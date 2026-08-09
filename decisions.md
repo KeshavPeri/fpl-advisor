@@ -19,4 +19,14 @@ HIGH-IMPACT
 ROUTINE
 #0 — Repo initialised with README, CLAUDE.md stub and this decisions.md during
      infrastructure setup (Phase 3), ahead of any tickets.
+#1 — Read Impeccable's SKILL.md and README (github.com/pbakaus/impeccable) before installing
+     (task 3.13). One thing worth flagging, not blocking: it's at v4.0.4, well ahead of the
+     v1.5.1 the system design doc cited (17 Mar 2026) — the skill has clearly moved fast, but
+     nothing in the current version contradicts how the design doc expected to use it
+     (`init`/`document` still write PRODUCT.md/DESIGN.md as assumed; 59 detector rules, 23
+     commands, both match the doc's figures exactly). It also ships an optional `hooks` feature
+     that auto-runs the anti-pattern detector after every UI file edit — leaving this OFF for
+     now per §5.4 (heavy design skills confined to polish tickets only); turning hooks on would
+     silently apply Impeccable-level scrutiny to every ticket, which is exactly the per-ticket
+     quota tax the design deliberately avoids.
 ```
