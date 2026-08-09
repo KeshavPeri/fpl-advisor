@@ -29,4 +29,11 @@ ROUTINE
      now per §5.4 (heavy design skills confined to polish tickets only); turning hooks on would
      silently apply Impeccable-level scrutiny to every ticket, which is exactly the per-ticket
      quota tax the design deliberately avoids.
+#2 — Read emil-design-eng's SKILL.md (github.com/emilkowalski/skills, official repo) before
+     installing (task 3.15). No surprises — detailed, well-reasoned animation/motion guidance
+     (easing curves, duration tables, spring vs. CSS-transition tradeoffs, accessibility via
+     prefers-reduced-motion, performance rules). Matches what the design doc expected: a motion
+     decision framework, not a second competing aesthetic rulebook. Installed via the official
+     `npx skills@latest add emilkowalski/skills` command, which pulls the whole collection
+     (animate, review-animations, improve-animations, etc.), not just the core skill alone.
 ```
