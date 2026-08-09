@@ -8,3 +8,15 @@
   text-align: center;
   padding: 1.5rem;
 }
+
+.supabase-status {
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+.supabase-status[data-status='connected'] {
+  color: #4ade80;
+}
+.supabase-status[data-status='error'],
+.supabase-status[data-status='not-configured'] {
+  color: #f87171;
+}
