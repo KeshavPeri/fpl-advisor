@@ -9,6 +9,13 @@
   padding: 1.5rem;
 }
 
+.tagline {
+  margin-top: -0.75rem;
+  font-size: 0.95rem;
+  font-weight: 400;
+  color: var(--text);
+}
+
 .supabase-status {
   font-size: 0.85rem;
   opacity: 0.8;
