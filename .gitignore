@@ -8,6 +8,9 @@ dist
 dist-ssr
 *.local
 
+# Claude Code: the shared allowlist is committed; per-machine additions are not
+.claude/settings.local.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
