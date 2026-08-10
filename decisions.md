@@ -70,4 +70,10 @@ ROUTINE
      because interactive dry-runs prompted for permissions repeatedly — overnight Routines
      never prompt mid-run (§4.1), so this is for interactive sessions like linting and
      dry-runs; rm and other destructive utilities deliberately left off the allowlist.
+#4 — Ticket #6 (iOS home-screen title): used "FPL Advisor" for the new
+     `apple-mobile-web-app-title` meta tag because it's the name already established
+     unanimously elsewhere in the codebase — `index.html`'s `<title>` and both `name` and
+     `short_name` in `vite.config.ts`'s VitePWA manifest config. No conflicting candidate
+     existed, so this was a Tier 3 consistency decision, not a new naming choice.
+     `product-brief.md` does not exist yet, so it wasn't consulted.
 ```
