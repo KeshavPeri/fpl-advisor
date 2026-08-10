@@ -2,19 +2,19 @@
 
 Personal FPL (Fantasy Premier League) advisory PWA, built by a semi-autonomous overnight
 pipeline. **Every session here is fresh and stateless — no run can resume a previous one, no
-run can ask a human mid-session, and the GitHub project board is the single source of truth.**
-This file is your context; read it before acting.
+run can ask a human mid-session, and the open GitHub issues with their `status:` labels are
+the single source of truth.** This file is your context; read it before acting.
 
 Full design reasoning: `app-factory-system-design-v2.md` in the `KeshavPeri/app-factory` repo
 (§ references throughout this repo point there).
 
 ## How work flows
 
-Tickets (GitHub issues) are linted in the evening, queued in **Ready**, and picked up by a
+Tickets (GitHub issues) are linted in the evening, labelled `status:ready`, and picked up by a
 scheduled overnight routine. The routine's top-level session is the orchestrator: it
-dispatches the subagents in `.claude/agents/`, moves cards, appends to `decisions.md` at
-decision time, and opens **draft** PRs. A human reviews from the phone in the morning and
-merges manually. Batch limit: 2 tickets per run. Revision cap: 2 per ticket.
+dispatches the subagents in `.claude/agents/`, moves issues between `status:` labels, appends
+to `decisions.md` at decision time, and opens **draft** PRs. A human reviews from the phone in
+the morning and merges manually. Batch limit: 2 tickets per run. Revision cap: 2 per ticket.
 
 ## Branch convention
 
@@ -22,20 +22,54 @@ All work happens on branches named `claude/ticket-<number>-<slug>`, e.g.
 `claude/ticket-14-gameweek-deadline-countdown`. This matches Claude Code Routines' default
 push restriction — `claude/`-prefixed branches are always accepted. Never commit to `main`.
 
-## The board
+## The board is issue labels
 
-GitHub project board **"FPL Advisor Pipeline"**, linked to this repo. Exactly five columns:
+**There is no project board in this pipeline.** A Claude Code Routine runs behind a GitHub
+proxy that blocks GraphQL and restricts REST to repository-scoped paths; GitHub Projects v2 is
+reachable by neither. Verified by direct experiment, 9 Aug 2026 — see `deltas.md` D1 in the
+app-factory repo before proposing a board again.
 
-- **Ready** — linted tickets queued for the next run, in priority order (top first).
-- **In progress** — being worked this run. A card here at run *start* means a previous run
-  died; apply stale-card recovery (§4.4 2a): branch has commits → Blocked with a note;
-  no commits → delete branch, card back to Ready.
-- **For review** — draft PR open with the five-part review packet; awaiting human review.
-- **Done** — merged by a human. Nothing else puts a card here.
-- **Blocked** — awaiting a human decision (Tier 1 question, revision cap hit, or stale
-  partial work). Each Blocked card carries a one-line, phone-answerable question.
+State lives on **exactly one `status:` label per open issue**. The four working states of §4.3,
+plus Blocked, map one-to-one:
 
-Do not add columns (no Building/QA/Review — deliberate, §4.3).
+| State | Label |
+|---|---|
+| Ready | `status:ready` — linted and queued for the next run |
+| In progress | `status:in-progress` — being worked this run |
+| For review | `status:for-review` — draft PR open with the five-part packet |
+| Blocked | `status:blocked` — awaiting a human decision |
+| Done | **the issue is closed.** No label |
+
+Rules that make this work:
+
+- **Closed beats labelled.** Every query filters to open issues, so a closed issue is Done
+  regardless of what label it still carries. Nobody has to tidy up after a merge.
+- **Order is ascending issue number** among `status:ready`. Lowest open number goes first.
+  There is no other priority mechanism — if something must jump the queue, close and re-file it.
+- **Exactly one `status:` label at a time.** To change state, read the issue's current labels,
+  drop any label starting `status:`, add the new one, and write the **whole array back**.
+  Writing a bare array replaces every label on the issue, so a careless write silently destroys
+  non-status labels like `polish`.
+- **A `status:blocked` issue always gets a comment** carrying the one-line question. The label
+  is machine state; the comment is what reaches Keshav's phone as a notification. A blocked
+  ticket with no comment is a failure of the mechanism, not a tidy edge case.
+- **An issue labelled `status:in-progress` at run start** belongs to a run that died — apply
+  stale-ticket recovery (§4.4 2a): branch has commits → `status:blocked` with a comment;
+  no commits → delete the branch, back to `status:ready`.
+
+Do not add states (no Building/QA/Review — deliberate, §4.3).
+
+## Reaching GitHub from a routine
+
+Use the **built-in GitHub tools** — `list_issues`, `issue_read`, `issue_write`, `get_label`,
+`add_issue_comment`, and the PR tools. They are the only interface that works from a cloud run.
+
+**`gh` and `curl` both fail against this repo's API paths** with 403s, and nothing you can
+install or configure changes that; the proxy authenticates the built-in tools, not arbitrary
+HTTP clients. Do not spend a run rediscovering this. Applying a label that doesn't exist yet
+creates it, so a typo silently invents a state nobody queries — copy label names, don't type them.
+
+Interactive local sessions are unaffected; `gh` works normally from Keshav's machine.
 
 ## Escalation
 

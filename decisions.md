@@ -11,6 +11,28 @@ loose about what counts as high-impact — tighten the rules, don't just keep lo
 
 ```
 HIGH-IMPACT
+#— (Phase 5, factory-level) Pipeline state moved off the GitHub project board and onto
+     issue labels — status:ready / status:in-progress / status:for-review /
+     status:blocked, with Done meaning the issue is closed — **because** a Claude Code
+     Routine provably cannot reach GitHub Projects v2 by any available path, and because
+     labels live outside the run's success path, which is what §2's crash-tolerance
+     constraint actually requires.
+     Evidence (two probe runs, 9 Aug 2026): GraphQL 403s with an explicit deny, tested via
+     both curl and gh; user/org-scoped projectsV2 REST 403s with "sessions are bound to
+     their configured repositories"; the repo-scoped endpoint the proxy suggests instead
+     does not exist in GitHub's API; the built-in GitHub tools expose no projects tools;
+     and no GitHub MCP connector exists that would bypass the session proxy.
+     Rejected alternative — a GitHub Actions workflow doing the GraphQL outside the proxy:
+     needs a classic PAT with project scope as a repo secret, and adds a second unproven
+     moving part during the phase whose job is to prove the first one works. Same shape as
+     the Telegram dispatch §7 already rejected. Revisit after Phase 6 if the columns are
+     genuinely missed.
+     Rejected alternative — a backlog.md file as source of truth: the routine cannot push
+     to main, and a file cannot send a phone notification, which Rule B depends on.
+     Ordering is now ascending issue number; that is the entire priority mechanism.
+     Agent definitions, orchestrator prompt and escalation.md mirrors bumped to v0.3.
+     §4.3's five states are unchanged — only their storage moved.
+
 #0 — Repo scaffolding stored as one repo per app rather than a monorepo,
      because each app has an independent Vercel/Supabase project and independent
      release cadence, and cross-app coupling would make crash-tolerant, stateless
@@ -36,4 +58,16 @@ ROUTINE
      decision framework, not a second competing aesthetic rulebook. Installed via the official
      `npx skills@latest add emilkowalski/skills` command, which pulls the whole collection
      (animate, review-animations, improve-animations, etc.), not just the core skill alone.
+#3 — Phase 4 dry-runs passed for all three subagent definitions (task 4.7, 9 Aug 2026).
+     Analyst: Tier 3 for in-game currency display (cited escalation.md's rule, noted the
+     absent brief without inventing content) and Tier 1 for login-cookie storage, returning a
+     one-line phone-answerable question without answering it. Builder: delivered
+     claude/ticket-0-home-footer-version with commits, clean build/lint, and the structured
+     handback. QA: per-item verdicts, five-part packet, correctly refused to fabricate a
+     preview URL for an unpushed branch, and flagged device-level rendering as not verifiable.
+     Throwaway branch deleted after the run. Also added .claude/settings.json allowlisting the
+     pipeline's command families (npm/npx/node/git/gh + read-only utilities, acceptEdits mode)
+     because interactive dry-runs prompted for permissions repeatedly — overnight Routines
+     never prompt mid-run (§4.1), so this is for interactive sessions like linting and
+     dry-runs; rm and other destructive utilities deliberately left off the allowlist.
 ```

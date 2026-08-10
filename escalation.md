@@ -6,7 +6,15 @@
      none of them restate the tiers, so nothing can drift.
      Everything below this comment is verbatim from §4.5 of
      app-factory-system-design-v2.md (repo: KeshavPeri/app-factory).
-     § references point into that document. -->
+     § references point into that document.
+
+     MECHANISM NOTE (Phase 5, unchanged meaning). The text below says "moves to
+     Blocked" and "the blocked card", written when state lived on a GitHub project
+     board. A routine cannot reach a project board (app-factory/deltas.md D1), so
+     state now lives on issue labels: Blocked means the issue carries
+     status:blocked and the one-line question is posted as a comment on it.
+     The tiers, Rule A and Rule B are untouched — only the storage changed. The
+     body is left verbatim on purpose so it stays diff-checkable against §4.5. -->
 
 Three tiers. This is the safety mechanism of the whole system. Two structural rules first, both new in v2:
 
