@@ -41,6 +41,7 @@ function App() {
   return (
     <main className="scaffold">
       <h1>FPL Advisor</h1>
+      <p className="tagline">Your Fantasy Premier League decisions, thought through.</p>
       <p>PWA scaffold — infrastructure setup (Phase 3). No app features yet.</p>
       <p className="supabase-status" data-status={status}>
         Supabase: {status === 'checking' && 'checking connection…'}
