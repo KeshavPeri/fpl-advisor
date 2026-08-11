@@ -43,7 +43,7 @@ Newest last. Apply in filename order.
 |---|---|---|
 | `20260811100000_reference_schema.sql` | Creates `teams`, `players`, `fixtures`, `gameweeks` with read-only RLS for `anon`. No data. | **Yes — 11 Aug 2026.** Ticket #9. |
 | `20260811130000_job_runs.sql` | Creates `job_runs` (job telemetry: name, status, started/finished, message, `details jsonb`) with read-only RLS for `anon`. Written by the Action's secret key, which bypasses RLS. | **Yes — 11 Aug 2026.** Ticket #10. |
-| `20260811160000_table_grants.sql` | Grants `SELECT` to `anon` and `SELECT, INSERT, UPDATE` to `service_role` on all five tables, plus default privileges for future ones. **Fixes `permission denied for table job_runs`.** | Not yet — apply this or every job fails on write. |
+| `20260811160000_table_grants.sql` | Grants `SELECT` to `anon` and `SELECT, INSERT, UPDATE` to `service_role` on all five tables, plus default privileges for future ones. `DELETE` deliberately withheld. Fixed `permission denied for table job_runs`. | **Yes — 11 Aug 2026.** Follow-up to #9 and #10. |
 
 Update this table by hand after you apply a migration, so the next person
 (or the next overnight run reading this file) knows what state the live
