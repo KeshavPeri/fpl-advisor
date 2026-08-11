@@ -1,0 +1,40 @@
+name: Scheduled jobs
+
+# Ticket #10 — the scaffold for the nightly write path. Today this runs only
+# scripts/heartbeat.ts (no business logic yet, see the ticket); ingest jobs
+# land on top of this same trigger in later tickets.
+
+on:
+  schedule:
+    # 17:45 UTC daily. FPL-Core-Insights refreshes at 07:30 and 17:30 UTC, so
+    # this is anchored shortly after the later of the two refreshes.
+    # GitHub Actions cron is always UTC. Asia/Singapore is UTC+8 year-round
+    # (no DST), so 17:45 UTC is 01:45 the FOLLOWING day in Singapore — this
+    # schedule crosses the date line. Do not "fix" this cron to look like a
+    # Singapore-evening time without re-deriving the UTC value; a Singapore
+    # evening (e.g. 20:00 SGT) is 12:00 UTC the SAME day, a different line
+    # entirely.
+    - cron: '45 17 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run heartbeat
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/heartbeat.ts
