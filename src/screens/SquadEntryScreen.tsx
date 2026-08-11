@@ -159,13 +159,12 @@ function SquadEntryScreen() {
     )
   }
 
-  function handleSelectCaptain(playerId: number) {
-    setSlots((prev) =>
-      prev.map((slot) => ({ ...slot, isCaptain: slot.playerId === playerId }))
-    )
+  /** playerId is null when the user picks the blank "— Pick —" option, clearing the choice. */
+  function handleSelectCaptain(playerId: number | null) {
+    setSlots((prev) => prev.map((slot) => ({ ...slot, isCaptain: slot.playerId === playerId })))
   }
 
-  function handleSelectViceCaptain(playerId: number) {
+  function handleSelectViceCaptain(playerId: number | null) {
     setSlots((prev) =>
       prev.map((slot) => ({ ...slot, isViceCaptain: slot.playerId === playerId }))
     )
@@ -321,7 +320,9 @@ function SquadEntryScreen() {
           <select
             className="squad-field__input"
             value={starters.find((s) => s.isCaptain)?.playerId ?? ''}
-            onChange={(e) => e.target.value && handleSelectCaptain(Number(e.target.value))}
+            onChange={(e) =>
+              handleSelectCaptain(e.target.value === '' ? null : Number(e.target.value))
+            }
           >
             <option value="">— Pick from your starting XI —</option>
             {starters.map((slot) => (
@@ -336,7 +337,9 @@ function SquadEntryScreen() {
           <select
             className="squad-field__input"
             value={starters.find((s) => s.isViceCaptain)?.playerId ?? ''}
-            onChange={(e) => e.target.value && handleSelectViceCaptain(Number(e.target.value))}
+            onChange={(e) =>
+              handleSelectViceCaptain(e.target.value === '' ? null : Number(e.target.value))
+            }
           >
             <option value="">— Pick from your starting XI —</option>
             {starters.map((slot) => (
