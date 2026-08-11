@@ -42,6 +42,16 @@
 // file's header comment for why (FPL element ids are not stable across
 // season boundaries, verified against real fetched data). This job stores
 // player_id honestly and does not drop rows over it.
+//
+// player_code (ticket #22): players.csv carries both player_id and the
+// source's stable player_code, so every match-stat row is stamped with the
+// player_code for its player_id, built as a player_id -> player_code map
+// from that same season's players.csv fetched below. This is the join key
+// that survives a season boundary — see
+// supabase/migrations/20260811180000_player_match_stats_player_code.sql's
+// header for the "because". A row whose player_id has no entry in that
+// map (source files are generated separately; a small gap is expected) is
+// still written, with player_code left null — never skipped over this.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { parse } from 'csv-parse/sync'
@@ -294,6 +304,7 @@ async function upsertTeams(supabase: SupabaseClient, records: Array<Record<strin
 
 interface MatchStatRow {
   player_id: number
+  player_code: number | null
   match_id: string
   season: string
   gameweek: number
@@ -317,12 +328,18 @@ interface MatchStatRow {
   updated_at: string
 }
 
-function toMatchStatRow(record: Record<string, string>, season: string, gameweek: number): MatchStatRow | null {
+function toMatchStatRow(
+  record: Record<string, string>,
+  season: string,
+  gameweek: number,
+  playerCodeByPlayerId: Map<number, number>
+): MatchStatRow | null {
   const playerId = toInt(record.player_id)
   const matchId = record.match_id?.trim()
   if (playerId === null || !matchId) return null
   return {
     player_id: playerId,
+    player_code: playerCodeByPlayerId.get(playerId) ?? null,
     match_id: matchId,
     season,
     gameweek,
@@ -347,17 +364,26 @@ function toMatchStatRow(record: Record<string, string>, season: string, gameweek
   }
 }
 
+interface PlayerMatchStatsUpsertResult {
+  written: number
+  // Rows written whose player_id had no entry in the season's players.csv
+  // (ticket #22) — written with player_code left null, never skipped over
+  // this. Reported in the run's job_runs row so the gap is visible.
+  missingPlayerCode: number
+}
+
 async function upsertPlayerMatchStats(
   supabase: SupabaseClient,
   url: string,
   season: string,
   gameweek: number,
-  records: Array<Record<string, string>>
-): Promise<number> {
+  records: Array<Record<string, string>>,
+  playerCodeByPlayerId: Map<number, number>
+): Promise<PlayerMatchStatsUpsertResult> {
   const rows: MatchStatRow[] = []
   let skipped = 0
   for (const record of records) {
-    const row = toMatchStatRow(record, season, gameweek)
+    const row = toMatchStatRow(record, season, gameweek, playerCodeByPlayerId)
     if (row) {
       rows.push(row)
     } else {
@@ -367,7 +393,8 @@ async function upsertPlayerMatchStats(
   if (skipped > 0) {
     console.warn(`${JOB_NAME}: skipped ${skipped} row(s) in ${url} missing player_id or match_id`)
   }
-  if (rows.length === 0) return 0
+  const missingPlayerCode = rows.filter((r) => r.player_code === null).length
+  if (rows.length === 0) return { written: 0, missingPlayerCode: 0 }
 
   const { error } = await supabase.from('player_match_stats').upsert(rows, { onConflict: 'player_id,match_id' })
   if (error) {
@@ -376,7 +403,27 @@ async function upsertPlayerMatchStats(
     }
     throw new IngestError(`upsert into player_match_stats failed for ${url}: ${error.message}`)
   }
-  return rows.length
+  return { written: rows.length, missingPlayerCode }
+}
+
+// ============================================================================
+// player_code map — ticket #22. Built once per run from the same season's
+// players.csv already fetched for logPlayerIdAlignmentNote(). player_code
+// entries that fail to parse as an integer are skipped (not mapped), same as
+// any other malformed numeric field in this file; the columns are already
+// validated present by PLAYERS_REQUIRED_COLUMNS before this is called.
+// ============================================================================
+
+function buildPlayerCodeMap(playerRecords: Array<Record<string, string>>): Map<number, number> {
+  const map = new Map<number, number>()
+  for (const record of playerRecords) {
+    const playerId = toInt(record.player_id)
+    const playerCode = toInt(record.player_code)
+    if (playerId !== null && playerCode !== null) {
+      map.set(playerId, playerCode)
+    }
+  }
+  return map
 }
 
 // ============================================================================
@@ -438,6 +485,7 @@ async function main(): Promise<void> {
 
     const playerRecords = parseCsvRecords(playersResp.text, playersUrl, PLAYERS_REQUIRED_COLUMNS)
     logPlayerIdAlignmentNote(playerRecords)
+    const playerCodeByPlayerId = buildPlayerCodeMap(playerRecords)
 
     const teamsUrl = seasonRootUrl(season, 'teams.csv')
     const teamsResp = await fetchCsv(teamsUrl)
@@ -449,6 +497,7 @@ async function main(): Promise<void> {
 
     let gameweeksFound = 0
     let matchRowsWritten = 0
+    let matchRowsWithoutPlayerCode = 0
     for (let gw = 1; gw <= MAX_GAMEWEEKS; gw++) {
       const url = gameweekUrl(season, gw)
       const resp = await fetchCsv(url)
@@ -464,17 +513,27 @@ async function main(): Promise<void> {
         console.log(`${JOB_NAME}: GW${gw} playermatchstats.csv has no rows yet (season ${season}) — skipping`)
         continue
       }
-      matchRowsWritten += await upsertPlayerMatchStats(supabase, url, season, gw, records)
+      const result = await upsertPlayerMatchStats(supabase, url, season, gw, records, playerCodeByPlayerId)
+      matchRowsWritten += result.written
+      matchRowsWithoutPlayerCode += result.missingPlayerCode
     }
 
     const message =
       `${JOB_NAME}: season ${season} — ${teamsUpdated} team(s) updated (elo), ` +
-      `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted`
+      `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted ` +
+      `(${matchRowsWithoutPlayerCode} without a matching player_code in players.csv)`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
       message,
-      details: { season, playersRows: playerRecords.length, teamsUpdated, gameweeksFound, matchRowsWritten },
+      details: {
+        season,
+        playersRows: playerRecords.length,
+        teamsUpdated,
+        gameweeksFound,
+        matchRowsWritten,
+        matchRowsWithoutPlayerCode,
+      },
       startedAt,
     })
   } catch (err) {
