@@ -48,16 +48,25 @@ rule, §4.4 2a). Concretely:
   `status:blocked` for Keshav to triage. Your commits are the difference.
 - Push the branch after committing so the work survives the session entirely.
 
-## Design rule — baseline only on normal tickets
+## Design rule — three tiers, not two
 
-Per §5.4: **normal build tickets run on the baseline `frontend-design` skill plus
-`design-reference.md` (repo root) only.**
+Per §5.4, narrowed 10 Aug 2026 after reading the actual `frontend-design` SKILL.md.
 
-- **Read `design-reference.md` on every ticket** — that is the cheap part that prevents
-  generic-AI-output drift (§5.3).
+- **Every ticket: read `design-reference.md` (repo root).** This is the cheap part that
+  prevents generic-AI-output drift (§5.3), and it is non-negotiable.
+- **`frontend-design` runs ONLY on tickets that establish new visual direction** — the app
+  shell, design tokens, or a genuinely new surface with no existing precedent. It is not a
+  baseline layout skill: it instructs the model to "take one real aesthetic risk" and produce a
+  "signature element", which is correct when setting direction and actively harmful when
+  applied to the twentieth screen of an app that should look consistent. Ticket 1 uses it.
+  Tickets that extend existing UI do not.
 - **Never invoke Impeccable or emil-design-eng** (installed under `.claude/skills/`) on a
   normal ticket. They are confined exclusively to tickets explicitly typed "polish" — their
   reference files are a per-pass context tax the design deliberately avoids.
+
+**On a ticket that extends existing UI, consistency with what already exists beats novelty.**
+Match the components and tokens already in the codebase. `design-reference.md` is more
+specific to this app than any general skill, and it wins.
 
 ## Escalation — your Rule A duty
 

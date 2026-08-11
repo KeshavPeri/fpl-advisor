@@ -88,11 +88,21 @@ calibration problem to note, not a logging quota to fill.
 
 ## Design-pass rule
 
-Normal build tickets use the baseline `frontend-design` skill plus **`design-reference.md`
-(repo root)** only — Builder reads the reference file on every ticket. **Impeccable and
-emil-design-eng (installed under `.claude/skills/`) are invoked exclusively inside tickets
-explicitly typed "polish"** — never on normal tickets (§5.4). `PRODUCT.md` and `DESIGN.md`
-are Impeccable-generated and still provisional.
+**`design-reference.md` (repo root) is read on every ticket.** That is the cheap, always-on
+layer.
+
+**`frontend-design` runs only on tickets that establish new visual direction** — app shell,
+design tokens, a genuinely new surface. Narrowed from "every build ticket" on 10 Aug 2026:
+the skill instructs the model to take an aesthetic risk and produce a signature element, which
+is right for setting direction and wrong for extending an established UI. Tickets that extend
+existing UI match existing components instead.
+
+**Impeccable and emil-design-eng (installed under `.claude/skills/`) are invoked exclusively
+inside tickets explicitly typed "polish"** — never on normal tickets (§5.4).
+
+`PRODUCT.md` and `DESIGN.md` are Impeccable-generated and still provisional; `product-brief.md`
+and `design-reference.md` supersede them on any question of mechanism, scope or visual
+direction.
 
 ## The agents
 
