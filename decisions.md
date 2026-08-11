@@ -1,3 +1,6 @@
+> **ARCHIVE — read-only as of 11 Aug 2026.** New decisions go in `decisions/ticket-<number>.md`,
+> one file per ticket. See `decisions/README.md` for why. Nothing appends to this file any more.
+
 # Decisions log
 
 Appended by the orchestrator at the moment each decision is made — never compiled after the

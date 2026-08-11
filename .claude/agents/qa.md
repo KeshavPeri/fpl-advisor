@@ -29,7 +29,13 @@ has one author and the revision count stays honest.
 ## Testing
 
 Check out the Builder's branch, then verify mechanically before judging anything:
-`npm run build` and `npm run lint` must pass. Use `npm run preview` and code inspection to
+`npm run build` and `npm run lint` must pass.
+
+**First, check branch containment** — `git log origin/main..HEAD --oneline` must show only
+commits belonging to this ticket. A commit from another ticket on this branch means two Builders
+shared a working tree and raced; report it as a FAIL with the offending SHA, and check
+`git log origin/main..main` for contamination of local `main` too. This check exists because on
+11 Aug 2026 exactly that happened and was caught only by luck. Use `npm run preview` and code inspection to
 exercise what the DoD describes.
 
 Then walk the definition-of-done **item by item**, and give each one an explicit verdict:

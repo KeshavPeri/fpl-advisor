@@ -80,10 +80,16 @@ ticket, never the run* (Rule B).
 
 ## Decisions log
 
-**`decisions.md`, repo root.** Two sections: HIGH-IMPACT and ROUTINE. Appended by the
-orchestrator **at the moment each decision is made**, never compiled afterwards. Every
-HIGH-IMPACT entry states the *because* ("Chose X because the brief says Y") and is prefixed
-with its ticket number. If HIGH-IMPACT regularly runs past ~5 items a night, that's a
+**One file per ticket: `decisions/ticket-<number>.md`.** Two headings inside it, HIGH-IMPACT and
+ROUTINE. Written by the orchestrator on that ticket's own branch **at the moment each decision is
+made**, never compiled afterwards. Every HIGH-IMPACT entry states the *because* ("Chose X because
+the brief says Y").
+
+**`decisions.md` in the repo root is a read-only archive** of everything logged before
+11 Aug 2026. Nothing writes to it any more. It was split because two tickets in one batch both
+append at the same point in one file, which conflicts on every 2-ticket run — git conflicts on
+position, not content, so numbering the entries per ticket would not have helped. Separate files
+cannot collide. If HIGH-IMPACT regularly runs past ~5 items a night, that's a
 calibration problem to note, not a logging quota to fill.
 
 ## Design-pass rule

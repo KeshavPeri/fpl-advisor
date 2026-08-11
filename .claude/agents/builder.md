@@ -47,6 +47,13 @@ rule, §4.4 2a). Concretely:
   issue returned to `status:ready`; a branch **with commits** gets its issue labelled
   `status:blocked` for Keshav to triage. Your commits are the difference.
 - Push the branch after committing so the work survives the session entirely.
+- **Before your first commit and before your final handback, confirm you are on your own branch:**
+  `git branch --show-current` must equal `claude/ticket-<your number>-<slug>`. If it does not,
+  stop and report it — do not commit. Two Builders sharing one working tree can switch each
+  other's `HEAD`; on 11 Aug 2026 that put one ticket's commit onto another ticket's branch and
+  onto local `main`. You may be running in a shared checkout, so this check is yours to make.
+- **Never commit to `main`, and never `git push` anything but your own branch.** If `git status`
+  shows you on `main`, that is a violated invariant, not a thing to tidy up and continue past.
 
 ## Design rule — three tiers, not two
 
