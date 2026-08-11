@@ -165,7 +165,9 @@ never present stale recommendations as current.** No recommendation is better th
 ### 6b. FPL-Core-Insights — match-level statistics
 
 **Source:** `https://github.com/olbauday/FPL-Core-Insights` — CSVs over plain HTTPS, refreshed
-twice daily at 05:00 and 17:00 UTC, covering the 2026/27 season.
+twice daily at 07:30 and 17:30 UTC, covering the 2026/27 season. (Refresh times corrected
+11 Aug 2026 against the source repository's own README; the 05:00/17:00 figures written in the
+Phase 1 workshop were wrong. Any schedule anchored to the ingest must use the later times.)
 
 **Because** it supplies per-player, per-match clearances, blocks, interceptions, tackles and
 recoveries — the raw inputs to defensive-contribution modelling — plus xG, xA, ClubElo team
@@ -307,8 +309,14 @@ honest.
 
 ## 9. Open questions
 
-1. **Geist licensing and delivery** — confirmed open source and self-hostable before it lands
-   in a ticket, or fall back to a named alternative that is explicitly not Inter.
+1. ~~**Geist licensing and delivery.**~~ **RESOLVED 11 Aug 2026 — no fallback needed.** Geist is
+   released under the **SIL Open Font License 1.1**, verified against
+   `github.com/vercel/geist-font/blob/main/LICENSE.txt`. Self-hosting, bundling and
+   redistribution are permitted; the only restriction is that the font may not be sold by
+   itself, which does not apply here. Delivery is `@fontsource-variable/geist` and
+   `@fontsource-variable/geist-mono` (both published `OFL-1.1`), importing the roman-only
+   `wght.css` from each. The CSS family names are exactly `'Geist Variable'` and
+   `'Geist Mono Variable'`. Inter remains excluded.
 2. **The exact threshold at which a −4 hit becomes recommendable** — needs a number, and the
    number should come from the backtest rather than from taste. Until then the solver's
    `hit_cost` default stands and hits are effectively rare.
