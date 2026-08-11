@@ -1,111 +1,135 @@
+/*
+  Design tokens — FPL Advisor
+  "The late-night team sheet." Dark only. No toggle, no light variant.
+  See design-reference.md (repo root) for the committed decisions this
+  file implements.
+*/
+
+@import '@fontsource-variable/geist/wght.css';
+@import '@fontsource-variable/geist-mono/wght.css';
+
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  /* ---- Surface — Deep Ink and its tonal lifts ----
+     #0b0f19 is the fixed anchor. Elevated surfaces are not a different
+     colour, they are the same ink lifted a little and made translucent,
+     then blurred over whatever sits behind them. */
+  --surface-0: #0b0f19;
+  --surface-1: #131a2c;
+  --surface-2: #1a2338;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  /* Translucent panel fills — used with backdrop-filter: blur(), never
+     as a flat, opaque card colour. This pairing is the elevation system. */
+  --panel-fill: rgba(23, 31, 51, 0.55);
+  --panel-fill-raised: rgba(29, 39, 63, 0.62);
+  --panel-border: rgba(148, 163, 194, 0.14);
+  --panel-blur: 22px;
+  --panel-saturate: 150%;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /* ---- Accent ----
+     Cool blue-cyan for recommended/positive, coral for risk/warning.
+     Both deliberately muted — no neon, no acid tone. No green, no
+     yellow, no purple anywhere in this file. */
+  --accent-cyan: #5ec8de;
+  --accent-cyan-dim: rgba(94, 200, 222, 0.16);
+  --accent-cyan-line: rgba(94, 200, 222, 0.4);
 
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+  --accent-coral: #e8825f;
+  --accent-coral-dim: rgba(232, 130, 95, 0.16);
+  --accent-coral-line: rgba(232, 130, 95, 0.4);
+
+  /* ---- Text ---- */
+  --text-primary: #e7eaf2;
+  --text-secondary: #9aa4bd;
+  --text-tertiary: #6b7590;
+
+  /* ---- Type ---- */
+  --font-sans: 'Geist Variable', sans-serif;
+  --font-mono: 'Geist Mono Variable', monospace;
+
+  /* A quiet type scale — size and weight carry hierarchy, not rules or
+     borders (design-reference.md, Typography). Named by role, not by
+     t-shirt size, so later screens reach for the right one on purpose. */
+  --text-label: 400 0.8125rem/1.3 var(--font-sans);
+  --text-body: 400 0.9375rem/1.5 var(--font-sans);
+  --text-title: 550 1.0625rem/1.3 var(--font-sans);
+  --text-display: 600 2.25rem/1.1 var(--font-sans);
+
+  /* ---- Spacing — 4px base unit ---- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-12: 3rem;
+
+  /* ---- Radius —  soft, continuous-feeling corners. Never zero: a
+     hairline, zero-radius broadsheet grid is one of the three default
+     AI looks and is explicitly not this app. ---- */
+  --radius-panel: 28px;
+  --radius-control: 14px;
+
+  color-scheme: dark;
+  background: var(--surface-0);
+  color: var(--text-primary);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font: var(--text-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100svh;
+  min-height: 100vh;
 }
 
 h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
+h2,
+h3,
 p {
   margin: 0;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+/* Numeric token — every price, projection, countdown and accuracy
+   figure in the app renders through this class. Geist Mono, tabular,
+   so digits never jitter as a value ticks. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: 0;
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+  border-radius: var(--radius-control);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
