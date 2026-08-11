@@ -38,6 +38,13 @@ HIGH-IMPACT
      release cadence, and cross-app coupling would make crash-tolerant, stateless
      runs harder to reason about.
 
+#9 — Used FPL integer ids as primary keys (teams.id, players.id, gameweeks.id, fixtures.id)
+     in the reference-schema migration because every downstream source (the FPL API,
+     FPL-Core-Insights CSVs, the solver's own CSV) keys on FPL element/team/event ids, and
+     introducing surrogate keys would force a join on every ingest write. This was pre-decided
+     in the ticket text itself as Tier 2 ("how data is structured"); logged here per Rule A
+     since it was carried out without a fresh question being asked.
+
 ROUTINE
 #0 — Repo initialised with README, CLAUDE.md stub and this decisions.md during
      infrastructure setup (Phase 3), ahead of any tickets.
@@ -101,4 +108,24 @@ ROUTINE
 #11 — Ticket #8: gave `Surface` a single quiet 0.5s fade + 6px rise on mount, guarded by
      `prefers-reduced-motion: reduce` — the one motion design-reference.md's scope (orientation/
      state-change only) actually allows for a surface arriving on screen.
+#12 — Ticket #9 (Supabase reference schema): the Builder shipped a broader column set on
+     `teams`/`players`/`gameweeks`/`fixtures` than the DoD's stated minimum — form, ownership%,
+     per-90 counting stats, ICT components, team strength ratings, and fixture-difficulty
+     ratings — so ticket #11's ingest job doesn't need a follow-up migration for data it will
+     obviously need. Still footballer/fixture reference data, within the ticket's own scope.
+#13 — Ticket #9: added `updated_at timestamptz default now()` to all four reference tables, to
+     support the "last successful sync" display the product brief (§6a) calls for later.
+#14 — Ticket #9: added two indexes beyond the three the ticket named by example
+     (`idx_fixtures_team_h`, `idx_fixtures_team_a`), since fixture-difficulty-by-team is an
+     obvious, immediate query pattern for the projection model.
+#15 — Ticket #9: added nullable FK constraints (`players.team_id`, `fixtures.team_h/team_a`,
+     `fixtures.event_id`) to catch ingest bugs early; left nullable because blank-gameweek/TBC
+     fixtures genuinely have no value yet. Wrapped the whole migration in `BEGIN`/`COMMIT` so a
+     partial failure rolls back instead of leaving some tables created and others not.
+#16 — Ticket #9, QA revision round 1: the migration originally failed against a vanilla
+     PostgreSQL database (`role "anon" does not exist`, exit 3) because `anon` is a role
+     Supabase's hosted Postgres provisions automatically but a plain install doesn't have.
+     Fixed with a guarded `IF NOT EXISTS (...) THEN CREATE ROLE anon NOLOGIN` block — a no-op
+     on real Supabase (role already present) that adds no grants beyond the original policies.
+     Re-verified idempotent and exit-0 on both first and second apply against a fresh database.
 ```
