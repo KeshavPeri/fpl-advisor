@@ -43,10 +43,16 @@ Newest last. Apply in filename order.
 |---|---|---|
 | `20260811100000_reference_schema.sql` | Creates `teams`, `players`, `fixtures`, `gameweeks` with read-only RLS for `anon`. No data. | **Yes — 11 Aug 2026.** Ticket #9. |
 | `20260811130000_job_runs.sql` | Creates `job_runs` (job telemetry: name, status, started/finished, message, `details jsonb`) with read-only RLS for `anon`. Written by the Action's secret key, which bypasses RLS. | **Yes — 11 Aug 2026.** Ticket #10. |
+| `20260811160000_table_grants.sql` | Grants `SELECT` to `anon` and `SELECT, INSERT, UPDATE` to `service_role` on all five tables, plus default privileges for future ones. **Fixes `permission denied for table job_runs`.** | Not yet — apply this or every job fails on write. |
 
 Update this table by hand after you apply a migration, so the next person
 (or the next overnight run reading this file) knows what state the live
 database is actually in.
+
+**Every migration that creates a table must also GRANT on it.** RLS and GRANTs are independent
+gates and a query must pass both. A policy without a grant produces `permission denied for
+table X`; a grant without a policy produces `new row violates row-level security policy`. The
+first one cost a failed run on 11 Aug 2026. Read the error text — it tells you which gate closed.
 
 **A migration file on `main` does not mean it has been applied.** Nothing in this repo can
 apply one — that is owner-only (Tier 1). If a job fails with a missing-table error, check this

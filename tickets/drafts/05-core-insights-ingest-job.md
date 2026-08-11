@@ -56,6 +56,11 @@ gets that data into Supabase so item 9 can compute defcon hit rates from it.
 - [ ] A genuine failure — an unreachable host, or a file that exists but does not parse — exits
       non-zero and writes a failed `job_runs` row naming the file.
 - [ ] `teams.elo` is populated for all 20 teams after a `2025-2026` run.
+- [ ] The `player_match_stats` migration **GRANTs** `SELECT` to `anon` and
+      `SELECT, INSERT, UPDATE` to `service_role` on the new table, in the same file that creates
+      it. RLS and GRANTs are separate gates: a policy without a grant yields `permission denied
+      for table`, which is what broke the first heartbeat run on 11 Aug 2026. See
+      `supabase/migrations/20260811160000_table_grants.sql` for the pattern to copy.
 - [ ] The season identifier appears exactly once as a configurable default in the script, not
       repeated across URL strings.
 - [ ] No credential, key, token or `Authorization` header appears anywhere in the script.
