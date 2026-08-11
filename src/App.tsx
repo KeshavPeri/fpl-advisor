@@ -1,55 +1,27 @@
-import { useEffect, useState } from 'react'
-import { supabase, supabaseConfigured } from './lib/supabase'
+import AppShell from './components/AppShell'
+import Surface from './components/Surface'
 import './App.css'
 
-type ConnectionStatus = 'checking' | 'connected' | 'not-configured' | 'error'
-
+/**
+ * Ticket #8 — app shell and design tokens only. No routing, no fetching,
+ * no real recommendation content: those arrive in later tickets
+ * (feature-list.md items 16–18). This placeholder home surface exists
+ * only to prove the token layer and the translucent-material surface
+ * render correctly on a real screen.
+ */
 function App() {
-  const [status, setStatus] = useState<ConnectionStatus>('checking')
-
-  useEffect(() => {
-    if (!supabaseConfigured) {
-      setStatus('not-configured')
-      return
-    }
-
-    // Querying a table that doesn't exist still proves the URL + anon key are
-    // valid and Supabase answered — a "relation does not exist" style error
-    // means the connection itself worked. Any network/auth failure means it didn't.
-    const checkConnection = async () => {
-      try {
-        const { error } = await supabase
-          .from('__connectivity_check__')
-          .select('*')
-          .limit(1)
-
-        if (!error || error.code === '42P01' || error.code === 'PGRST205') {
-          setStatus('connected')
-        } else {
-          setStatus('error')
-          console.error('Supabase connectivity check failed:', error)
-        }
-      } catch (err) {
-        setStatus('error')
-        console.error('Supabase connectivity check failed:', err)
-      }
-    }
-
-    void checkConnection()
-  }, [])
-
   return (
-    <main className="scaffold">
-      <h1>FPL Advisor</h1>
-      <p className="tagline">Your Fantasy Premier League decisions, thought through.</p>
-      <p>PWA scaffold — infrastructure setup (Phase 3). No app features yet.</p>
-      <p className="supabase-status" data-status={status}>
-        Supabase: {status === 'checking' && 'checking connection…'}
-        {status === 'connected' && 'connected ✓'}
-        {status === 'not-configured' && 'env vars not set'}
-        {status === 'error' && 'connection error — check console'}
-      </p>
-    </main>
+    <AppShell>
+      <header className="home-mark">FPL Advisor</header>
+
+      <Surface className="home-demo">
+        <p className="home-demo__label">Design tokens</p>
+        <p className="home-demo__figure num">£100.0m</p>
+        <p className="home-demo__caption">
+          Example figure — later screens replace this with your squad value.
+        </p>
+      </Surface>
+    </AppShell>
   )
 }
 
