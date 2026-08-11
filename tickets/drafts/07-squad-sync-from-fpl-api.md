@@ -45,6 +45,18 @@ more than most.
 
 - [ ] `npm run build` passes clean.
 - [ ] `npm run lint` passes clean.
+- [ ] Rows written to `squad_picks` populate **`player_code`**, which is `NOT NULL` in the schema.
+      FPL's `picks/` endpoint returns `element` (the per-season id) and no code, so the sync must
+      resolve `players.code` from `players.id` before inserting. A missing lookup is a not-null
+      violation, not a silent gap.
+- [ ] Rows written to `squads` set `source` to exactly **`'api_sync'`**. The column carries
+      `CHECK (source IN ('manual', 'api_sync', 'override'))` — any other spelling is rejected by
+      the database.
+- [ ] The migration accompanying this ticket **explicitly GRANTs** `SELECT, INSERT, UPDATE, DELETE`
+      on `public.squads` and `public.squad_picks` to `service_role`. #13 granted those tables to
+      `anon` only; `service_role` currently has at most what `ALTER DEFAULT PRIVILEGES` gave it,
+      which excludes `DELETE`. Do not rely on default privileges — grant explicitly, per
+      `deltas.md` D8.
 - [ ] With `FPL_ENTRY_ID` set to a real entry, `npx tsx scripts/sync-squad.ts` fetches `entry/{id}/`
       and stores bank, squad value, total transfers, chips used, overall points and overall rank.
 - [ ] **When `entry/{id}/event/{gw}/picks/` returns 404, the script exits ZERO, changes no stored
@@ -56,6 +68,11 @@ more than most.
       against the API and updates the last-sync timestamp.
 - [ ] When picks are available and **differ** from stored state, the difference is recorded and
       surfaced, and the stored squad is not silently overwritten.
+- [ ] **Before the first deadline of the season passes, `entry/{id}/` returns null for
+      `last_deadline_bank` and `last_deadline_value`.** `squads.bank` and `squads.squad_value` are
+      `NOT NULL CHECK (>= 0)`, so writing nulls fails. In that state the sync writes no `squads`
+      row at all, exits zero, and records "no deadline has passed yet" in its `job_runs` row —
+      the same shape as the picks-404 path, not a substitute default value.
 - [ ] With `FPL_ENTRY_ID` unset, the script exits zero with a message naming the variable, and makes
       no request. It never guesses an entry id.
 - [ ] No entry id literal appears anywhere in `scripts/` or `src/`.
@@ -73,6 +90,21 @@ more than most.
 - **The 404 item is the one most likely to be marked verified from reading code.** It is directly
   testable today: point the script at any real entry id and gameweek 1 and observe the 404 path end
   to end. Report what you actually ran.
+**#13 has merged. The schema below is real, not assumed — check it before writing any insert.**
+
+- `squads`: `gameweek_id integer PRIMARY KEY REFERENCES gameweeks(id)`, `bank integer NOT NULL
+  CHECK (>= 0)`, `squad_value integer NOT NULL CHECK (>= 0)`, `free_transfers integer NOT NULL
+  DEFAULT 1`, `source text NOT NULL CHECK (source IN ('manual','api_sync','override'))`.
+- `squad_picks`: `gameweek_id`, `squad_position smallint CHECK (BETWEEN 1 AND 15)`,
+  `player_id integer NOT NULL REFERENCES players(id)`, **`player_code integer NOT NULL`**,
+  `is_starting boolean NOT NULL`, `bench_order smallint`, `is_captain`, `is_vice_captain`.
+- Partial unique indexes already enforce one captain, one vice-captain, and no duplicate player
+  per gameweek. Your writes must satisfy those, so replace a gameweek's picks as a set rather
+  than row by row.
+- **`squads.gameweek_id` is a foreign key to `gameweeks`**, so the FPL ingest must have run
+  before a sync can write anything. If the gameweek row is absent, report that rather than
+  inserting one.
+
 - **The entry id is a public identifier and storing it is explicitly not Tier 1** —
   `product-brief.md` §5 pre-approves it by name. Do not block on it.
 - Keshav's 2026/27 entry id is listed in the Part 1 handover as owner setup. If it has not been
