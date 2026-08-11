@@ -1,0 +1,161 @@
+/*
+  Squad entry screen (#13). A functional entry form matching #8's design
+  system — no pitch layout, that's item 16, wave 4. Every colour below
+  resolves to a token from src/index.css; no hex literal appears here.
+*/
+
+.squad-mark {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.squad-status-text {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.squad-status-text--error {
+  color: var(--accent-coral);
+}
+
+.squad-gameweek__label {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.squad-gameweek__name {
+  margin-top: var(--space-1);
+  font: var(--text-display);
+}
+
+.squad-position-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.squad-position-group__title {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.squad-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.squad-row__select {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-1);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-control);
+  padding: var(--space-3);
+  color: var(--text-primary);
+  font: var(--text-body);
+}
+
+.squad-row__starting {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--text-label);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.squad-captaincy,
+.squad-money {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.squad-captaincy__title,
+.squad-money__title {
+  font: var(--text-title);
+}
+
+.squad-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.squad-field__label {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.squad-field__input {
+  background: var(--surface-1);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-control);
+  padding: var(--space-3);
+  color: var(--text-primary);
+  font: var(--text-body);
+}
+
+.squad-field__hint {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.squad-errors {
+  border-color: var(--accent-coral-line);
+  background: var(--accent-coral-dim);
+}
+
+.squad-errors__title {
+  font: var(--text-title);
+  color: var(--accent-coral);
+}
+
+.squad-errors__list {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font: var(--text-body);
+  color: var(--text-primary);
+}
+
+.squad-saved {
+  border-color: var(--accent-cyan-line);
+  background: var(--accent-cyan-dim);
+}
+
+.squad-saved__title {
+  font: var(--text-title);
+  color: var(--accent-cyan);
+}
+
+.squad-picked-count {
+  text-align: center;
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.squad-save-button {
+  border: none;
+  border-radius: var(--radius-control);
+  padding: var(--space-4) var(--space-6);
+  background: var(--accent-cyan);
+  color: var(--surface-0);
+  font: var(--text-title);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.squad-save-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
