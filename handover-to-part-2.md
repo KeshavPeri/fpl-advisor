@@ -9,13 +9,38 @@ it reads the actual codebase and writes GitHub issues. It does not redesign anyt
 
 ## What to attach to the Part 2 chat
 
+**Two of these live outside the fpl-advisor repo. Part 2 cannot see them unless you attach
+them.** The rest it will find by reading the codebase, but attach them anyway so nothing
+depends on it looking.
+
 | File | Where | Why |
 |---|---|---|
-| `new-app-kickoff.md` | The pack Keshav uploaded to start this session | Part 2's own instructions live in it |
+| `new-app-kickoff.md` | **Outside the repo** — the pack Keshav uploaded to start this session | Part 2's own instructions live in it |
+| `assets/ticket-template.md` | **Outside the repo** — `~/Projects/app-factory/assets/` | The canonical ticket shape, with a worked example. The pack says to follow it exactly |
 | `product-brief.md` | Repo root | Scope, data sources, escalation pre-answers |
 | `design-reference.md` | Repo root | Visual direction, read on every ticket |
 | `feature-list.md` | Repo root | 33 items in build order with dependencies |
 | This file | Repo root | The handover block itself |
+
+### Two notes on the ticket template
+
+**There are two versions and they differ.** `app-factory/assets/ticket-template.md` is the
+canonical one with guidance and a worked example. `fpl-advisor/.github/ISSUE_TEMPLATE/ticket.md`
+is the GitHub issue form — same four sections, no example. Follow the canonical one; the issue
+form is what the section headings must match.
+
+**The template's worked example is incomplete against the kickoff pack.** Its example
+Definition of Done lists only functional and device-level criteria. The pack requires more of
+every ticket:
+
+- `npm run build` and `npm run lint` passing, on every ticket without exception.
+- A **scope constraint naming which files may change**.
+- Device-level items are fine, but a DoD made *entirely* of them means QA verifies nothing —
+  it has no phone and will return CANNOT VERIFY for all of them.
+
+Also note the template's worked example happens to be "Add gameweek deadline countdown", which
+is feature 18 on this app's list. It is an example, not a filed ticket. Do not treat it as
+already done.
 
 ---
 
@@ -122,7 +147,9 @@ wording and are Keshav's to reconcile.
 3. **Complete the four Tier 1 setup items above**, in your own browser. No credential is ever
    pasted into a chat.
 
-4. **Start the Part 2 chat** with `new-app-kickoff.md` and the four repo files attached.
+4. **Start the Part 2 chat** with six files attached: `new-app-kickoff.md` and
+   `app-factory/assets/ticket-template.md` (both from outside this repo), plus
+   `product-brief.md`, `design-reference.md`, `feature-list.md` and this file.
 
 ---
 
