@@ -54,11 +54,20 @@ squad to reason about.
 - [ ] A local-Postgres test **cannot** catch a missing grant, because it runs as a superuser. State
       in the handback that the grants were verified by reading the SQL, not by the migration
       applying cleanly.
-- [ ] The database rejects a squad with other than 15 picks for a gameweek — enforced by a
-      constraint or unique index, not only in the UI. Demonstrate with a failing `insert`.
-- [ ] The database rejects two captains, or two vice-captains, for the same gameweek. Demonstrate
-      with a failing `insert`.
-- [ ] The database rejects the same player appearing twice in one gameweek's squad.
+- [ ] **Database-enforced, each demonstrated with a failing `insert`:** no two picks share a
+      squad position in one gameweek; the same player cannot appear twice in one gameweek; at most
+      one captain per gameweek; at most one vice-captain per gameweek. These are expressible as
+      unique and partial-unique indexes.
+- [ ] **UI-enforced, each demonstrated by attempting the save:** exactly 15 picks; exactly 11
+      starters; captain and vice-captain are different players; the starting XI is a legal FPL
+      formation. Each rejection names what is wrong and what to do about it. These are multi-row
+      rules that a plain constraint cannot express — see the notes for why they are deliberately
+      not enforced in the database.
+- [ ] **Legal formation** means exactly 1 goalkeeper, at least 3 defenders, at least 2 midfielders
+      and at least 1 forward in the starting XI, totalling 11. A 2-5-3 is rejected; a 3-4-3 and a
+      3-5-2 are both accepted. Verified against the Premier League's published rules, 11 Aug 2026.
+- [ ] The screen states which gameweek it is editing, by name (`Gameweek 1`), before anything is
+      entered.
 - [ ] Navigating to `/squad` renders the entry screen; navigating to `/` still renders the shell
       from #8 unchanged.
 - [ ] Entering a valid 15, saving, and reloading the page shows the same squad — it persisted.
@@ -79,6 +88,25 @@ squad to reason about.
       *(Device-level — expect CANNOT VERIFY.)*
 
 ## Notes for the Analyst / Builder
+
+**Three ambiguities, answered here so nobody guesses at 3am.**
+
+- **Which gameweek does manual entry target?** The next gameweek whose deadline has not passed —
+  the lowest `gameweeks.id` where `deadline_time > now()`. Today that is Gameweek 1, whose deadline
+  is `2026-08-21T17:30:00Z`. If every deadline has passed, target the highest `gameweeks.id`. The
+  screen names the gameweek it is editing; it never silently picks one.
+- **Captain and vice-captain must be different players.** Reject the collision. The vice-captain
+  exists solely as the fallback when the captain does not play, so setting both to the same player
+  removes the mechanism entirely while looking like a valid save.
+- **Formation legality is enforced, in the UI.** 1 GK, 3–5 DEF, 2–5 MID, 1–3 FWD, 11 starters —
+  the maxima follow from the 15-man squad being 2/5/5/3.
+
+**Why counts and formation are not database constraints.** A rule spanning fifteen rows needs a
+deferred constraint trigger, which is a substantial amount of PL/pgSQL to write, test and maintain
+for a single-user app whose only realistic writer is this screen. The database enforces everything
+a plain index can express — duplicate positions, duplicate players, more than one captain, more
+than one vice — and the UI enforces the rest. **This is a Tier 2 decision, made here.** Log it with
+that reasoning; do not escalate it, and do not build the trigger.
 
 - **Router: react-router v7. Decided here, Tier 2, do not escalate.** Because `feature-list.md` has
   at least four more screens coming in wave 4 — pitch view, verdict card, reasoning screen, accuracy
