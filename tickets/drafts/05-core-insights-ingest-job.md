@@ -60,6 +60,11 @@ gets that data into Supabase so item 9 can compute defcon hit rates from it.
       repeated across URL strings.
 - [ ] No credential, key, token or `Authorization` header appears anywhere in the script.
 - [ ] The workflow still parses as valid YAML and the new step runs after the FPL ingest step.
+- [ ] **The workflow contains BOTH ingest steps after the merge.** #11 edits the same file in the
+      same wave, appending its own step at the same point. Your branch will not see #11's step and
+      #11's will not see yours, so one of the two merges will conflict — resolve by keeping both,
+      never by taking one side wholesale. A workflow missing a step is a job that silently never
+      runs and produces no data and no error.
 - [ ] Scope constraint: only `scripts/`, `supabase/migrations/` and
       `.github/workflows/scheduled-jobs.yml` change.
 
@@ -96,5 +101,9 @@ gets that data into Supabase so item 9 can compute defcon hit rates from it.
 - Player ids in this source are aligned to official FPL element ids, so `player_match_stats.player_id`
   can reference `players.id`. Verify that on real data rather than assuming it — if the alignment is
   imperfect, record what you observed rather than silently dropping unmatched rows.
+- **#11 edits `.github/workflows/scheduled-jobs.yml` in the same wave as you.** Both branches fork
+  from the same `main`, so neither can see the other's step — the same structural collision that
+  hit `decisions.md` on 11 Aug (`deltas.md` D6b). Append your step at the end of the job and keep
+  the diff minimal, so the conflict is one obvious hunk rather than a tangle.
 - Adding a CSV parsing library is a **Tier 2** choice. Proceed and log it with the because; do not
   hand-roll a parser that breaks on a quoted comma.
