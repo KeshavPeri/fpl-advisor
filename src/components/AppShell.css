@@ -1,0 +1,32 @@
+.app-shell {
+  min-height: 100svh;
+  min-height: 100vh;
+  width: 100%;
+  /* A faint ambient wash, not a flat fill — it's what the translucent
+     surfaces below have to actually frost. Without something behind a
+     panel, backdrop-filter: blur() has nothing to prove; with it, the
+     material read becomes real instead of theoretical. Body still
+     carries the flat #0b0f19 background underneath. */
+  background:
+    radial-gradient(ellipse 130% 55% at 50% -8%, var(--accent-cyan-dim), transparent 60%),
+    radial-gradient(ellipse 90% 40% at 85% 30%, var(--accent-coral-dim), transparent 65%),
+    var(--surface-0);
+  display: flex;
+  justify-content: center;
+}
+
+/* Single column, iPhone-first. Widens gently on larger viewports but
+   never chases a desktop layout — this app is read on one device. */
+.app-shell__column {
+  width: 100%;
+  max-width: 28rem;
+  min-height: 100svh;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding-top: calc(env(safe-area-inset-top) + var(--space-6));
+  padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-6));
+  padding-left: calc(env(safe-area-inset-left) + var(--space-4));
+  padding-right: calc(env(safe-area-inset-right) + var(--space-4));
+  gap: var(--space-6);
+}

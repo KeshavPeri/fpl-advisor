@@ -76,4 +76,29 @@ ROUTINE
      `short_name` in `vite.config.ts`'s VitePWA manifest config. No conflicting candidate
      existed, so this was a Tier 3 consistency decision, not a new naming choice.
      `product-brief.md` does not exist yet, so it wasn't consulted.
+#5 — Ticket #8 (app shell + design tokens): chose accent hexes `#5ec8de` (cyan, positive/
+     recommended) and `#e8825f` (coral, risk/warning) — lower-chroma, non-neon tones, chosen
+     specifically because design-reference.md warns "dark base plus one bright accent" is
+     itself an AI-default look, and a loud neon pair would fall straight into it.
+#6 — Ticket #8: elevation values fixed at `--panel-fill: rgba(23,31,51,.55)`,
+     `--panel-fill-raised: rgba(29,39,63,.62)`, `--panel-border: rgba(148,163,194,.14)`,
+     blur `22px` + `saturate(150%)` — the saturate boost is the standard iOS-vibrancy trick
+     that keeps blurred colour lively instead of washed out. Later tickets should match these
+     rather than inventing new elevation numbers.
+#7 — Ticket #8: added an ambient two-gradient background wash behind the shell, using the
+     same `-dim` accent tokens, because a flat single-colour page gives `backdrop-filter: blur`
+     nothing real to prove against — the wash makes the translucent-material claim visible in a
+     screenshot, not just present in the CSS.
+#8 — Ticket #8: named type scale by role, not size — `--text-label` 13px, `--text-body` 15px,
+     `--text-title` 17px/550, `--text-display` 36px/600 — and a 4px-base spacing scale
+     (4/8/12/16/24/32/48px), invented outright since no CSS framework is installed. Later
+     screens should reach for these roles rather than picking new pixel values.
+#9 — Ticket #8: panel/control radii set to 28px/14px, deliberately non-zero, to stay clear of
+     the hairline-bordered "broadsheet" look design-reference.md also warns against.
+#10 — Ticket #8: started a `src/components/` directory with `AppShell` and `Surface` as the
+     first two primitives, because later tickets (verdict card, pitch view, reasoning screen)
+     will compose against these same components rather than each inventing their own shell.
+#11 — Ticket #8: gave `Surface` a single quiet 0.5s fade + 6px rise on mount, guarded by
+     `prefers-reduced-motion: reduce` — the one motion design-reference.md's scope (orientation/
+     state-change only) actually allows for a surface arriving on screen.
 ```
