@@ -45,6 +45,15 @@ squad to reason about.
 - [ ] `npm run lint` passes clean.
 - [ ] The migration applies twice against an empty local Postgres, both runs exit 0, the second
       creating nothing new.
+- [ ] The migration **GRANTs** `SELECT, INSERT, UPDATE, DELETE` to `anon` on the squad tables it
+      creates, in the same file that creates them, alongside the RLS policies. RLS and GRANTs are
+      two independent gates: a policy without a grant yields `permission denied for table`, which
+      broke the first heartbeat run on 11 Aug 2026 (`deltas.md` D8). `DELETE` is included here
+      deliberately — replacing a 15-player squad needs it, unlike the read-only reference tables.
+      Copy the pattern from `supabase/migrations/20260811160000_table_grants.sql`.
+- [ ] A local-Postgres test **cannot** catch a missing grant, because it runs as a superuser. State
+      in the handback that the grants were verified by reading the SQL, not by the migration
+      applying cleanly.
 - [ ] The database rejects a squad with other than 15 picks for a gameweek — enforced by a
       constraint or unique index, not only in the UI. Demonstrate with a failing `insert`.
 - [ ] The database rejects two captains, or two vice-captains, for the same gameweek. Demonstrate
@@ -92,6 +101,11 @@ squad to reason about.
   that it is too big for a single Builder pass, the clean seam is schema-and-routing in one ticket
   and the entry screen in the next; splitting it there costs nothing downstream.
 
+- **Store `players.code`, not just `players.id`, anywhere you persist a player reference.** FPL
+  element ids are **not stable across seasons** — verified on real data during #12: of 458 players
+  matched between the 2025/26 and 2026/27 snapshots, only 5 kept the same id and 453 changed.
+  `code` is the stable cross-season identifier and is already a column on `players`. A squad stored
+  by `id` alone becomes wrong the moment the players table is refreshed for a new season.
 - The player list comes from the `players` table filled by #11. Do not fetch the FPL API
   directly from the browser for this — the ingest job is the single path by which player data
   enters the system, and a second path is a second thing to keep correct.
