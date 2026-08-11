@@ -31,6 +31,59 @@
   font: var(--text-display);
 }
 
+.squad-gameweek__fpl-link {
+  display: inline-block;
+  margin-top: var(--space-2);
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/*
+  Sync status banner (#14) — same translucent-surface pattern as
+  .squad-errors/.squad-saved above: a Surface with a tinted border and
+  background, never a flat card or a hex literal. --pending stays neutral
+  (no green/yellow per design-reference.md); --confirmed is cyan
+  (recommended/positive); --stale and --diff are coral (needs attention),
+  matching the app-wide accent convention exactly.
+*/
+.squad-sync {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.squad-sync__title {
+  font: var(--text-title);
+}
+
+.squad-sync--pending {
+  border-color: var(--panel-border);
+}
+
+.squad-sync--pending .squad-sync__title {
+  color: var(--text-secondary);
+}
+
+.squad-sync--confirmed {
+  border-color: var(--accent-cyan-line);
+  background: var(--accent-cyan-dim);
+}
+
+.squad-sync--confirmed .squad-sync__title {
+  color: var(--accent-cyan);
+}
+
+.squad-sync--diff,
+.squad-sync--stale {
+  border-color: var(--accent-coral-line);
+  background: var(--accent-coral-dim);
+}
+
+.squad-sync--diff .squad-sync__title,
+.squad-sync--stale .squad-sync__title {
+  color: var(--accent-coral);
+}
+
 .squad-position-group {
   display: flex;
   flex-direction: column;
