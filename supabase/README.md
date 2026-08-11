@@ -37,10 +37,17 @@ in, re-run it and check the notices.
 
 ## Migrations applied so far
 
-| File | What it does | Applied? |
+Newest last. Apply in filename order.
+
+| File | What it does | Applied to live? |
 |---|---|---|
-| `20260811100000_reference_schema.sql` | Creates `teams`, `players`, `fixtures`, `gameweeks` with read-only RLS for `anon`. No data. | Not yet — apply this before #10 (heartbeat) or #11 (ingest) can do anything useful; both write into tables this migration creates. |
+| `20260811100000_reference_schema.sql` | Creates `teams`, `players`, `fixtures`, `gameweeks` with read-only RLS for `anon`. No data. | **Yes — 11 Aug 2026.** Ticket #9. |
+| `20260811130000_job_runs.sql` | Creates `job_runs` (job telemetry: name, status, started/finished, message, `details jsonb`) with read-only RLS for `anon`. Written by the Action's secret key, which bypasses RLS. | **Yes — 11 Aug 2026.** Ticket #10. |
 
 Update this table by hand after you apply a migration, so the next person
 (or the next overnight run reading this file) knows what state the live
 database is actually in.
+
+**A migration file on `main` does not mean it has been applied.** Nothing in this repo can
+apply one — that is owner-only (Tier 1). If a job fails with a missing-table error, check this
+table first: the most likely cause is a merged migration that nobody ran.
