@@ -27,6 +27,22 @@
 BEGIN;
 
 -- ============================================================================
+-- Roles — on Supabase's hosted platform (and its local dev CLI), `anon` is
+-- provisioned automatically. A plain vanilla Postgres install has no such
+-- role, so the RLS policies below (TO anon) would fail on first apply. This
+-- guard is a no-op against real Supabase and makes the file self-contained
+-- when applied to bare Postgres.
+-- ============================================================================
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    CREATE ROLE anon NOLOGIN;
+  END IF;
+END
+$$;
+
+-- ============================================================================
 -- teams
 -- ============================================================================
 
