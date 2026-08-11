@@ -21,3 +21,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code worktree isolation scaffolding (not repo content)
+.claude/worktrees/
