@@ -25,3 +25,30 @@ export function parseMoneyInput(value: string): number | null {
 export function tenthsToInputString(tenths: number): string {
   return (tenths / 10).toFixed(1)
 }
+
+/**
+ * Extracts a human-readable message from anything a `catch` block might see.
+ *
+ * supabase-js does not reject with an `Error` on a Postgrest-level failure
+ * (RLS denial, permission error, missing table/column, malformed query, a
+ * bare network error) — by default it *resolves* `{ data: null, error }`,
+ * where `error` is a plain `{ message, details, hint, code }` object, not an
+ * `Error` instance. `src/lib/squad/api.ts` re-throws that object as-is, so a
+ * naive `err instanceof Error ? err.message : String(err)` falls through to
+ * `String(err)` for it, which stringifies a plain object to the useless
+ * literal "[object Object]" — silently violating design-reference.md's rule
+ * that error text must say what happened. Every catch block in this app
+ * should route through this function instead of reimplementing the check.
+ */
+export function toErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    'message' in err &&
+    typeof (err as { message: unknown }).message === 'string'
+  ) {
+    return (err as { message: string }).message
+  }
+  return String(err)
+}

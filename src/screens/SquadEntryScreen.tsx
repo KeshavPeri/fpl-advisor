@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
-import { formatMoney, tenthsToInputString } from '../lib/format'
+import { formatMoney, tenthsToInputString, toErrorMessage } from '../lib/format'
 import { fetchExistingSquad, fetchPlayers, fetchTargetGameweek, saveSquad } from '../lib/squad/api'
 import {
   POSITION_LABEL,
@@ -108,8 +108,7 @@ function SquadEntryScreen() {
         setLoadState({ status: 'ready' })
       } catch (err) {
         if (cancelled) return
-        const message = err instanceof Error ? err.message : String(err)
-        setLoadState({ status: 'error', message })
+        setLoadState({ status: 'error', message: toErrorMessage(err) })
       }
     }
 
@@ -202,8 +201,7 @@ function SquadEntryScreen() {
       await saveSquad(gameweek.id, { ...result.parsed, picks })
       setSaveState('saved')
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      setSaveErrorMessage(message)
+      setSaveErrorMessage(toErrorMessage(err))
       setSaveState('error')
     }
   }

@@ -2,6 +2,23 @@ import { supabase } from '../supabase'
 import type { PositionCode } from './positions'
 import type { SelectablePlayer, TargetGameweek } from './types'
 
+/**
+ * supabase-js does not reject with an `Error` on a Postgrest-level failure —
+ * it resolves `{ data: null, error }`, where `error` is a plain
+ * `{ message, details, hint, code }` object. Wrapping it in a real `Error`
+ * here (rather than `throw error` at each call site) means every caller's
+ * `catch` block gets normal `Error` behaviour — `instanceof Error`,
+ * `.stack`, `.message` — instead of having to know about supabase-js's
+ * shape. `cause` keeps the original object around for anyone who does want
+ * `.details`/`.hint`/`.code`. See src/lib/format.ts's toErrorMessage, which
+ * also handles the case, for the incident this fixes (QA, ticket #13
+ * revision round 1: an un-wrapped error object rendered as "[object
+ * Object]" in the UI).
+ */
+function raise(error: { message: string }): never {
+  throw new Error(error.message, { cause: error })
+}
+
 interface GameweekRow {
   id: number
   name: string
@@ -21,7 +38,7 @@ export async function fetchTargetGameweek(): Promise<TargetGameweek | null> {
     .order('id', { ascending: true })
     .returns<GameweekRow[]>()
 
-  if (error) throw error
+  if (error) raise(error)
   if (!data || data.length === 0) return null
 
   const now = Date.now()
@@ -49,7 +66,7 @@ export async function fetchPlayers(): Promise<SelectablePlayer[]> {
     .order('web_name', { ascending: true })
     .returns<PlayerRow[]>()
 
-  if (error) throw error
+  if (error) raise(error)
 
   return (data ?? []).map((row) => {
     const team = Array.isArray(row.teams) ? row.teams[0] : row.teams
@@ -87,7 +104,7 @@ export async function fetchExistingSquad(gameweekId: number): Promise<ExistingSq
     .eq('gameweek_id', gameweekId)
     .maybeSingle()
 
-  if (squadError) throw squadError
+  if (squadError) raise(squadError)
   if (!squadRow) return null
 
   const { data: pickRows, error: picksError } = await supabase
@@ -96,7 +113,7 @@ export async function fetchExistingSquad(gameweekId: number): Promise<ExistingSq
     .eq('gameweek_id', gameweekId)
     .order('squad_position', { ascending: true })
 
-  if (picksError) throw picksError
+  if (picksError) raise(picksError)
 
   return {
     bank: squadRow.bank,
@@ -146,13 +163,13 @@ export async function saveSquad(gameweekId: number, input: SaveSquadInput): Prom
     source: 'manual',
     updated_at: new Date().toISOString(),
   })
-  if (upsertError) throw upsertError
+  if (upsertError) raise(upsertError)
 
   const { error: deleteError } = await supabase
     .from('squad_picks')
     .delete()
     .eq('gameweek_id', gameweekId)
-  if (deleteError) throw deleteError
+  if (deleteError) raise(deleteError)
 
   const rows = input.picks.map((pick) => ({
     gameweek_id: gameweekId,
@@ -166,5 +183,5 @@ export async function saveSquad(gameweekId: number, input: SaveSquadInput): Prom
   }))
 
   const { error: insertError } = await supabase.from('squad_picks').insert(rows)
-  if (insertError) throw insertError
+  if (insertError) raise(insertError)
 }
