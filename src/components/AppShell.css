@@ -2,17 +2,35 @@
   min-height: 100svh;
   min-height: 100vh;
   width: 100%;
-  /* A faint ambient wash, not a flat fill — it's what the translucent
-     surfaces below have to actually frost. Without something behind a
-     panel, backdrop-filter: blur() has nothing to prove; with it, the
-     material read becomes real instead of theoretical. Body still
-     carries the flat #0b0f19 background underneath. */
+  display: flex;
+  justify-content: center;
+}
+
+/* Ticket #26 — the ambient wash, pinned to the viewport instead of
+   scrolling with the page. `position: fixed; inset: 0` paints one
+   static layer behind all content — deliberately not the "fixed"
+   value of CSS's background attachment property, which iOS Safari
+   ignores for this exact purpose; a fixed *element* is required
+   instead. `app-shell` and `app-shell__column`
+   above have no background of their own any more, so this is the only
+   place the gradient values live. Values are #8's, unchanged — this
+   ticket repositions the wash, it does not redesign it.
+   `inset: 0` deliberately ignores the safe-area padding applied to
+   `app-shell__column` below, so the wash covers the full viewport,
+   including the area behind the notch and the home indicator.
+   `z-index: -1` keeps it behind the (non-positioned, in-flow)
+   `app-shell__column` in paint order without needing a z-index on the
+   column; `pointer-events: none` is belt-and-suspenders so it can never
+   intercept a tap even if that ordering ever changes. */
+.app-shell__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
   background:
     radial-gradient(ellipse 130% 55% at 50% -8%, var(--accent-cyan-dim), transparent 60%),
     radial-gradient(ellipse 90% 40% at 85% 30%, var(--accent-coral-dim), transparent 65%),
     var(--surface-0);
-  display: flex;
-  justify-content: center;
 }
 
 /* Single column, iPhone-first. Widens gently on larger viewports but
