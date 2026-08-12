@@ -5,19 +5,11 @@ name: Solver smoke test
 #     inside a GitHub Action, and (2) what column headers its projections
 #     CSV actually expects. Diagnostic only, workflow_dispatch only — no
 #     schedule, no integration with this app's data, no CSV adapter.
-# See docs/solver-notes.md for the write-up and decisions/ticket-29.md for
-# the reasoning.
-#
-# IMPORTANT — deviation from the original plan, recorded here so it isn't
-# missed: at the pinned commit below the upstream repo does NOT ship a
-# bundled sample projections CSV (removed upstream in commit 374c36c,
-# "remove unnecessary files", Aug 2025). This workflow instead builds a
-# minimal projections CSV from the live public FPL bootstrap-static
-# endpoint (real player IDs are required — dev/solver.py inner-merges the
-# projections CSV against live FPL data on ID, so synthetic IDs would
-# produce an empty, infeasible model). This is the same public endpoint the
-# solver itself calls at runtime; it is not this app's data, no adapter is
-# written, and nothing is vendored. Full detail in docs/solver-notes.md.
+# See docs/solver-notes.md for the full write-up and decisions/ticket-29.md
+# for the reasoning, including a BLOCKED item: this workflow currently
+# proves install-and-dependency-resolution only, not a full solve. Read
+# docs/solver-notes.md before extending this file — the missing solve step
+# is a known gap awaiting a human decision, not an oversight.
 
 on:
   workflow_dispatch: {}
@@ -42,64 +34,10 @@ jobs:
         working-directory: solver
         run: uv sync
 
-      - name: Build a minimal smoke-test projections CSV
-        working-directory: solver
-        run: |
-          curl -sS -o /tmp/bootstrap.json "https://fantasy.premierleague.com/api/bootstrap-static/"
-          uv run python - <<'PY'
-          import csv, json
-
-          with open("/tmp/bootstrap.json") as f:
-              data = json.load(f)
-
-          pos_map = {1: "G", 2: "D", 3: "M", 4: "F"}
-          rows = []
-          for e in data["elements"]:
-              ppg = float(e.get("points_per_game") or 0)
-              rows.append(
-                  {
-                      "ID": e["id"],
-                      "Pos": pos_map[e["element_type"]],
-                      "1_Pts": round(ppg, 2),
-                      "1_xMins": 90 if ppg > 0 else 0,
-                  }
-              )
-
-          with open("data/solio.csv", "w", newline="") as f:
-              w = csv.DictWriter(f, fieldnames=["ID", "Pos", "1_Pts", "1_xMins"])
-              w.writeheader()
-              w.writerows(rows)
-
-          print(f"wrote {len(rows)} rows to data/solio.csv")
-          PY
-
-      - name: Reduce horizon/xmin_lb to match the 1-gameweek smoke CSV
-        working-directory: solver
-        run: |
-          python3 - <<'PY'
-          import json
-
-          path = "data/user_settings.json"
-          with open(path) as f:
-              settings = json.load(f)
-
-          # Defaults already have datasource: "solio", preseason: true.
-          # horizon/xmin_lb are the only two that need to shrink to match a
-          # 1-gameweek smoke CSV instead of the default 8-gameweek horizon.
-          settings["horizon"] = 1
-          settings["xmin_lb"] = 60
-
-          with open(path, "w") as f:
-              json.dump(settings, f, indent=4)
-          PY
-
-      - name: Run the solver against the smoke-test data
-        working-directory: solver/run
-        run: uv run python solve.py
-
-      - name: Show the solution file the solver produced
-        working-directory: solver
-        run: |
-          latest=$(ls -t data/results/*.csv | head -1)
-          echo "Solution file: $latest"
-          cat "$latest"
+      # No solve step here. Running dev/solver.py:solve_multi_period_fpl
+      # requires a projections CSV in the solio/fplreview shape (ID, Pos,
+      # {gw}_Pts, {gw}_xMins columns), and no commit in this upstream
+      # repository's history — verified across every branch — has ever
+      # shipped one. See docs/solver-notes.md, "Blocked: no bundled sample
+      # projections CSV exists" for the full verification and the options
+      # awaiting a decision.

@@ -8,120 +8,109 @@ run, not a guess from reading the README.
 `45131c5a41d7caadb5cb626c012bfa9111dca7a2` — resolved from upstream `main` on 2026-08-12 via
 `git ls-remote https://github.com/sertalpbilal/FPL-Optimization-Tools.git HEAD`.
 
-## Toolchain that actually worked
+## Toolchain install — verified, works cleanly
 
 ```
-pip install uv                # in this session; the Action uses astral-sh/setup-uv instead
-uv sync                        # installs Python 3.14.7 + all deps in ~5s, no manual Python install
-cd run
-uv run python solve.py
+pip install uv        # in this session; the Action uses astral-sh/setup-uv instead
+uv sync                 # installs Python 3.14.7 + all deps in ~5s, no manual Python install
 ```
 
 `uv sync` output confirmed: Python 3.14.7, `highspy==1.15.1` (bundles HiGHS 1.15.1), `pandas==3.0.5`.
-No install failures, no manual dependency wrangling.
+No install failures, no manual dependency wrangling. This half of the ticket's purpose —
+"does the toolchain install and run inside a GitHub Action at all" — is answered: yes, cleanly,
+in about 5 seconds.
 
-## Important deviation from the ticket's assumption — no bundled sample CSV
+## Blocked: no bundled sample projections CSV exists
 
-**The upstream repository at this pinned commit does not ship a sample projections CSV.**
-`data/` contains only `user_settings.json`, `comprehensive_settings.json`, two `.md` docs, and
-a `team.json.sample`. The historical sample data (`data/sample_outputs/optimal_plan_*.csv`,
-which were solver *outputs*, not projection *inputs*, and no projections CSV either) was
-deleted upstream in commit `374c36c` ("remove unnecessary files", Aug 2025) — confirmed via
-`git log --all -- "*.csv"` against the upstream history.
+**Revision note (this section replaces an earlier version of this file).** The first pass at
+this ticket worked around the missing sample data by building a projections CSV from the live
+FPL `bootstrap-static` endpoint, shaped to match the solver's expected input format. On review,
+that was correctly identified as out of scope: shaping a CSV to satisfy `dev/solver.py`'s
+`prep_data` inner-join *is* the CSV-adapter work the ticket explicitly reserves for a later
+item, regardless of whether the data source is live or hand-authored. That code has been
+removed. This section documents the actual, verified state instead.
 
-So "run the solver against its own bundled sample data" could not be done literally. Instead,
-this smoke test builds a minimal projections CSV from the **live public FPL bootstrap-static
-endpoint** (`https://fantasy.premierleague.com/api/bootstrap-static/`) — the same endpoint the
-solver's own `dev/solver.py:prep_data` calls at runtime regardless of what's in the CSV. This
-is necessary, not optional: `prep_data` does `pd.merge(elements_team, data, left_on="id_x",
-right_on="ID")`, an inner join against live FPL data on player ID. A CSV with synthetic/fake
-IDs merges to zero rows and produces an infeasible/empty model — real current FPL player IDs
-are required to prove anything.
-
-This is **not** an app data adapter and not this app's data: it is the minimum viable input
-the tool itself requires, built the same way for a one-off smoke run as an upstream sample
-file would have been consumed. No CSV adapter is written here — that remains a distinct future
-ticket's job, now with an accurate target instead of a guessed one.
-
-## Header row actually used — quoted verbatim
+**No commit in `sertalpbilal/FPL-Optimization-Tools`'s history — checked across every branch —
+has ever shipped a projections CSV that `solve.py` can consume for a squad solve.** Verified
+directly, not assumed, with:
 
 ```
-ID,Pos,1_Pts,1_xMins
+git log --diff-filter=A --name-only --all --remotes -- "*.csv"
 ```
 
-Derived by reading `dev/solver.py` (`prep_data`, lines ~136–210) rather than guessed:
+Every CSV ever added to the repository, in full:
+
+| File | What it actually is |
+|---|---|
+| `data/am_pts.csv` | Per-**team** points for the (now-removed) Assistant Manager chip. Keyed by `team`, not by player — not a projections file, and the code that read it was deleted in commit `dd15feb` before the pinned commit. |
+| `data/sample_outputs/optimal_plan_decay.csv` | A solver **output** example (columns: `week,name,pos,type,team,price,xP,lineup,captain,vicecaptain,transfer_in,transfer_out`) — this is the shape `solve.py` *produces*, not what it *reads*. |
+| `data/sample_outputs/optimal_plan_regular.csv` | Same as above, other decay setting. |
+| `notebooks/data/gk_season.csv` | Goalkeeper season stats for an unrelated tutorial notebook, no relation to `solve.py`'s projections format. |
+
+The commit that removed the two `sample_outputs` files, `374c36c` ("remove unnecessary
+files", Aug 2025), is real, but those files were never usable as solver *input* in the first
+place — pinning to a commit before it does not produce a usable sample projections CSV,
+because one was never there. Going back to the repository's very first commit
+(`9651526`, "Add README file") confirms the same thing from the other direction: the original
+README's own instructions required a user to supply either their own projections file or FPL
+login credentials — never a bundled sample.
+
+**Net effect:** with the `data/am_pts.csv` code path, whatever it read, gone from the code
+before the pinned commit, and no other projections CSV ever committed, `run/solve.py` cannot
+be run to a real squad solve against genuine upstream sample data, because no such file exists
+anywhere in this repository's recorded history. This is not a gap in this session's searching —
+`git log --diff-filter=A --all --remotes` is exhaustive over every commit that ever added a
+file, on every branch this clone knows about.
+
+**What the workflow does instead:** `.github/workflows/solver-smoke.yml` now proves
+installability only (checkout at the pinned SHA, `uv sync`) and stops there. It does not
+attempt a solve, and does not read from any external data source, live or otherwise — the
+scope concern that triggered this revision is fully addressed by removing that step, not
+worked around.
+
+**Open question for a human decision**, since none of the following can be chosen
+unilaterally without touching the "no adapter, no external data source" constraint one way or
+another:
+
+1. Accept a small, hand-authored fixture CSV (a handful of real current FPL player IDs, real
+   positions, plausible points) checked into this smoke workflow purely as CI test data, on the
+   understanding that it is explicitly *not* production adapter code and is scoped to proving
+   the solve step only — same objection as before, since building it still shapes data to the
+   solver's expected columns; flagging rather than choosing.
+2. Accept that this ticket's "solver runs to completion and produces a solution file" DoD item
+   cannot be satisfied against real upstream sample data because none exists, and descope that
+   item to "installs and resolves dependencies cleanly" — with a full solve proof deferred to
+   whichever ticket first builds real projection data (the CSV-adapter item this ticket was
+   explicitly protecting).
+3. Something else Keshav specifies.
+
+## Toolchain verification actually performed, for the record
+
+Before this revision, the install-and-solve sequence was run end-to-end in this session using
+a live-data CSV (since removed from scope) and reached a proven-optimal solve
+(HiGHS: status Optimal, gap 0%, 0.25s solve time; ~5.2s total wall clock including live API
+calls). That run is not reported as satisfying this ticket's DoD — it demonstrated the
+toolchain and the HiGHS/`highspy` install path work, but it used data this revision determined
+was out of scope to produce. The install-only path above (`uv sync` alone, no solve) is the
+part of that verification still directly relevant to this ticket's remaining scope.
+
+## Required input column shape, for whoever builds the adapter later
+
+Documented here so the CSV-adapter ticket doesn't have to re-derive it from scratch, even
+though no sample file confirms it directly — this is read from `dev/solver.py`'s `prep_data`
+(lines ~136–210), which is the actual consumer:
 
 - `ID` — required. Inner-merge key against live FPL `elements` (`id_x`). Must be a real,
   current FPL element id or the row is dropped before solving.
-- `Pos` — required. Read directly as `merged_data["Pos"]` (there is no equivalent column in
-  the live FPL data merged in, so the CSV must supply it). Values used elsewhere in the repo:
+- `Pos` — required. Read directly as `merged_data["Pos"]`. Values used elsewhere in the repo:
   `"G"`, `"D"`, `"M"`, `"F"`.
-- `{gw}_Pts` — required, one column per gameweek in the horizon (e.g. `1_Pts` for a
-  horizon of 1). `prep_data` raises `ValueError(f"{week}_Pts is not inside prediction
-  data...")` if a horizon gameweek's column is missing.
-- `{gw}_xMins` — required, paired with `{gw}_Pts` the same way, used for the minutes-based
-  player-pool filter (`xmin_lb`) and for the randomisation noise term.
+- `{gw}_Pts` — required, one column per gameweek in the configured horizon.  `prep_data` raises
+  `ValueError(f"{week}_Pts is not inside prediction data...")` if a horizon gameweek's column
+  is missing.
+- `{gw}_xMins` — required, paired with `{gw}_Pts`, used for the minutes-based player-pool
+  filter (`xmin_lb`) and the randomisation noise term.
 
-Columns present in the wider community "FPL Review" / "solio" format but **not** required by
-the solver code path exercised here: `Name`, `Value`, `Team`. Those are only read by the
-`mixed`/`mikkel` conversion helpers in `dev/data_parser.py`, not by the direct `solio`/
-`fplreview` CSV readers used in this run. A future adapter can supply the fuller format for
-compatibility with the community tooling, but the four columns above are the true minimum the
-solver needs to run.
-
-## Settings that had to change from the shipped defaults
-
-`data/user_settings.json` ships with `"datasource": "solio"` and `"preseason": true` already —
-no change needed there. Two values were changed, both purely to match a **1-gameweek** smoke
-CSV instead of the shipped 8-gameweek default horizon:
-
-- `"horizon": 8` → `"horizon": 1`
-- `"xmin_lb": 300` → `"xmin_lb": 60` (300 expected minutes across an 8-GW horizon is
-  unreachable within a single simulated gameweek of 90 minutes)
-
-No other setting was touched.
-
-## Invocation that produced a solution
-
-```bash
-curl -sS -o /tmp/bootstrap.json "https://fantasy.premierleague.com/api/bootstrap-static/"
-uv run python data/build_smoke_csv.py   # writes data/solio.csv from /tmp/bootstrap.json
-# (edit data/user_settings.json: horizon 8→1, xmin_lb 300→60)
-cd run
-uv run python solve.py
-```
-
-(The Action inlines the CSV-building step instead of a checked-in script — see
-`.github/workflows/solver-smoke.yml`. `build_smoke_csv.py` itself was a throwaway file in the
-local session, not committed anywhere.)
-
-## Result
-
-- Solver status: **Optimal**, gap 0%, proven — not a timeout/incumbent.
-- HiGHS solve time (from HiGHS's own report): **0.25s** (0.05s presolve + 0.20s solve).
-- Total wall clock for `uv run python solve.py` (includes live FPL API calls,
-  `.venv` already warm from `uv sync`): **~5.2s**.
-- A solution file was written automatically to
-  `data/results/solio_<timestamp>_<runid>_0.csv` — no explicit `solutions_file` setting was
-  needed for this to happen.
-
-Solution output file header (also worth recording — this is the solver's *output* shape, not
-its input shape):
-
-```
-id,week,name,pos,type,team,buy_price,sell_price,xP,xMin,squad,lineup,bench,captain,vicecaptain,transfer_in,transfer_out,multiplier,xp_cont,chip,iter,ft,transfer_count
-```
-
-## What this proves and doesn't prove
-
-Proves: the toolchain (`uv` + `highspy`/HiGHS) installs and solves cleanly in a plain Linux
-environment reachable from this session, and confirms the exact input columns the solver code
-requires. Also proves it runs the same way under GitHub Actions' network policy — Keshav
-should confirm via `workflow_dispatch` after merge, since this session cannot trigger a
-GitHub Action directly (see ticket DoD and decisions/ticket-29.md).
-
-Does not prove: solve time or feasibility at the shipped default horizon (8 gameweeks) or
-with a non-preseason squad — this smoke test deliberately used the simplest configuration that
-would exercise the full install → solve → output path. A later ticket depending on
-multi-gameweek horizons or Plan A/B/C iteration should re-check timing at the real horizon
-length, not assume this smoke test's ~5s wall clock scales linearly.
+Columns present in the wider community "FPL Review" / "solio" format but not required by the
+solver code path used here (`read_solio`/`read_fplreview`, both a plain `pd.read_csv`):
+`Name`, `Value`, `Team`. Those are only read by the `mixed`/`mikkel` conversion helpers in
+`dev/data_parser.py`.
