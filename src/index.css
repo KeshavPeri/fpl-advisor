@@ -87,7 +87,18 @@ body {
 }
 
 body {
-  background: var(--surface-0);
+  /* No background here — deliberately. `:root` above already supplies
+     the canvas background (and #0b0f19 is the fallback paint before any
+     component mounts). Ticket #26: because `:root`'s background is not
+     transparent, the CSS canvas-background propagation rule does not
+     hand off to `body`, so a `background` declared here would paint as
+     body's own ordinary, non-positioned box background — which sits
+     *above* any `z-index: -1` descendant in stacking order (canvas →
+     negative-z-index descendants → non-positioned in-flow descendants,
+     including body's own background paint). With this rule in place,
+     `AppShell`'s fixed, negative-z-index backdrop layer was being fully
+     painted over by body's own background and was invisible in the
+     actual page, confirmed empirically, not just by spec reading. */
   color: var(--text-primary);
   font: var(--text-body);
   -webkit-font-smoothing: antialiased;
