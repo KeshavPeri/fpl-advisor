@@ -1,17 +1,106 @@
 import { useEffect, useMemo, useState } from 'react'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
-import { formatMoney, tenthsToInputString, toErrorMessage } from '../lib/format'
+import { formatMoney, formatSyncTimestamp, tenthsToInputString, toErrorMessage } from '../lib/format'
 import { fetchExistingSquad, fetchPlayers, fetchTargetGameweek, saveSquad } from '../lib/squad/api'
+import { getFplEntryId } from '../lib/squad/env'
 import {
   POSITION_LABEL,
   POSITION_ORDER,
   squadPositionRange,
   type PositionCode,
 } from '../lib/squad/positions'
+import { fetchSquadSyncStatus, type SquadDiff, type SquadSyncStatus } from '../lib/squad/syncStatus'
 import type { SelectablePlayer, SquadSlot, TargetGameweek } from '../lib/squad/types'
 import { validateSquad } from '../lib/squad/validate'
 import './SquadEntryScreen.css'
+
+/**
+ * Ticket #14 — a short, human summary of a reconciliation diff for the sync
+ * banner. Mirrors scripts/sync-squad.ts's own summarizeDiff(), duplicated
+ * rather than shared for the same reason every scripts/*.ts file already
+ * duplicates rather than imports across the scripts/src boundary (see that
+ * file's header comment on POSITION_ORDER).
+ */
+function summarizeDiff(diff: SquadDiff): string {
+  const parts: string[] = []
+  if (diff.addedPlayerIds.length > 0) parts.push(`${diff.addedPlayerIds.length} player(s) added`)
+  if (diff.removedPlayerIds.length > 0) parts.push(`${diff.removedPlayerIds.length} player(s) removed`)
+  if (diff.startingChangedPlayerIds.length > 0) {
+    parts.push(`${diff.startingChangedPlayerIds.length} player(s) moved starting XI/bench`)
+  }
+  if (diff.captainChanged) parts.push('captain changed')
+  if (diff.viceCaptainChanged) parts.push('vice-captain changed')
+  return parts.length > 0 ? parts.join(', ') : 'a difference was detected'
+}
+
+/**
+ * Ticket #14's "visible last-successful-sync timestamp" and "the difference
+ * is … surfaced" DoD items. Stale (last sync attempt failed) always wins —
+ * the app must never present stale state as current (product-brief.md
+ * §6a) — regardless of what an older successful run's reason says.
+ */
+function renderSyncBanner(status: SquadSyncStatus | null) {
+  if (!status) return null
+
+  if (status.isStale) {
+    return (
+      <Surface className="squad-sync squad-sync--stale" role="status">
+        <p className="squad-sync__title">FPL sync stale</p>
+        <p>
+          The last sync attempt failed.{' '}
+          {status.lastSuccessfulSyncAt
+            ? `Showing the last confirmed state, synced ${formatSyncTimestamp(status.lastSuccessfulSyncAt)}.`
+            : 'FPL has never been reached successfully — this is your manually-entered squad.'}
+        </p>
+      </Surface>
+    )
+  }
+
+  const run = status.lastRunForGameweek
+  if (!run) return null
+
+  if (run.reason === 'diff_detected' && run.diff) {
+    return (
+      <Surface className="squad-sync squad-sync--diff" role="status">
+        <p className="squad-sync__title">Squad differs from FPL</p>
+        <p>
+          {summarizeDiff(run.diff)}. Not overwritten — update the picks below and save if this
+          needs correcting.
+        </p>
+      </Surface>
+    )
+  }
+
+  if (run.reason === 'confirmed' || run.reason === 'established') {
+    return (
+      <Surface className="squad-sync squad-sync--confirmed" role="status">
+        <p className="squad-sync__title">Confirmed against FPL</p>
+        {run.finishedAt && <p className="num">Synced {formatSyncTimestamp(run.finishedAt)}</p>}
+      </Surface>
+    )
+  }
+
+  if (run.reason === 'picks_not_published') {
+    return (
+      <Surface className="squad-sync squad-sync--pending" role="status">
+        <p className="squad-sync__title">Waiting on FPL</p>
+        <p>FPL hasn't published picks for this gameweek yet — this is your manually-entered squad.</p>
+      </Surface>
+    )
+  }
+
+  if (run.reason === 'no_deadline_passed') {
+    return (
+      <Surface className="squad-sync squad-sync--pending" role="status">
+        <p className="squad-sync__title">Not yet synced</p>
+        <p>This gameweek's deadline hasn't passed yet — squad state is whatever you enter below.</p>
+      </Surface>
+    )
+  }
+
+  return null
+}
 
 type LoadState =
   | { status: 'loading' }
@@ -59,6 +148,8 @@ function SquadEntryScreen() {
   const [validationErrors, setValidationErrors] = useState<string[]>([])
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [saveErrorMessage, setSaveErrorMessage] = useState('')
+  const [syncStatus, setSyncStatus] = useState<SquadSyncStatus | null>(null)
+  const fplEntryId = useMemo(() => getFplEntryId(), [])
 
   useEffect(() => {
     let cancelled = false
@@ -117,6 +208,26 @@ function SquadEntryScreen() {
       cancelled = true
     }
   }, [])
+
+  // Ticket #14 — sync status is fetched separately from the squad itself:
+  // it depends only on knowing the gameweek id, and a failure to read it
+  // (e.g. job_runs not migrated yet) should not block the entry form from
+  // rendering at all. Silently shows nothing rather than an error banner —
+  // this is supplementary context, not something the screen depends on.
+  useEffect(() => {
+    if (gameweek === null) return
+    let cancelled = false
+    fetchSquadSyncStatus(gameweek.id)
+      .then((status) => {
+        if (!cancelled) setSyncStatus(status)
+      })
+      .catch(() => {
+        // Deliberately silent — see comment above.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [gameweek])
 
   const selectedPlayerIds = useMemo(
     () => new Set(slots.map((slot) => slot.playerId).filter((id): id is number => id !== null)),
@@ -268,7 +379,19 @@ function SquadEntryScreen() {
       <Surface className="squad-gameweek">
         <p className="squad-gameweek__label">Editing</p>
         <p className="squad-gameweek__name">{gameweek?.name}</p>
+        {fplEntryId && gameweek && (
+          <a
+            className="squad-gameweek__fpl-link"
+            href={`https://fantasy.premierleague.com/entry/${fplEntryId}/event/${gameweek.id}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View on the official FPL site ↗
+          </a>
+        )}
       </Surface>
+
+      {renderSyncBanner(syncStatus)}
 
       {POSITION_ORDER.map((position) => (
         <Surface key={position} className="squad-position-group">

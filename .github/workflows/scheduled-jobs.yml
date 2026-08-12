@@ -49,3 +49,15 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: npx tsx scripts/ingest-fpl.ts
+
+      - name: Sync squad from FPL
+        # Ticket #14. Runs after the FPL ingest step above, which populates
+        # the gameweeks and players tables this job reads from. FPL_ENTRY_ID
+        # is optional at the secrets level: scripts/sync-squad.ts exits zero
+        # with a named message and makes no request if it is unset, so this
+        # step is safe to run before the entry id is known.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          FPL_ENTRY_ID: ${{ secrets.FPL_ENTRY_ID }}
+        run: npx tsx scripts/sync-squad.ts

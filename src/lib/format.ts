@@ -27,6 +27,28 @@ export function tenthsToInputString(tenths: number): string {
 }
 
 /**
+ * Formats an ISO timestamp for display, always in Asia/Singapore — every
+ * time Keshav sees in this app is in his timezone, never UTC or the
+ * server's local time (product-brief.md §8). "Sat 22 Aug, 01:45" — weekday
+ * first, 24-hour, matching the brief's date/time conventions exactly.
+ */
+export function formatSyncTimestamp(iso: string): string {
+  const date = new Date(iso)
+  const formatted = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Singapore',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
+  // Intl's en-GB output is "Sat, 22 Aug, 01:45" — drop the comma after the
+  // weekday to match the brief's literal "Sat 22 Aug" example exactly.
+  return formatted.replace(',', '')
+}
+
+/**
  * Extracts a human-readable message from anything a `catch` block might see.
  *
  * supabase-js does not reject with an `Error` on a Postgrest-level failure
