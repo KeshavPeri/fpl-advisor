@@ -1,0 +1,43 @@
+name: Solver smoke test
+
+# Ticket #29 — de-risks two later items before anything depends on them:
+# (1) whether sertalpbilal/FPL-Optimization-Tools installs and runs at all
+#     inside a GitHub Action, and (2) what column headers its projections
+#     CSV actually expects. Diagnostic only, workflow_dispatch only — no
+#     schedule, no integration with this app's data, no CSV adapter.
+# See docs/solver-notes.md for the full write-up and decisions/ticket-29.md
+# for the reasoning, including a BLOCKED item: this workflow currently
+# proves install-and-dependency-resolution only, not a full solve. Read
+# docs/solver-notes.md before extending this file — the missing solve step
+# is a known gap awaiting a human decision, not an oversight.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out solver at pinned commit
+        uses: actions/checkout@v6
+        with:
+          repository: sertalpbilal/FPL-Optimization-Tools
+          # Pinned to the current `main` SHA as of 2026-08-12. Do not move
+          # this to a branch or tag reference — see decisions/ticket-29.md.
+          ref: 45131c5a41d7caadb5cb626c012bfa9111dca7a2
+          path: solver
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install solver dependencies (and pinned Python, via uv sync)
+        working-directory: solver
+        run: uv sync
+
+      # No solve step here. Running dev/solver.py:solve_multi_period_fpl
+      # requires a projections CSV in the solio/fplreview shape (ID, Pos,
+      # {gw}_Pts, {gw}_xMins columns), and no commit in this upstream
+      # repository's history — verified across every branch — has ever
+      # shipped one. See docs/solver-notes.md, "Blocked: no bundled sample
+      # projections CSV exists" for the full verification and the options
+      # awaiting a decision.
