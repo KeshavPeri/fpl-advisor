@@ -53,6 +53,7 @@ not rely on that again. When two tickets in one batch both add a migration, chec
 | `20260811180000_player_match_stats_player_code.sql` | Adds `player_code` to `player_match_stats` as the stable cross-season join key. | **Yes — 11 Aug 2026.** Ticket #22. |
 | `20260811180000_squad_state.sql` | Creates `squads` and `squad_picks`, with RLS + GRANTs for `anon` (incl. DELETE). | **Yes — 11 Aug 2026.** Ticket #13. |
 | `20260811190000_squad_api_sync_fields.sql` | Adds the sync-metadata columns #14's squad sync writes, and grants `squads`/`squad_picks` to `service_role`. | **Yes — confirmed applied 15 Aug 2026.** Ticket #14. Verified by checking `information_schema.columns` for `total_transfers`, `overall_points`, `overall_rank` and `chips_used` on `public.squads`. |
+| `20260815120000_player_projections.sql` | Creates `player_projections` (one row per gameweek × player × model version: expected points, expected minutes, and the model's inputs and point components as `components jsonb`). RLS read-only for `anon`; `SELECT, INSERT, UPDATE` for `service_role`, no `DELETE`. | **Yes — applied 15 Aug 2026.** Ticket #33 (feature-list item 10). Confirmed by the first `project-points` run writing 2,935 rows. |
 
 Update this table by hand after you apply a migration, so the next person
 (or the next overnight run reading this file) knows what state the live

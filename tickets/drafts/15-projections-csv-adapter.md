@@ -84,6 +84,12 @@ Read directly at the pinned commit, confirming and extending `docs/solver-notes.
       `player_projections.expected_minutes` unmodified. No value is divided by 90, and no value is
       written as a probability. A double gameweek may legitimately exceed 90; that is not clamped.
 - [ ] `{gw}_Pts` is `player_projections.expected_points` unmodified.
+- [ ] **The read filters on a single named model version, from one constant with the value
+      `'baseline-v1'`.** `player_projections`'s primary key is
+      `(gameweek_id, player_id, model_version)`, so an unfiltered read emits one duplicate row per
+      player per additional model the moment item 31 writes a second one — and the solver's
+      `drop_duplicates(subset=["ID"], keep="first")` would silently pick whichever arrived first.
+      There is a named test proving rows from a second model version are excluded.
 - [ ] Every cell is a plain number with no thousands separator, no currency symbol and no quoting.
       Any `Name` containing a comma or a double quote is CSV-quoted correctly, and there is a named
       test using a name containing both.

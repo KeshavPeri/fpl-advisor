@@ -305,6 +305,40 @@ are statistically indistinguishable, the app must say so plainly** rather than i
 preference. Raw numbers may appear on the reasoning screen, where the context makes them
 honest.
 
+### Data-coverage confidence — added 15 Aug 2026, binds items 13, 17 and 21
+
+**A projection built on no data must not be presented like a projection built on a season of it.**
+
+Observed on the first live run of the v1 baseline model: **265 of 587 players — 45% — had no
+Premier League match history at all.** Three populations, all legitimate: players at the promoted
+clubs, players signed from outside the Premier League, and squad-listed players who have simply
+never played a Premier League minute (academy players, third-choice goalkeepers, the long-term
+injured). The proportion falls every week of the season as 2026/27 matches accumulate, but it is
+at its worst precisely at GW1.
+
+For those players the model returns a position prior — a generic, low-information estimate. That
+is the honest answer and it is deliberate. **The failure mode is not the estimate, it is showing it
+without saying so.**
+
+Therefore, binding on every ticket that surfaces a projection or a recommendation:
+
+- **A recommendation resting on a player with little or no match history must say so, in words**,
+  and must drop at least one confidence band (clear → marginal → coin-flip, per the rule above).
+- **The reasoning screen must state the coverage** — how much history the estimate is built on —
+  alongside the numbers, not instead of them.
+- **This is a display requirement, not a modelling one.** Do not fix it by excluding those players
+  from the projection or from the solver's player pool; they must still be transferable *in*, or the
+  optimiser cannot consider them at all.
+
+**The consequence to hold in mind:** the players a human is most excited about in August — the
+marquee summer signing, the promoted club's star — are exactly the ones the model knows least
+about. Its silence on them is an absence of evidence, not a verdict, and the interface must not let
+that read as a judgement.
+
+Known gaps in the baseline model, including this one, are catalogued in
+`docs/projection-model-backlog.md`. Read it before writing any ticket that touches the projection or
+the recommendation.
+
 ---
 
 ## 9. Open questions
