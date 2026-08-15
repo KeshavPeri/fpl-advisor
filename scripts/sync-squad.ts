@@ -52,6 +52,17 @@ const BASE_DELAY_MS = 300
 // identical-looking constants) for the general reasoning. Values must stay
 // in sync with src/lib/squad/positions.ts by hand; both are 2026/27 FPL
 // squad-shape constants that essentially never change mid-season.
+//
+// SUPERSEDED IN PART, 15 Aug 2026 — do not read the paragraph above as a
+// standing rule for new jobs. Ticket #33 (scripts/project-points.ts) is the
+// first scripts/*.ts job that genuinely needed shared logic from src/lib/
+// rather than a copy of it, and importing is now permitted: flipping
+// tsconfig.scripts.json's `allowImportingTsExtensions` to true lets scripts/
+// compile against src/lib/'s .ts-extension imports. See decisions/ticket-33.md
+// and CLAUDE.md's "Sharing code between scripts/ and src/" section. The
+// duplication in THIS file stays as it is — it predates the change, it works,
+// and rewriting a merged job to prove a point is not worth a ticket. New work
+// imports; it does not copy.
 // ============================================================================
 
 export type PositionCode = 1 | 2 | 3 | 4

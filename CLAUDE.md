@@ -131,6 +131,30 @@ cannot talk to each other — the orchestrator mediates every exchange.
 - FPL data comes from an unofficial API that changes without notice — every external fetch
   needs a graceful failure path.
 
+## Sharing code between `scripts/` and `src/`
+
+**A `scripts/*.ts` job may import from `src/lib/`, and should, rather than copying logic.**
+Established 15 Aug 2026 by ticket #33.
+
+`scripts/` and `src/` are separate compilation environments (`tsconfig.scripts.json` vs
+`tsconfig.app.json`) and the earlier jobs — `heartbeat.ts`, `ingest-fpl.ts`,
+`ingest-core-insights.ts`, `sync-squad.ts` — all duplicate small helpers rather than import them.
+That was a reasonable call for a four-line `readSupabaseEnv`. It is the wrong call for a scoring or
+projection rule, where a second copy is a second thing to get wrong and nothing would ever flag the
+drift.
+
+The mechanism: `src/lib/` uses `.ts`-extension imports, which need
+`allowImportingTsExtensions: true`. `tsconfig.scripts.json` now sets it. Without that flag
+`tsc -b` fails the moment a job imports from `src/lib/`.
+
+Two rules that follow:
+
+- **`src/lib/scoring/` and `src/lib/projection/` are pure — no I/O — and must stay that way.**
+  That purity is what makes them provable without a database and importable from either side. A job
+  may read Supabase and map rows onto their input types; those modules may never read anything.
+- **A ticket whose scope constraint lists exact files must list the build config too** if it is the
+  first to cross this boundary, or it hands the Builder a contradiction. See `deltas.md` D10.
+
 ## Hard rules
 
 - Merging is always manual. Agents open **draft** PRs only; nothing here ever merges.
