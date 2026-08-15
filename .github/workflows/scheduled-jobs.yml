@@ -70,3 +70,31 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           FPL_ENTRY_ID: ${{ secrets.FPL_ENTRY_ID }}
         run: npx tsx scripts/sync-squad.ts
+
+      - name: Emit projections CSV
+        # Ticket #34 (product-brief.md §6c — "the seam"). Runs after the
+        # "Project points" step above, which populates player_projections
+        # this job reads from. Writes ./out/projections.csv (the
+        # PROJECTIONS_CSV_PATH default) — a plain file on the runner. This
+        # job does not check out, install or invoke the solver; item 12 is
+        # what actually feeds this file to it.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/emit-projections-csv.ts
+
+      - name: Upload projections CSV artifact
+        # Runs even if the step above failed (if: always()), so a partial or
+        # missing file can still be inspected/reported on — but
+        # if-no-files-found: warn means a missing file only warns, never
+        # fails this step and never fabricates an empty artifact. The
+        # workflow's overall failure (if "Emit projections CSV" failed) is
+        # never masked by this step: a red job here means that earlier step
+        # failed, not that the upload itself did.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: projections-csv
+          path: out/projections.csv
+          if-no-files-found: warn
+          retention-days: 14
