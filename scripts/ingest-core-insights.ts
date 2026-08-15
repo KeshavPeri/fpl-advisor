@@ -1,4 +1,5 @@
-// FPL-Core-Insights ingest job — ticket #12.
+// FPL-Core-Insights ingest job — ticket #12, team-write matching fixed by
+// ticket #32.
 //
 // Fetches CSVs over plain HTTPS from the FPL-Core-Insights repo (no
 // credential, no clone — individual files only) and upserts:
@@ -7,6 +8,27 @@
 //     and a few adjacent counting stats) — the raw inputs to later defcon
 //     modelling. Nothing here is derived; see the ticket's out-of-scope list.
 //   - public.teams.elo: ClubElo ratings, from the source's teams.csv.
+//
+// TEAM WRITES ARE MATCHED ON teams.code, NEVER teams.id (ticket #32).
+// FPL team ids are not stable across seasons — the same failure already
+// proven for player ids one level up, in #12/#22. This job ingests the
+// 2025-2026 season file (see DEFAULT_SEASON below) while scripts/ingest-fpl.ts
+// ingests the 2026/27 bootstrap-static/ into the same public.teams table, and
+// the two season's ids disagree for most clubs. Verified live on 15 Aug 2026
+// by fetching both season files directly from the source:
+//   https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data/2025-2026/teams.csv
+//   https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data/2026-2027/teams.csv
+// Only 5 of the 20 team ids referred to the same club in both files — e.g.
+// id 3 was Burnley (code 90) in 2025-2026 but Bournemouth (code 91) in
+// 2026-2027; id 12 was Liverpool (code 14) then Ipswich Town (code 40).
+// `teams.code`, by contrast, was identical for all 17 clubs present in both
+// files, with the same `elo` value against that code in both. So this job
+// never inserts a team row and never writes identity columns (name,
+// short_name, code, pulse_id, any strength_*) — scripts/ingest-fpl.ts alone
+// owns team identity (upserted on id, which is stable within one FPL
+// season). This job only reads `id, code` off existing public.teams rows and
+// updates `elo` on whichever row's `code` matches the CSV, exactly as
+// player_match_stats.player_code already does one level up.
 //
 // One job_runs row per execution, matching the #10 heartbeat pattern: never
 // upserted, so runs accumulate as an audit log. Reads exactly two
@@ -195,7 +217,10 @@ function parseCsvRecords(text: string, url: string, requiredColumns: string[]): 
 }
 
 const PLAYERS_REQUIRED_COLUMNS = ['player_code', 'player_id', 'first_name', 'second_name', 'web_name', 'team_code', 'position']
-const TEAMS_REQUIRED_COLUMNS = ['code', 'id', 'name', 'short_name', 'elo']
+// Only the two columns this job actually reads (ticket #32) — it no longer
+// touches id/name/short_name, so requiring them here would be a stale guard
+// against columns nothing downstream of this file depends on any more.
+export const TEAMS_REQUIRED_COLUMNS = ['code', 'elo']
 const MATCH_STATS_REQUIRED_COLUMNS = [
   'player_id',
   'match_id',
@@ -235,67 +260,140 @@ function toNumeric(value: string | undefined): number | null {
 }
 
 // ============================================================================
-// teams.elo
+// teams.elo — matched on code, never id (ticket #32). See the file header
+// for the "because". This job never inserts a team row and writes exactly
+// one column (elo, plus updated_at) on rows that already exist.
 // ============================================================================
 
-interface TeamUpsertRow {
+// A row read back from public.teams — just enough to join the CSV's code
+// onto the table's id, which is what the update is actually keyed on.
+export interface TeamIdentityRow {
   id: number
-  name: string
-  short_name: string
   code: number | null
-  strength: number | null
-  strength_overall_home: number | null
-  strength_overall_away: number | null
-  strength_attack_home: number | null
-  strength_attack_away: number | null
-  strength_defence_home: number | null
-  strength_defence_away: number | null
-  pulse_id: number | null
-  elo: number | null
-  updated_at: string
 }
 
-function toTeamRow(record: Record<string, string>): TeamUpsertRow | null {
-  const id = toInt(record.id)
-  if (id === null || !record.name || !record.short_name) return null
-  return {
-    id,
-    name: record.name,
-    short_name: record.short_name,
-    code: toInt(record.code),
-    strength: toInt(record.strength),
-    strength_overall_home: toInt(record.strength_overall_home),
-    strength_overall_away: toInt(record.strength_overall_away),
-    strength_attack_home: toInt(record.strength_attack_home),
-    strength_attack_away: toInt(record.strength_attack_away),
-    strength_defence_home: toInt(record.strength_defence_home),
-    strength_defence_away: toInt(record.strength_defence_away),
-    pulse_id: toInt(record.pulse_id),
-    elo: toNumeric(record.elo),
-    updated_at: new Date().toISOString(),
+export interface EloByCodeResult {
+  // code -> elo, built only from rows whose elo cell parses as a number.
+  eloByCode: Map<number, number>
+  // Every code seen in the CSV, regardless of whether its elo parsed —
+  // used to distinguish "code present but elo malformed" from "code not in
+  // the CSV at all" when classifying public.teams rows below.
+  seenCodes: Set<number>
+  // Rows whose code parsed but whose elo cell was empty or non-numeric —
+  // skipped rather than writing null over an existing rating.
+  malformedElo: number
+}
+
+export function buildEloByCode(records: Array<Record<string, string>>): EloByCodeResult {
+  const eloByCode = new Map<number, number>()
+  const seenCodes = new Set<number>()
+  let malformedElo = 0
+  for (const record of records) {
+    const code = toInt(record.code)
+    if (code === null) continue // can't join this row onto anything; not a countable DoD case
+    seenCodes.add(code)
+    const elo = toNumeric(record.elo)
+    if (elo === null) {
+      malformedElo++
+      continue
+    }
+    eloByCode.set(code, elo)
   }
+  return { eloByCode, seenCodes, malformedElo }
 }
 
-// Upserts full team rows (id, name, short_name, strengths, pulse_id, elo),
-// not just the elo column. Tier 2 decision, "because": this ticket's own
-// tests must be able to populate teams.elo standalone, without depending on
-// ticket #11 (the bootstrap-static ingest, built concurrently, not
-// guaranteed to have run first) having already inserted team rows. An
-// elo-only upsert would fail its INSERT branch on the NOT NULL name/
-// short_name columns for a team that doesn't exist yet. Every field written
-// here has a same-named or clearly-equivalent column in the source's
-// teams.csv, so this never invents data.
-async function upsertTeams(supabase: SupabaseClient, records: Array<Record<string, string>>): Promise<number> {
-  const rows = records.map(toTeamRow).filter((r): r is TeamUpsertRow => r !== null)
-  if (rows.length === 0) return 0
-  const { error } = await supabase.from('teams').upsert(rows, { onConflict: 'id' })
+async function fetchTeamIdentities(supabase: SupabaseClient): Promise<TeamIdentityRow[]> {
+  const { data, error } = await supabase.from('teams').select('id, code')
   if (error) {
     if (isMissingTable(error, 'teams')) {
       throw new IngestError('table "teams" does not exist — apply the #9 reference-schema migration first')
     }
-    throw new IngestError(`upsert into teams failed: ${error.message}`)
+    throw new IngestError(`reading teams failed: ${error.message}`)
   }
-  return rows.length
+  return (data ?? []) as TeamIdentityRow[]
+}
+
+export interface TeamEloUpdatePlan {
+  updates: Array<{ id: number; elo: number }>
+  // CSV codes with a parsed elo but no matching row in public.teams — a club
+  // relegated out of the current season. Skipped, not inserted.
+  codesNotInTeams: number
+  // public.teams rows whose code has no entry anywhere in the CSV (or whose
+  // code is null) — left untouched.
+  teamsCodesNotInCsv: number
+  // A code shared by more than one public.teams row. Ambiguous — neither row
+  // is updated, and this is not the same bucket as codesNotInTeams/
+  // teamsCodesNotInCsv since it's a fault in the table, not a set mismatch.
+  duplicateCodeConflicts: number
+}
+
+export function planTeamEloUpdates(existingTeams: TeamIdentityRow[], elo: EloByCodeResult): TeamEloUpdatePlan {
+  const teamsByCode = new Map<number, TeamIdentityRow[]>()
+  let teamsCodesNotInCsv = 0 // seeded below with null-code rows, then added to per-code below
+  for (const team of existingTeams) {
+    if (team.code === null) {
+      teamsCodesNotInCsv++
+      continue
+    }
+    const existing = teamsByCode.get(team.code)
+    if (existing) existing.push(team)
+    else teamsByCode.set(team.code, [team])
+  }
+
+  const updates: Array<{ id: number; elo: number }> = []
+  let codesNotInTeams = 0
+  let duplicateCodeConflicts = 0
+
+  const allCodes = new Set<number>([...teamsByCode.keys(), ...elo.seenCodes])
+  for (const code of allCodes) {
+    const teams = teamsByCode.get(code) ?? []
+    const inCsv = elo.seenCodes.has(code)
+
+    if (teams.length === 0) {
+      if (inCsv) codesNotInTeams++
+      continue
+    }
+    if (!inCsv) {
+      teamsCodesNotInCsv += teams.length
+      continue
+    }
+    if (teams.length > 1) {
+      duplicateCodeConflicts++
+      continue
+    }
+    const value = elo.eloByCode.get(code)
+    if (value !== undefined) {
+      updates.push({ id: teams[0].id, elo: value })
+    }
+    // else: code is in the CSV but its elo cell was malformed — already
+    // counted in elo.malformedElo above; no update, nothing else to count.
+  }
+
+  return { updates, codesNotInTeams, teamsCodesNotInCsv, duplicateCodeConflicts }
+}
+
+// One UPDATE per matched row, never an upsert — every id here was just read
+// back from public.teams, so there is never a row to insert, only rows to
+// leave alone or correct. `code`, `name`, `short_name`, `pulse_id` and every
+// `strength_*` column are never referenced past this point.
+async function applyTeamEloUpdates(
+  supabase: SupabaseClient,
+  updates: Array<{ id: number; elo: number }>
+): Promise<number> {
+  const updatedAt = new Date().toISOString()
+  for (const update of updates) {
+    const { error } = await supabase
+      .from('teams')
+      .update({ elo: update.elo, updated_at: updatedAt })
+      .eq('id', update.id)
+    if (error) {
+      if (isMissingTable(error, 'teams')) {
+        throw new IngestError('table "teams" does not exist — apply the #9 reference-schema migration first')
+      }
+      throw new IngestError(`update of teams.elo failed for team id ${update.id}: ${error.message}`)
+    }
+  }
+  return updates.length
 }
 
 // ============================================================================
@@ -472,6 +570,10 @@ async function main(): Promise<void> {
           reason: 'season_directory_not_found',
           playersRows: 0,
           teamsUpdated: 0,
+          codesNotInTeams: 0,
+          teamsCodesNotInCsv: 0,
+          duplicateCodeConflicts: 0,
+          malformedEloRows: 0,
           gameweeksFound: 0,
           matchRowsWritten: 0,
         },
@@ -493,7 +595,16 @@ async function main(): Promise<void> {
       throw new IngestError(`unexpected HTTP ${teamsResp.status} fetching ${teamsUrl}`)
     }
     const teamRecords = parseCsvRecords(teamsResp.text, teamsUrl, TEAMS_REQUIRED_COLUMNS)
-    const teamsUpdated = await upsertTeams(supabase, teamRecords)
+    const eloResult = buildEloByCode(teamRecords)
+    const existingTeams = await fetchTeamIdentities(supabase)
+    const teamEloPlan = planTeamEloUpdates(existingTeams, eloResult)
+    const teamsUpdated = await applyTeamEloUpdates(supabase, teamEloPlan.updates)
+    if (teamEloPlan.duplicateCodeConflicts > 0) {
+      console.warn(
+        `${JOB_NAME}: ${teamEloPlan.duplicateCodeConflicts} team code(s) matched more than one ` +
+          'public.teams row — left unchanged rather than guessing which row was meant'
+      )
+    }
 
     let gameweeksFound = 0
     let matchRowsWritten = 0
@@ -519,7 +630,11 @@ async function main(): Promise<void> {
     }
 
     const message =
-      `${JOB_NAME}: season ${season} — ${teamsUpdated} team(s) updated (elo), ` +
+      `${JOB_NAME}: season ${season} — ${teamsUpdated} team(s) updated (elo, matched on code), ` +
+      `${teamEloPlan.codesNotInTeams} CSV code(s) not in public.teams, ` +
+      `${teamEloPlan.teamsCodesNotInCsv} public.teams row(s) with no matching CSV code, ` +
+      `${teamEloPlan.duplicateCodeConflicts} duplicate-code conflict(s), ` +
+      `${eloResult.malformedElo} row(s) with a malformed elo cell skipped, ` +
       `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted ` +
       `(${matchRowsWithoutPlayerCode} without a matching player_code in players.csv)`
     console.log(message)
@@ -530,6 +645,10 @@ async function main(): Promise<void> {
         season,
         playersRows: playerRecords.length,
         teamsUpdated,
+        codesNotInTeams: teamEloPlan.codesNotInTeams,
+        teamsCodesNotInCsv: teamEloPlan.teamsCodesNotInCsv,
+        duplicateCodeConflicts: teamEloPlan.duplicateCodeConflicts,
+        malformedEloRows: eloResult.malformedElo,
         gameweeksFound,
         matchRowsWritten,
         matchRowsWithoutPlayerCode,
@@ -554,8 +673,16 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err)
-  console.error(`${JOB_NAME}: unexpected failure: ${message}`)
-  process.exit(1)
-})
+// Guarded, matching scripts/sync-squad.ts: this file also exports its pure
+// team-elo join functions (scripts/ingest-core-insights.test.ts, ticket #32)
+// so they are unit-testable without a live Supabase project. Importing the
+// module for that must not trigger a real run — only running it directly
+// (`npx tsx scripts/ingest-core-insights.ts`) should.
+const isMainModule = process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`
+if (isMainModule) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`${JOB_NAME}: unexpected failure: ${message}`)
+    process.exit(1)
+  })
+}
