@@ -1,0 +1,43 @@
+/*
+  The pitch itself: no green, no pitch texture, no team colours — an
+  abstract domain form built from the app's existing translucent surfaces
+  (design-reference.md, References item 5 — "the pitch layout is the one
+  convention worth keeping"). Every value below is a var(--…) token.
+*/
+
+.pitch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.pitch__field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-6);
+}
+
+.pitch__row {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.pitch__bench-title {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-4);
+}
+
+.pitch__bench-row {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}

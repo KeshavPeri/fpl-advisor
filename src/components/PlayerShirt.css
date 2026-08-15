@@ -1,0 +1,120 @@
+/*
+  The player shirt — an abstract domain shape, not a broadcast-graphic team
+  kit (design-reference.md: "shirt as an abstract shape in the app's
+  neutral palette with tonal lift"). No club crest, no team colour, no
+  green. Every colour/spacing/radius value below is a var(--…) token from
+  src/index.css; border-width is the one place a literal px is used, which
+  design-reference.md's execution rules permit.
+*/
+
+.player-shirt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  width: var(--space-12);
+}
+
+/* The badge is the ring's own element: a rounded square holding the shirt
+   shape, sized so the ring never touches the shirt directly — it reads as
+   a halo around the player, not an outline traced on the jersey. */
+.player-shirt__badge {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-12);
+  height: var(--space-12);
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  border: 2px solid transparent;
+}
+
+.player-shirt__badge--ring-solid {
+  border-color: var(--accent-coral);
+}
+
+.player-shirt__badge--ring-hollow {
+  border-color: var(--accent-coral-line);
+}
+
+/* The shirt silhouette itself — a simple V-neck jersey shape cut with
+   clip-path, tonally lifted one step above the badge behind it so it
+   reads as a distinct object rather than a flat square. */
+.player-shirt__shirt {
+  width: 70%;
+  height: 70%;
+  background: var(--surface-2);
+  clip-path: polygon(
+    30% 0%,
+    70% 0%,
+    85% 14%,
+    100% 30%,
+    88% 42%,
+    88% 100%,
+    12% 100%,
+    12% 42%,
+    0% 30%,
+    15% 14%
+  );
+}
+
+/* Captaincy — a small badge on the shirt itself, not a separate line of
+   text, so it doesn't add a fourth per-player element. Filled cyan for
+   captain, an outline-only cyan ring for vice — the same solid/hollow
+   pairing as the availability ring, on the app's other accent. */
+.player-shirt__captaincy {
+  position: absolute;
+  top: calc(-1 * var(--space-2));
+  right: calc(-1 * var(--space-2));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  border-radius: 50%;
+  font: var(--text-label);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.player-shirt__captaincy--captain {
+  background: var(--accent-cyan);
+  color: var(--surface-0);
+}
+
+.player-shirt__captaincy--vice {
+  background: var(--panel-fill-raised);
+  border: 1.5px solid var(--accent-cyan-line);
+  color: var(--accent-cyan);
+}
+
+.player-shirt__name {
+  width: 100%;
+  font: var(--text-label);
+  color: var(--text-primary);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-shirt__price {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* Standard clip-based visually-hidden technique — rem, not px, so it stays
+   inside this file's "no raw px spacing" rule; a size this small carries no
+   design decision to tokenize. */
+.player-shirt__visually-hidden {
+  position: absolute;
+  width: 0.0625rem;
+  height: 0.0625rem;
+  padding: 0;
+  margin: -0.0625rem;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

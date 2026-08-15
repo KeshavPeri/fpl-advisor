@@ -6,21 +6,52 @@
   color: var(--text-tertiary);
 }
 
-.home-demo__label {
-  font: var(--text-label);
+.home-status-text {
+  font: var(--text-body);
   color: var(--text-secondary);
 }
 
-.home-demo__figure {
-  margin-top: var(--space-2);
-  font-size: 2.5rem;
-  font-weight: 500;
-  color: var(--text-primary);
-  line-height: 1.1;
+.home-status-text--error {
+  color: var(--accent-coral);
 }
 
-.home-demo__caption {
-  margin-top: var(--space-4);
-  font: var(--text-label);
-  color: var(--text-tertiary);
+/* No squad saved for the target gameweek — an invitation to act, not an
+   empty pitch outline (design-reference.md: "an empty state is an
+   invitation to act, not a mood"). */
+.home-invitation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.home-invitation__title {
+  font: var(--text-title);
+}
+
+.home-invitation__body {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.home-invitation__link {
+  margin-top: var(--space-2);
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-cyan);
+}
+
+/* Fewer than 15 saved picks — states it plainly, links to where to fix it. */
+.home-incomplete {
+  border-color: var(--accent-coral-line);
+  background: var(--accent-coral-dim);
+}
+
+.home-incomplete__text {
+  font: var(--text-body);
+  color: var(--text-primary);
+}
+
+.home-incomplete__link {
+  color: var(--accent-coral);
+  font-weight: 550;
 }

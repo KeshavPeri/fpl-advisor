@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../lib/squad/positions'
+import {
+  DEFENDER,
+  FORWARD,
+  GOALKEEPER,
+  MIDFIELDER,
+  POSITION_ORDER,
+  SQUAD_SLOT_COUNT,
+} from '../lib/squad/positions'
 import { buildPitchLayout, type PitchPlayer } from './pitchLayout'
 
 const AVAILABLE = { ring: 'none', label: 'Available' } as const
@@ -22,20 +29,18 @@ function player(overrides: Partial<PitchPlayer>): PitchPlayer {
 
 /** Builds a full 15-man squad for a given starting formation [GK, DEF, MID, FWD]. */
 function buildSquad([gk, def, mid, fwd]: [number, number, number, number]): PitchPlayer[] {
-  const counts: Record<number, number> = { 1: 2, 2: 5, 3: 5, 4: 3 }
-  const startingCounts: Record<number, number> = { 1: gk, 2: def, 3: mid, 4: fwd }
-  const positions = [
-    [GOALKEEPER, 1],
-    [DEFENDER, 2],
-    [MIDFIELDER, 3],
-    [FORWARD, 4],
-  ] as const
+  const startingByPosition = new Map([
+    [GOALKEEPER, gk],
+    [DEFENDER, def],
+    [MIDFIELDER, mid],
+    [FORWARD, fwd],
+  ])
 
   const players: PitchPlayer[] = []
   let benchCounter = 0
-  for (const [position, code] of positions) {
-    const total = counts[code]
-    const starting = startingCounts[code]
+  for (const position of POSITION_ORDER) {
+    const total = SQUAD_SLOT_COUNT[position]
+    const starting = startingByPosition.get(position) ?? 0
     for (let i = 0; i < total; i += 1) {
       const isStarting = i < starting
       players.push(
