@@ -673,8 +673,16 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err)
-  console.error(`${JOB_NAME}: unexpected failure: ${message}`)
-  process.exit(1)
-})
+// Guarded, matching scripts/sync-squad.ts: this file also exports its pure
+// team-elo join functions (scripts/ingest-core-insights.test.ts, ticket #32)
+// so they are unit-testable without a live Supabase project. Importing the
+// module for that must not trigger a real run — only running it directly
+// (`npx tsx scripts/ingest-core-insights.ts`) should.
+const isMainModule = process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`
+if (isMainModule) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`${JOB_NAME}: unexpected failure: ${message}`)
+    process.exit(1)
+  })
+}
