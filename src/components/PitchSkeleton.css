@@ -1,0 +1,26 @@
+/*
+  Loading placeholder for the pitch — same row/bench structure as the real
+  Pitch (Pitch.css's .pitch/.pitch__field/.pitch__row/.pitch__bench* classes
+  are reused directly) so the real content replaces it without a layout
+  jump. The shirt-shaped placeholders are sized identically to
+  PlayerShirt's own badge, just filled and dimmed rather than drawn.
+*/
+
+.pitch-skeleton__shirt {
+  width: var(--space-12);
+  height: calc(var(--space-12) + var(--space-6));
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: pitch-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pitch-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
