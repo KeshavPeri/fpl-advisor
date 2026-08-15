@@ -124,9 +124,16 @@ person would assume.
 
 **The run**
 
-- [ ] The workflow completes a real solve on GitHub infrastructure and the solver writes at least
-      one results CSV under `solver/data/results/`. **This is the ticket's central claim and it must
-      be demonstrated by an actual run, not by reading YAML.**
+- [ ] **CANNOT VERIFY inside this run, and expected:** that the workflow completes a real solve on
+      GitHub infrastructure. A `workflow_dispatch` workflow can only be triggered once its file
+      exists on the **default branch**, so a brand-new workflow file on a `claude/` branch cannot be
+      run from within the pipeline — exactly as with `solver-smoke.yml` in #29, which Keshav ran
+      after merge. QA must mark this CANNOT VERIFY and say why, rather than claiming it or treating
+      it as a failure. **This remains the ticket's central claim; it is simply verified by Keshav
+      after merge, and it is what actually closes the ticket.**
+- [ ] Because that is so, the workflow's own log must be the diagnostic: every step prints what it
+      is about to do and with what configuration, the assembled solver config is echoed before the
+      solve, and the solver's stdout is captured in full rather than swallowed.
 - [ ] The workflow uploads, as named artifacts: the projections CSV fed in, the generated
       `team.json`, the solver's stdout log, and every results CSV produced.
 - [ ] The solver's time limit is set explicitly and is **shorter than the job's own timeout**, so a
