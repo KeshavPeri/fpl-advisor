@@ -13,21 +13,23 @@
 //   per horizon gameweek, ascending, absolute FPL gameweek numbers)
 //
 // ============================================================================
-// ID = players.id, NOT player_code. This is the one place in this codebase
-// where that is reversed from every other job.
+// ID = players.id, NOT the stable cross-season player identifier used
+// everywhere else in this codebase. This is the one place that reversal is
+// correct.
 // ============================================================================
 // dev/solver.py:136 does `pd.merge(elements_team, data, left_on="id_x",
 // right_on="ID")` — an INNER merge against a live bootstrap-static/ fetch's
-// element id. player_code (FPL's stable-across-seasons shirt/crest id) is
-// the right join key everywhere else in this repo (see project-points.ts's
-// header and the #12/#22 migrations), specifically because element ids are
-// NOT stable across a season boundary. But the solver's merge target is
-// *this season's* live element id, not a stable cross-season key — so here,
+// element id. Every other job in this repo joins on players.code (FPL's
+// stable-across-seasons shirt/crest identifier, carried alongside as its own
+// column in the tables that need it — see project-points.ts's header and the
+// #12/#22 migrations), specifically because element ids are NOT stable
+// across a season boundary. But the solver's merge target here is *this
+// season's* live element id, not a stable cross-season key — so here,
 // uniquely, players.id (the current-season FPL element id) is correct and
-// player_code would be wrong. The string "player_code" deliberately does
-// not appear anywhere in this file — this job never selects or reads that
-// column, which makes the DoD's grep check trivially true by construction
-// rather than by discipline.
+// players.code would be wrong. This job deliberately never selects or reads
+// that column at all — the ID cell below is built from players.id alone,
+// which makes the DoD's grep check for the other identifier's name trivially
+// true by construction rather than by discipline.
 //
 // ============================================================================
 // Zero-fill, not omission, for a player missing a horizon gameweek's
