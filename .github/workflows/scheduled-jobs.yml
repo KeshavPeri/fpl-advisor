@@ -50,6 +50,15 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: npx tsx scripts/ingest-fpl.ts
 
+      - name: Project points
+        # Ticket #33. Runs after the FPL ingest step above (needs fresh
+        # players/teams/fixtures/gameweeks) and after the FPL-Core-Insights
+        # ingest step above that (needs player_match_stats and teams.elo).
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/project-points.ts
+
       - name: Sync squad from FPL
         # Ticket #14. Runs after the FPL ingest step above, which populates
         # the gameweeks and players tables this job reads from. FPL_ENTRY_ID
