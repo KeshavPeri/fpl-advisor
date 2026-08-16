@@ -268,7 +268,7 @@ export interface SolverConfig {
   chip_limits: { bb: 0; wc: 0; fh: 0; tc: 0 }
   secs: number
   solver: 'highs'
-  num_iterations: 1
+  num_iterations: 3
   iteration_criteria: 'this_gw_transfer_in_out'
   verbose: true
   print_result_table: true
@@ -283,6 +283,16 @@ export interface SolverConfig {
  * data/user_settings.json ships `preseason: true`, which replaces the whole squad with an
  * empty one (product-brief.md §3: full-squad building is out of scope until the wildcard
  * work) — omitting the key here would silently inherit that.
+ *
+ * `num_iterations: 3` — ticket #47 (feature-list item 13). product-brief.md §6c: the solver's
+ * own `iteration`/`iteration_criteria` mechanism is "exactly the Plan A / Plan B / Plan C
+ * requirement" — this is what raises it from item 12's `1`. `iteration_criteria` stays the
+ * shipped `this_gw_transfer_in_out` (set explicitly, not left to a default) so the alternative
+ * solutions differ in what THIS gameweek's transfer is, which is what "Plan B" and "Plan C" mean
+ * for a weekly recommendation — a criterion that varies a gameweek-4 decision would produce three
+ * plans identical this week and useless as alternatives. See decisions/ticket-47.md. A solve that
+ * returns fewer than three distinct solutions is not a failure — scripts/generate-recommendations.ts
+ * stores whatever it got and records the shortfall.
  */
 export function buildSolverConfig(params: { horizon: number; datasource: string; secs?: number }): SolverConfig {
   if (!Number.isInteger(params.horizon) || params.horizon <= 0) {
@@ -309,7 +319,7 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
     chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
     secs: params.secs ?? SOLVER_TIME_LIMIT_SECS,
     solver: 'highs',
-    num_iterations: 1,
+    num_iterations: 3,
     iteration_criteria: 'this_gw_transfer_in_out',
     verbose: true,
     print_result_table: true,

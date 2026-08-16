@@ -16,7 +16,7 @@ describe('roundSolverCount', () => {
   })
 
   it('the raw noisy value never equals 1 by strict equality, but the rounded value does — the guard this module exists for', () => {
-    const raw = 0.9999999999999996
+    const raw: number = 0.9999999999999996
     const rounded = roundSolverCount(raw)
     expect(raw === 1).toBe(false)
     expect(rounded === 1).toBe(true)
