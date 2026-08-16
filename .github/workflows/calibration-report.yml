@@ -1,0 +1,59 @@
+name: Calibration report
+
+# Ticket #48 — a measurement job, not a scheduled one. Compares
+# baseline-v1's projected points against last season's actual results (see
+# scripts/calibration-report.ts's own file header for the full "why").
+# Read-only against Supabase except for one job_runs row; writes one
+# markdown report, uploaded as a workflow artifact.
+#
+# workflow_dispatch only, deliberately no schedule: this report answers a
+# question about the MODEL, not a nightly data question — it should be
+# re-run on demand (after a model change, or whenever the defender-captain
+# question comes up again), not every night regardless of whether anything
+# changed. A NEW file, not a step folded into scheduled-jobs.yml or
+# solver-run.yml, for the same reason solver-smoke.yml is its own file
+# (decisions/ticket-29.md): two other tickets in this batch already own
+# those workflow files, and a separate file cannot collide with them
+# (deltas.md D7).
+
+on:
+  workflow_dispatch: {}
+
+env:
+  CALIBRATION_REPORT_PATH: out/calibration-report.md
+
+jobs:
+  calibration-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run calibration report
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/calibration-report.ts
+
+      - name: Upload calibration report artifact
+        # if: always() — the report is most useful when the job failed
+        # partway (e.g. an empty-table skip that still ran) too, and
+        # if-no-files-found: warn means a genuinely missing file (the
+        # empty-table skip path writes none, by design) only warns, never
+        # fails this step.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-report
+          path: ${{ env.CALIBRATION_REPORT_PATH }}
+          if-no-files-found: warn
+          retention-days: 90
