@@ -649,6 +649,7 @@ async function main(): Promise<void> {
         net_points: plan.netPoints,
         net_points_rounded: netPointsRounded,
         confidence_band: confidenceBand,
+        coverage: coverageResults,
         updated_at: new Date().toISOString(),
       })
 

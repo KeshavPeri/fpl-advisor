@@ -116,6 +116,8 @@ CREATE TABLE IF NOT EXISTS public.recommendations (
 
   confidence_band                text NOT NULL CHECK (confidence_band IN ('clear', 'marginal', 'coin-flip')),  -- derived from the score gap between Plan A and Plan B across the horizon, then floored (never raised) by the data-coverage rule. See src/lib/recommendation/confidence.ts. Thresholds are explicitly provisional — product-brief.md §9 open question 2.
 
+  coverage                       jsonb NOT NULL,   -- one entry per player named in this recommendation (transfer in/out, captain, vice-captain): {role, playerId, hasHistory}. product-brief.md §8 — a structured, queryable flag per player, independent of the prose reason lines (which only exist for a player WITHOUT history).
+
   updated_at                    timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (gameweek_id, plan_index)
 );
@@ -148,6 +150,16 @@ COMMENT ON COLUMN public.recommendations.transfers_made IS
   'Routed through src/lib/recommendation/rounding.ts''s roundSolverCount '
   'regardless, as a defensive no-op, so the guard exists the day a raw '
   'solver count IS wired in directly.';
+
+COMMENT ON COLUMN public.recommendations.coverage IS
+  'product-brief.md §8''s data-coverage honesty rule, stored per player '
+  'named in this recommendation, not just asserted in prose: one entry per '
+  'transfer-in/out, captain and vice-captain (skipping transfer-in/out for '
+  'a roll plan), {role, playerId, hasHistory}, where hasHistory is whether '
+  'public.player_match_stats holds any row for that player''s code. A '
+  'false entry is also what triggers the confidence_band floor '
+  '(src/lib/recommendation/confidence.ts''s applyCoverageFloor) and a '
+  'matching line in recommendation_reasons.';
 
 CREATE INDEX IF NOT EXISTS idx_recommendations_gameweek_id ON public.recommendations (gameweek_id);
 CREATE INDEX IF NOT EXISTS idx_recommendations_solver_run_id ON public.recommendations (solver_run_id);
