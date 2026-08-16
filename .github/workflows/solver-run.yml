@@ -1,0 +1,201 @@
+name: Solver run
+
+# Ticket #41 (feature-list item 12, the second half). #29 proved the solver's
+# toolchain installs cleanly in a GitHub Action at the pinned commit; #34
+# built the projections CSV it reads. This workflow is what actually runs a
+# solve against our own data and stores what it produces — see
+# docs/solver-notes.md and decisions/ticket-41.md for the full write-up.
+#
+# A NEW file, deliberately not folded into scheduled-jobs.yml or
+# solver-smoke.yml — same reasoning #29 used for solver-smoke.yml (see
+# decisions/ticket-29.md): the solver install is slow, and this workflow's
+# solve step can run for minutes, which has no place inside the daily
+# ingest/projection workflow.
+#
+# Scheduling: AFTER scheduled-jobs.yml's 17:45 UTC run, which refreshes
+# players/fixtures/projections and syncs the squad — the solve needs that
+# data to be fresh. 18:20 UTC gives it 35 minutes to finish (that workflow's
+# own jobs run in low single-digit minutes). Singapore is UTC+8 with no DST,
+# so 18:20 UTC is 02:20 the FOLLOWING day in Singapore — this schedule
+# crosses the date line, same as scheduled-jobs.yml's own comment warns
+# about. Do not "fix" this cron to look like a Singapore-evening time
+# without re-deriving the UTC value.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '20 18 * * *'
+
+# The projections CSV this run consumes and the team.json/config this run
+# writes all live under solver/data/ — named here once so every step and the
+# artifact-upload steps at the bottom agree on the same paths.
+env:
+  PROJECTIONS_CSV_PATH: solver/data/fpladvisor.csv
+  TEAM_JSON_PATH: solver/data/team.json
+  SOLVER_CONFIG_PATH: solver/data/solver-config.json
+  SOLVER_LOG_PATH: solver/solve.log
+  SOLVER_RESULTS_DIR: solver/data/results
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    # Generous headroom over the solver's own time limit (secs: 300, set in
+    # scripts/build-solver-input.ts's SOLVER_TIME_LIMIT_SECS) so a slow solve
+    # returns its best incumbent instead of being killed mid-write by the job
+    # timeout itself. Checkout + npm ci + uv sync + CSV emit + store are all
+    # low single-digit minutes; 20 covers the 5-minute solve plus all of that
+    # with room to spare.
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check out solver at pinned commit
+        uses: actions/checkout@v6
+        with:
+          repository: sertalpbilal/FPL-Optimization-Tools
+          # Pinned to the exact commit #29 verified installs cleanly. Do not
+          # move this to a branch or tag reference — see decisions/ticket-29.md
+          # and decisions/ticket-41.md.
+          ref: 45131c5a41d7caadb5cb626c012bfa9111dca7a2
+          path: solver
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install solver dependencies (and pinned Python, via uv sync)
+        working-directory: solver
+        run: uv sync
+
+      # Ticket #41 DoD: "Install or checkout failure fails the workflow
+      # loudly with a non-zero exit and a failed job_runs row naming the
+      # step." if: failure() here fires only if the checkout or uv sync step
+      # above has already failed — no later step can reach this point and
+      # still trigger it, since every subsequent step depends (by GitHub
+      # Actions' own default) on everything before it having succeeded.
+      # Written inline rather than as a third script: the scope this ticket
+      # was given lists exactly two new scripts, and a one-row insert with no
+      # business logic doesn't earn a third.
+      - name: Record install/checkout failure
+        if: failure()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          cat > ./.record-infra-failure.mjs << 'EOF'
+          import { createClient } from '@supabase/supabase-js'
+          const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY)
+          const now = new Date().toISOString()
+          const { error } = await supabase.from('job_runs').insert({
+            job_name: 'solver-run',
+            status: 'failure',
+            message:
+              'solver checkout or dependency install failed — see the "Check out solver at pinned commit" ' +
+              'and "Install solver dependencies" step logs above for the underlying error.',
+            details: null,
+            started_at: now,
+            finished_at: now,
+          })
+          if (error) {
+            console.error('failed to record job_runs row:', error.message)
+            process.exit(1)
+          }
+          console.log('recorded solver-run install/checkout failure in job_runs')
+          EOF
+          node ./.record-infra-failure.mjs
+
+      - name: Emit projections CSV
+        # Reuses the existing, unmodified scripts/emit-projections-csv.ts
+        # (item 11) — this workflow never regenerates or reshapes the CSV.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/emit-projections-csv.ts
+
+      - name: Build solver input
+        id: build-input
+        # Writes TEAM_JSON_PATH and SOLVER_CONFIG_PATH from squads/squad_picks
+        # and the projections CSV above — never from FPL's authenticated
+        # squad endpoint (see scripts/build-solver-input.ts's own header).
+        # Sets the `squad_found` step output the next two steps gate on: a
+        # missing squad is a normal pre-GW1 state (exits 0, no solve
+        # attempted), not a failure.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SOLVER_SECS: '300'
+        run: npx tsx scripts/build-solver-input.ts
+
+      - name: Run solver
+        id: solve
+        if: steps.build-input.outputs.squad_found == 'true'
+        working-directory: solver
+        # The solve step's own exit code is deliberately swallowed here (set
+        # +e / exit 0) rather than left to fail the step: dev/solver.py, at
+        # the pinned commit, exits non-zero both for a genuine crash AND for
+        # an infeasible/no-incumbent solve, and exits 0 for BOTH a proven
+        # optimum and a "time limit reached but usable" result — the exit
+        # code alone cannot tell these apart (see scripts/store-solver-
+        # output.ts's file header for how it was verified this needed the
+        # captured log, not the exit code). Swallowing it here lets "Store
+        # solver output" always run and make the real, log-based
+        # determination, while the JOB's overall pass/fail is decided by
+        # THAT step's own exit code instead.
+        run: |
+          set +e
+          uv run python run/solve.py --config data/solver-config.json > solve.log 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Store solver output
+        id: store
+        if: steps.build-input.outputs.squad_found == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/store-solver-output.ts
+
+      - name: Upload projections CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solver-run-projections-csv
+          path: ${{ env.PROJECTIONS_CSV_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload team.json artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solver-run-team-json
+          path: ${{ env.TEAM_JSON_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload solver log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solver-run-log
+          path: ${{ env.SOLVER_LOG_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload results CSV artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solver-run-results-csv
+          path: ${{ env.SOLVER_RESULTS_DIR }}/*.csv
+          if-no-files-found: warn
+          retention-days: 14
