@@ -4,6 +4,10 @@
   width: 100%;
   display: flex;
   justify-content: center;
+  /* Ticket #44, finding 4 — same defence-in-depth as src/index.css;
+     the real fix for the pitch row overflow lives in Pitch.css and
+     PlayerShirt.css. */
+  overflow-x: hidden;
 }
 
 /* Ticket #26 — the ambient wash, pinned to the viewport instead of
@@ -21,15 +25,21 @@
    `z-index: -1` keeps it behind the (non-positioned, in-flow)
    `app-shell__column` in paint order without needing a z-index on the
    column; `pointer-events: none` is belt-and-suspenders so it can never
-   intercept a tap even if that ordering ever changes. */
+   intercept a tap even if that ordering ever changes.
+
+   Ticket #44, finding 3: alpha raised via the dedicated
+   --accent-*-ambient tokens (src/index.css) rather than --accent-*-dim,
+   which stayed unchanged — same shape and position as before, just
+   slightly more present, so glass panels moving over it read more
+   clearly without introducing banding or a second focal point. */
 .app-shell__backdrop {
   position: fixed;
   inset: 0;
   z-index: -1;
   pointer-events: none;
   background:
-    radial-gradient(ellipse 130% 55% at 50% -8%, var(--accent-cyan-dim), transparent 60%),
-    radial-gradient(ellipse 90% 40% at 85% 30%, var(--accent-coral-dim), transparent 65%),
+    radial-gradient(ellipse 130% 55% at 50% -8%, var(--accent-cyan-ambient), transparent 60%),
+    radial-gradient(ellipse 90% 40% at 85% 30%, var(--accent-coral-ambient), transparent 65%),
     var(--surface-0);
 }
 

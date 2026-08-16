@@ -3,10 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover — ticket #44, finding 5. Without it iOS never
+         extends layout into the safe areas, so every env(safe-area-inset-*)
+         resolves to 0 and AppShell's fixed backdrop (inset: 0, deliberately
+         written to reach the notch) renders as flat black there instead.
+         app-shell__column's safe-area padding (AppShell.css) already
+         exists to keep content itself clear of the notch/home indicator
+         once this is enabled. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>FPL Advisor</title>
     <meta name="theme-color" content="#0b0f19" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- black-translucent lets content extend under the status bar instead
+         of the status bar reserving an opaque strip above it — the status
+         bar then sits over the app's own dark backdrop rather than a flat
+         system bar, matching theme-color below. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="FPL Advisor" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
   </head>

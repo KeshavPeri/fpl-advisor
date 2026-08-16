@@ -26,6 +26,19 @@
   gap: var(--space-3);
 }
 
+/* Ticket #44, finding 6 — the pitch has exactly two Surface panels
+   (field, bench), so the shared arrival animation isn't the "page
+   assembling itself" risk the ticket flags in the general case. A small
+   stagger still reads better than both panels arriving in lockstep: it
+   communicates the field-then-bench hierarchy instead of two unrelated
+   things popping in together. Applies to both the real Pitch and
+   PitchSkeleton, which share this class. prefers-reduced-motion is
+   still handled by Surface.css — with the animation disabled there, this
+   delay is simply inert. */
+.pitch__bench {
+  animation-delay: 90ms;
+}
+
 .pitch__bench-title {
   font: var(--text-label);
   font-weight: 550;
