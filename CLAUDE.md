@@ -14,7 +14,14 @@ Tickets (GitHub issues) are linted in the evening, labelled `status:ready`, and 
 scheduled overnight routine. The routine's top-level session is the orchestrator: it
 dispatches the subagents in `.claude/agents/`, moves issues between `status:` labels, appends
 to `decisions.md` at decision time, and opens **draft** PRs. A human reviews from the phone in
-the morning and merges manually. Batch limit: 2 tickets per run. Revision cap: 2 per ticket.
+the morning and merges manually. **Batch limit: 3 tickets per run.** Revision cap: 2 per ticket.
+
+**This file is the binding source of truth on the batch limit.** The routine's saved prompt holds
+its own copy of that number and the two can drift — the routine's copy only changes when the prompt
+is re-pasted into its Instructions box, which is a manual step that is easy to forget in either
+direction. Raised from 2 to 3 on 16 Aug 2026. **If the routine's prompt and this file disagree,
+follow this file and flag the discrepancy in the end-of-run note** — which is exactly what happened
+on the 16 Aug run, correctly.
 
 ## Branch convention
 

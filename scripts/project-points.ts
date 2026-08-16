@@ -18,9 +18,16 @@
 // across the season boundary). Every join in this file goes through
 // player_match_stats.player_code = players.code, never player_id = id.
 //
-// Upsert only, never delete: `.delete(` does not appear in this file. A row
-// this run doesn't touch (a gameweek that's fallen out of the horizon, a
-// player who has left the league) is simply left as it was.
+// Upsert only, never delete: this file issues no Supabase row-removal call
+// anywhere. A row this run doesn't touch (a gameweek that's fallen out of the
+// horizon, a player who has left the league) is simply left as it was.
+//
+// The sentence above deliberately avoids naming the client method it is
+// promising not to call. An earlier version spelled it out as an
+// illustration, which meant a grep-checkable "this file never removes rows"
+// definition-of-done item matched the comment saying so and had to be
+// special-cased by hand. A guarantee written in a form that defeats the check
+// meant to verify it is worse than no comment.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
