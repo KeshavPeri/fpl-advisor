@@ -702,10 +702,15 @@ function buildComponentTable(
     ['defensiveContributionPoints', 'Defensive contribution'],
   ]
   const sections = POSITIONS.map((position) => {
-    const header = `### ${POSITION_NAMES[position]}\n\n| Component | Actual pts/90 | Projected pts/90 | Ratio (proj/actual) |\n|---|---|---|---|`
-    const rows = componentLabels.map(([key, label]) =>
-      componentRow(label, actual[position].componentPer90, projected[position].componentPer90, key),
-    )
+    const a = actual[position]
+    const p = projected[position]
+    // Sample size stated once per position, ahead of every component row it
+    // covers — DoD: "every figure in the report carries its sample size."
+    const sampleSizeLine =
+      `*Sample: ${a.playerMatchCount} actual player-matches (${a.appearanceCount} with minutes played, ${a.distinctPlayerCount} distinct players) ` +
+      `vs ${p.rowCount} projected rows (${p.distinctPlayerCount} distinct players).*`
+    const header = `### ${POSITION_NAMES[position]}\n\n${sampleSizeLine}\n\n| Component | Actual pts/90 | Projected pts/90 | Ratio (proj/actual) |\n|---|---|---|---|`
+    const rows = componentLabels.map(([key, label]) => componentRow(label, a.componentPer90, p.componentPer90, key))
     return [header, ...rows].join('\n')
   })
   return sections.join('\n\n')
