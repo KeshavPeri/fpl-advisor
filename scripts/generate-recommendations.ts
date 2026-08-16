@@ -544,6 +544,8 @@ async function main(): Promise<void> {
     }
 
     const codesWithHistory = new Set<number>()
+    let matchStatsRowsFetched = 0
+    let matchStatsPagesFetchedTotal = 0
     if (allCoverageCodes.size > 0) {
       const codesArray = [...allCoverageCodes]
       const {
@@ -564,7 +566,8 @@ async function main(): Promise<void> {
         throw new GenerateRecommendationsError(`player_match_stats count check failed: ${matchStatsCountError.message}`, 'player_match_stats')
       }
       assertRowCountMatches('player_match_stats (coverage check)', matchStatsRows.length, matchStatsExpectedByCount ?? 0)
-      void matchStatsPagesFetched // logged via job_runs.details below
+      matchStatsRowsFetched = matchStatsRows.length
+      matchStatsPagesFetchedTotal = matchStatsPagesFetched
       for (const row of matchStatsRows) {
         if (row.player_code !== null) codesWithHistory.add(row.player_code)
       }
@@ -715,6 +718,9 @@ async function main(): Promise<void> {
       picksPagesFetched,
       playersRowsFetched: playerRows.length,
       playersPagesFetched,
+      matchStatsRowsFetched,
+      matchStatsPagesFetched: matchStatsPagesFetchedTotal,
+      coverageCodesChecked: allCoverageCodes.size,
     }
     const message =
       `${JOB_NAME}/generate-recommendations: stored ${plans.length} plan(s) for gameweek ${currentGw} ` +
