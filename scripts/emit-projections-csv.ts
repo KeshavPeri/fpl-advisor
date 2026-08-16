@@ -83,6 +83,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { assertRowCountMatches, fetchAllPages } from './lib/paginate.js'
 
 const JOB_NAME = 'emit-projections-csv'
 const PLAYER_PROJECTIONS_MIGRATION = 'supabase/migrations/20260815120000_player_projections.sql'
@@ -349,6 +350,11 @@ async function main(): Promise<void> {
     // --------------------------------------------------------------------
     // 1. Horizon: gameweeks.is_next plus the following ids — same source
     //    item 10 (scripts/project-points.ts) uses.
+    //
+    //    Not paginated: a season has 38 gameweeks, several orders of
+    //    magnitude under the 1,000-row db-max-rows ceiling, and that bound
+    //    cannot change mid-repo — see decisions/ticket-43.md for the full
+    //    audit of every read in this file.
     // --------------------------------------------------------------------
     const { data: gwRows, error: gwError } = await supabase
       .from('gameweeks')
@@ -380,20 +386,37 @@ async function main(): Promise<void> {
     // 2. players + teams — the full current pool, not filtered by status:
     //    an unavailable player still needs a (zero-filled or projected) row
     //    so the solver's pool is never silently narrowed by this job.
+    //
+    //    players is paginated (587 rows today, close to the 1,000-row
+    //    db-max-rows ceiling and will cross it as FPL adds players through
+    //    the season — see scripts/lib/paginate.ts) and its result verified
+    //    against an independent count query. teams is a fixed ~20 rows and
+    //    is not paginated — see decisions/ticket-43.md for the full audit.
     // --------------------------------------------------------------------
-    const { data: playerRows, error: playersError } = await supabase
-      .from('players')
-      .select('id, web_name, team_id, element_type')
-      .returns<PlayerRow[]>()
+    const {
+      rows: playerRows,
+      error: playersError,
+      pages: playersPagesFetched,
+    } = await fetchAllPages<PlayerRow>((from, to) =>
+      supabase.from('players').select('id, web_name, team_id, element_type').range(from, to).returns<PlayerRow[]>(),
+    )
     if (playersError) {
       if (isMissingTable(playersError, 'players')) {
         throw new CsvEmitError(`the "players" table does not exist. Apply ${REFERENCE_SCHEMA_MIGRATION} first.`, 'players')
       }
       throw new CsvEmitError(`players lookup failed: ${playersError.message}`, 'players')
     }
-    if (!playerRows || playerRows.length === 0) {
+    if (playerRows.length === 0) {
       throw new CsvEmitError('the players table is empty. Run scripts/ingest-fpl.ts before emitting the projections CSV.', 'players')
     }
+
+    const { count: playersRowsExpectedByCount, error: playersCountError } = await supabase
+      .from('players')
+      .select('*', { count: 'exact', head: true })
+    if (playersCountError) {
+      throw new CsvEmitError(`players count check failed: ${playersCountError.message}`, 'players')
+    }
+    assertRowCountMatches('players', playerRows.length, playersRowsExpectedByCount ?? 0)
 
     const { data: teamRows, error: teamsError } = await supabase.from('teams').select('id, short_name').returns<TeamRow[]>()
     if (teamsError) {
@@ -411,13 +434,25 @@ async function main(): Promise<void> {
     // --------------------------------------------------------------------
     // 3. player_projections, filtered to MODEL_VERSION and the candidate
     //    horizon. See file header for why model_version is filtered.
+    //
+    //    THIS is the read that caused the ticket #43 incident: 587 players
+    //    x 5 gameweeks = 2,935 rows, well past the 1,000-row db-max-rows
+    //    ceiling an unbounded .select() silently truncates at. Paginated
+    //    and count-verified — see scripts/lib/paginate.ts's file header.
     // --------------------------------------------------------------------
-    const { data: projectionRows, error: projectionsError } = await supabase
-      .from('player_projections')
-      .select('gameweek_id, player_id, expected_points, expected_minutes')
-      .eq('model_version', MODEL_VERSION)
-      .in('gameweek_id', horizonGwIds)
-      .returns<ProjectionRow[]>()
+    const {
+      rows: projectionRows,
+      error: projectionsError,
+      pages: projectionPagesFetched,
+    } = await fetchAllPages<ProjectionRow>((from, to) =>
+      supabase
+        .from('player_projections')
+        .select('gameweek_id, player_id, expected_points, expected_minutes')
+        .eq('model_version', MODEL_VERSION)
+        .in('gameweek_id', horizonGwIds)
+        .range(from, to)
+        .returns<ProjectionRow[]>(),
+    )
     if (projectionsError) {
       if (isMissingTable(projectionsError, 'player_projections')) {
         throw new CsvEmitError(
@@ -428,9 +463,19 @@ async function main(): Promise<void> {
       throw new CsvEmitError(`player_projections lookup failed: ${projectionsError.message}`, 'player_projections')
     }
 
+    const { count: projectionRowsExpectedByCount, error: projectionsCountError } = await supabase
+      .from('player_projections')
+      .select('*', { count: 'exact', head: true })
+      .eq('model_version', MODEL_VERSION)
+      .in('gameweek_id', horizonGwIds)
+    if (projectionsCountError) {
+      throw new CsvEmitError(`player_projections count check failed: ${projectionsCountError.message}`, 'player_projections')
+    }
+    assertRowCountMatches('player_projections', projectionRows.length, projectionRowsExpectedByCount ?? 0)
+
     const projectionByKey = new Map<string, ProjectionValue>()
     const gwIdsWithAnyProjection = new Set<number>()
-    for (const row of projectionRows ?? []) {
+    for (const row of projectionRows) {
       projectionByKey.set(projectionKey(row.player_id, row.gameweek_id), {
         expectedPoints: row.expected_points,
         expectedMinutes: row.expected_minutes,
@@ -457,17 +502,26 @@ async function main(): Promise<void> {
     //    gameweeks beyond the candidate horizon — the signal that the two
     //    jobs' independently-duplicated horizon length has drifted.
     // --------------------------------------------------------------------
+    // Paginated too: unbounded over a season, since player_projections only
+    // ever grows and this reads every row with gameweek_id past the current
+    // horizon regardless of model run history. No independent count check
+    // here — this is a diagnostic report of drift between this job's and
+    // project-points.ts's duplicated horizon constants, not a correctness
+    // guard the CSV depends on.
     const maxHorizonGwId = horizonGwIds[horizonGwIds.length - 1]
-    const { data: extraGwRows, error: extraGwError } = await supabase
-      .from('player_projections')
-      .select('gameweek_id')
-      .eq('model_version', MODEL_VERSION)
-      .gt('gameweek_id', maxHorizonGwId)
-      .returns<Pick<ProjectionRow, 'gameweek_id'>[]>()
+    const { rows: extraGwRows, error: extraGwError } = await fetchAllPages<Pick<ProjectionRow, 'gameweek_id'>>((from, to) =>
+      supabase
+        .from('player_projections')
+        .select('gameweek_id')
+        .eq('model_version', MODEL_VERSION)
+        .gt('gameweek_id', maxHorizonGwId)
+        .range(from, to)
+        .returns<Pick<ProjectionRow, 'gameweek_id'>[]>(),
+    )
     if (extraGwError) {
       throw new CsvEmitError(`player_projections lookup (beyond-horizon check) failed: ${extraGwError.message}`, 'player_projections')
     }
-    const extraProjectionGameweekIdsBeyondHorizon = [...new Set((extraGwRows ?? []).map((r) => r.gameweek_id))].sort((a, b) => a - b)
+    const extraProjectionGameweekIdsBeyondHorizon = [...new Set(extraGwRows.map((r) => r.gameweek_id))].sort((a, b) => a - b)
 
     // --------------------------------------------------------------------
     // 6. Build the CSV and write it.
@@ -494,6 +548,12 @@ async function main(): Promise<void> {
       playerGameweekPairsZeroFilled: result.playerGameweekPairsZeroFilled,
       lowExpectedMinutesPlayerCount: result.lowExpectedMinutesPlayerCount,
       extraProjectionGameweekIdsBeyondHorizon,
+      playersRowsFetched: playerRows.length,
+      playersRowsExpectedByCount: playersRowsExpectedByCount ?? 0,
+      playersPagesFetched,
+      projectionRowsFetched: projectionRows.length,
+      projectionRowsExpectedByCount: projectionRowsExpectedByCount ?? 0,
+      projectionPagesFetched,
     }
     const message =
       `${JOB_NAME}: wrote ${result.rowsWritten} player rows across ${horizonGwIds.length} gameweek(s) ` +

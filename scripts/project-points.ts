@@ -23,6 +23,7 @@
 // player who has left the league) is simply left as it was.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
 import type { Position } from '../src/lib/scoring/types.ts'
 import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
 import {
@@ -213,6 +214,9 @@ async function main(): Promise<void> {
   try {
     // --------------------------------------------------------------------
     // 1. Horizon: gameweeks.is_next plus the four following ids.
+    //
+    //    Not paginated: a season has 38 gameweeks, well under the
+    //    1,000-row db-max-rows ceiling — see decisions/ticket-43.md.
     // --------------------------------------------------------------------
     const { data: gwRows, error: gwError } = await supabase
       .from('gameweeks')
@@ -248,20 +252,43 @@ async function main(): Promise<void> {
 
     // --------------------------------------------------------------------
     // 2. Reference data: players, teams, fixtures in the horizon.
+    //
+    //    players is paginated (587 rows today, close to the 1,000-row
+    //    db-max-rows ceiling and will cross it as FPL adds players through
+    //    the season — see scripts/lib/paginate.ts) and its result verified
+    //    against an independent count query. teams (~20 rows) and fixtures
+    //    filtered to a 5-gameweek horizon (~50 rows) are not paginated —
+    //    see decisions/ticket-43.md for the full audit of every read in
+    //    this file.
     // --------------------------------------------------------------------
-    const { data: playerRows, error: playersError } = await supabase
-      .from('players')
-      .select('id, code, team_id, element_type, status, chance_of_playing_next_round')
-      .returns<PlayerRow[]>()
+    const {
+      rows: playerRows,
+      error: playersError,
+      pages: playersPagesFetched,
+    } = await fetchAllPages<PlayerRow>((from, to) =>
+      supabase
+        .from('players')
+        .select('id, code, team_id, element_type, status, chance_of_playing_next_round')
+        .range(from, to)
+        .returns<PlayerRow[]>(),
+    )
     if (playersError) {
       if (isMissingTable(playersError, 'players')) {
         throw new ProjectionError(`the "players" table does not exist. Apply ${REFERENCE_SCHEMA_MIGRATION} first.`, 'players')
       }
       throw new ProjectionError(`players lookup failed: ${playersError.message}`, 'players')
     }
-    if (!playerRows || playerRows.length === 0) {
+    if (playerRows.length === 0) {
       throw new ProjectionError('the players table is empty. Run scripts/ingest-fpl.ts before projecting points.', 'players')
     }
+
+    const { count: playersRowsExpectedByCount, error: playersCountError } = await supabase
+      .from('players')
+      .select('*', { count: 'exact', head: true })
+    if (playersCountError) {
+      throw new ProjectionError(`players count check failed: ${playersCountError.message}`, 'players')
+    }
+    assertRowCountMatches('players', playerRows.length, playersRowsExpectedByCount ?? 0)
 
     const { data: teamRows, error: teamsError } = await supabase.from('teams').select('id, elo').returns<TeamRow[]>()
     if (teamsError) {
@@ -288,6 +315,10 @@ async function main(): Promise<void> {
     // --------------------------------------------------------------------
     // 3. League baseline goals: computed from finished fixtures at runtime
     //    when enough exist, else the named placeholder constant.
+    //
+    //    Not paginated: a 20-team season plays 380 fixtures total, well
+    //    under the 1,000-row db-max-rows ceiling, and that total cannot
+    //    grow mid-season — see decisions/ticket-43.md for the full audit.
     // --------------------------------------------------------------------
     const { data: finishedFixtures, error: finishedError } = await supabase
       .from('fixtures')
@@ -315,13 +346,24 @@ async function main(): Promise<void> {
     // --------------------------------------------------------------------
     // 4. player_match_stats — THE JOIN is player_code = players.code, never
     //    player_id = players.id (see file header).
+    //
+    //    Over 15,000 rows in the live table — far past the 1,000-row
+    //    db-max-rows ceiling. This is the read the ticket #43 audit named
+    //    explicitly. Paginated and count-verified, same as players above.
     // --------------------------------------------------------------------
-    const { data: matchStatsRows, error: matchStatsError } = await supabase
-      .from('player_match_stats')
-      .select(
-        'player_code, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries',
-      )
-      .returns<MatchStatsRow[]>()
+    const {
+      rows: matchStatsRows,
+      error: matchStatsError,
+      pages: matchStatsPagesFetched,
+    } = await fetchAllPages<MatchStatsRow>((from, to) =>
+      supabase
+        .from('player_match_stats')
+        .select(
+          'player_code, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries',
+        )
+        .range(from, to)
+        .returns<MatchStatsRow[]>(),
+    )
     if (matchStatsError) {
       if (isMissingTable(matchStatsError, 'player_match_stats')) {
         throw new ProjectionError(
@@ -332,6 +374,14 @@ async function main(): Promise<void> {
       throw new ProjectionError(`player_match_stats lookup failed: ${matchStatsError.message}`, 'player_match_stats')
     }
 
+    const { count: matchStatsRowsExpectedByCount, error: matchStatsCountError } = await supabase
+      .from('player_match_stats')
+      .select('*', { count: 'exact', head: true })
+    if (matchStatsCountError) {
+      throw new ProjectionError(`player_match_stats count check failed: ${matchStatsCountError.message}`, 'player_match_stats')
+    }
+    assertRowCountMatches('player_match_stats', matchStatsRows.length, matchStatsRowsExpectedByCount ?? 0)
+
     const codeToPlayer = new Map<number, PlayerRow>()
     for (const player of playerRows) {
       if (player.code !== null) codeToPlayer.set(player.code, player)
@@ -341,7 +391,7 @@ async function main(): Promise<void> {
     const rateMatchesByPosition: Record<Position, RateHistoryMatch[]> = { 1: [], 2: [], 3: [], 4: [] }
     const defconMatchesByPosition: Record<Position, DefensiveContributionMatch[]> = { 1: [], 2: [], 3: [], 4: [] }
 
-    for (const row of matchStatsRows ?? []) {
+    for (const row of matchStatsRows) {
       if (row.player_code === null) continue // no join key on this row -- see #22 migration, a small gap is expected
 
       const list = matchesByPlayerCode.get(row.player_code) ?? []
@@ -535,6 +585,12 @@ async function main(): Promise<void> {
       fixtureEloFallbackCount,
       leagueBaselineGoalsSource,
       leagueBaselineGoals,
+      playersRowsFetched: playerRows.length,
+      playersRowsExpectedByCount: playersRowsExpectedByCount ?? 0,
+      playersPagesFetched,
+      matchStatsRowsFetched: matchStatsRows.length,
+      matchStatsRowsExpectedByCount: matchStatsRowsExpectedByCount ?? 0,
+      matchStatsPagesFetched,
     }
     const message =
       `${JOB_NAME}: projected ${horizonGameweeks.length} gameweek(s) ` +
