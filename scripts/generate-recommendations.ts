@@ -61,7 +61,7 @@
 // ============================================================================
 // Reads exactly SUPABASE_URL and SUPABASE_SECRET_KEY. No VITE_-prefixed
 // variable. Writes recommendations/recommendation_reasons (upsert only —
-// `.delete(` does not appear anywhere in this file) and one job_runs row
+// this file issues no Supabase row-removal call of any kind) and one job_runs row
 // per execution, job_name 'solver-run' (matching build-solver-input.ts and
 // store-solver-output.ts — every script in this one workflow shares a
 // job_name so the workflow's history reads as one execution log).

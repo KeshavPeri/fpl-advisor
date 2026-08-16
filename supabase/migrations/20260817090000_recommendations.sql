@@ -201,7 +201,7 @@ CREATE POLICY "recommendation_reasons_select_anon" ON public.recommendation_reas
 -- filtered result). Granted here, in the same file that creates the tables,
 -- per the pattern in every migration since #12. DELETE is deliberately
 -- withheld on both tables — scripts/generate-recommendations.ts upserts and
--- never deletes (DoD: `.delete(` does not appear in that script).
+-- never deletes (DoD: that script issues no Supabase row-removal call of any kind).
 -- ============================================================================
 
 GRANT USAGE ON SCHEMA public TO anon, service_role;
