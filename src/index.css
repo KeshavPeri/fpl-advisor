@@ -72,8 +72,13 @@
   /* A tighter label variant, same role as --text-label but for
      width-constrained contexts. Currently only the pitch shirt's player
      name, whose column is fixed at var(--space-12) wide and must never
-     truncate mid-word (ticket #44, finding 2). */
-  --text-label-tight: 400 0.75rem/1.25 var(--font-sans);
+     truncate mid-word (ticket #44, finding 2). 0.6875rem, not a rounder
+     0.75rem, because it was checked empirically (a local, uncommitted
+     render harness against real long web_names) rather than guessed:
+     0.75rem still forced a 2-line clamp to truncate "Alexander-Arnold",
+     the longest real current web_name; 0.6875rem is the smallest step
+     down that clears it. */
+  --text-label-tight: 400 0.6875rem/1.25 var(--font-sans);
 
   /* ---- Spacing — 4px base unit ---- */
   --space-1: 0.25rem;

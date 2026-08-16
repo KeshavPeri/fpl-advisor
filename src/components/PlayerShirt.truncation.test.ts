@@ -26,39 +26,36 @@ const css = rawCss.replace(/\/\*[\s\S]*?\*\//g, '')
 
 /**
  * Ticket #44, finding 2 — "no player name renders with a mid-word ellipsis
- * at 390px viewport" is a claim about rendered pixels, which this project
- * has no tooling to assert directly: there's no jsdom/testing-library
- * dependency here (deliberately — this ticket may not add one), so a real
- * layout/paint check is QA's/Keshav's job on-device, same as the rest of
- * this ticket's device-only DoD items.
+ * at 390px viewport" is a claim about rendered pixels. There's no
+ * jsdom/testing-library dependency committed here (deliberately — this
+ * ticket may not add one), so this file can't render and measure text on
+ * its own. It was checked once, empirically, with a temporary local-only
+ * harness (real Pitch/PlayerShirt components, mock data, Playwright +
+ * headless Chromium — none of it committed, all of it removed before
+ * handoff) against FPL's own longest current `web_name`,
+ * "Alexander-Arnold" (16 characters). That check is what caught a real
+ * bug: at the first size tried, 0.75rem, `-webkit-line-clamp: 2` was
+ * still truncating that name onto a browser-inserted "…" after the
+ * hyphen — a two-line clamp alone was not sufficient, only *usually*
+ * sufficient. `--text-label-tight` (src/index.css) was stepped down to
+ * 0.6875rem specifically because that was the smallest reduction that
+ * cleared it for every name tried, "Alexander-Arnold" included. That
+ * measurement can't be re-run in CI without the harness, so it isn't
+ * automated — but the fix it produced (no `text-overflow`, wrap instead
+ * of clip) is a general one, not tuned to that one name, and that part
+ * *is* checked below, on every build.
  *
- * What *is* provable without a browser: a mid-word ellipsis can only ever
- * appear via `text-overflow: ellipsis` (or an explicit `content: '…'`,
- * which this file never uses). `.player-shirt__name` no longer sets
- * `text-overflow` at all — overflow is handled by `-webkit-line-clamp`
- * wrapping onto a second line instead of truncating a single line. So the
- * strongest thing this test can do, and the thing worth pinning against
- * regression, is assert that mechanism is genuinely gone: no rule in this
- * stylesheet can produce an ellipsis, full stop.
- *
- * Manual/documented check for the longest-name case (no rendering
- * available to automate it): FPL's `web_name` field runs long for
- * hyphenated surnames — "Alexander-Arnold" (16 characters) and
- * "Calvert-Lewin" (13) are real, current examples. At
- * `--text-label-tight` (0.75rem / 12px) in Geist, both wrap cleanly at
- * their existing hyphen (browsers treat a hyphen as a valid break point
- * even without `overflow-wrap`), landing on two lines within the
- * `var(--space-12)` (48px) column well inside the `-webkit-line-clamp: 2`
- * budget — no forced mid-word break needed for either. A long
- * *unhyphenated* surname with no natural break point (e.g. "Szoboszlai",
- * 10 characters) is the harder case: at ~7-8 characters fitting per line
- * at this size, it wraps to two lines using `overflow-wrap`/`word-break`
- * (a wrapped break, not a truncation), and `hyphens: auto` lets the
- * browser insert a soft hyphen at a valid syllable point where its
- * dictionary supports one, rather than an arbitrary mid-character cut.
- * That is a mid-word *wrap*, not a mid-word *ellipsis* — the DoD forbids
- * the latter specifically, and the two-line clamp plus fixed
- * `min-height` mean it never overflows or shifts row height either way.
+ * What's provable without a browser, and pinned against regression here:
+ * a mid-word ellipsis can only appear via `text-overflow: ellipsis` (or
+ * an explicit `content: '…'`, which this file never uses).
+ * `.player-shirt__name` sets neither — overflow is handled by
+ * `-webkit-line-clamp` wrapping onto a second line instead of truncating
+ * a single one. Real names still wrap *within* a word sometimes (no
+ * natural hyphen to break at, e.g. "Szoboszlai" → "Szobosz" / "lai") —
+ * that's a mid-word *wrap*, not a mid-word *ellipsis*; the DoD forbids
+ * the latter specifically, and `hyphens: auto` softens the common case
+ * where the browser's dictionary has a better break point than "wherever
+ * the width ran out".
  */
 
 describe('PlayerShirt.css — name truncation mechanism (ticket #44, finding 2)', () => {
