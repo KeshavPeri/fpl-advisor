@@ -94,6 +94,18 @@ Depends on the calibration report (merged) and #12/#22 (`player_match_stats`).
 - [ ] The report retains its existing caveats section, its per-position sample sizes, its
       component tables and its top-20 distribution tables. **Nothing is removed except numbers that
       were not meaningful.**
+- [ ] **The top-20 "actual scorers" tables are corrected too, and this is not optional.** They are
+      built from the same reconstruction, so every defender and midfielder total in them is inflated
+      by the phantom clean sheets — Virgil at 388 points across 49 matches is 7.9 per match, which no
+      defender achieves. Either recompute those totals excluding the not-comparable components, or
+      **label the tables as position-internal rankings only and state in the table caption that
+      totals must not be compared across positions.** A reader glancing at those tables today would
+      conclude a defender outscored Haaland, which is the specific wrong inference this ticket exists
+      to prevent.
+- [ ] The report states in one line that **a season total is not a captaincy signal** — it rewards
+      availability as much as per-match quality, and the model's own inputs are per-90 rates and
+      fixture difficulty, never a season total. The top-20 actual table is a validation artefact, not
+      a model input, and the report should not read as though it were a ranking to pick from.
 - [ ] The report notes that **2,873 of 15,340 match rows (19%) were skipped** because their
       `player_code` is not in the current `players` table — players who left the league — and states
       that this biases the actual sample toward players still in the game. The existing provenance
