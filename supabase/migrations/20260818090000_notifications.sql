@@ -121,11 +121,28 @@ CREATE POLICY "notifications_select_anon" ON public.notifications FOR SELECT TO 
 -- deliberately withheld from EVERY role, including service_role: this is a
 -- log, and withholding the privilege makes append-only a database
 -- guarantee rather than a habit scripts/send-telegram.ts happens to follow.
+--
+-- The explicit REVOKE below is not defensive boilerplate — it fixes a real
+-- gap, found by applying this migration against a live Postgres instance
+-- while building this ticket. The #10/table_grants migration's
+-- `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE ON
+-- TABLES TO service_role` applies to every table created AFTERWARDS by the
+-- same executing role — which, in this project, is every migration, since
+-- they all run as the same role. Verified directly: creating this table
+-- with only `GRANT SELECT, INSERT ... TO service_role` still left
+-- service_role able to UPDATE it, entirely from that earlier statement, with
+-- nothing in this file's own GRANT list responsible. The REVOKE below is
+-- what actually makes "no UPDATE, no DELETE" true, regardless of what a
+-- schema-wide default privileges statement elsewhere grants new tables by
+-- default. DELETE was never part of that default grant, so no corresponding
+-- leak exists for it today, but it is revoked too — a guarantee that does
+-- not depend on what that statement happens to list.
 -- ============================================================================
 
 GRANT USAGE ON SCHEMA public TO anon, service_role;
 
 GRANT SELECT ON public.notifications TO anon;
 GRANT SELECT, INSERT ON public.notifications TO service_role;
+REVOKE UPDATE, DELETE ON public.notifications FROM service_role;
 
 COMMIT;

@@ -141,9 +141,9 @@ describe('composeStaleMessage', () => {
       planB: null,
       solverStatus: OPTIMAL,
     })
-    const lines = message.split('\n')
-    expect(lines[0]).toBe('Transfer in Erling Haaland. Transfer out Ivan Toney.')
-    expect(lines[1]).toBe('This is the gameweek 3 plan, 2 gameweeks old — gameweek 5 has no recommendation yet.')
+    const paragraphs = message.split('\n\n')
+    expect(paragraphs[0]).toBe('Transfer in Erling Haaland. Transfer out Ivan Toney.')
+    expect(paragraphs[1]).toBe('This is the gameweek 3 plan, 2 gameweeks old — gameweek 5 has no recommendation yet.')
   })
 
   it('uses the singular "gameweek" for exactly one gameweek behind', () => {
