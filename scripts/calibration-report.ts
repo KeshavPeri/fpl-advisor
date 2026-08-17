@@ -63,6 +63,20 @@
 // impossible to make by accident rather than merely disciplined against.
 //
 // ============================================================================
+// PREMIER LEAGUE ONLY (ticket #54).
+// ============================================================================
+// player_match_stats holds every competition the source publishes, not just
+// Premier League — cup and European matches score zero FPL points and this
+// report was scoring them as though they did (see the ticket for the
+// measured effect). The actual-side read below (section 2) filters to
+// competition = PREMIER_LEAGUE_COMPETITION IN THE QUERY, alongside the
+// existing season filter, on both the data fetch and its count-check, so the
+// two always agree — see scripts/calibration-report.test.ts's grep-based
+// test for that identity. A row whose competition is NULL (not yet
+// re-stamped since the #54 migration added the column) is excluded, same as
+// a known non-Premier-League row, and both are counted separately.
+//
+// ============================================================================
 // Bonus and cards.
 // ============================================================================
 // player_match_stats carries neither bonus nor cards, so both are reported
@@ -89,6 +103,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
+import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import type { DefensiveActionStats, Position } from '../src/lib/scoring/types.ts'
 import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../src/lib/scoring/types.ts'
 import { defensiveContributionPoints } from '../src/lib/scoring/defensiveContribution.ts'
@@ -641,6 +656,10 @@ interface ReportData {
   playersRowCount: number
   matchStatsRowCount: number
   projectionRowCount: number
+  /** Ticket #54: player_match_stats rows for TARGET_SEASON whose competition was a known non-Premier-League value — excluded from the actual side, counted separately from a null competition below. */
+  matchStatsRowsExcludedNonPremierLeague: number
+  /** Ticket #54: player_match_stats rows for TARGET_SEASON whose competition was NULL (not yet re-stamped since the #54 migration added the column) — excluded and counted separately from a known non-Premier-League value above. */
+  matchStatsRowsExcludedNullCompetition: number
 }
 
 function averageBonusPerAppearance(): number {
@@ -802,7 +821,11 @@ function generateReportMarkdown(data: ReportData): string {
   sections.push(
     '## Sample sizes and data provenance\n\n' +
       `- players rows fetched: ${data.playersRowCount}\n` +
-      `- player_match_stats rows fetched (season=${TARGET_SEASON}): ${data.matchStatsRowCount}\n` +
+      `- player_match_stats rows fetched (season=${TARGET_SEASON}, competition=${PREMIER_LEAGUE_COMPETITION}): ${data.matchStatsRowCount}\n` +
+      `- player_match_stats rows excluded as non-Premier-League (season=${TARGET_SEASON}, competition known and != ${PREMIER_LEAGUE_COMPETITION}): ` +
+      `${data.matchStatsRowsExcludedNonPremierLeague}\n` +
+      `- player_match_stats rows excluded for a null competition (season=${TARGET_SEASON}, not yet re-stamped since ticket #54): ` +
+      `${data.matchStatsRowsExcludedNullCompetition}\n` +
       `- player_match_stats rows skipped (no player_code, or player_code not found in players): ${data.skippedMatchStatsNoPosition}\n` +
       `- player_projections rows fetched (model_version=${MODEL_VERSION}): ${data.projectionRowCount}\n` +
       `- player_projections rows skipped (player_id not found in players): ${data.skippedProjectionsNoPosition}\n`,
@@ -874,9 +897,11 @@ async function main(): Promise<void> {
     }
 
     // --------------------------------------------------------------------
-    // 2. player_match_stats, filtered to TARGET_SEASON. Over 15,000 rows in
-    //    the live table — well past the 1,000-row db-max-rows ceiling.
-    //    Paginated and count-verified against the SAME filter.
+    // 2. player_match_stats, filtered to TARGET_SEASON AND to Premier League
+    //    rows only (ticket #54 — see file header). Over 15,000 rows in the
+    //    live table — well past the 1,000-row db-max-rows ceiling. Paginated
+    //    and count-verified against the SAME filter (both filters, on both
+    //    queries).
     // --------------------------------------------------------------------
     const {
       rows: matchStatsRows,
@@ -889,6 +914,7 @@ async function main(): Promise<void> {
           'player_code, minutes_played, goals, assists, goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries',
         )
         .eq('season', TARGET_SEASON)
+        .eq('competition', PREMIER_LEAGUE_COMPETITION)
         .range(from, to)
         .returns<MatchStatsRow[]>(),
     )
@@ -905,10 +931,41 @@ async function main(): Promise<void> {
       .from('player_match_stats')
       .select('*', { count: 'exact', head: true })
       .eq('season', TARGET_SEASON)
+      .eq('competition', PREMIER_LEAGUE_COMPETITION)
     if (matchStatsCountError) {
       throw new CalibrationReportError(`player_match_stats count check failed: ${matchStatsCountError.message}`, 'player_match_stats')
     }
     assertRowCountMatches('player_match_stats', matchStatsRows.length, matchStatsRowsExpectedByCount ?? 0)
+
+    // Exclusion counts — informational only, scoped to TARGET_SEASON like
+    // the read above, never used to filter anything. Two independent
+    // count-only queries so a null competition (not yet re-stamped since the
+    // #54 migration added the column) is reported separately from a known
+    // non-Premier-League competition, per the ticket's robustness requirement.
+    const { count: matchStatsRowsNullCompetition, error: nullCompetitionError } = await supabase
+      .from('player_match_stats')
+      .select('*', { count: 'exact', head: true })
+      .eq('season', TARGET_SEASON)
+      .is('competition', null)
+    if (nullCompetitionError) {
+      throw new CalibrationReportError(
+        `player_match_stats null-competition count check failed: ${nullCompetitionError.message}`,
+        'player_match_stats',
+      )
+    }
+
+    const { count: matchStatsRowsExcludedNonPremierLeague, error: nonPremierLeagueError } = await supabase
+      .from('player_match_stats')
+      .select('*', { count: 'exact', head: true })
+      .eq('season', TARGET_SEASON)
+      .not('competition', 'is', null)
+      .neq('competition', PREMIER_LEAGUE_COMPETITION)
+    if (nonPremierLeagueError) {
+      throw new CalibrationReportError(
+        `player_match_stats non-Premier-League count check failed: ${nonPremierLeagueError.message}`,
+        'player_match_stats',
+      )
+    }
 
     // --------------------------------------------------------------------
     // 3. player_projections, filtered to MODEL_VERSION. Same pagination +
@@ -1094,6 +1151,8 @@ async function main(): Promise<void> {
       playersRowCount: playerRows.length,
       matchStatsRowCount: matchStatsRows.length,
       projectionRowCount: projectionRows.length,
+      matchStatsRowsExcludedNonPremierLeague: matchStatsRowsExcludedNonPremierLeague ?? 0,
+      matchStatsRowsExcludedNullCompetition: matchStatsRowsNullCompetition ?? 0,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
 
@@ -1123,14 +1182,22 @@ async function main(): Promise<void> {
       matchStatsRowsFetched: matchStatsRows.length,
       matchStatsPagesFetched,
       matchStatsRowsSkippedNoPosition: skippedMatchStatsNoPosition,
+      // Ticket #54: rows read is the Premier-League-filtered count above;
+      // excluded rows are reported as two separate named counts (known
+      // non-Premier-League vs not-yet-stamped null), never combined.
+      matchStatsRowsRead: matchStatsRows.length,
+      matchStatsRowsExcludedNonPremierLeague: matchStatsRowsExcludedNonPremierLeague ?? 0,
+      matchStatsRowsExcludedNullCompetition: matchStatsRowsNullCompetition ?? 0,
       projectionRowsFetched: projectionRows.length,
       projectionsPagesFetched,
       projectionRowsSkippedNoPosition: skippedProjectionsNoPosition,
     }
 
     const message =
-      `${JOB_NAME}: compared ${matchStatsRows.length} actual player-matches (${TARGET_SEASON}) against ` +
-      `${projectionRows.length} projection rows (${MODEL_VERSION}). Defender pts/90 — actual ${fmt(
+      `${JOB_NAME}: compared ${matchStatsRows.length} actual Premier League player-matches (${TARGET_SEASON}) against ` +
+      `${projectionRows.length} projection rows (${MODEL_VERSION}) ` +
+      `(${matchStatsRowsExcludedNonPremierLeague ?? 0} non-Premier-League row(s) and ` +
+      `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded). Defender pts/90 — actual ${fmt(
         actualByPosition[DEFENDER].meanPointsPer90,
       )}, projected ${fmt(projectedByPosition[DEFENDER].meanPointsPer90)}. Report written to ${reportPath}.`
     console.log(message)

@@ -7,9 +7,21 @@
 // player_projections data produces a sensible report — is why the row-count
 // assertion is a DoD item in its own right and the report itself is the
 // deliverable (see the ticket's Notes).
+//
+// Ticket #54 (Premier-League-only filter) appends its own tests at the
+// bottom of this file rather than replacing it — #54 does not touch the
+// reconstruction/aggregation arithmetic above (explicitly out of scope: no
+// fix to the clean-sheet reconstruction), only which ROWS reach it. Its
+// tests are source-invariant (grep) tests, since main()'s Supabase reads
+// need a live project this Builder's session does not have — same technique
+// scripts/ingest-core-insights.test.ts's "source invariants" section and
+// scripts/project-points.test.ts already use.
 
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../src/lib/scoring/types.ts'
+import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import {
   aggregateActualByPosition,
   aggregateProjectedByPosition,
@@ -392,5 +404,79 @@ describe('topActualScorersByPosition / topProjectedPlayersByPosition', () => {
     ]
     const result = topProjectedPlayersByPosition(projected, 20)
     expect(result[FORWARD].map((r) => r.webName)).toEqual(['B', 'A'])
+  })
+})
+
+// ============================================================================
+// Ticket #54 — Premier League filter (source invariants).
+//
+// main()'s Supabase reads need a live project this Builder's session does
+// not have (same constraint scripts/ingest-core-insights.test.ts's "source
+// invariants" section and scripts/project-points.test.ts already document).
+// What CAN be proven without a database is the shape of the query
+// construction itself — grepping the actual shipped source rather than
+// re-deriving the same logic here in TypeScript.
+// ============================================================================
+
+const sourcePath = fileURLToPath(new URL('./calibration-report.ts', import.meta.url))
+const source = readFileSync(sourcePath, 'utf8')
+
+// Whitespace-insensitive: the data-fetch query sits one indent level deeper
+// (inside the fetchAllPages callback) than its count-check, so the two
+// occurrences are not byte-identical even though the filter is.
+const SEASON_AND_PL_FILTER_RE =
+  /\.eq\(\s*['"]season['"]\s*,\s*TARGET_SEASON\s*\)\s*\n\s*\.eq\(\s*['"]competition['"]\s*,\s*PREMIER_LEAGUE_COMPETITION\s*\)/g
+
+describe('calibration-report.ts — Premier League filter (source invariants, ticket #54)', () => {
+  it('imports PREMIER_LEAGUE_COMPETITION rather than a hardcoded competition literal', () => {
+    expect(source).toMatch(/import\s*\{\s*PREMIER_LEAGUE_COMPETITION\s*\}\s*from\s*['"]\.\/lib\/competition\.ts['"]/)
+  })
+
+  it('the data-fetch query and its row-count-check query both filter on the identical season + competition clause', () => {
+    // Same failure mode scripts/lib/paginate.ts's header describes and
+    // scripts/project-points.test.ts guards on its own read: a count taken
+    // under a different filter than the data it verifies would pass even on
+    // a truncated or wrongly-filtered read.
+    const occurrences = source.match(SEASON_AND_PL_FILTER_RE) ?? []
+    expect(occurrences.length).toBe(2) // the paginated data fetch + its count-check — no more, no fewer
+  })
+
+  it('never filters player_match_stats with a hardcoded "prem" string literal instead of the constant', () => {
+    expect(source).not.toMatch(/\.eq\(\s*['"]competition['"]\s*,\s*['"]prem['"]\s*\)/)
+  })
+
+  it(`PREMIER_LEAGUE_COMPETITION is "${PREMIER_LEAGUE_COMPETITION}"`, () => {
+    expect(PREMIER_LEAGUE_COMPETITION).toBe('prem')
+  })
+
+  it('counts null-competition rows separately from known non-Premier-League rows, both scoped to TARGET_SEASON', () => {
+    expect(source).toMatch(/\.eq\(\s*['"]season['"]\s*,\s*TARGET_SEASON\s*\)\s*\n\s*\.is\(\s*['"]competition['"]\s*,\s*null\s*\)/)
+    expect(source).toMatch(
+      /\.eq\(\s*['"]season['"]\s*,\s*TARGET_SEASON\s*\)\s*\n\s*\.not\(\s*['"]competition['"]\s*,\s*['"]is['"]\s*,\s*null\s*\)\s*\n\s*\.neq\(\s*['"]competition['"]\s*,\s*PREMIER_LEAGUE_COMPETITION\s*\)/,
+    )
+  })
+
+  it('reports rows read and both exclusion counts as separate named job_runs.details fields', () => {
+    expect(source).toMatch(/matchStatsRowsRead/)
+    expect(source).toMatch(/matchStatsRowsExcludedNonPremierLeague/)
+    expect(source).toMatch(/matchStatsRowsExcludedNullCompetition/)
+  })
+
+  it('reports both exclusion counts in the generated report body, not just job_runs', () => {
+    expect(source).toMatch(/rows excluded as non-Premier-League/)
+    expect(source).toMatch(/rows excluded for a null competition/)
+  })
+
+  it('issues no Supabase row-removal call anywhere', () => {
+    expect(source).not.toMatch(/\.delete\(\s*\)/)
+  })
+
+  it('does not touch the clean-sheet reconstruction — out of scope for this ticket', () => {
+    // reconstructActualMatchPoints' clean-sheet gate must still read
+    // goals_conceded (not a team_goals_conceded column this ticket does not
+    // add) — a grep guard against silently doing the folded-in scope from
+    // the newer tickets/drafts/ file that this ticket's own issue text
+    // explicitly excludes.
+    expect(source).not.toMatch(/team_goals_conceded/)
   })
 })
