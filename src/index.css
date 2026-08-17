@@ -22,6 +22,11 @@
   --panel-fill: rgba(23, 31, 51, 0.55);
   --panel-fill-raised: rgba(29, 39, 63, 0.62);
   --panel-border: rgba(148, 163, 194, 0.14);
+  /* A stronger line than --panel-border, same ink hue at higher alpha.
+     --panel-border is tuned to whisper against a panel's own translucent
+     fill; small details sitting on already-lifted material (the shirt
+     outline) need more definition to read at all. Added ticket #44. */
+  --panel-border-strong: rgba(148, 163, 194, 0.34);
   --panel-blur: 22px;
   --panel-saturate: 150%;
 
@@ -32,10 +37,21 @@
   --accent-cyan: #5ec8de;
   --accent-cyan-dim: rgba(94, 200, 222, 0.16);
   --accent-cyan-line: rgba(94, 200, 222, 0.4);
+  /* Ambient-backdrop-only variant of --accent-cyan-dim, raised slightly
+     in alpha. Kept as its own token rather than raising --accent-cyan-dim
+     itself, because that token is shared with badges/banners elsewhere
+     (home-incomplete, squad-sync, squad-errors) which should not brighten
+     as a side effect of the fixed viewport wash reading more clearly
+     (ticket #44, finding 3). */
+  --accent-cyan-ambient: rgba(94, 200, 222, 0.24);
 
   --accent-coral: #e8825f;
   --accent-coral-dim: rgba(232, 130, 95, 0.16);
   --accent-coral-line: rgba(232, 130, 95, 0.4);
+  /* See --accent-cyan-ambient above — same reasoning, kept slightly lower
+     than the cyan ambient value so the wash doesn't grow a second focal
+     point that competes with the cyan glow or with panels. */
+  --accent-coral-ambient: rgba(232, 130, 95, 0.21);
 
   /* ---- Text ---- */
   --text-primary: #e7eaf2;
@@ -53,6 +69,16 @@
   --text-body: 400 0.9375rem/1.5 var(--font-sans);
   --text-title: 550 1.0625rem/1.3 var(--font-sans);
   --text-display: 600 2.25rem/1.1 var(--font-sans);
+  /* A tighter label variant, same role as --text-label but for
+     width-constrained contexts. Currently only the pitch shirt's player
+     name, whose column is fixed at var(--space-12) wide and must never
+     truncate mid-word (ticket #44, finding 2). 0.6875rem, not a rounder
+     0.75rem, because it was checked empirically (a local, uncommitted
+     render harness against real long web_names) rather than guessed:
+     0.75rem still forced a 2-line clamp to truncate "Alexander-Arnold",
+     the longest real current web_name; 0.6875rem is the smallest step
+     down that clears it. */
+  --text-label-tight: 400 0.6875rem/1.25 var(--font-sans);
 
   /* ---- Spacing — 4px base unit ---- */
   --space-1: 0.25rem;
@@ -84,9 +110,22 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  /* Ticket #44, finding 4 — lock the horizontal axis at the document
+     level. This is the backstop, not the fix: the actual cause was a
+     flex item (the pitch shirt's name) whose min-content width could
+     exceed its column, forcing the row — and the whole page — wider
+     than the viewport at narrow widths. That's fixed at the source in
+     PlayerShirt.css (the name wraps instead of forcing a single
+     unbreakable line) and Pitch.css (`min-width: 0` on the shirt column,
+     the standard flex-item fix for this exact failure mode). This rule
+     stays as defence in depth against the next thing that does the same. */
+  overflow-x: hidden;
 }
 
 body {
+  /* Contains iOS's rubber-band overscroll to the vertical axis, so a
+     sideways drag can't nudge the column off-centre even momentarily. */
+  overscroll-behavior-x: none;
   /* No background here — deliberately. `:root` above already supplies
      the canvas background (and #0b0f19 is the fallback paint before any
      component mounts). Ticket #26: because `:root`'s background is not

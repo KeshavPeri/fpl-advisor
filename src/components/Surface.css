@@ -29,18 +29,32 @@
 /* Ambient glow bleeding from behind the panel — a low-opacity wash of
    the recommended-action accent, not a bright fill. This is the
    signature move: light behind glass, the way a phone screen reads in
-   a dark room, rather than a bordered box sitting on a dark page. */
+   a dark room, rather than a bordered box sitting on a dark page.
+
+   Ticket #44, finding 3 — reworked. The previous version sized the
+   glow's box with `height: 70%`, which put the box's own bottom edge
+   *inside* the panel rather than below it. The radial-gradient's
+   default "farthest-corner" sizing measures its fade against the
+   diagonal to that box's corners, which is longer than the distance
+   straight down to the box's bottom-centre — so at that bottom edge the
+   gradient hadn't actually finished fading yet, and blur() turned that
+   still-live edge into a visible seam: the "thick fixed line low on the
+   panel". Fixed by giving the ellipse an explicit size (not
+   farthest-corner) and making the box itself generously larger than
+   that ellipse, so by the time the *box's own edge* is reached the
+   gradient has been sitting at true `transparent` — not just a low
+   value — for a wide margin already. No mask, no second gradient:
+   the fix is entirely "let the fade finish before the box ends". */
 .surface::before {
   content: '';
   position: absolute;
-  inset: -40% -30% auto -30%;
-  height: 70%;
+  inset: -60% -35% 0 -35%;
   background: radial-gradient(
-    ellipse at top,
+    ellipse 60% 50% at 50% 20%,
     var(--accent-cyan-dim) 0%,
-    transparent 70%
+    transparent 100%
   );
-  filter: blur(12px);
+  filter: blur(20px);
   z-index: -1;
   pointer-events: none;
 }

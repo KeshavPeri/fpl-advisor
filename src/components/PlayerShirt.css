@@ -13,6 +13,17 @@
   align-items: center;
   gap: var(--space-1);
   width: var(--space-12);
+  /* Ticket #44, finding 4 — the actual cause of the horizontal-scroll
+     bug: without this, a flex item's automatic minimum width is its
+     content's min-content size, not its explicit `width` above. Before
+     this ticket, `.player-shirt__name` used `white-space: nowrap`, so
+     a long name's full unwrapped width became this column's real
+     minimum — wider than var(--space-12) — and a full row of them
+     forced the whole page wider than the viewport. The name now wraps
+     (see `.player-shirt__name` below), which already shrinks that
+     min-content size back down; `min-width: 0` is the standard,
+     belt-and-suspenders flex fix for this exact failure mode. */
+  min-width: 0;
 }
 
 /* The badge is the ring's own element: a rounded square holding the shirt
@@ -40,11 +51,22 @@
 
 /* The shirt silhouette itself — a simple V-neck jersey shape cut with
    clip-path, tonally lifted one step above the badge behind it so it
-   reads as a distinct object rather than a flat square. */
+   reads as a distinct object rather than a flat square.
+
+   Ticket #44, finding 1: a flat `--surface-2` fill on a `--panel-fill-
+   raised` badge — both from the same low-chroma ink family — read as
+   barely-there at phone size, especially once the badge itself sits on
+   blurred glass over the backdrop. Fixed with three token-only moves,
+   no new hue: a two-stop gradient for a little dimension instead of a
+   flat fill, a defined edge using --panel-border-strong (a stronger
+   line than the whisper-thin --panel-border), and a small collar notch
+   (::after below) so the shape reads as a garment, not a badge icon. */
 .player-shirt__shirt {
-  width: 70%;
-  height: 70%;
-  background: var(--surface-2);
+  position: relative;
+  width: 74%;
+  height: 74%;
+  background: linear-gradient(165deg, var(--surface-2) 0%, var(--panel-fill-raised) 100%);
+  border: 1.5px solid var(--panel-border-strong);
   clip-path: polygon(
     30% 0%,
     70% 0%,
@@ -57,6 +79,21 @@
     0% 30%,
     15% 14%
   );
+}
+
+/* The collar notch — a small triangular cut, one step darker than the
+   shirt body, sitting at the neckline so the silhouette reads as a
+   V-neck jersey rather than an abstract polygon. */
+.player-shirt__shirt::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 34%;
+  height: 24%;
+  background: var(--surface-1);
+  clip-path: polygon(22% 0%, 78% 0%, 50% 100%);
 }
 
 /* Captaincy — a small badge on the shirt itself, not a separate line of
@@ -89,18 +126,46 @@
   color: var(--accent-cyan);
 }
 
+/* Ticket #44, finding 2 — `name` is already FPL's own `web_name`
+   (src/lib/squad/api.ts), the domain's own short form; this ticket does
+   not touch what's displayed, only how. At var(--space-12) (48px) wide,
+   single-line-plus-ellipsis truncation still cut some real names
+   mid-word ("Bruno…", "Pedro…"). Replaced with up to two lines instead
+   of a single truncated one: `-webkit-line-clamp` (not
+   `text-overflow: ellipsis`) is the only overflow mechanism now, so a
+   mid-word ellipsis is structurally impossible, not just unlikely.
+   `min-height: var(--space-8)` reserves the same two-line height for
+   every player regardless of whether their own name needs one line or
+   two, which is what keeps all 15 slots' row height uniform. See
+   PlayerShirt.truncation.test.ts for the check against the longest
+   realistic name this needs to survive. */
 .player-shirt__name {
   width: 100%;
-  font: var(--text-label);
+  min-height: var(--space-8);
+  font: var(--text-label-tight);
   color: var(--text-primary);
   text-align: center;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  hyphens: auto;
 }
 
+/* Ticket #44, finding 7 — the one number each player carries should
+   read as the important thing (design-reference.md reference 2,
+   Revolut: a tabular figure with a small quiet label). `.num` already
+   supplies the tabular mono digits; weight and letter-spacing here are
+   the "generously spaced" half of that reference, layered on top the
+   same way `.pitch__bench-title` layers weight onto `--text-label`
+   elsewhere in this app. Explicitly not made bigger — the DoD is
+   explicit that name-fit is never solved by shrinking the number. */
 .player-shirt__price {
   font: var(--text-label);
+  font-weight: 500;
+  letter-spacing: 0.02em;
   color: var(--text-tertiary);
 }
 
