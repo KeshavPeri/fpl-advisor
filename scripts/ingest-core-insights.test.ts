@@ -190,3 +190,47 @@ describe('source invariants (grep-based, matching the DoD wording exactly)', () 
     }
   })
 })
+
+// ============================================================================
+// competition (ticket #54) — source invariants. The actual parsing is
+// scripts/lib/competition.test.ts's job; what belongs here is proving THIS
+// file uses it the way the ticket requires: derived once via the shared
+// parser, written on every row, and never caught or defaulted past on an
+// unknown token. Grepping the shipped source, same technique as the
+// invariants above.
+// ============================================================================
+
+describe('competition (ticket #54) — source invariants', () => {
+  const sourcePath = fileURLToPath(new URL('./ingest-core-insights.ts', import.meta.url))
+  const source = readFileSync(sourcePath, 'utf8')
+
+  it('imports parseCompetition from the shared module rather than pattern-matching match_id locally', () => {
+    expect(source).toMatch(/import\s*\{\s*parseCompetition\s*\}\s*from\s*['"]\.\/lib\/competition\.js['"]/)
+    expect(source).not.toMatch(/match_id.*\.includes\(/) // no LIKE-style local pattern match on match_id
+  })
+
+  it('never defaults an unrecognized competition to "prem"', () => {
+    // The ticket's own most-important line. A hardcoded fallback like
+    // `?? 'prem'` or `|| 'prem'` right after parseCompetition would silently
+    // reproduce the bug this ticket exists to fix.
+    expect(source).not.toMatch(/parseCompetition\([^)]*\)\s*(\?\?|\|\|)\s*['"]prem['"]/)
+  })
+
+  it('does not wrap parseCompetition in a try/catch that would swallow UnknownCompetitionError', () => {
+    // toMatchStatRow calls parseCompetition() with no try around it, so the
+    // throw propagates out of the per-row loop in upsertPlayerMatchStats and
+    // all the way to main()'s own catch block — which is what turns an
+    // unknown token into a failed job_runs row rather than a skipped row.
+    const toMatchStatRowBody = source.slice(source.indexOf('function toMatchStatRow'), source.indexOf('function toMatchStatRow') + 800)
+    expect(toMatchStatRowBody).toMatch(/parseCompetition\(/)
+    expect(toMatchStatRowBody).not.toMatch(/try\s*\{/)
+  })
+
+  it('writes competition on the upserted row, not just an in-memory field', () => {
+    expect(source).toMatch(/competition[,\s]*$/m)
+  })
+
+  it('reports rows written and rows now carrying a non-null competition as named job_runs.details fields', () => {
+    expect(source).toMatch(/matchRowsWithCompetition/)
+  })
+})
