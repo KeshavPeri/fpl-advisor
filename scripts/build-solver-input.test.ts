@@ -117,9 +117,10 @@ describe('buildSolverConfig', () => {
     expect(config.chip_limits).toEqual({ bb: 0, wc: 0, fh: 0, tc: 0 })
   })
 
-  it('leaves num_iterations at 1 — raising it is item 13\'s decision', () => {
+  it('sets num_iterations to 3 — ticket #47, so the solve produces Plan A/B/C — and iteration_criteria explicitly rather than the shipped default', () => {
     const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
-    expect(config.num_iterations).toBe(1)
+    expect(config.num_iterations).toBe(3)
+    expect(config.iteration_criteria).toBe('this_gw_transfer_in_out')
   })
 
   it('sets the datasource to whatever the CSV-derived value is, matching the CSV\'s own filename', () => {

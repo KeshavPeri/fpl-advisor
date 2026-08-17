@@ -164,6 +164,32 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: npx tsx scripts/store-solver-output.ts
 
+      - name: Generate recommendations
+        id: recommend
+        # Ticket #47 (feature-list item 13). Reads solver_runs/solver_picks
+        # — written by the "Store solver output" step above — and builds
+        # Plan A/B/C.
+        #
+        # Gated on BOTH steps.build-input's squad_found output AND
+        # steps.store.outcome being 'success' (an explicit `if:` on a step
+        # replaces GitHub Actions' own default success() gate rather than
+        # adding to it, so this has to be spelled out, not assumed). Without
+        # the second half of this condition, a "Store solver output" failure
+        # (infeasible / no-incumbent / crashed — product-brief.md §6c's
+        # three named failure modes) would still let this step run, and it
+        # would silently re-process whatever OLDER run's picks were already
+        # in solver_picks (that table is upserted, so a failed attempt
+        # simply leaves it unchanged) rather than reflect that today's solve
+        # never produced a new one. scripts/generate-recommendations.ts's
+        # own "no solve at all yet" path (an empty solver_picks table) still
+        # covers the case where no run has EVER succeeded — see that
+        # script's own file header.
+        if: steps.build-input.outputs.squad_found == 'true' && steps.store.outcome == 'success'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/generate-recommendations.ts
+
       - name: Upload projections CSV artifact
         if: always()
         uses: actions/upload-artifact@v4
