@@ -190,6 +190,31 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: npx tsx scripts/generate-recommendations.ts
 
+      - name: Send Telegram notification
+        # Ticket #55 (feature-list item 14). Runs whenever a squad was found
+        # for this gameweek, REGARDLESS of whether "Store solver output" or
+        # "Generate recommendations" above succeeded — product-brief.md
+        # §6a/§6c/§6d all require a failure notice (not silence) on exactly
+        # the failure paths those steps can produce (crash, timeout,
+        # infeasible), and scripts/send-telegram.ts's own read of
+        # solver_runs/recommendations is what tells those cases apart. Using
+        # `if: always()` here (scoped to squad_found, not to the whole job)
+        # is therefore deliberate, not a copy-paste default — do not add
+        # `&& steps.store.outcome == 'success'` the way the step above does.
+        #
+        # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are optional at the secrets
+        # level: scripts/send-telegram.ts exits zero with a named message and
+        # makes no request (Supabase included) if either is unset, same
+        # contract as sync-squad.ts's unset FPL_ENTRY_ID — so this step is
+        # safe to run before the bot exists.
+        if: always() && steps.build-input.outputs.squad_found == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: npx tsx scripts/send-telegram.ts
+
       - name: Upload projections CSV artifact
         if: always()
         uses: actions/upload-artifact@v4
