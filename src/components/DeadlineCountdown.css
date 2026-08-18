@@ -1,0 +1,50 @@
+/*
+  Thin, topmost strip on the home screen (design-reference.md: "Home screen
+  order: thin deadline countdown, then the verdict, then the squad as a
+  pitch"). Deliberately not a Surface — no translucent panel, no blur, no
+  border — this is a quiet inline strip, not a card.
+
+  Understated by default (small quiet label, body-weight value). Inside the
+  24h escalation threshold the remaining-time figure alone grows larger and
+  picks up --accent-coral — chosen over --accent-cyan because this is a
+  time-pressure signal, matching the warning/risk role coral already carries
+  elsewhere in the app (e.g. .home-incomplete), not a positive/recommended
+  one. Never a colour transition that flashes or pulses — see
+  decisions/ticket-42.md.
+*/
+.deadline-countdown {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.deadline-countdown__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.deadline-countdown__value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: var(--space-1);
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.deadline-countdown__remaining {
+  color: var(--text-primary);
+  transition:
+    color 0.2s ease,
+    font-size 0.2s ease;
+}
+
+/* prefers-reduced-motion is already handled globally in src/index.css,
+   which zeroes every element's transition-duration — no local override
+   needed here. */
+
+.deadline-countdown--escalated .deadline-countdown__remaining {
+  font: var(--text-title);
+  color: var(--accent-coral);
+}

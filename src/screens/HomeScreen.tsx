@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import AppShell from '../components/AppShell'
+import DeadlineCountdown, { type DeadlineCountdownState } from '../components/DeadlineCountdown'
 import { deriveAvailability } from '../components/pitchAvailability'
 import Pitch, { type PitchPlayer } from '../components/Pitch'
 import PitchSkeleton from '../components/PitchSkeleton'
@@ -11,11 +12,14 @@ import { SQUAD_SIZE } from '../lib/squad/positions'
 import './HomeScreen.css'
 
 /**
- * Ticket #38 — the squad as a pitch. Countdown (item 18) and verdict card
- * (item 17) are separate tickets and deliberately not here yet
- * (product-brief.md §1: home screen order is countdown, verdict, pitch —
- * this ticket builds only the third piece). Replaces the design-token demo
- * panel #8 left on this screen.
+ * Ticket #38 — the squad as a pitch. Verdict card (item 17) is a separate
+ * ticket and deliberately not here yet (product-brief.md §1: home screen
+ * order is countdown, verdict, pitch). The countdown (item 18, ticket #42)
+ * is now built too — it renders above everything else in this component,
+ * fed by the same fetchTargetGameweek() call the pitch section already
+ * makes (see countdownState below; ticket #42: "do not add a second query
+ * for the same row"). Replaces the design-token demo panel #8 left on this
+ * screen.
  *
  * Data note (see decisions/ticket-38.md): the pitch reads via
  * fetchTargetGameweek + fetchExistingSquad, plus fetchPlayers for player
@@ -35,6 +39,9 @@ type LoadState =
 
 function HomeScreen() {
   const [loadState, setLoadState] = useState<LoadState>({ status: 'loading' })
+  const [countdownState, setCountdownState] = useState<DeadlineCountdownState>({
+    status: 'loading',
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -45,8 +52,15 @@ function HomeScreen() {
         if (cancelled) return
         if (!gw) {
           setLoadState({ status: 'no-gameweek' })
+          setCountdownState({ status: 'unavailable' })
           return
         }
+
+        setCountdownState({
+          status: 'ready',
+          gameweekName: gw.name,
+          deadlineIso: gw.deadlineTime,
+        })
 
         const [playerList, existing] = await Promise.all([
           fetchPlayers(),
@@ -90,6 +104,14 @@ function HomeScreen() {
       } catch (err) {
         if (cancelled) return
         setLoadState({ status: 'error', message: toErrorMessage(err) })
+        // Covers a fetchTargetGameweek() failure too (countdownState would
+        // otherwise be stuck on 'loading' forever) as well as a later
+        // players/squad failure, where it was already set to 'ready' —
+        // re-setting to 'unavailable' here is wrong in that second case
+        // only if countdownState is already 'ready', so guard on that.
+        setCountdownState((current) =>
+          current.status === 'ready' ? current : { status: 'unavailable' }
+        )
       }
     }
 
@@ -101,6 +123,7 @@ function HomeScreen() {
 
   return (
     <AppShell>
+      <DeadlineCountdown state={countdownState} />
       <header className="home-mark">FPL Advisor</header>
 
       {loadState.status === 'loading' && <PitchSkeleton />}
