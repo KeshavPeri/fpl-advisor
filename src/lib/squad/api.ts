@@ -55,14 +55,27 @@ interface PlayerRow {
   team_id: number
   element_type: PositionCode
   now_cost: number
+  status: string
+  chance_of_playing_next_round: number | null
   teams: { short_name: string } | { short_name: string }[] | null
 }
 
-/** The selectable player pool, from the #11-filled `players` table. */
+/**
+ * The selectable player pool, from the #11-filled `players` table.
+ *
+ * `status` and `chance_of_playing_next_round` were added by ticket #61 —
+ * fetchPlayers is the only existing read that supplies player name/position/
+ * price to the home screen's pitch (see HomeScreen.tsx), and it was the one
+ * read missing these two columns, which is why every shirt rendered with no
+ * availability ring until now. See pitchAvailability.ts's deriveAvailability
+ * for the rules these two fields feed.
+ */
 export async function fetchPlayers(): Promise<SelectablePlayer[]> {
   const { data, error } = await supabase
     .from('players')
-    .select('id, code, web_name, team_id, element_type, now_cost, teams(short_name)')
+    .select(
+      'id, code, web_name, team_id, element_type, now_cost, status, chance_of_playing_next_round, teams(short_name)'
+    )
     .order('web_name', { ascending: true })
     .returns<PlayerRow[]>()
 
@@ -78,6 +91,8 @@ export async function fetchPlayers(): Promise<SelectablePlayer[]> {
       teamShortName: team?.short_name ?? '',
       elementType: row.element_type,
       nowCost: row.now_cost,
+      status: row.status,
+      chanceOfPlayingNextRound: row.chance_of_playing_next_round,
     }
   })
 }

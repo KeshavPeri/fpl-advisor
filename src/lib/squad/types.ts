@@ -9,6 +9,9 @@ export interface SelectablePlayer {
   teamShortName: string
   elementType: PositionCode
   nowCost: number // tenths of a million
+  /** a/d/i/s/u/n, straight from the FPL API — see deriveAvailability (src/components/pitchAvailability.ts) for what each code means. */
+  status: string
+  chanceOfPlayingNextRound: number | null
 }
 
 export interface TargetGameweek {

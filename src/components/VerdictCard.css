@@ -1,0 +1,154 @@
+/*
+  The verdict card (ticket #61, feature-list item 17) — the recommendation,
+  on the home screen. Built entirely from Surface (design-reference.md: every
+  panel in this app is a translucent-material surface, never a flat card
+  with its own box-shadow) and design tokens from src/index.css — no new
+  token is introduced here.
+
+  Colour follows the DoD directly: --accent-cyan marks the recommended
+  action (the points figure); --accent-coral marks risk language — a hit, a
+  stale recommendation, a coverage gap. No green, no yellow, no purple.
+*/
+
+.verdict-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* A stale recommendation reads as a confident answer to a DIFFERENT
+   gameweek, not to this one — product-brief.md §6a: "It must never present
+   stale recommendations as current." This banner is the one thing allowed
+   to sit above the headline: the DoD's "nothing precedes it" governs the
+   normal, fresh case, and is deliberately overridden here so a stale plan
+   can never be mistaken for today's. */
+.verdict-card__stale {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--accent-coral);
+}
+
+/* The decision — largest text on the card by construction (--text-display
+   is the largest token in src/index.css), sourced verbatim from
+   recommendation_reasons order_index 0 (see src/lib/verdict/derive.ts). */
+.verdict-card__headline {
+  font: var(--text-display);
+  color: var(--text-primary);
+}
+
+.verdict-card__captains {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+/* The one important number, Revolut-style (design-reference.md reference 2):
+   large, tabular, generously spaced, with a small quiet label — the only
+   other thing sharing --text-display's size, and the only accented text on
+   the card in the ordinary (non-stale, non-hit) case. */
+.verdict-card__points {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.verdict-card__points-label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.verdict-card__points-value {
+  font: var(--text-display);
+  color: var(--accent-cyan);
+  letter-spacing: 0.01em;
+}
+
+/* Risk language: a hit always costs points, so it's coral, never cyan
+   (design-reference.md: "coral for risk"). Only rendered when hit_cost > 0
+   — see VerdictCard.tsx; product-brief.md §6d forbids hit language of any
+   kind when there is no hit. */
+.verdict-card__hit {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+/* The confidence band as a word, never a number/percentage/bar/meter
+   (product-brief.md §8). Neutral colour — confidence itself isn't risk,
+   only a low band plus the coin-flip note below carries that meaning. */
+.verdict-card__confidence {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.verdict-card__confidence-note {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* A player the model has no history for is a real gap in the recommendation
+   — coral, same family as the hit and stale warnings above. */
+.verdict-card__coverage {
+  font: var(--text-label);
+  color: var(--accent-coral);
+}
+
+.verdict-card__invitation-title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.verdict-card__invitation-body {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.verdict-card__error {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+/* Loading placeholder — four bars shaped roughly like the ordinary
+   (non-stale, non-hit) card's own content: headline, captain line, points
+   figure, confidence line. Same technique as PitchSkeleton.css: real
+   content replaces these bars at close to the same height, so the pitch
+   below doesn't jump when the read resolves. */
+.verdict-card--loading {
+  gap: var(--space-4);
+}
+
+.verdict-card__skeleton-line {
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: verdict-card-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.verdict-card__skeleton-line--headline {
+  height: var(--space-8);
+  width: 85%;
+}
+
+.verdict-card__skeleton-line--body {
+  height: var(--space-4);
+  width: 60%;
+}
+
+.verdict-card__skeleton-line--points {
+  height: var(--space-8);
+  width: 35%;
+  margin-top: var(--space-2);
+}
+
+@keyframes verdict-card-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+/* prefers-reduced-motion is already handled globally in src/index.css,
+   which zeroes every element's animation-duration — no local override
+   needed here (same note as DeadlineCountdown.css). */
