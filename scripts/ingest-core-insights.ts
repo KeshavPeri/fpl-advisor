@@ -74,9 +74,23 @@
 // header for the "because". A row whose player_id has no entry in that
 // map (source files are generated separately; a small gap is expected) is
 // still written, with player_code left null — never skipped over this.
+//
+// competition (ticket #54): match_id carries the competition as a slug
+// segment (e.g. "25-26-prem-arsenal-vs-chelsea"), decoded once per row by
+// scripts/lib/competition.ts's parseCompetition() and written to every row,
+// existing and new, via this same upsert — see
+// supabase/migrations/20260818100000_player_match_stats_competition.sql's
+// header for the "because" and every consumer's filtering obligation. A
+// match_id whose competition token is not on that module's known list makes
+// this job FAIL LOUDLY — parseCompetition() throws, the error propagates out
+// of the per-row mapping straight to main()'s catch block below, which
+// records a failed job_runs row (naming the match_id, via the thrown
+// error's own message) and exits non-zero. It does not default to "prem"
+// and does not store null and continue — see that module's header for why.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { parse } from 'csv-parse/sync'
+import { parseCompetition } from './lib/competition.js'
 
 const JOB_NAME = 'ingest-core-insights'
 
@@ -404,6 +418,7 @@ interface MatchStatRow {
   player_id: number
   player_code: number | null
   match_id: string
+  competition: string
   season: string
   gameweek: number
   minutes_played: number | null
@@ -435,10 +450,17 @@ function toMatchStatRow(
   const playerId = toInt(record.player_id)
   const matchId = record.match_id?.trim()
   if (playerId === null || !matchId) return null
+  // Throws UnknownCompetitionError on a token outside the known list — see
+  // this file's header and scripts/lib/competition.ts. Deliberately NOT
+  // caught here: it must propagate out of the per-row loop in
+  // upsertPlayerMatchStats and all the way to main()'s catch block, so an
+  // unrecognized competition fails the whole run rather than skipping one row.
+  const competition = parseCompetition(matchId)
   return {
     player_id: playerId,
     player_code: playerCodeByPlayerId.get(playerId) ?? null,
     match_id: matchId,
+    competition,
     season,
     gameweek,
     minutes_played: toInt(record.minutes_played),
@@ -468,6 +490,13 @@ interface PlayerMatchStatsUpsertResult {
   // (ticket #22) — written with player_code left null, never skipped over
   // this. Reported in the run's job_runs row so the gap is visible.
   missingPlayerCode: number
+  // Rows written whose competition parsed successfully (ticket #54). In
+  // practice this always equals `written`: parseCompetition() either
+  // returns a token or throws, and a throw aborts the whole run before any
+  // row from this file is upserted (see toMatchStatRow). Computed
+  // defensively, the same way missingPlayerCode is above, rather than
+  // assumed equal to `written` by construction.
+  withCompetition: number
 }
 
 async function upsertPlayerMatchStats(
@@ -492,7 +521,8 @@ async function upsertPlayerMatchStats(
     console.warn(`${JOB_NAME}: skipped ${skipped} row(s) in ${url} missing player_id or match_id`)
   }
   const missingPlayerCode = rows.filter((r) => r.player_code === null).length
-  if (rows.length === 0) return { written: 0, missingPlayerCode: 0 }
+  const withCompetition = rows.filter((r) => r.competition !== null && r.competition !== undefined && r.competition !== '').length
+  if (rows.length === 0) return { written: 0, missingPlayerCode: 0, withCompetition: 0 }
 
   const { error } = await supabase.from('player_match_stats').upsert(rows, { onConflict: 'player_id,match_id' })
   if (error) {
@@ -501,7 +531,7 @@ async function upsertPlayerMatchStats(
     }
     throw new IngestError(`upsert into player_match_stats failed for ${url}: ${error.message}`)
   }
-  return { written: rows.length, missingPlayerCode }
+  return { written: rows.length, missingPlayerCode, withCompetition }
 }
 
 // ============================================================================
@@ -576,6 +606,8 @@ async function main(): Promise<void> {
           malformedEloRows: 0,
           gameweeksFound: 0,
           matchRowsWritten: 0,
+          matchRowsWithoutPlayerCode: 0,
+          matchRowsWithCompetition: 0,
         },
         startedAt,
       })
@@ -609,6 +641,7 @@ async function main(): Promise<void> {
     let gameweeksFound = 0
     let matchRowsWritten = 0
     let matchRowsWithoutPlayerCode = 0
+    let matchRowsWithCompetition = 0
     for (let gw = 1; gw <= MAX_GAMEWEEKS; gw++) {
       const url = gameweekUrl(season, gw)
       const resp = await fetchCsv(url)
@@ -624,9 +657,15 @@ async function main(): Promise<void> {
         console.log(`${JOB_NAME}: GW${gw} playermatchstats.csv has no rows yet (season ${season}) — skipping`)
         continue
       }
+      // upsertPlayerMatchStats -> toMatchStatRow -> parseCompetition() throws
+      // UnknownCompetitionError on an unrecognized competition token, which
+      // is deliberately NOT caught here — it propagates to this function's
+      // own try/catch below, failing the whole run loudly rather than
+      // skipping the offending gameweek file. See scripts/lib/competition.ts.
       const result = await upsertPlayerMatchStats(supabase, url, season, gw, records, playerCodeByPlayerId)
       matchRowsWritten += result.written
       matchRowsWithoutPlayerCode += result.missingPlayerCode
+      matchRowsWithCompetition += result.withCompetition
     }
 
     const message =
@@ -636,7 +675,8 @@ async function main(): Promise<void> {
       `${teamEloPlan.duplicateCodeConflicts} duplicate-code conflict(s), ` +
       `${eloResult.malformedElo} row(s) with a malformed elo cell skipped, ` +
       `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted ` +
-      `(${matchRowsWithoutPlayerCode} without a matching player_code in players.csv)`
+      `(${matchRowsWithoutPlayerCode} without a matching player_code in players.csv, ` +
+      `${matchRowsWithCompetition} carrying a non-null competition)`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
@@ -652,6 +692,7 @@ async function main(): Promise<void> {
         gameweeksFound,
         matchRowsWritten,
         matchRowsWithoutPlayerCode,
+        matchRowsWithCompetition,
       },
       startedAt,
     })

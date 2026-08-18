@@ -18,6 +18,20 @@
 // across the season boundary). Every join in this file goes through
 // player_match_stats.player_code = players.code, never player_id = id.
 //
+// PREMIER LEAGUE ONLY (ticket #54). player_match_stats holds every
+// competition the source publishes — cup and European matches score zero
+// FPL points and their rates are measurably different (34% higher xG per 90
+// in cup/European rows — see the ticket). The single player_match_stats read
+// below (section 4) is filtered to competition = PREMIER_LEAGUE_COMPETITION
+// IN THE QUERY, not in memory after fetching, and every downstream use of
+// its result — the per-90 rate history, the last-five-matches minutes
+// window, and the defensive-contribution match set — derives from that same
+// filtered fetch, so one filter covers all three. A row whose competition is
+// NULL (not yet re-stamped by scripts/ingest-core-insights.ts since the
+// #54 migration added the column) is excluded, same as a known
+// non-Premier-League row, and both are counted separately in job_runs.details
+// — see the exclusion-count queries in section 4 below.
+//
 // Upsert only, never delete: this file issues no Supabase row-removal call
 // anywhere. A row this run doesn't touch (a gameweek that's fallen out of the
 // horizon, a player who has left the league) is simply left as it was.
@@ -31,6 +45,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
+import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import type { Position } from '../src/lib/scoring/types.ts'
 import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
 import {
@@ -357,6 +372,15 @@ async function main(): Promise<void> {
     //    Over 15,000 rows in the live table — far past the 1,000-row
     //    db-max-rows ceiling. This is the read the ticket #43 audit named
     //    explicitly. Paginated and count-verified, same as players above.
+    //
+    //    PREMIER LEAGUE ONLY (ticket #54): filtered to
+    //    competition = PREMIER_LEAGUE_COMPETITION IN THE QUERY on both the
+    //    data fetch and the count-check below, so the two use the exact same
+    //    filter (see scripts/project-points.test.ts's grep-based test for
+    //    that identity) and the pagination/row-count guard above still
+    //    composes correctly. A row whose competition is NULL or a known
+    //    non-Premier-League value is excluded here and counted separately
+    //    below — never assumed Premier League.
     // --------------------------------------------------------------------
     const {
       rows: matchStatsRows,
@@ -368,6 +392,7 @@ async function main(): Promise<void> {
         .select(
           'player_code, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries',
         )
+        .eq('competition', PREMIER_LEAGUE_COMPETITION)
         .range(from, to)
         .returns<MatchStatsRow[]>(),
     )
@@ -384,10 +409,39 @@ async function main(): Promise<void> {
     const { count: matchStatsRowsExpectedByCount, error: matchStatsCountError } = await supabase
       .from('player_match_stats')
       .select('*', { count: 'exact', head: true })
+      .eq('competition', PREMIER_LEAGUE_COMPETITION)
     if (matchStatsCountError) {
       throw new ProjectionError(`player_match_stats count check failed: ${matchStatsCountError.message}`, 'player_match_stats')
     }
     assertRowCountMatches('player_match_stats', matchStatsRows.length, matchStatsRowsExpectedByCount ?? 0)
+
+    // Exclusion counts — informational only, never used to filter anything
+    // above; two independent count-only queries so a null competition (not
+    // yet re-stamped since the #54 migration added the column) is reported
+    // separately from a known non-Premier-League competition, per the
+    // ticket's robustness requirement.
+    const { count: matchStatsRowsNullCompetition, error: nullCompetitionError } = await supabase
+      .from('player_match_stats')
+      .select('*', { count: 'exact', head: true })
+      .is('competition', null)
+    if (nullCompetitionError) {
+      throw new ProjectionError(
+        `player_match_stats null-competition count check failed: ${nullCompetitionError.message}`,
+        'player_match_stats',
+      )
+    }
+
+    const { count: matchStatsRowsExcludedNonPremierLeague, error: nonPremierLeagueError } = await supabase
+      .from('player_match_stats')
+      .select('*', { count: 'exact', head: true })
+      .not('competition', 'is', null)
+      .neq('competition', PREMIER_LEAGUE_COMPETITION)
+    if (nonPremierLeagueError) {
+      throw new ProjectionError(
+        `player_match_stats non-Premier-League count check failed: ${nonPremierLeagueError.message}`,
+        'player_match_stats',
+      )
+    }
 
     const codeToPlayer = new Map<number, PlayerRow>()
     for (const player of playerRows) {
@@ -598,11 +652,19 @@ async function main(): Promise<void> {
       matchStatsRowsFetched: matchStatsRows.length,
       matchStatsRowsExpectedByCount: matchStatsRowsExpectedByCount ?? 0,
       matchStatsPagesFetched,
+      // Ticket #54: rows read is the Premier-League-filtered count above;
+      // excluded rows are reported as two separate named counts (known
+      // non-Premier-League vs not-yet-stamped null), never combined.
+      matchStatsRowsRead: matchStatsRows.length,
+      matchStatsRowsExcludedNonPremierLeague: matchStatsRowsExcludedNonPremierLeague ?? 0,
+      matchStatsRowsExcludedNullCompetition: matchStatsRowsNullCompetition ?? 0,
     }
     const message =
       `${JOB_NAME}: projected ${horizonGameweeks.length} gameweek(s) ` +
       `(${horizonGameweeks.map((gw) => gw.id).join(', ')}) for ${playerRows.length} players ` +
-      `(${rowsToUpsert.length} rows written).`
+      `(${rowsToUpsert.length} rows written). player_match_stats: ${matchStatsRows.length} Premier League row(s) read, ` +
+      `${matchStatsRowsExcludedNonPremierLeague ?? 0} non-Premier-League row(s) excluded, ` +
+      `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {
