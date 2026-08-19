@@ -20,6 +20,23 @@ export interface CoverageEntry {
 }
 
 /**
+ * One starting-XI `solver_picks` row for the recommendation's own
+ * `gameweek_id` + `solution_index` (ticket #68) — used only to derive THIS
+ * gameweek's projected points, which is a different figure from
+ * `netPointsRounded`/`grossPointsRounded` below (those are totals across
+ * the whole multi-gameweek solve horizon). `isLineup` is carried through
+ * even though api.ts's own query already filters to `is_lineup = true` at
+ * the database layer, so `deriveVerdictView` can defend the same rule in
+ * the one place its arithmetic actually lives rather than trusting the
+ * caller silently (see derive.ts's bench-exclusion test).
+ */
+export interface GameweekPick {
+  expectedPoints: number
+  isCaptain: boolean
+  isLineup: boolean
+}
+
+/**
  * Everything `deriveVerdictView` needs for one recommendation — already
  * resolved by `src/lib/verdict/api.ts` (player names looked up, reasons
  * fetched in order_index order). Plan A only (`plan_index = 0`); this
@@ -42,6 +59,14 @@ export interface VerdictRecommendationData {
   reasons: readonly string[]
   /** Display name for every player id referenced above that could be resolved. */
   playerNames: ReadonlyMap<number, string>
+  /**
+   * Starting-XI `solver_picks` rows for this recommendation's own
+   * `gameweek_id` + `solution_index` (ticket #68) — see api.ts. Null when
+   * the rows could not be found at all (the read failed, or no rows exist
+   * for this gameweek+solution): `deriveVerdictView` must fall back to an
+   * explicit "unavailable" figure rather than 0/NaN/blank.
+   */
+  gameweekPicks: readonly GameweekPick[] | null
 }
 
 /** Explicit hit-cost figures — only present when hit_cost > 0 (product-brief.md §6d). */
@@ -65,8 +90,32 @@ export interface VerdictView {
    *  the same stored line is this card's headline, by the same established convention). */
   headline: string
   captainLine: string
-  netPoints: number
+  /**
+   * This gameweek's projected points (ticket #68) — sum of starting-XI
+   * `solver_picks.expected_points` for the recommendation's own
+   * `gameweekId` + solution, captain's contribution counted twice, rounded
+   * to a whole number. Null when `data.gameweekPicks` held no lineup rows —
+   * the component must render an explicit "unavailable" message, never
+   * 0/NaN/blank. This, not a horizon total, is the card's primary figure —
+   * see api.ts and derive.ts for the full "because".
+   */
+  gameweekPoints: number | null
+  /**
+   * States the figure's period unambiguously, using the recommendation's
+   * own gameweek name — never "current gameweek", since a stale
+   * recommendation's figure is for ITS gameweek, not the one showing
+   * elsewhere on screen.
+   */
+  gameweekPointsLabel: string
   hit: VerdictHit | null
+  /**
+   * Present only when `hit` is non-null. States explicitly that the hit's
+   * gross/net figures are a multi-gameweek total, never the single
+   * gameweek figure above — a hit is a one-off cost weighed against
+   * horizon-wide gain (product-brief.md §6d), so pairing it with
+   * `gameweekPoints` without saying so would be incoherent (ticket #68).
+   */
+  hitBasisLabel: string | null
   confidenceWord: string
   /** Present only when confidenceBand is 'coin-flip' — states in words that the top options are too close to separate. */
   coinFlipNote: string | null

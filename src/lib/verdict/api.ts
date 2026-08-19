@@ -1,5 +1,10 @@
 import { supabase } from '../supabase'
-import type { ConfidenceBand, CoverageEntry, VerdictRecommendationData } from './types.ts'
+import type {
+  ConfidenceBand,
+  CoverageEntry,
+  GameweekPick,
+  VerdictRecommendationData,
+} from './types.ts'
 
 /**
  * Same wrapping as src/lib/squad/api.ts's raise() — supabase-js resolves
@@ -24,6 +29,10 @@ interface RecommendationRow {
   confidence_band: ConfidenceBand
   coverage: CoverageEntry[] | null
   gameweeks: { name: string } | { name: string }[] | null
+  /** The solver's OWN iteration index this plan was built from (ticket #68)
+   *  — joins into solver_picks alongside gameweek_id. NOT the same as
+   *  plan_index; see the recommendations migration's own comment. */
+  solution_index: number
 }
 
 interface ReasonRow {
@@ -34,6 +43,17 @@ interface ReasonRow {
 interface PlayerNameRow {
   id: number
   web_name: string
+}
+
+/** One starting-XI solver_picks row for this recommendation's own
+ *  gameweek_id + solution_index (ticket #68). expected_points is the
+ *  solver's raw per-player xP, NOT multiplier-applied — see
+ *  scripts/store-solver-output.ts and the solver_output migration's own
+ *  comment — so captain doubling is applied in derive.ts, not here. */
+interface SolverPickRow {
+  expected_points: number
+  is_captain: boolean
+  is_lineup: boolean
 }
 
 /**
@@ -63,7 +83,7 @@ export async function fetchVerdict(): Promise<VerdictRecommendationData | null> 
     .select(
       'gameweek_id, is_roll, transfer_in_player_id, transfer_out_player_id, ' +
         'captain_player_id, vice_captain_player_id, hit_cost, gross_points_rounded, ' +
-        'net_points_rounded, confidence_band, coverage, gameweeks(name)'
+        'net_points_rounded, confidence_band, coverage, gameweeks(name), solution_index'
     )
     .eq('plan_index', 0)
     .order('gameweek_id', { ascending: false })
@@ -113,6 +133,36 @@ export async function fetchVerdict(): Promise<VerdictRecommendationData | null> 
     }
   }
 
+  // This gameweek's projected points (ticket #68) — a single additional
+  // read, filtered in the database to exactly this recommendation's own
+  // gameweek_id + solution_index + starting XI (is_lineup = true), never
+  // fetched-all-then-filtered-in-memory. Deliberately NOT passed through
+  // raise(): a failed or missing solver_picks read must fall back to an
+  // "unavailable" figure on the card (see deriveVerdictView), not blank the
+  // whole card the way raise() would via VerdictCard's error state — every
+  // other field this function resolves is unaffected by this read failing.
+  let gameweekPicks: GameweekPick[] | null = null
+  try {
+    const { data: pickRows, error: pickError } = await supabase
+      .from('solver_picks')
+      .select('expected_points, is_captain, is_lineup')
+      .eq('gameweek_id', recRow.gameweek_id)
+      .eq('solution_index', recRow.solution_index)
+      .eq('is_lineup', true)
+      .returns<SolverPickRow[]>()
+
+    if (pickError) throw pickError
+    if (pickRows && pickRows.length > 0) {
+      gameweekPicks = pickRows.map((row) => ({
+        expectedPoints: row.expected_points,
+        isCaptain: row.is_captain,
+        isLineup: row.is_lineup,
+      }))
+    }
+  } catch {
+    gameweekPicks = null
+  }
+
   return {
     gameweekId: recRow.gameweek_id,
     gameweekName,
@@ -128,5 +178,6 @@ export async function fetchVerdict(): Promise<VerdictRecommendationData | null> 
     coverage: recRow.coverage ?? [],
     reasons: (reasonRows ?? []).map((row) => row.reason),
     playerNames,
+    gameweekPicks,
   }
 }

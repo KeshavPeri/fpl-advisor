@@ -33,6 +33,13 @@ type VerdictState =
  * No commit action, no override registration, no link to a reasoning
  * screen — all out of scope (items 19, 20, 21). This card displays; it
  * never acts.
+ *
+ * The card's primary figure is THIS gameweek's projected points (ticket
+ * #68), not the multi-gameweek horizon total — see derive.ts's
+ * `sumGameweekPoints` and api.ts's solver_picks read for how that's
+ * derived. `view.gameweekPoints` renders as a number when available and as
+ * an explicit "Unavailable" state when the underlying solver_picks rows
+ * couldn't be found — never as 0, NaN, or a blank card.
  */
 function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
   const [state, setState] = useState<VerdictState>({ status: 'loading' })
@@ -118,16 +125,25 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
       <p className="verdict-card__captains">{view.captainLine}</p>
 
       <div className="verdict-card__points">
-        <p className="verdict-card__points-label">Projected points</p>
-        <p className="verdict-card__points-value num">{view.netPoints}</p>
+        <p className="verdict-card__points-label">{view.gameweekPointsLabel}</p>
+        {view.gameweekPoints !== null ? (
+          <p className="verdict-card__points-value num">{view.gameweekPoints}</p>
+        ) : (
+          <p className="verdict-card__points-value verdict-card__points-value--unavailable">
+            Unavailable
+          </p>
+        )}
       </div>
 
       {view.hit && (
-        <p className="verdict-card__hit">
-          <span className="num">−{view.hit.cost}</span> hit ·{' '}
-          <span className="num">{view.hit.gross}</span> before it ·{' '}
-          <span className="num">{view.hit.net}</span> after
-        </p>
+        <div className="verdict-card__hit-block">
+          {view.hitBasisLabel && <p className="verdict-card__hit-label">{view.hitBasisLabel}</p>}
+          <p className="verdict-card__hit">
+            <span className="num">−{view.hit.cost}</span> hit ·{' '}
+            <span className="num">{view.hit.gross}</span> before it ·{' '}
+            <span className="num">{view.hit.net}</span> after
+          </p>
+        </div>
       )}
 
       <p className="verdict-card__confidence">Confidence: {view.confidenceWord}</p>
