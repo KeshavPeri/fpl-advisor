@@ -52,3 +52,31 @@
 - Captain-line full-stop fix (`withFullStop`) lives in `derive.ts`, not `VerdictCard.tsx` — same
   pure/impure split as everything else in this module, and it only ever inspects the END of the
   string (`endsWith('.')`), so an internal full stop in a name is never touched.
+
+## ROUTINE (revision round — QA failure: no test asserts on rendered output)
+
+- Extracted the points-figure JSX (the `<div className="verdict-card__points">` block) out of
+  `VerdictCard` into its own named export, `VerdictPointsFigure({ label, points })`, still inside
+  `VerdictCard.tsx`. Tier 3 (naming/layout convention, not a data-structure or dependency choice).
+  Named for exactly what it renders — the card's one primary figure — following this file's own
+  "name things by what Keshav controls" convention, and takes only the two fields it actually
+  uses rather than the whole `VerdictView`, so its test doesn't have to construct an unrelated
+  headline/captain-line/hit fixture just to render a number. This is the only way to get a
+  synchronous, renderable "ready" output at all: `VerdictCard` fetches internally via `useEffect`
+  and can't be driven into its ready state without a fetch mock, which QA's failure note ruled
+  out in favour of testing a presentational subcomponent directly.
+- New test file `src/components/VerdictCard.test.ts` renders `VerdictPointsFigure` with
+  `react-dom/server`'s `renderToStaticMarkup` (via `React.createElement`, from a plain `.ts` file)
+  and asserts the resulting markup contains no `.` for both the numeric and the "Unavailable"
+  case — closing the gap QA's failure note identified: `derive.test.ts`'s existing "never renders
+  a decimal point" test only ever asserted on `deriveVerdictView`'s return value, never on
+  anything React actually renders.
+- That test file has to `vi.mock('../lib/supabase.ts', ...)` before importing `VerdictCard.tsx`.
+  Because `VerdictCard.tsx` also imports `fetchVerdict` from `../lib/verdict/api.ts`, which
+  imports the real Supabase client, and `src/lib/supabase.ts` calls
+  `createClient(supabaseUrl ?? '', supabasePublishableKey ?? '')` — the empty-string fallback
+  throws at module-evaluation time under `vitest run`, where neither env var is set. No test file
+  existed before this one that imported anything on that chain, so nothing had hit this
+  pre-existing landmine yet; `VerdictPointsFigure` never calls `fetchVerdict`, so stubbing the
+  client out (rather than touching `supabase.ts`, which is out of this ticket's scope) is correct
+  and doesn't weaken what the test verifies.

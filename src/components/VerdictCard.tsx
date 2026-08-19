@@ -20,6 +20,35 @@ type VerdictState =
   | { status: 'error'; message: string }
   | { status: 'ready'; data: VerdictRecommendationData }
 
+interface VerdictPointsFigureProps {
+  label: string
+  points: number | null
+}
+
+/**
+ * The card's primary figure — this gameweek's projected points (ticket
+ * #68) — split out of VerdictCard so it can be rendered and asserted on
+ * directly in a test. VerdictCard itself fetches via useEffect and can't
+ * be rendered synchronously into its 'ready' state, so before this split
+ * the no-decimal-figure requirement (DoD) was only ever verified against
+ * deriveVerdictView's return value (derive.test.ts), never against
+ * anything React actually renders. See VerdictCard.test.ts.
+ */
+export function VerdictPointsFigure({ label, points }: VerdictPointsFigureProps) {
+  return (
+    <div className="verdict-card__points">
+      <p className="verdict-card__points-label">{label}</p>
+      {points !== null ? (
+        <p className="verdict-card__points-value num">{points}</p>
+      ) : (
+        <p className="verdict-card__points-value verdict-card__points-value--unavailable">
+          Unavailable
+        </p>
+      )}
+    </div>
+  )
+}
+
 /**
  * The recommendation, on the home screen (ticket #61, feature-list item 17).
  * product-brief.md §1: home screen order is countdown, verdict, pitch — this
@@ -124,16 +153,7 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
       <p className="verdict-card__headline">{view.headline}</p>
       <p className="verdict-card__captains">{view.captainLine}</p>
 
-      <div className="verdict-card__points">
-        <p className="verdict-card__points-label">{view.gameweekPointsLabel}</p>
-        {view.gameweekPoints !== null ? (
-          <p className="verdict-card__points-value num">{view.gameweekPoints}</p>
-        ) : (
-          <p className="verdict-card__points-value verdict-card__points-value--unavailable">
-            Unavailable
-          </p>
-        )}
-      </div>
+      <VerdictPointsFigure label={view.gameweekPointsLabel} points={view.gameweekPoints} />
 
       {view.hit && (
         <div className="verdict-card__hit-block">
