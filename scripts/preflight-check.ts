@@ -132,9 +132,10 @@
 // value — of TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID and FPL_ENTRY_ID, which
 // this job does not otherwise use. Writes to no table but job_runs (one row
 // per execution, never upserted). Makes no network request other than to
-// Supabase — the strings 'fantasy.premierleague.com', 'api.telegram.org'
-// and 'raw.githubusercontent.com' appear nowhere in this file, and it
-// issues no insert/upsert/update/delete against any table but job_runs.
+// Supabase — this file names no other external host at all (verified by
+// the DoD's own grep of this file for the FPL API, Telegram API and GitHub
+// raw-content hostnames), and it issues no insert/upsert/update/delete
+// against any table but job_runs.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { mkdir, writeFile } from 'node:fs/promises'
