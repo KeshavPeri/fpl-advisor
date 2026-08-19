@@ -7,10 +7,32 @@
 // .github/workflows/solver-run.yml, right after "Generate recommendations."
 //
 // This script does NOT decide *when* to send — no 24h/10h trigger, no
-// deadline arithmetic. That is item 15, a separate, later ticket. Every run
-// of this script is a single, immediate attempt to send whatever the
+// deadline arithmetic. That is item 15 (ticket #59): its own
+// scripts/notification-schedule.ts decides the trigger and calls runSend()
+// below directly, in-process, with whichever trigger it decided on. Every
+// run of runSend() is a single, immediate attempt to send whatever the
 // current state warrants (a fresh plan, a stale one clearly marked with its
 // age, or a failure notice) — never a schedule.
+//
+// ============================================================================
+// trigger — ticket #59. Which of 'manual' / 'deadline_24h' / 'deadline_10h'
+// caused this send. Recorded verbatim on the notifications row (see that
+// ticket's migration). Invoked directly (workflow_dispatch, or `npx tsx
+// scripts/send-telegram.ts` by hand) it defaults to 'manual' — see main()'s
+// own default parameter. scripts/notification-schedule.ts instead calls
+// runSend() directly, in-process, with the trigger its own pure schedule.ts
+// decided on, never 'manual'.
+//
+// ============================================================================
+// Why main() is a thin wrapper around runSend(), not one function.
+// ============================================================================
+// main() calls process.exit(1) on failure — correct for this file's own
+// entry point, wrong for a caller like scripts/notification-schedule.ts
+// that needs to keep running afterwards to write ITS OWN job_runs row
+// regardless of whether this send succeeded. runSend() is the same logic
+// with every process.exit(1) replaced by `return false`; main() is the
+// process-exit-owning wrapper every direct invocation of this file already
+// went through, unchanged in observable behaviour.
 //
 // ============================================================================
 // TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID do not exist yet.
@@ -77,6 +99,7 @@ import {
   composeNoRecommendationMessage,
   composeStaleMessage,
   isProvenOptimal,
+  type NotificationTrigger,
   type SolverStatusInfo,
 } from '../src/lib/notification/index.ts'
 
@@ -92,7 +115,7 @@ const TELEGRAM_BASE_DELAY_MS = 300
 // Env
 // ============================================================================
 
-interface TelegramEnv {
+export interface TelegramEnv {
   botToken: string
   chatId: string
 }
@@ -164,6 +187,22 @@ function isMissingTable(error: PostgrestLikeError, tableName: string): boolean {
   if (error.code === 'PGRST205' || error.code === '42P01') return true
   const message = error.message ?? ''
   return new RegExp(tableName).test(message) && /schema cache|does not exist|relation.*does not exist/i.test(message)
+}
+
+/**
+ * Postgres's own unique_violation SQLSTATE (23505) — surfaced verbatim as
+ * `error.code` by PostgREST/Supabase. This is what
+ * idx_notifications_gameweek_trigger_sent_once (ticket #59's own migration)
+ * produces when two runs race past the pre-send existingSent check above and
+ * both attempt to INSERT the same (gameweek_id, trigger, outcome='sent')
+ * row. runSend() treats this as the expected outcome of a race, not a
+ * crash — this ticket's own DoD: "two workflow runs overlapping is a normal
+ * race, not a failure." See that migration's own header for why the index,
+ * not any application-level check, is the actual guarantee against a
+ * double send.
+ */
+export function isUniqueViolation(error: PostgrestLikeError): boolean {
+  return error.code === '23505'
 }
 
 // ============================================================================
@@ -306,26 +345,19 @@ export async function sendTelegramMessage(params: {
 }
 
 // ============================================================================
-// Main
+// runSend — the actual work, with no process.exit() anywhere in it. See this
+// file's header ("Why main() is a thin wrapper") for why: a caller other
+// than this file's own direct invocation (scripts/notification-schedule.ts)
+// needs to keep running after this returns, to write its own job_runs row
+// regardless of the outcome here. Returns true on success (including the
+// benign "already sent" skips — a race lost to another run, or an identical
+// message already sent, is not a failure of THIS run), false on any failure
+// that should be treated as one. Every branch that used to call
+// process.exit(1) now returns false instead; every other branch is
+// unchanged from ticket #55's original main().
 // ============================================================================
 
-export async function main(): Promise<void> {
-  const startedAt = new Date()
-
-  const telegramEnv = readTelegramEnv()
-  if (!telegramEnv) {
-    // No network call of any kind — including to Supabase. Matches
-    // scripts/sync-squad.ts's unset-FPL_ENTRY_ID contract exactly.
-    return
-  }
-
-  const supabaseEnv = readSupabaseEnv()
-  if (!supabaseEnv) {
-    process.exit(1)
-    return
-  }
-  const supabase = createClient(supabaseEnv.url, supabaseEnv.secretKey)
-
+export async function runSend(trigger: NotificationTrigger, supabase: SupabaseClient, telegramEnv: TelegramEnv, startedAt: Date): Promise<boolean> {
   try {
     // ------------------------------------------------------------------
     // 1. Current gameweek.
@@ -346,8 +378,7 @@ export async function main(): Promise<void> {
       const message = `${JOB_NAME}: the "gameweeks" table is empty — nothing to determine a current gameweek from. Run scripts/ingest-fpl.ts first.`
       console.error(message)
       await recordJobRun(supabase, { status: 'failure', message, details: {}, startedAt })
-      process.exit(1)
-      return
+      return false
     }
     const currentGameweekId = determineCurrentGameweekId(gwRows, Date.now())
 
@@ -509,8 +540,8 @@ export async function main(): Promise<void> {
     if (existingSent) {
       const message = `${JOB_NAME}: an identical message was already sent for gameweek ${currentGameweekId} (notifications.id=${existingSent.id}) — skipping to avoid a duplicate send.`
       console.log(message)
-      await recordJobRun(supabase, { status: 'skipped', message, details: { currentGameweekId, sendKind, gwPages, recGwPages }, startedAt })
-      return
+      await recordJobRun(supabase, { status: 'skipped', message, details: { currentGameweekId, sendKind, trigger, gwPages, recGwPages }, startedAt })
+      return true
     }
 
     // ------------------------------------------------------------------
@@ -528,10 +559,24 @@ export async function main(): Promise<void> {
       message_text: messageText,
       http_status: sendOutcome.status,
       telegram_error: sendOutcome.errorText,
+      trigger,
     })
     if (notifInsertError) {
       if (isMissingTable(notifInsertError, 'notifications')) {
         throw new SendTelegramError(`the "notifications" table does not exist. Apply ${NOTIFICATIONS_MIGRATION} first.`, 'notifications')
+      }
+      if (isUniqueViolation(notifInsertError)) {
+        // ticket #59: idx_notifications_gameweek_trigger_sent_once rejected
+        // this INSERT because another run already recorded a successful
+        // "${trigger}" send for this gameweek — the pre-send existingSent
+        // check above raced and lost. That is the expected outcome of an
+        // overlapping run, not a failure of this one (this ticket's own
+        // DoD); the Telegram message this run just sent is an unfortunate
+        // but accepted duplicate, not something this insert can undo.
+        const message = `${JOB_NAME}: a "${trigger}" notification for gameweek ${currentGameweekId} was already recorded as sent by another run (unique-index race) — not treating this as a failure.`
+        console.log(message)
+        await recordJobRun(supabase, { status: 'skipped', message, details: { currentGameweekId, sendKind, trigger }, startedAt })
+        return true
       }
       throw new SendTelegramError(`failed to record notifications row: ${notifInsertError.message}`, 'notifications')
     }
@@ -544,24 +589,24 @@ export async function main(): Promise<void> {
       await recordJobRun(supabase, {
         status: 'failure',
         message,
-        details: { currentGameweekId, sendKind, httpStatus: sendOutcome.status, telegramError: sendOutcome.errorText, attempts: sendOutcome.attempts },
+        details: { currentGameweekId, sendKind, trigger, httpStatus: sendOutcome.status, telegramError: sendOutcome.errorText, attempts: sendOutcome.attempts },
         startedAt,
       })
-      process.exit(1)
-      return
+      return false
     }
 
     const message =
-      `${JOB_NAME}: sent a "${sendKind}" notification for gameweek ${currentGameweekId}` +
+      `${JOB_NAME}: sent a "${sendKind}" notification for gameweek ${currentGameweekId} (trigger: ${trigger})` +
       (recommendationGameweekId !== null && recommendationGameweekId !== currentGameweekId ? ` (recommendation from gameweek ${recommendationGameweekId})` : '') +
       '.'
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
       message,
-      details: { currentGameweekId, sendKind, recommendationGameweekId, httpStatus: sendOutcome.status, attempts: sendOutcome.attempts },
+      details: { currentGameweekId, sendKind, trigger, recommendationGameweekId, httpStatus: sendOutcome.status, attempts: sendOutcome.attempts },
       startedAt,
     })
+    return true
   } catch (err) {
     const message =
       err instanceof SendTelegramError ? err.message : err instanceof Error ? `unexpected failure: ${err.message}` : `unexpected failure: ${String(err)}`
@@ -572,6 +617,40 @@ export async function main(): Promise<void> {
       const recordMessage = recordErr instanceof Error ? recordErr.message : String(recordErr)
       console.error(`${JOB_NAME}: additionally failed to record the failed job_runs row: ${recordMessage}`)
     }
+    return false
+  }
+}
+
+// ============================================================================
+// main — the direct-invocation entry point (workflow_dispatch, or `npx tsx
+// scripts/send-telegram.ts` by hand). Owns process.exit(1) on failure, and
+// defaults trigger to 'manual' when invoked directly, since nothing sets it
+// otherwise — see this file's header. scripts/notification-schedule.ts
+// never goes through this function at all: it imports and calls runSend()
+// directly, in-process, with the trigger its own schedule.ts decided on
+// (never 'manual'), specifically so it can keep running afterwards and
+// write its own job_runs row regardless of what runSend() returns.
+// ============================================================================
+
+export async function main(trigger: NotificationTrigger = 'manual'): Promise<void> {
+  const startedAt = new Date()
+
+  const telegramEnv = readTelegramEnv()
+  if (!telegramEnv) {
+    // No network call of any kind — including to Supabase. Matches
+    // scripts/sync-squad.ts's unset-FPL_ENTRY_ID contract exactly.
+    return
+  }
+
+  const supabaseEnv = readSupabaseEnv()
+  if (!supabaseEnv) {
+    process.exit(1)
+    return
+  }
+  const supabase = createClient(supabaseEnv.url, supabaseEnv.secretKey)
+
+  const ok = await runSend(trigger, supabase, telegramEnv, startedAt)
+  if (!ok) {
     process.exit(1)
   }
 }

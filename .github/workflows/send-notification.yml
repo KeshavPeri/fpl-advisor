@@ -4,30 +4,61 @@ name: Send notification
 # acknowledging the notification and deciding are the same act"). Builds and
 # sends the Telegram message for the current gameweek's recommendation.
 #
-# workflow_dispatch ONLY, deliberately — this ticket's own Scope OUT: "No
-# scheduling logic, no 24h/10h trigger, no deadline arithmetic." Item 15 (a
-# separate, later ticket) adds the scheduled 24h/10h trigger. Until then,
-# this file exists so a send can be triggered on demand — by Keshav, or by
-# a human reviewing from the phone.
+# Two independent trigger paths, two independent jobs, deliberately kept
+# apart rather than merged into one conditional job:
 #
-# scripts/send-telegram.ts also runs as a step appended to
+# - `send` (workflow_dispatch): on demand, immediately, with trigger =
+#   'manual', bypassing the 24h/10h window logic entirely. This is exactly
+#   ticket #55's original job — its steps, env vars and secrets are
+#   UNCHANGED by ticket #59 below. Triggered by Keshav, or by a human
+#   reviewing from the phone.
+# - `scheduled-send` (schedule, added by ticket #59 — feature-list item 15,
+#   "the last piece of the value loop"): runs hourly and asks
+#   scripts/notification-schedule.ts whether NOW is the 24-hour or 10-hour
+#   mark before the next deadline. Most hourly runs decide nothing and exit
+#   zero, per that script's own header.
+#
+# `if: github.event_name == '...'` on each job is what keeps a
+# workflow_dispatch run from also running the scheduled job (and vice
+# versa) even though both live in the same `on:` block.
+#
+# scripts/send-telegram.ts (the 'manual' path's own script; also imported
+# directly by scripts/notification-schedule.ts's runSend() for the
+# scheduled path — see that script's own header for why it is an in-process
+# call, not a second workflow job) also runs as a step appended to
 # .github/workflows/solver-run.yml, right after "Generate recommendations,"
 # so a normal nightly solve already produces a notification without waiting
-# for item 15. This file is the standalone, on-demand path — independent of
-# that workflow ever having run.
+# for either trigger here. This file is the standalone paths — independent
+# of that workflow ever having run.
 #
 # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID do not exist as repository secrets yet
-# (Tier 1, owner-only — creating the bot and chat is an owner action).
-# scripts/send-telegram.ts handles that gracefully: it logs which variable
-# is missing, makes no network request of any kind — including to Supabase
-# — and exits zero. This workflow is safe to run (or leave sitting unused)
+# (Tier 1, owner-only — creating the bot and chat is an owner action). Both
+# scripts/send-telegram.ts and scripts/notification-schedule.ts handle that
+# gracefully: each logs which variable is missing, makes no network request
+# of any kind — including to Supabase — and exits zero. This workflow is
+# safe to run (or leave sitting unused, or let its schedule fire hourly)
 # before the bot exists.
 
 on:
+  schedule:
+    # Hourly, on the hour, UTC (GitHub Actions cron is always UTC and
+    # best-effort — a run asked for at :00 may arrive several minutes late,
+    # or occasionally be skipped under load). This is deliberate, not a
+    # missing refinement: the window rule in src/lib/notification/schedule.ts
+    # is a WINDOW with a floor ("fire at the first opportunity at or inside
+    # the window, and never twice"), not a match against an exact instant,
+    # specifically so an hourly, best-effort cron is sufficient — a delayed
+    # run, a skipped run, or a runner outage are all self-correcting on the
+    # next hour's run. No timezone conversion is needed or wanted here: the
+    # deadline arithmetic itself is UTC-instant-to-UTC-instant (that pure
+    # module's own header) and runs the same regardless of what hour it is
+    # in Singapore.
+    - cron: '0 * * * *'
   workflow_dispatch: {}
 
 jobs:
   send:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -50,3 +81,30 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: npx tsx scripts/send-telegram.ts
+
+  scheduled-send:
+    # Ticket #59. Separate job so the 'send' job above — its steps, env vars
+    # and secrets — is untouched by this addition (this ticket's own DoD).
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run notification schedule
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: npx tsx scripts/notification-schedule.ts
