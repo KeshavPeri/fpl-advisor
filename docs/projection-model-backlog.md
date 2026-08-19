@@ -149,3 +149,54 @@ reward different actions. Defensive-contribution thresholds already changed how 
 this season's behaviour, not a measurement of it. This is the same caveat `product-brief.md` §9
 open question 4 raises about backtest fidelity, and it resolves itself as 2026/27 matches
 accumulate.
+
+---
+
+## G7 — OPEN DIAGNOSIS, 19 Aug 2026: is a defender the right captain?
+
+**Not a known gap — an unresolved question, recorded so it is not lost.** Being worked through
+20 Aug 2026.
+
+**The observation.** The GW1 recommendation captained Guéhi, a defender, in a fixture Keshav
+identified as a hard one. Across the five-gameweek horizon the solver captained a defender in four of
+five gameweeks.
+
+**The mechanism, which is understood.** A defender's projection has a floor a forward's does not:
+appearance ≈ 1.95, defensive contribution ≈ 1.15, and a clean sheet worth ≈ 1.4 even in a hard
+fixture. That is ≈ 4.5 points before any attacking return, and only the clean-sheet component moves
+much with the opponent. A forward starts at 2 for appearing and needs roughly 0.9 expected goals to
+reach 5.6 — elite-striker territory. Compounding it, **G3 (bonus not modelled) removes the term that
+most favours attackers.**
+
+**What is not yet known.** Whether that floor is *correct*. The 2026/27 defensive-contribution rules
+genuinely did raise defender scoring — `product-brief.md` §6d treats defcon as a first-class input for
+that reason. So the model may be tracking a real shift, or over-weighting it.
+
+**What settles it, and neither had been run when this was written:**
+
+1. **`player_projections.components` for the gameweek in question**, comparing a top defender against
+   the squad's forwards — showing how much of each projection is clean sheet versus defcon versus
+   appearance, and what expected-score the fixture was assigned. If the clean-sheet share stays high
+   in a hard fixture, fixture weighting is too weak; if it is already low and the defender still tops
+   the list, the gap is the missing bonus on the forwards' side.
+2. **The calibration report re-run** after the Premier-League filter and the `team_goals_conceded`
+   fix — the first time it would run on data that is both league-only and has real clean sheets. If
+   defenders genuinely outscore forwards on corrected actuals, the model is right.
+
+**Do not act on this from argument alone.** Both artefacts exist and neither had been read. The
+earlier version of this same worry, on 16 Aug, was resolved the *opposite* way by measurement and the
+alarm turned out to be unfounded — see the note in G2 and the report's own headline history.
+
+## G8 — Fixture sensitivity may be too narrow
+
+Surfaced while investigating G7 and untested.
+
+The clean-sheet swing between the easiest and hardest fixture, at `LEAGUE_BASELINE_GOALS_PER_TEAM =
+1.45`, is roughly 0.24 to 0.48 probability — about one point of projected value for a defender. Real
+FPL experience suggests the gap between facing a promoted club and facing a title contender is worth
+more than a point.
+
+Two candidates, both untested: the elo-to-goals mapping (`2 × (1 - expectedScore)`) may compress the
+range, and `leagueBaselineGoals` is still on its pre-season fallback constant rather than computed
+from results. **The second resolves itself once the season has fixtures with scores** — which makes
+this worth re-measuring after a few gameweeks rather than tuning now.
