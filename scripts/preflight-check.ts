@@ -230,19 +230,13 @@ function readReportPath(): string {
 }
 
 // ============================================================================
-// Errors — a genuine unhandled exception only. Every expected data-shape
-// failure (missing table, empty result) is turned into a FAIL CheckResult
+// Errors. Unlike every other scripts/*.ts job, this file has no domain
+// error class of its own: every expected data-shape failure (missing
+// table, query error, empty result) is turned into a FAIL CheckResult
 // instead of thrown — see the file header's "Partial evaluation" section.
+// Only a genuine unhandled exception (a real bug) reaches main()'s outer
+// catch below, and a plain Error carries enough there.
 // ============================================================================
-
-export class PreflightCheckError extends Error {
-  context: string
-  constructor(message: string, context: string) {
-    super(message)
-    this.name = 'PreflightCheckError'
-    this.context = context
-  }
-}
 
 interface PostgrestLikeError {
   code?: string
@@ -1342,13 +1336,12 @@ async function main(): Promise<void> {
       process.exit(1)
     }
   } catch (err) {
-    const message =
-      err instanceof PreflightCheckError ? err.message : err instanceof Error ? `unexpected failure: ${err.message}` : `unexpected failure: ${String(err)}`
+    const message = err instanceof Error ? `unexpected failure: ${err.message}` : `unexpected failure: ${String(err)}`
 
     console.error(`${JOB_NAME}: failed: ${message}`)
 
     try {
-      await recordJobRun(supabase, { status: 'failure', message, details: {} , startedAt })
+      await recordJobRun(supabase, { status: 'failure', message, details: {}, startedAt })
     } catch (recordErr) {
       const recordMessage = recordErr instanceof Error ? recordErr.message : String(recordErr)
       console.error(`${JOB_NAME}: additionally failed to record the failed job_runs row: ${recordMessage}`)
