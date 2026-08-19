@@ -1,5 +1,34 @@
 // FPL-Core-Insights ingest job — ticket #12, team-write matching fixed by
-// ticket #32.
+// ticket #32, stale-elo-on-unmatched-club fixed by ticket #63.
+//
+// TICKET #63 FINDING (verified 18 Aug 2026, live data). A club whose `code`
+// has no row in the ingested season's teams.csv — i.e. counted under
+// `teamsCodesNotInCsv` below — used to be left with whatever `elo` value it
+// last held, rather than having that value cleared. For three of this
+// season's promoted clubs, what it last held was a ClubElo rating that
+// belonged to an entirely different club, written during the pre-#32 era
+// when this job upserted teams.elo keyed on `id` rather than `code` (FPL
+// team ids are not stable across seasons — see the #32 note below). Confirmed
+// against the live public.teams table on 18 Aug 2026:
+//   Coventry City (id 7)  was holding Chelsea's  rating
+//   Hull City     (id 11) was holding Leeds's    rating
+//   Ipswich Town  (id 12) was holding Liverpool's rating
+// All three are 2026/27 promoted clubs with no row in the historical
+// 2025-2026 teams.csv this job reads, so `teamsCodesNotInCsv` counted them
+// correctly — but counting is all the pre-#63 code did; the stale value sat
+// there unflagged because it was present, not null. A promoted club rated
+// like a top-four side inverts its projection in both directions: its own
+// players are over-projected, and its opponents are under-projected on
+// clean sheets. Fixed by nulling `elo` (see `teamsEloNulled` below) on every
+// public.teams row this job cannot currently match to a CSV code, rather
+// than leaving whatever the row last held. A null elo is not silent — it is
+// the documented input that makes src/lib/projection/fixture.ts's existing
+// FDR fallback engage (see that module and its `fixtureEloFallbackCount`),
+// which was built for exactly this case and, before this fix, had never
+// once triggered because the column had never been null. This job does not
+// invent a substitute rating: data/2026-2027/teams.csv (the current season's
+// own file) was checked on 18 Aug 2026 and its `elo` column is empty for all
+// twenty clubs, so no current-season rating exists at this source yet.
 //
 // Fetches CSVs over plain HTTPS from the FPL-Core-Insights repo (no
 // credential, no clone — individual files only) and upserts:
@@ -329,24 +358,38 @@ async function fetchTeamIdentities(supabase: SupabaseClient): Promise<TeamIdenti
 
 export interface TeamEloUpdatePlan {
   updates: Array<{ id: number; elo: number }>
+  // public.teams rows to null out (ticket #63) — every row counted under
+  // teamsCodesNotInCsv below, i.e. every row this run cannot match to a CSV
+  // code (a null `code`, or a `code` with no entry anywhere in the CSV).
+  // These are NOT the same rows as codesNotInTeams (a CSV code with no
+  // matching public.teams row — nothing to null there, there is no row) nor
+  // duplicateCodeConflicts (the code DID match the CSV, just ambiguously —
+  // left alone, not nulled, same as before #63).
+  nulls: Array<{ id: number }>
   // CSV codes with a parsed elo but no matching row in public.teams — a club
   // relegated out of the current season. Skipped, not inserted.
   codesNotInTeams: number
   // public.teams rows whose code has no entry anywhere in the CSV (or whose
-  // code is null) — left untouched.
+  // code is null). Every row counted here is also queued in `nulls` (#63) —
+  // an unmatched code means this run has no honest rating for that row, so
+  // whatever `elo` last held (possibly a different club's rating entirely,
+  // see the file header) must not be left in place.
   teamsCodesNotInCsv: number
   // A code shared by more than one public.teams row. Ambiguous — neither row
-  // is updated, and this is not the same bucket as codesNotInTeams/
+  // is updated (nor nulled — the code matched the CSV fine; only the table
+  // is at fault), and this is not the same bucket as codesNotInTeams/
   // teamsCodesNotInCsv since it's a fault in the table, not a set mismatch.
   duplicateCodeConflicts: number
 }
 
 export function planTeamEloUpdates(existingTeams: TeamIdentityRow[], elo: EloByCodeResult): TeamEloUpdatePlan {
   const teamsByCode = new Map<number, TeamIdentityRow[]>()
+  const nulls: Array<{ id: number }> = []
   let teamsCodesNotInCsv = 0 // seeded below with null-code rows, then added to per-code below
   for (const team of existingTeams) {
     if (team.code === null) {
       teamsCodesNotInCsv++
+      nulls.push({ id: team.id })
       continue
     }
     const existing = teamsByCode.get(team.code)
@@ -369,6 +412,7 @@ export function planTeamEloUpdates(existingTeams: TeamIdentityRow[], elo: EloByC
     }
     if (!inCsv) {
       teamsCodesNotInCsv += teams.length
+      for (const t of teams) nulls.push({ id: t.id })
       continue
     }
     if (teams.length > 1) {
@@ -380,10 +424,11 @@ export function planTeamEloUpdates(existingTeams: TeamIdentityRow[], elo: EloByC
       updates.push({ id: teams[0].id, elo: value })
     }
     // else: code is in the CSV but its elo cell was malformed — already
-    // counted in elo.malformedElo above; no update, nothing else to count.
+    // counted in elo.malformedElo above; no update, no null (a good stored
+    // rating survives a one-off source glitch — see buildEloByCode).
   }
 
-  return { updates, codesNotInTeams, teamsCodesNotInCsv, duplicateCodeConflicts }
+  return { updates, nulls, codesNotInTeams, teamsCodesNotInCsv, duplicateCodeConflicts }
 }
 
 // One UPDATE per matched row, never an upsert — every id here was just read
@@ -408,6 +453,26 @@ async function applyTeamEloUpdates(
     }
   }
   return updates.length
+}
+
+// One UPDATE per row this run cannot match to a CSV code (ticket #63) —
+// sets elo to null rather than leaving whatever value the row last held.
+// Same write shape as applyTeamEloUpdates above (elo, updated_at only; never
+// an upsert, never a team-identity column) — kept as a separate function
+// because it writes a different value for a different reason, not because
+// the write path differs.
+async function applyTeamEloNulls(supabase: SupabaseClient, nulls: Array<{ id: number }>): Promise<number> {
+  const updatedAt = new Date().toISOString()
+  for (const row of nulls) {
+    const { error } = await supabase.from('teams').update({ elo: null, updated_at: updatedAt }).eq('id', row.id)
+    if (error) {
+      if (isMissingTable(error, 'teams')) {
+        throw new IngestError('table "teams" does not exist — apply the #9 reference-schema migration first')
+      }
+      throw new IngestError(`null-out of teams.elo failed for team id ${row.id}: ${error.message}`)
+    }
+  }
+  return nulls.length
 }
 
 // ============================================================================
@@ -600,6 +665,7 @@ async function main(): Promise<void> {
           reason: 'season_directory_not_found',
           playersRows: 0,
           teamsUpdated: 0,
+          teamsEloNulled: 0,
           codesNotInTeams: 0,
           teamsCodesNotInCsv: 0,
           duplicateCodeConflicts: 0,
@@ -631,6 +697,7 @@ async function main(): Promise<void> {
     const existingTeams = await fetchTeamIdentities(supabase)
     const teamEloPlan = planTeamEloUpdates(existingTeams, eloResult)
     const teamsUpdated = await applyTeamEloUpdates(supabase, teamEloPlan.updates)
+    const teamsEloNulled = await applyTeamEloNulls(supabase, teamEloPlan.nulls)
     if (teamEloPlan.duplicateCodeConflicts > 0) {
       console.warn(
         `${JOB_NAME}: ${teamEloPlan.duplicateCodeConflicts} team code(s) matched more than one ` +
@@ -671,7 +738,8 @@ async function main(): Promise<void> {
     const message =
       `${JOB_NAME}: season ${season} — ${teamsUpdated} team(s) updated (elo, matched on code), ` +
       `${teamEloPlan.codesNotInTeams} CSV code(s) not in public.teams, ` +
-      `${teamEloPlan.teamsCodesNotInCsv} public.teams row(s) with no matching CSV code, ` +
+      `${teamEloPlan.teamsCodesNotInCsv} public.teams row(s) with no matching CSV code ` +
+      `(${teamsEloNulled} elo value(s) nulled rather than left stale, ticket #63), ` +
       `${teamEloPlan.duplicateCodeConflicts} duplicate-code conflict(s), ` +
       `${eloResult.malformedElo} row(s) with a malformed elo cell skipped, ` +
       `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted ` +
@@ -685,6 +753,7 @@ async function main(): Promise<void> {
         season,
         playersRows: playerRecords.length,
         teamsUpdated,
+        teamsEloNulled,
         codesNotInTeams: teamEloPlan.codesNotInTeams,
         teamsCodesNotInCsv: teamEloPlan.teamsCodesNotInCsv,
         duplicateCodeConflicts: teamEloPlan.duplicateCodeConflicts,
