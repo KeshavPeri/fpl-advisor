@@ -57,21 +57,62 @@
 // gameweek 1 and never today's wall-clock date (see this ticket's Notes).
 //
 // ============================================================================
+// Plan distinctness (ticket #60) — collapsing, not padding.
+// ============================================================================
+// #47's own iteration_criteria bug (fixed in scripts/build-solver-input.ts,
+// ticket #60) let the solver return "alternatives" that were really the
+// same decision wearing a different bench player. Every solution the solver
+// returns is still ranked and built into a full plan (unchanged from #47),
+// but before anything is stored, src/lib/recommendation/distinctness.ts's
+// collapseSameDecisionPlans() collapses any plans that share the same
+// incoming player, the same captain, and a score within SCORE_TOLERANCE —
+// keeping the highest-scoring survivor — and plan_index is re-assigned
+// contiguously from 0 over what survives. Storing one or two plans instead
+// of three is normal, not a shortfall: see detectIterationShortfall (which
+// still separately reports when the SOLVER returned fewer than three raw
+// solutions — a different fact from how many of those solutions turned out
+// to be distinct decisions).
+//
+// ============================================================================
+// Stale plan_index rows — KNOWN GAP, not implemented. See decisions/ticket-60.md.
+// ============================================================================
+// Collapsing can shrink the stored set for a gameweek (e.g. last run stored
+// plan_index 0/1/2, this run's collapse only produces 0/1). Upserting alone
+// does not remove the now-stale plan_index 2 row. src/lib/recommendation/
+// staleness.ts's computeStalePlanIndices() is the pure logic for deciding
+// which rows are stale, unit-tested and ready to wire in — but actually
+// removing them needs a Supabase DELETE against public.recommendations, and
+// the migration that created that table (20260817090000_recommendations.sql)
+// explicitly withholds DELETE from service_role's GRANT, on the strength of
+// #47's own DoD ("this file issues no Supabase row-removal call of any
+// kind"). Granting DELETE needs a new migration — outside this ticket's
+// Scope constraint (file list AND its explicit "no migration") — and
+// escalation.md classifies "any migration or operation that deletes ...
+// data in the live Supabase instance" as TIER 1 (stop for a human), with
+// the Tier 2 carve-out limited to "code, test fixtures, or seed data" —
+// stored recommendations are live app data, not that. This script does NOT
+// issue a delete call. Flagged back to the orchestrator; see
+// decisions/ticket-60.md.
+//
+// ============================================================================
 // Wiring
 // ============================================================================
 // Reads exactly SUPABASE_URL and SUPABASE_SECRET_KEY. No VITE_-prefixed
 // variable. Writes recommendations/recommendation_reasons (upsert only —
-// this file issues no Supabase row-removal call of any kind) and one job_runs row
-// per execution, job_name 'solver-run' (matching build-solver-input.ts and
-// store-solver-output.ts — every script in this one workflow shares a
-// job_name so the workflow's history reads as one execution log).
+// see "Stale plan_index rows" above for the one known consequence) and one
+// job_runs row per execution, job_name 'solver-run' (matching
+// build-solver-input.ts and store-solver-output.ts — every script in this
+// one workflow shares a job_name so the workflow's history reads as one
+// execution log).
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
 import {
   applyCoverageFloor,
+  assignContiguousPlanIndices,
   buildReasonLines,
   checkCoverage,
+  collapseSameDecisionPlans,
   computeHitCost,
   computeNetPoints,
   computePlanScore,
@@ -84,9 +125,11 @@ import {
   hasAnyCoverageGap,
   rankSolutions,
   roundSolverCount,
+  SCORE_TOLERANCE,
   type ConfidenceBand,
   type CoveragePlayerRef,
   type CoverageCheckedRole,
+  type PlanDecisionKey,
 } from '../src/lib/recommendation/index.ts'
 
 const JOB_NAME = 'solver-run'
@@ -437,17 +480,9 @@ async function main(): Promise<void> {
       )
     }
 
-    // Base confidence band: the gap between Plan A (best score) and Plan B
-    // (second-best), across the horizon. A single-solution solve has no
-    // "B" to compare against — treated as maximally confident (Infinity
-    // gap -> 'clear') since there is no competing alternative to hedge
-    // against; the coverage floor below can still lower it per plan. Tier
-    // 3, logged in decisions/ticket-47.md.
-    const scoreGap = ranked.length >= 2 ? Math.abs(ranked[0].score - ranked[1].score) : Number.POSITIVE_INFINITY
-    const baseBand: ConfidenceBand = deriveConfidenceBand(scoreGap)
-
     // --------------------------------------------------------------------
-    // 6. Per-plan facts: lineup, transfer summary, hit cost, gross/net.
+    // 6. Per-plan facts: lineup, transfer summary, hit cost, gross/net —
+    //    one PlanBuild per RAW solver solution (not yet collapsed).
     // --------------------------------------------------------------------
     interface PlanBuild {
       planIndex: number
@@ -466,7 +501,7 @@ async function main(): Promise<void> {
       netPoints: number
     }
 
-    const plans: PlanBuild[] = []
+    const rawPlans: PlanBuild[] = []
     for (const { solutionIndex, score, planIndex } of ranked) {
       const currentGwPicks = (picksBySolution.get(solutionIndex) ?? []).filter((p) => p.gameweek_id === currentGw)
 
@@ -510,7 +545,7 @@ async function main(): Promise<void> {
       const grossPoints = score
       const netPoints = computeNetPoints(grossPoints, hitCost)
 
-      plans.push({
+      rawPlans.push({
         planIndex,
         solutionIndex,
         score,
@@ -529,13 +564,57 @@ async function main(): Promise<void> {
     }
 
     // --------------------------------------------------------------------
+    // 6b. Collapse same-decision plans (ticket #60) — see file header
+    //     "Plan distinctness". rawPlans is already score-descending (it was
+    //     built by iterating `ranked` in that order), which
+    //     collapseSameDecisionPlans relies on to keep each group's
+    //     highest-scoring member automatically. plan_index is re-assigned
+    //     contiguously from 0 over whatever survives — never a gap like
+    //     {0, 2} — and the outgoing player never enters the comparison (see
+    //     distinctness.ts's own header).
+    // --------------------------------------------------------------------
+    const collapseCandidates: (PlanBuild & PlanDecisionKey)[] = rawPlans.map((p) => ({
+      ...p,
+      transferInPlayerId: p.transferIn?.playerId ?? null,
+      captainPlayerId: p.captain.playerId,
+    }))
+    const { survivors, collapsedCount } = collapseSameDecisionPlans(collapseCandidates)
+    const distinctPlans: PlanBuild[] = assignContiguousPlanIndices(survivors)
+
+    // Storing fewer than three plans is normal — a partial collapse (e.g. 3 raw solutions ->
+    // 2 distinct plans) errors and warns for nothing; ticket #60's DoD only asks for a notable
+    // event in the specific case where EVERY raw solution turned out to be the same decision,
+    // leaving nothing to choose between.
+    if (rawPlans.length > 1 && distinctPlans.length === 1) {
+      console.warn(
+        `${JOB_NAME}/generate-recommendations: all ${rawPlans.length} raw solution(s) the solver returned for gameweek ` +
+          `${currentGw} collapsed to a single distinct plan (same incoming player, same captain, score within ` +
+          `${SCORE_TOLERANCE} point(s) of each other) — one clear course of action, no meaningfully different alternative ` +
+          'this gameweek.',
+      )
+    }
+
+    // Base confidence band: the gap between Plan A (best score) and Plan B
+    // (second-best) AMONG THE DISTINCT PLANS, across the horizon — not the
+    // raw solver solutions, which can disagree with the distinct count once
+    // a collapse has happened. A single-distinct-plan solve has no "B" to
+    // compare against — treated as maximally confident (Infinity gap ->
+    // 'clear') since there is no competing alternative to hedge against;
+    // the coverage floor below still applies per plan regardless (ticket
+    // #60's DoD: not forced to 'coin-flip' merely for lack of a comparison).
+    // Tier 3, logged in decisions/ticket-47.md and decisions/ticket-60.md.
+    const scoreGap =
+      distinctPlans.length >= 2 ? Math.abs(distinctPlans[0].score - distinctPlans[1].score) : Number.POSITIVE_INFINITY
+    const baseBand: ConfidenceBand = deriveConfidenceBand(scoreGap)
+
+    // --------------------------------------------------------------------
     // 7. Data-coverage check (product-brief.md §8) — every player named in
     //    a recommendation (transfer in/out, captain, vice-captain) across
-    //    every plan, checked once in a single batch query.
+    //    every DISTINCT plan, checked once in a single batch query.
     // --------------------------------------------------------------------
     const coverageRefsByPlan = new Map<number, CoveragePlayerRef[]>()
     const allCoverageCodes = new Set<number>()
-    for (const plan of plans) {
+    for (const plan of distinctPlans) {
       const refs = buildCoverageRefs(plan)
       coverageRefsByPlan.set(plan.planIndex, refs)
       for (const ref of refs) {
@@ -579,7 +658,7 @@ async function main(): Promise<void> {
     //    coverage-checked player, which is the same set).
     // --------------------------------------------------------------------
     const allPlayerIds = new Set<number>()
-    for (const plan of plans) {
+    for (const plan of distinctPlans) {
       if (plan.transferIn) allPlayerIds.add(plan.transferIn.playerId)
       if (plan.transferOut) allPlayerIds.add(plan.transferOut.playerId)
       allPlayerIds.add(plan.captain.playerId)
@@ -617,8 +696,9 @@ async function main(): Promise<void> {
     const recommendationRows: JsonRecord[] = []
     const reasonRows: JsonRecord[] = []
     let plansWithCoverageGap = 0
+    const isOnlyDistinctPlan = distinctPlans.length === 1
 
-    for (const plan of plans) {
+    for (const plan of distinctPlans) {
       const coverageRefs = coverageRefsByPlan.get(plan.planIndex) ?? []
       const coverageResults = checkCoverage(coverageRefs, codesWithHistory)
       const coverageGap = hasAnyCoverageGap(coverageResults)
@@ -672,6 +752,7 @@ async function main(): Promise<void> {
         grossPointsRounded,
         netPointsRounded,
         confidenceBand,
+        isOnlyDistinctPlan,
         coverageGaps: coverageGapNames,
       })
 
@@ -706,9 +787,14 @@ async function main(): Promise<void> {
       solverRunId: latestRunId,
       solverStatus: solverRunRow?.solver_status ?? null,
       iterationsRequested: shortfall.requested,
-      distinctSolutionsFound: shortfall.found,
       iterationShortfall: shortfall.isShortfall,
-      plansStored: plans.length,
+      // Ticket #60's three named counts: how many raw solutions the solver
+      // returned, how many of those turned out to be distinct decisions
+      // (same incoming player + captain + score-within-tolerance collapsed
+      // together), and how many were collapsed away.
+      rawSolutionsReturned: rawPlans.length,
+      distinctPlansStored: distinctPlans.length,
+      plansCollapsed: collapsedCount,
       baseConfidenceBand: baseBand,
       scoreGapPlanAToB: Number.isFinite(scoreGap) ? scoreGap : null,
       plansWithCoverageGap,
@@ -723,8 +809,9 @@ async function main(): Promise<void> {
       coverageCodesChecked: allCoverageCodes.size,
     }
     const message =
-      `${JOB_NAME}/generate-recommendations: stored ${plans.length} plan(s) for gameweek ${currentGw} ` +
-      `(requested ${shortfall.requested}, found ${shortfall.found} distinct solution(s)). Base confidence band: ${baseBand}.`
+      `${JOB_NAME}/generate-recommendations: stored ${distinctPlans.length} distinct plan(s) for gameweek ${currentGw} ` +
+      `(solver returned ${rawPlans.length} raw solution(s) against ${shortfall.requested} requested, ${collapsedCount} collapsed ` +
+      `as the same decision). Base confidence band: ${baseBand}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {
