@@ -97,6 +97,18 @@ export const SOLVER_TIME_LIMIT_SECS = 300
 
 const MAX_ALLOWED_HORIZON = 5
 
+/**
+ * dev/solver.py's `iteration_criteria` setting for the alternate-solution search (ticket #47's
+ * `num_iterations: 3`). The shipped `this_gw_transfer_in_out` requires only the transfer IN or
+ * OUT player to differ between alternatives — and varying the OUT player alone is nearly free
+ * for the optimiser, so the first real run produced three plans with the SAME incoming player,
+ * the SAME captain and identical scores, differing only in which bench player was sold (ticket
+ * #60's own Context section). `this_gw_transfer_in` instead requires the INCOMING player to
+ * differ — the actual decision a human is choosing between when reading "Plan B". See
+ * decisions/ticket-60.md.
+ */
+export const ITERATION_CRITERION = 'this_gw_transfer_in'
+
 // ============================================================================
 // Env
 // ============================================================================
@@ -269,7 +281,7 @@ export interface SolverConfig {
   secs: number
   solver: 'highs'
   num_iterations: 3
-  iteration_criteria: 'this_gw_transfer_in_out'
+  iteration_criteria: typeof ITERATION_CRITERION
   verbose: true
   print_result_table: true
   print_squads: true
@@ -286,13 +298,16 @@ export interface SolverConfig {
  *
  * `num_iterations: 3` — ticket #47 (feature-list item 13). product-brief.md §6c: the solver's
  * own `iteration`/`iteration_criteria` mechanism is "exactly the Plan A / Plan B / Plan C
- * requirement" — this is what raises it from item 12's `1`. `iteration_criteria` stays the
- * shipped `this_gw_transfer_in_out` (set explicitly, not left to a default) so the alternative
- * solutions differ in what THIS gameweek's transfer is, which is what "Plan B" and "Plan C" mean
- * for a weekly recommendation — a criterion that varies a gameweek-4 decision would produce three
- * plans identical this week and useless as alternatives. See decisions/ticket-47.md. A solve that
- * returns fewer than three distinct solutions is not a failure — scripts/generate-recommendations.ts
- * stores whatever it got and records the shortfall.
+ * requirement" — this is what raises it from item 12's `1`. `iteration_criteria` is set
+ * explicitly (never left to a default) to `ITERATION_CRITERION`
+ * (`this_gw_transfer_in`, ticket #60) so the alternative solutions differ in WHO comes in this
+ * gameweek — the shipped `this_gw_transfer_in_out` only requires the in-OR-out player to differ,
+ * and varying the out player is nearly free for the optimiser: the first real run produced three
+ * plans with the same incoming player, same captain and identical scores, differing only in
+ * which bench player was sold (ticket #60's Context section). See decisions/ticket-60.md. A
+ * solve that returns fewer than three distinct solutions is not a failure —
+ * scripts/generate-recommendations.ts stores whatever it got (collapsing any that are still the
+ * same decision — src/lib/recommendation/distinctness.ts) and records the shortfall.
  */
 export function buildSolverConfig(params: { horizon: number; datasource: string; secs?: number }): SolverConfig {
   if (!Number.isInteger(params.horizon) || params.horizon <= 0) {
@@ -320,7 +335,7 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
     secs: params.secs ?? SOLVER_TIME_LIMIT_SECS,
     solver: 'highs',
     num_iterations: 3,
-    iteration_criteria: 'this_gw_transfer_in_out',
+    iteration_criteria: ITERATION_CRITERION,
     verbose: true,
     print_result_table: true,
     print_squads: true,

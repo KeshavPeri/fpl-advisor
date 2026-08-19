@@ -12,6 +12,7 @@ import { parse } from 'csv-parse/sync'
 import {
   BuildInputError,
   HIT_COST,
+  ITERATION_CRITERION,
   XMIN_LB,
   analyzeProjectionsCsv,
   buildSolverConfig,
@@ -120,7 +121,14 @@ describe('buildSolverConfig', () => {
   it('sets num_iterations to 3 — ticket #47, so the solve produces Plan A/B/C — and iteration_criteria explicitly rather than the shipped default', () => {
     const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
     expect(config.num_iterations).toBe(3)
-    expect(config.iteration_criteria).toBe('this_gw_transfer_in_out')
+    expect(config.iteration_criteria).toBe(ITERATION_CRITERION)
+  })
+
+  it('sets iteration_criteria to "this_gw_transfer_in", NOT the shipped "this_gw_transfer_in_out" — ticket #60: the _in_out criterion let the optimiser vary only the (nearly-free) outgoing bench player, producing three plans with the same incoming player, same captain and identical scores', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
+    expect(config.iteration_criteria).toBe('this_gw_transfer_in')
+    expect(config.iteration_criteria).not.toBe('this_gw_transfer_in_out')
+    expect(ITERATION_CRITERION).toBe('this_gw_transfer_in')
   })
 
   it('sets the datasource to whatever the CSV-derived value is, matching the CSV\'s own filename', () => {
