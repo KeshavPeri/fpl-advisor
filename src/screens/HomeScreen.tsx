@@ -6,28 +6,34 @@ import { deriveAvailability } from '../components/pitchAvailability'
 import Pitch, { type PitchPlayer } from '../components/Pitch'
 import PitchSkeleton from '../components/PitchSkeleton'
 import Surface from '../components/Surface'
+import VerdictCard from '../components/VerdictCard'
 import { toErrorMessage } from '../lib/format'
 import { fetchExistingSquad, fetchPlayers, fetchTargetGameweek } from '../lib/squad/api'
 import { SQUAD_SIZE } from '../lib/squad/positions'
+import type { TargetGameweek } from '../lib/squad/types'
 import './HomeScreen.css'
 
 /**
- * Ticket #38 — the squad as a pitch. Verdict card (item 17) is a separate
- * ticket and deliberately not here yet (product-brief.md §1: home screen
- * order is countdown, verdict, pitch). The countdown (item 18, ticket #42)
- * is now built too — it renders above everything else in this component,
- * fed by the same fetchTargetGameweek() call the pitch section already
- * makes (see countdownState below; ticket #42: "do not add a second query
- * for the same row"). Replaces the design-token demo panel #8 left on this
- * screen.
+ * Ticket #38 — the squad as a pitch. The countdown (item 18, ticket #42)
+ * renders above everything else in this component, fed by the same
+ * fetchTargetGameweek() call the pitch section already makes (see
+ * countdownState below; ticket #42: "do not add a second query for the same
+ * row"). Replaces the design-token demo panel #8 left on this screen.
+ *
+ * The verdict card (item 17, ticket #61) now sits between the countdown and
+ * the pitch — product-brief.md §1's full home-screen order. It owns its own
+ * read (fetchVerdict, not filtered to this gameweek — see
+ * src/lib/verdict/api.ts) and only needs this screen's target gameweek
+ * id/name to decide fresh vs stale, so it's handed those via
+ * `targetGameweek` state below rather than a prop drilled out of
+ * countdownState (which doesn't carry the gameweek id).
  *
  * Data note (see decisions/ticket-38.md): the pitch reads via
  * fetchTargetGameweek + fetchExistingSquad, plus fetchPlayers for player
  * name/position/price — fetchExistingSquad's picks carry only a bare
  * playerId, so fetchPlayers is the only existing read that supplies those.
- * Neither fetchPlayers nor fetchExistingSquad expose `players.status` or
- * `players.chance_of_playing_next_round`, so every player renders with no
- * availability ring for now — a real, reported gap, not a design choice.
+ * Ticket #61 added `status` and `chance_of_playing_next_round` to
+ * fetchPlayers, so every player's availability ring below is now real.
  */
 
 type LoadState =
@@ -42,6 +48,9 @@ function HomeScreen() {
   const [countdownState, setCountdownState] = useState<DeadlineCountdownState>({
     status: 'loading',
   })
+  // VerdictCard needs the gameweek id (countdownState only carries the name
+  // and the deadline) — see the file header comment.
+  const [targetGameweek, setTargetGameweek] = useState<TargetGameweek | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -53,6 +62,7 @@ function HomeScreen() {
         if (!gw) {
           setLoadState({ status: 'no-gameweek' })
           setCountdownState({ status: 'unavailable' })
+          setTargetGameweek(null)
           return
         }
 
@@ -61,6 +71,7 @@ function HomeScreen() {
           gameweekName: gw.name,
           deadlineIso: gw.deadlineTime,
         })
+        setTargetGameweek(gw)
 
         const [playerList, existing] = await Promise.all([
           fetchPlayers(),
@@ -87,11 +98,7 @@ function HomeScreen() {
             benchOrder: pick.benchOrder,
             isCaptain: pick.isCaptain,
             isViceCaptain: pick.isViceCaptain,
-            // Availability data isn't exposed by any existing read yet —
-            // see the file header comment. `deriveAvailability` itself is
-            // fully implemented and tested against the real rules; this is
-            // the one line to change once status/chance are readable.
-            availability: deriveAvailability('a', null),
+            availability: deriveAvailability(player.status, player.chanceOfPlayingNextRound),
           })
         }
 
@@ -125,6 +132,10 @@ function HomeScreen() {
     <AppShell>
       <DeadlineCountdown state={countdownState} />
       <header className="home-mark">FPL Advisor</header>
+
+      {targetGameweek && (
+        <VerdictCard gameweekId={targetGameweek.id} gameweekName={targetGameweek.name} />
+      )}
 
       {loadState.status === 'loading' && <PitchSkeleton />}
 
