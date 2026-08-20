@@ -29,6 +29,15 @@ export interface ReasonInputs {
   grossPointsRounded: number
   netPointsRounded: number
   confidenceBand: ConfidenceBand
+  /**
+   * True when this is the only distinct plan the solve produced this gameweek — every other
+   * solution the solver returned was collapsed as the same decision (see
+   * src/lib/recommendation/distinctness.ts). There is then no "next-best alternative" to compare
+   * this plan against, so the confidence-band comparison line below would be describing an
+   * alternative that does not exist. Ticket #60's DoD: this reads as one clear course of action
+   * with no meaningfully different alternative — a confident answer, never an apology or hedge.
+   */
+  isOnlyDistinctPlan: boolean
   /** Players in THIS plan with no Premier League match history — already resolved to display names by the caller. */
   coverageGaps: readonly CoverageReasonInput[]
 }
@@ -52,7 +61,9 @@ export function buildReasonLines(inputs: ReasonInputs): string[] {
     lines.push(`Projected gain: ${inputs.grossPointsRounded} points before the hit, ${inputs.netPointsRounded} after.`)
   }
 
-  if (inputs.confidenceBand === 'coin-flip') {
+  if (inputs.isOnlyDistinctPlan) {
+    lines.push('One clear course of action this gameweek — no meaningfully different alternative.')
+  } else if (inputs.confidenceBand === 'coin-flip') {
     lines.push('This plan and the next-best alternative are statistically close. Either is a reasonable choice.')
   } else if (inputs.confidenceBand === 'marginal') {
     lines.push('A marginal edge over the next-best alternative across the gameweeks ahead.')

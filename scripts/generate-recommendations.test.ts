@@ -6,8 +6,17 @@
 // how the current gameweek is derived from them, and which players a plan
 // asks the data-coverage check about.
 
-import { describe, expect, it } from 'vitest'
-import { buildCoverageRefs, deriveCurrentGameweekId, findLatestRunId, GenerateRecommendationsError, NUM_ITERATIONS_REQUESTED } from './generate-recommendations.js'
+import { describe, expect, it, vi } from 'vitest'
+import { deriveTransferSummary } from '../src/lib/recommendation/index.ts'
+import {
+  buildCoverageRefs,
+  deriveCurrentGameweekId,
+  filterPicksToRun,
+  findLatestRunId,
+  GenerateRecommendationsError,
+  NUM_ITERATIONS_REQUESTED,
+  writeRecommendationsWithStaleCleanup,
+} from './generate-recommendations.js'
 
 describe('NUM_ITERATIONS_REQUESTED', () => {
   it('matches the num_iterations this ticket sets in scripts/build-solver-input.ts', () => {
@@ -82,5 +91,133 @@ describe('GenerateRecommendationsError', () => {
     expect(err.message).toBe('boom')
     expect(err.context).toBe('solver_picks')
     expect(err.name).toBe('GenerateRecommendationsError')
+  })
+})
+
+// ============================================================================
+// Ticket #60 (found 20 Aug 2026) — solver_picks double-counting guard.
+// ============================================================================
+
+describe('filterPicksToRun', () => {
+  it('keeps only the rows carrying the given runId', () => {
+    const picks = [{ run_id: 1 }, { run_id: 2 }, { run_id: 2 }, { run_id: null }]
+    expect(filterPicksToRun(picks, 2)).toEqual([{ run_id: 2 }, { run_id: 2 }])
+  })
+
+  it('returns an empty list when no row carries the given runId', () => {
+    expect(filterPicksToRun([{ run_id: 1 }, { run_id: 1 }], 9)).toEqual([])
+  })
+
+  it("a gameweek with two runs' worth of solver_picks yields the same transfers_made as one run's alone", () => {
+    // solver_picks is upserted keyed on (solution_index, gameweek_id, player_id) — see
+    // scripts/store-solver-output.ts — so an older run's row for a player no longer part of a
+    // newer run's plan is never overwritten and can sit in the table under its old run_id
+    // indefinitely. This reproduces exactly that: run 5's stale transfer-in row for player 100
+    // coexists with run 9's real transfer-in (player 200) and transfer-out (player 300) rows, all
+    // for gameweek 1.
+    const allPicks = [
+      { run_id: 5, gameweek_id: 1, player_id: 100, is_transfer_in: true, is_transfer_out: false },
+      { run_id: 9, gameweek_id: 1, player_id: 200, is_transfer_in: true, is_transfer_out: false },
+      { run_id: 9, gameweek_id: 1, player_id: 300, is_transfer_in: false, is_transfer_out: true },
+    ]
+
+    const latestRunId = findLatestRunId(allPicks)
+    expect(latestRunId).toBe(9)
+
+    const toSummaryInput = (picks: typeof allPicks) =>
+      picks.map((p) => ({ playerId: p.player_id, playerCode: null, isTransferIn: p.is_transfer_in, isTransferOut: p.is_transfer_out }))
+
+    const filteredToLatestRun = filterPicksToRun(allPicks, latestRunId!)
+    const transfersMadeFromFilteredAllPicks = deriveTransferSummary(toSummaryInput(filteredToLatestRun)).transfersMade
+
+    // The answer building from ONLY run 9's rows directly (as if run 5 had never left a row
+    // behind) gives — the ground truth this guard must match.
+    const singleRunOnly = allPicks.filter((p) => p.run_id === 9)
+    const transfersMadeFromSingleRun = deriveTransferSummary(toSummaryInput(singleRunOnly)).transfersMade
+
+    expect(transfersMadeFromFilteredAllPicks).toBe(transfersMadeFromSingleRun)
+    expect(transfersMadeFromFilteredAllPicks).toBe(1) // not 2 — run 5's stale row must never be counted
+  })
+})
+
+describe('writeRecommendationsWithStaleCleanup', () => {
+  it('always upserts before it deletes, even when there is something stale to remove', async () => {
+    const calls: string[] = []
+    await writeRecommendationsWithStaleCleanup({
+      gameweekId: 5,
+      previousPlanIndices: [0, 1, 2],
+      newPlanIndices: [0],
+      upsertNewPlans: async () => {
+        calls.push('upsert')
+      },
+      deleteStalePlans: async () => {
+        calls.push('delete')
+      },
+    })
+    expect(calls).toEqual(['upsert', 'delete'])
+  })
+
+  it('never calls delete at all when nothing is stale — no bare delete for its own sake', async () => {
+    const deleteStalePlans = vi.fn(async () => {})
+    await writeRecommendationsWithStaleCleanup({
+      gameweekId: 5,
+      previousPlanIndices: [0, 1],
+      newPlanIndices: [0, 1, 2],
+      upsertNewPlans: async () => {},
+      deleteStalePlans,
+    })
+    expect(deleteStalePlans).not.toHaveBeenCalled()
+  })
+
+  it('never deletes if the upsert throws — a failed write must never be followed by a delete', async () => {
+    const deleteStalePlans = vi.fn(async () => {})
+    await expect(
+      writeRecommendationsWithStaleCleanup({
+        gameweekId: 5,
+        previousPlanIndices: [0, 1, 2],
+        newPlanIndices: [0],
+        upsertNewPlans: async () => {
+          throw new Error('upsert failed')
+        },
+        deleteStalePlans,
+      }),
+    ).rejects.toThrow('upsert failed')
+    expect(deleteStalePlans).not.toHaveBeenCalled()
+  })
+
+  it('scopes the delete to exactly this gameweek and only the stale plan_index values — never cross-gameweek, never bare', async () => {
+    let receivedSpec: { gameweekId: number; stalePlanIndices: number[] } | null = null
+    await writeRecommendationsWithStaleCleanup({
+      gameweekId: 7,
+      previousPlanIndices: [0, 1, 2],
+      newPlanIndices: [0],
+      upsertNewPlans: async () => {},
+      deleteStalePlans: async (spec) => {
+        receivedSpec = spec
+      },
+    })
+    expect(receivedSpec).toEqual({ gameweekId: 7, stalePlanIndices: [1, 2] })
+  })
+
+  it('reports which plan_index values it removed', async () => {
+    const { stalePlanIndices } = await writeRecommendationsWithStaleCleanup({
+      gameweekId: 3,
+      previousPlanIndices: [0, 1, 2],
+      newPlanIndices: [0, 1],
+      upsertNewPlans: async () => {},
+      deleteStalePlans: async () => {},
+    })
+    expect(stalePlanIndices).toEqual([2])
+  })
+
+  it('reports no stale plan_index values on a first run for a gameweek (nothing stored previously)', async () => {
+    const { stalePlanIndices } = await writeRecommendationsWithStaleCleanup({
+      gameweekId: 3,
+      previousPlanIndices: [],
+      newPlanIndices: [0, 1, 2],
+      upsertNewPlans: async () => {},
+      deleteStalePlans: async () => {},
+    })
+    expect(stalePlanIndices).toEqual([])
   })
 })

@@ -14,6 +14,7 @@ function inputs(overrides: Partial<ReasonInputs> = {}): ReasonInputs {
     grossPointsRounded: 40,
     netPointsRounded: 40,
     confidenceBand: 'clear',
+    isOnlyDistinctPlan: false,
     coverageGaps: [],
     ...overrides,
   }
@@ -61,5 +62,28 @@ describe('buildReasonLines', () => {
     const lines = buildReasonLines(inputs())
     const joined = lines.join(' ').toLowerCase()
     expect(joined).not.toMatch(/sorry|something went wrong|oops/)
+  })
+
+  it('when this is the only distinct plan, states a confident one-clear-course-of-action line instead of comparing to a "next-best alternative" that does not exist', () => {
+    const lines = buildReasonLines(inputs({ isOnlyDistinctPlan: true, confidenceBand: 'clear' }))
+    expect(lines.some((l) => l.includes('One clear course of action'))).toBe(true)
+    expect(lines.some((l) => l.includes('next-best alternative'))).toBe(false)
+  })
+
+  it('the only-distinct-plan line does not apologise or hedge', () => {
+    const lines = buildReasonLines(inputs({ isOnlyDistinctPlan: true }))
+    const joined = lines.join(' ').toLowerCase()
+    expect(joined).not.toMatch(/sorry|apolog|unfortunately|no other option|couldn'?t find/)
+  })
+
+  it('the only-distinct-plan line wins over the confidence-band comparison line even when the band is coin-flip', () => {
+    const lines = buildReasonLines(inputs({ isOnlyDistinctPlan: true, confidenceBand: 'coin-flip' }))
+    expect(lines.some((l) => l.includes('One clear course of action'))).toBe(true)
+    expect(lines.some((l) => l.includes('statistically close'))).toBe(false)
+  })
+
+  it('with more than one distinct plan, the ordinary confidence-band comparison line is unchanged', () => {
+    const lines = buildReasonLines(inputs({ isOnlyDistinctPlan: false, confidenceBand: 'marginal' }))
+    expect(lines.some((l) => l.includes('marginal edge over the next-best alternative'))).toBe(true)
   })
 })

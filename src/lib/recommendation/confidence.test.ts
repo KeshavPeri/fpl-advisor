@@ -27,6 +27,10 @@ describe('deriveConfidenceBand', () => {
     expect(deriveConfidenceBand(-5)).toBe('clear')
     expect(deriveConfidenceBand(-0.1)).toBe('coin-flip')
   })
+
+  it('ticket #60: with only one distinct plan (no Plan B to compare against, gap passed as Infinity) the band is "clear", NOT forced to "coin-flip" merely because there is nothing to compare — deriveConfidenceBand answers "how close are the top options", and with one option there are no top options to be close', () => {
+    expect(deriveConfidenceBand(Number.POSITIVE_INFINITY)).toBe('clear')
+  })
 })
 
 describe('applyCoverageFloor', () => {
@@ -46,5 +50,9 @@ describe('applyCoverageFloor', () => {
 
   it('is a floor, not a ceiling: "coin-flip" cannot go any lower, and a coverage gap never raises a band', () => {
     expect(applyCoverageFloor('coin-flip', true)).toBe('coin-flip')
+  })
+
+  it('ticket #60: a single-plan "clear" band still gets floored by a coverage gap — having no Plan B to compare against does not exempt a plan from the data-coverage rule', () => {
+    expect(applyCoverageFloor(deriveConfidenceBand(Number.POSITIVE_INFINITY), true)).toBe('marginal')
   })
 })
