@@ -1,0 +1,92 @@
+name: Preflight check
+
+# Ticket #69. GW1 locks 01:30 Singapore time, Saturday 22 August 2026. This
+# workflow runs the one job that answers "is the whole chain healthy right
+# now?" — read-only against Supabase, writes one job_runs row and a
+# markdown report artifact, never repairs or notifies anything. See
+# scripts/preflight-check.ts's own file header for the full "why".
+#
+# A NEW file, deliberately not folded into scheduled-jobs.yml or
+# solver-run.yml — this ticket's own scope constraint adds new files only
+# and modifies no existing workflow, so a separate file cannot collide with
+# whatever else is in flight this batch (same reasoning solver-smoke.yml and
+# calibration-report.yml already use for the same structural reason).
+#
+# Scheduling: daily, AFTER both scheduled-jobs.yml (17:45 UTC — refreshes
+# players/fixtures/projections and syncs the squad) and solver-run.yml
+# (18:20 UTC, timeout-minutes: 20, so it is done well before 18:40 UTC) have
+# had a chance to run, so this check reflects a fully-updated chain rather
+# than racing either of them. 19:00 UTC gives comfortable headroom past
+# both. Asia/Singapore is UTC+8 with no daylight saving (verified against
+# scheduled-jobs.yml's and solver-run.yml's own cron comments, which this
+# one mirrors): 19:00 UTC is 03:00 the FOLLOWING day in Singapore — this
+# schedule crosses the date line, same as those two workflows' own crons.
+# Do not "fix" this to look like a Singapore-evening time without
+# re-deriving the UTC value; a Singapore evening (e.g. 20:00 SGT) is 12:00
+# UTC the SAME day, a different line entirely.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 19 * * *'
+
+env:
+  PREFLIGHT_REPORT_PATH: out/preflight-report.md
+
+jobs:
+  preflight-check:
+    runs-on: ubuntu-latest
+    # Read-only against a handful of tables, the largest being
+    # player_match_stats (~15,000+ rows today, paginated in pages of 1,000
+    # per scripts/lib/paginate.ts) — comfortably a low-single-digit-minutes
+    # job even with headroom for a slow Supabase response.
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run preflight check
+        # Non-zero on an overall FAIL verdict (scripts/preflight-check.ts's
+        # own file header / DoD) — deliberately NOT wrapped in `continue-on-
+        # error` or `if: always()` tricks: a red run of THIS step is the
+        # signal, exactly as the DoD asks for ("a red workflow run is itself
+        # the signal, without anyone opening the artifact"). The artifact
+        # upload step below still runs regardless, via its own `if: always()`.
+        #
+        # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID and FPL_ENTRY_ID are read only
+        # for their PRESENCE by check 10 (configuration) — this job makes no
+        # Telegram or FPL API request of any kind (verified in the script's
+        # own file header and DoD). All three are optional at the secrets
+        # level, same as everywhere else they appear in this repo: safe to
+        # run before any of them exist.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FPL_ENTRY_ID: ${{ secrets.FPL_ENTRY_ID }}
+        run: npx tsx scripts/preflight-check.ts
+
+      - name: Upload preflight report artifact
+        # if: always() — the report is most useful precisely when the run
+        # above exited non-zero (an overall FAIL still writes the report
+        # before exiting — see the script's own main()). if-no-files-found:
+        # warn means a genuinely missing file (e.g. an unhandled exception
+        # before the write step) only warns, never masks the real failure
+        # already reported by the step above.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preflight-report
+          path: ${{ env.PREFLIGHT_REPORT_PATH }}
+          if-no-files-found: warn
+          retention-days: 30
