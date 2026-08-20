@@ -1,0 +1,67 @@
+name: Prediction log
+
+# Ticket #73 (product-brief.md §2: "every projection stored, scored against actuals after
+# gameweek lockdown, and shown as a rolling figure in-app" — this workflow runs the "stored" and
+# "scored" halves; the rolling in-app figure is a separate, later ticket).
+#
+# One job, two steps, run in this order every time:
+#   1. scripts/snapshot-predictions.ts — copies the current gameweek's player_projections into
+#      prediction_log. A no-op (exits zero, writes nothing) once that gameweek's deadline has
+#      passed — see that script's own header for the freeze rule.
+#   2. scripts/settle-predictions.ts — scores any prediction_log rows whose gameweek is finished
+#      and past its 09:00 Europe/London lockdown (product-brief.md §6d) against the FPL live/
+#      API. A no-op (exits zero) when nothing is eligible yet.
+#
+# Both scripts are independently self-guarding (see their own headers), so running them together
+# on one daily schedule is safe regardless of exactly where in the gameweek cycle that day falls:
+# on a normal day, step 1 does real work (a fresh snapshot) and step 2 mostly doesn't (nothing
+# eligible); the day after a gameweek finishes, step 2 does real work and step 1 is a no-op
+# (already past that gameweek's deadline); most days, both quietly do nothing new. Kept as one
+# workflow file, not folded into .github/workflows/scheduled-jobs.yml, per this ticket's own
+# scope constraint.
+
+on:
+  schedule:
+    # 19:00 UTC daily. Two independent constraints both land comfortably inside this time:
+    #   - Snapshot wants FRESH player_projections. scripts/project-points.ts runs inside
+    #     .github/workflows/scheduled-jobs.yml at 17:45 UTC, so 19:00 UTC is safely after that
+    #     job has finished writing the day's projections.
+    #   - Settle wants to run AFTER lockdown. product-brief.md §6d's lockdown is 09:00
+    #     Europe/London the day after a gameweek's final match — 08:00 UTC in British Summer
+    #     Time, 09:00 UTC in GMT (never later than 09:00 UTC either way). 19:00 UTC is at least
+    #     10 hours past the latest possible lockdown instant on any given day.
+    # GitHub Actions cron is always UTC.
+    - cron: '0 19 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  prediction-log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Snapshot predictions
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/snapshot-predictions.ts
+
+      - name: Settle predictions
+        # Runs regardless of whether the snapshot step above did anything — a gameweek being
+        # settled today was snapshotted on a previous day's run, not necessarily this one.
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/settle-predictions.ts
