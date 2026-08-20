@@ -300,6 +300,41 @@ describe('deriveVerdictView', () => {
     })
   })
 
+  describe('the eleven-player guard (ticket #72)', () => {
+    /** N identical lineup rows, none flagged captain — enough for the guard
+     *  tests below, which only care about count, not arithmetic. */
+    function lineupOfSize(n: number): GameweekPick[] {
+      return Array.from({ length: n }, () => ({
+        expectedPoints: 4,
+        isCaptain: false,
+        isLineup: true,
+      }))
+    }
+
+    it('reports the figure unavailable when only 10 lineup rows survive filtering — a squad cannot start 10', () => {
+      const view = deriveVerdictView(baseData({ gameweekPicks: lineupOfSize(10) }), 5)
+      expect(view.gameweekPoints).toBeNull()
+    })
+
+    it('derives the figure normally when exactly 11 lineup rows survive filtering', () => {
+      const view = deriveVerdictView(baseData({ gameweekPicks: lineupOfSize(11) }), 5)
+      expect(view.gameweekPoints).toBe(44)
+    })
+
+    it('reports the figure unavailable when 12 lineup rows survive filtering — a squad cannot start 12', () => {
+      const view = deriveVerdictView(baseData({ gameweekPicks: lineupOfSize(12) }), 5)
+      expect(view.gameweekPoints).toBeNull()
+    })
+
+    it('the impossible-count guard does not blank the rest of the card — decision, captain line and band still render', () => {
+      const view = deriveVerdictView(baseData({ gameweekPicks: lineupOfSize(12) }), 5)
+      expect(view.gameweekPoints).toBeNull()
+      expect(view.headline).toBe('Transfer in Haaland. Transfer out Isak.')
+      expect(view.captainLine).toBe('Captain Salah. Vice-captain Saliba.')
+      expect(view.confidenceWord).toBe('clear')
+    })
+  })
+
   it('uses the stored roll reason verbatim as the headline for a rolled transfer', () => {
     const view = deriveVerdictView(
       baseData({

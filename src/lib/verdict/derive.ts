@@ -1,6 +1,6 @@
 /**
- * Pure derivation for the verdict card (ticket #61, extended by #68). No
- * I/O — takes an already-resolved `VerdictRecommendationData` (see api.ts
+ * Pure derivation for the verdict card (ticket #61, extended by #68 and
+ * #72). No I/O — takes an already-resolved `VerdictRecommendationData` (see api.ts
  * for how that gets built) plus the current gameweek id, and returns a
  * fully-resolved `VerdictView` the component renders with no further logic.
  * Same shape as the pitch's own split (pitchLayout.ts pure + tested,
@@ -32,6 +32,11 @@ function withFullStop(name: string): string {
   return name.endsWith('.') ? name : `${name}.`
 }
 
+/** A starting XI is exactly eleven players — not a house style choice, the
+ *  literal FPL rule. Exported so callers (and this file's own tests) can
+ *  name the guard without repeating the magic number. */
+const LINEUP_SIZE = 11
+
 /**
  * Sums a starting XI's THIS-gameweek projected points (ticket #68) —
  * `solver_picks.expected_points`, captain's contribution counted twice,
@@ -39,14 +44,22 @@ function withFullStop(name: string): string {
  * api.ts's own query already filters `is_lineup = true` at the database
  * layer — this is the one place the arithmetic actually lives, so it is the
  * one place that must not silently trust an unfiltered input (see this
- * file's bench-exclusion test). Returns null when there is nothing to sum
- * (no rows at all, or no lineup rows survive the filter) — the caller
- * renders that as an explicit "unavailable" figure, never 0/NaN.
+ * file's bench-exclusion test).
+ *
+ * Returns null when there is nothing to sum, OR when the surviving lineup
+ * is not exactly eleven players (ticket #72's guard). Eleven-or-not is
+ * deliberately checked here, after api.ts's run filter has already run:
+ * a lineup of 10 or 12 is not a slightly-wrong figure, it is evidence the
+ * upstream data is broken in some way this file cannot diagnose (a second
+ * run's rows leaking through, a partial write, anything else that inflates
+ * or shrinks the row set) — rendering a number computed from an impossible
+ * squad would be worse than saying the figure is unavailable. The caller
+ * renders null as an explicit "unavailable" figure, never 0/NaN.
  */
 function sumGameweekPoints(picks: readonly GameweekPick[] | null): number | null {
   if (!picks) return null
   const lineup = picks.filter((pick) => pick.isLineup)
-  if (lineup.length === 0) return null
+  if (lineup.length !== LINEUP_SIZE) return null
   const total = lineup.reduce(
     (sum, pick) => sum + pick.expectedPoints * (pick.isCaptain ? 2 : 1),
     0
