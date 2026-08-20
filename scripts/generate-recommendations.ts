@@ -45,16 +45,26 @@
 // decisions/ticket-47.md.
 //
 // ============================================================================
-// Which run's picks. solver_picks is "the current best plan", not history.
+// Which run's picks. solver_picks is "the current best plan", not history —
+// except it isn't quite, and that gap is a real bug this ticket also fixes.
 // ============================================================================
-// solver_picks can hold rows written by different solver_runs executions at
-// once (a horizon shift leaves an older gameweek's rows under an older
-// run_id — see that migration's own header). This job reads every row,
-// finds the HIGHEST run_id present, and uses only rows carrying it — the
-// complete, self-consistent output of one execution, never a mix of two.
-// The current gameweek is then the LOWEST gameweek_id among that run's own
-// rows — "the first week in the solver's own output," never a hardcoded
-// gameweek 1 and never today's wall-clock date (see this ticket's Notes).
+// solver_picks is upserted keyed on (solution_index, gameweek_id, player_id)
+// — see scripts/store-solver-output.ts — so a row whose player differs from
+// a NEWER run's pick for that same slot is never overwritten by the upsert;
+// it just sits in the table forever under its OLDER run_id. Two solver_runs
+// executions' worth of rows can coexist for the same gameweek as a result
+// (ticket #60, found 20 Aug 2026 — the same fact src/lib/verdict/api.ts's
+// own copy of this bug, fixed separately by ticket #72, is built on). This
+// job discovers the HIGHEST run_id present with a minimal `run_id`-only
+// read, then fetches every OTHER solver_picks column filtered to exactly
+// that run_id at the query level (`.eq('run_id', latestRunId)`) — never an
+// unfiltered read of the full row data. `filterPicksToRun` re-applies the
+// same filter in memory as a second, independently-testable guard (see this
+// file's own test for the two-runs-vs-one-run proof) — belt and suspenders,
+// not a substitute for the query-level filter. The current gameweek is then
+// the LOWEST gameweek_id among that run's own rows — "the first week in the
+// solver's own output," never a hardcoded gameweek 1 and never today's
+// wall-clock date (see this ticket's Notes).
 //
 // ============================================================================
 // Plan distinctness (ticket #60) — collapsing, not padding.
@@ -74,36 +84,37 @@
 // to be distinct decisions).
 //
 // ============================================================================
-// Stale plan_index rows — KNOWN GAP, not implemented. See decisions/ticket-60.md.
+// Stale plan_index rows — now wired in. See decisions/ticket-60.md.
 // ============================================================================
 // Collapsing can shrink the stored set for a gameweek (e.g. last run stored
 // plan_index 0/1/2, this run's collapse only produces 0/1). Upserting alone
 // does not remove the now-stale plan_index 2 row. src/lib/recommendation/
 // staleness.ts's computeStalePlanIndices() is the pure logic for deciding
-// which rows are stale, unit-tested and ready to wire in — but actually
-// removing them needs a Supabase DELETE against public.recommendations, and
-// the migration that created that table (20260817090000_recommendations.sql)
-// explicitly withholds DELETE from service_role's GRANT, on the strength of
-// #47's own DoD ("this file issues no Supabase row-removal call of any
-// kind"). Granting DELETE needs a new migration — outside this ticket's
-// Scope constraint (file list AND its explicit "no migration") — and
-// escalation.md classifies "any migration or operation that deletes ...
-// data in the live Supabase instance" as TIER 1 (stop for a human), with
-// the Tier 2 carve-out limited to "code, test fixtures, or seed data" —
-// stored recommendations are live app data, not that. This script does NOT
-// issue a delete call. Flagged back to the orchestrator; see
-// decisions/ticket-60.md.
+// which rows are stale; RECOMMENDATIONS_DELETE_GRANT_MIGRATION (already
+// applied to live Supabase — the Tier 1 question this ticket was blocked on
+// is resolved, see decisions/ticket-60.md) grants service_role DELETE on
+// public.recommendations. `writeRecommendationsWithStaleCleanup` (below)
+// enforces the two required conditions: the new plans are upserted FIRST —
+// so a crash or a failed delete never leaves the gameweek without its
+// just-written Plan A — and any delete that does run is scoped to exactly
+// this gameweek, at plan_index values at or above this run's new plan count
+// (never a bare delete, never cross-gameweek). recommendation_reasons rows
+// for a deleted plan follow via that table's own ON DELETE CASCADE FK
+// (20260817090000_recommendations.sql) — Postgres performs a cascade
+// without needing a DELETE grant on the child table itself, so no separate
+// delete against recommendation_reasons is issued or needed.
 //
 // ============================================================================
 // Wiring
 // ============================================================================
 // Reads exactly SUPABASE_URL and SUPABASE_SECRET_KEY. No VITE_-prefixed
-// variable. Writes recommendations/recommendation_reasons (upsert only —
-// see "Stale plan_index rows" above for the one known consequence) and one
-// job_runs row per execution, job_name 'solver-run' (matching
-// build-solver-input.ts and store-solver-output.ts — every script in this
-// one workflow shares a job_name so the workflow's history reads as one
-// execution log).
+// variable. Writes recommendations/recommendation_reasons: upserts every
+// run, and — since ticket #60 — deletes stale plan_index rows for the
+// current gameweek only, always AFTER the upsert (see "Stale plan_index
+// rows" above). Also writes one job_runs row per execution, job_name
+// 'solver-run' (matching build-solver-input.ts and store-solver-output.ts —
+// every script in this one workflow shares a job_name so the workflow's
+// history reads as one execution log).
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
@@ -116,6 +127,7 @@ import {
   computeHitCost,
   computeNetPoints,
   computePlanScore,
+  computeStalePlanIndices,
   deriveConfidenceBand,
   deriveLineup,
   deriveTransferSummary,
@@ -134,6 +146,7 @@ import {
 
 const JOB_NAME = 'solver-run'
 const RECOMMENDATIONS_MIGRATION = 'supabase/migrations/20260817090000_recommendations.sql'
+const RECOMMENDATIONS_DELETE_GRANT_MIGRATION = 'supabase/migrations/20260820100000_recommendations_delete_grant.sql'
 const SOLVER_OUTPUT_MIGRATION = 'supabase/migrations/20260816090000_solver_output.sql'
 const SQUAD_STATE_MIGRATION = 'supabase/migrations/20260811180000_squad_state.sql'
 
@@ -291,6 +304,61 @@ export function deriveCurrentGameweekId(runPicks: readonly { gameweek_id: number
   return runPicks.reduce((min, p) => Math.min(min, p.gameweek_id), Number.POSITIVE_INFINITY)
 }
 
+/**
+ * Filters `picks` down to exactly the rows carrying `runId` — the single execution's rows this
+ * job's recommendation is built from. Ticket #60 (found 20 Aug 2026): `solver_picks` is upserted
+ * keyed on (solution_index, gameweek_id, player_id) — see scripts/store-solver-output.ts — so a
+ * row whose player differs from a newer run's pick for that same slot is never overwritten and
+ * can sit in the table under its OLDER run_id indefinitely. Two solver_runs executions' worth of
+ * rows can therefore coexist for the same gameweek; without this filter, transfers_made (and
+ * every other per-plan figure this job derives) would double-count across both. The main data
+ * fetch in `main()` already filters at the query level (`.eq('run_id', runId)`); this function
+ * re-applies the same filter in memory as a second, independently-testable guard — see this
+ * file's test for the two-runs-vs-one-run proof.
+ */
+export function filterPicksToRun<T extends { run_id: number | null }>(picks: readonly T[], runId: number): T[] {
+  return picks.filter((p) => p.run_id === runId)
+}
+
+// ============================================================================
+// Stale plan_index rows — ticket #60. Pure orchestration: WHAT to write and
+// delete, and in what order, decided here; the actual Supabase calls are
+// injected by main() so this ordering and scoping is provable with no real
+// database — same injection pattern as scripts/lib/paginate.ts's
+// `fetchAllPages`.
+// ============================================================================
+
+export interface StaleRecommendationsDeleteSpec {
+  gameweekId: number
+  stalePlanIndices: number[]
+}
+
+/**
+ * Upserts this run's new plans, then — ONLY once that upsert has succeeded — deletes any
+ * previously-stored plan_index rows for this gameweek that the new set no longer covers. Never
+ * the reverse: a crash or a failed delete must never leave a gameweek without its just-written
+ * Plan A. `deleteStalePlans` is called only when there is something concrete to remove (never a
+ * bare, unconditional delete), and only ever receives `gameweekId` (this run's own gameweek —
+ * never another one) and the exact stale `plan_index` values (see `computeStalePlanIndices`) — a
+ * caller wiring `deleteStalePlans` to a real Supabase call still owns adding its own filters, but
+ * has no argument here it could use to build a delete spanning more than this one gameweek's
+ * stale rows.
+ */
+export async function writeRecommendationsWithStaleCleanup(params: {
+  gameweekId: number
+  previousPlanIndices: readonly number[]
+  newPlanIndices: readonly number[]
+  upsertNewPlans: () => Promise<void>
+  deleteStalePlans: (spec: StaleRecommendationsDeleteSpec) => Promise<void>
+}): Promise<{ stalePlanIndices: number[] }> {
+  await params.upsertNewPlans()
+  const stalePlanIndices = computeStalePlanIndices(params.previousPlanIndices, params.newPlanIndices)
+  if (stalePlanIndices.length > 0) {
+    await params.deleteStalePlans({ gameweekId: params.gameweekId, stalePlanIndices })
+  }
+  return { stalePlanIndices }
+}
+
 // ============================================================================
 // Pure-ish local helpers — thin glue between the DB row shapes above and
 // src/lib/recommendation/'s pure input types. No I/O.
@@ -342,15 +410,65 @@ async function main(): Promise<void> {
 
   try {
     // --------------------------------------------------------------------
-    // 1. Every solver_picks row. Paginated and count-verified — the same
-    //    ceiling scripts/emit-projections-csv.ts and scripts/project-
-    //    points.ts guard against (scripts/lib/paginate.ts's file header).
-    //    Realistic size today: up to 15 players x 5 gameweeks x 3
-    //    iterations = 225 rows, comfortably under the page size, but this
-    //    job pages and count-checks regardless — see this ticket's DoD.
+    // 1a. Discover the latest run — a minimal `run_id`-only read, paginated
+    //     and count-verified same as any other read this job does (scripts/
+    //     lib/paginate.ts's file header). This is necessarily unfiltered
+    //     (there is no run to filter BY yet); ticket #60's "filter every
+    //     read of solver_picks to the run the recommendation is built from"
+    //     applies to the substantive data fetch in step 1b, which this
+    //     step's only job is to make possible without ever reading the full
+    //     row data for more than one run.
     // --------------------------------------------------------------------
     const {
-      rows: allPicks,
+      rows: runIdRows,
+      error: runIdError,
+      pages: runIdPagesFetched,
+    } = await fetchAllPages<{ run_id: number | null }>((from, to) =>
+      supabase.from('solver_picks').select('run_id').range(from, to).returns<{ run_id: number | null }[]>(),
+    )
+    if (runIdError) {
+      if (isMissingTable(runIdError, 'solver_picks')) {
+        throw new GenerateRecommendationsError(`the "solver_picks" table does not exist. Apply ${SOLVER_OUTPUT_MIGRATION} first.`, 'solver_picks')
+      }
+      throw new GenerateRecommendationsError(`solver_picks run_id lookup failed: ${runIdError.message}`, 'solver_picks')
+    }
+    const { count: runIdExpectedByCount, error: runIdCountError } = await supabase
+      .from('solver_picks')
+      .select('*', { count: 'exact', head: true })
+    if (runIdCountError) {
+      throw new GenerateRecommendationsError(`solver_picks count check failed: ${runIdCountError.message}`, 'solver_picks')
+    }
+    assertRowCountMatches('solver_picks (run discovery)', runIdRows.length, runIdExpectedByCount ?? 0)
+
+    // --------------------------------------------------------------------
+    // 2. No solve at all yet — a normal state (e.g. before #41's workflow
+    //    has ever produced output), not a failure. Exit 0, write nothing —
+    //    same shape as scripts/build-solver-input.ts's "no squad" path.
+    // --------------------------------------------------------------------
+    if (runIdRows.length === 0) {
+      console.log(
+        `${JOB_NAME}/generate-recommendations: "solver_picks" has no rows at all. Nothing to build a recommendation from — ` +
+          'making no further request. Run the solver (scripts/store-solver-output.ts) before this job.',
+      )
+      process.exit(0)
+      return
+    }
+
+    const latestRunId = findLatestRunId(runIdRows)
+    if (latestRunId === null) {
+      throw new GenerateRecommendationsError('every "solver_picks" row has a null run_id — cannot determine the latest solve.', 'solver_picks')
+    }
+
+    // --------------------------------------------------------------------
+    // 1b. Every column, filtered at the query level to exactly the latest
+    //     run (ticket #60) — never the whole table. `filterPicksToRun`
+    //     re-applies the same filter in memory as a second, independently
+    //     -testable guard (see this file's test); it is not a substitute
+    //     for the `.eq('run_id', ...)` below, which is what keeps this job
+    //     from ever pulling another execution's rows over the wire at all.
+    // --------------------------------------------------------------------
+    const {
+      rows: fetchedRunPicks,
       error: picksError,
       pages: picksPagesFetched,
     } = await fetchAllPages<SolverPickRow>((from, to) =>
@@ -359,6 +477,7 @@ async function main(): Promise<void> {
         .select(
           'solution_index, gameweek_id, player_id, player_code, is_lineup, bench_order, is_captain, is_vice_captain, is_transfer_in, is_transfer_out, expected_points, run_id',
         )
+        .eq('run_id', latestRunId)
         .range(from, to)
         .returns<SolverPickRow[]>(),
     )
@@ -371,34 +490,12 @@ async function main(): Promise<void> {
     const { count: picksExpectedByCount, error: picksCountError } = await supabase
       .from('solver_picks')
       .select('*', { count: 'exact', head: true })
+      .eq('run_id', latestRunId)
     if (picksCountError) {
       throw new GenerateRecommendationsError(`solver_picks count check failed: ${picksCountError.message}`, 'solver_picks')
     }
-    assertRowCountMatches('solver_picks', allPicks.length, picksExpectedByCount ?? 0)
-
-    // --------------------------------------------------------------------
-    // 2. No solve at all yet — a normal state (e.g. before #41's workflow
-    //    has ever produced output), not a failure. Exit 0, write nothing —
-    //    same shape as scripts/build-solver-input.ts's "no squad" path.
-    // --------------------------------------------------------------------
-    if (allPicks.length === 0) {
-      console.log(
-        `${JOB_NAME}/generate-recommendations: "solver_picks" has no rows at all. Nothing to build a recommendation from — ` +
-          'making no further request. Run the solver (scripts/store-solver-output.ts) before this job.',
-      )
-      process.exit(0)
-      return
-    }
-
-    // --------------------------------------------------------------------
-    // 3. The latest run's rows only — see file header for why the highest
-    //    run_id, not solver_runs.gameweek_id, decides which rows are used.
-    // --------------------------------------------------------------------
-    const latestRunId = findLatestRunId(allPicks)
-    if (latestRunId === null) {
-      throw new GenerateRecommendationsError('every "solver_picks" row has a null run_id — cannot determine the latest solve.', 'solver_picks')
-    }
-    const runPicks = allPicks.filter((p) => p.run_id === latestRunId)
+    assertRowCountMatches('solver_picks', fetchedRunPicks.length, picksExpectedByCount ?? 0)
+    const runPicks = filterPicksToRun(fetchedRunPicks, latestRunId)
 
     const currentGw = deriveCurrentGameweekId(runPicks)
 
@@ -687,6 +784,25 @@ async function main(): Promise<void> {
     const nameFor = (ref: PlanPlayerRef): string => playerNameById.get(ref.playerId) ?? `Player ${ref.playerId}`
 
     // --------------------------------------------------------------------
+    // 8b. What plan_index values are currently stored for this gameweek —
+    //     read BEFORE this run's upsert below, so the ticket #60 staleness
+    //     comparison reflects the prior state, not what we are about to
+    //     write. Never used to gate the upsert itself.
+    // --------------------------------------------------------------------
+    const { data: previousPlanRows, error: previousPlansError } = await supabase
+      .from('recommendations')
+      .select('plan_index')
+      .eq('gameweek_id', currentGw)
+      .returns<{ plan_index: number }[]>()
+    if (previousPlansError) {
+      if (isMissingTable(previousPlansError, 'recommendations')) {
+        throw new GenerateRecommendationsError(`the "recommendations" table does not exist. Apply ${RECOMMENDATIONS_MIGRATION} first.`, 'recommendations')
+      }
+      throw new GenerateRecommendationsError(`recommendations previous plan_index lookup failed: ${previousPlansError.message}`, 'recommendations')
+    }
+    const previousPlanIndices = (previousPlanRows ?? []).map((r) => r.plan_index)
+
+    // --------------------------------------------------------------------
     // 9. Assemble and upsert. Each plan's own confidence band is the
     //    shared base band, floored (never raised) by ITS OWN coverage gap
     //    — product-brief.md §8: "a recommendation whose transfer-in has no
@@ -761,26 +877,59 @@ async function main(): Promise<void> {
       })
     }
 
-    const { error: recUpsertError } = await supabase.from('recommendations').upsert(recommendationRows, { onConflict: 'gameweek_id,plan_index' })
-    if (recUpsertError) {
-      if (isMissingTable(recUpsertError, 'recommendations')) {
-        throw new GenerateRecommendationsError(`the "recommendations" table does not exist. Apply ${RECOMMENDATIONS_MIGRATION} first.`, 'recommendations')
-      }
-      throw new GenerateRecommendationsError(`recommendations upsert failed: ${recUpsertError.message}`, 'recommendations')
-    }
+    // Ticket #60: the new plans are upserted FIRST; only once that has
+    // succeeded is anything stale (a previous run's plan_index this run's
+    // collapse no longer produces) deleted — see writeRecommendationsWithStaleCleanup's
+    // own header for why the order matters and decisions/ticket-60.md for the "because".
+    const { stalePlanIndices } = await writeRecommendationsWithStaleCleanup({
+      gameweekId: currentGw,
+      previousPlanIndices,
+      newPlanIndices: distinctPlans.map((p) => p.planIndex),
+      upsertNewPlans: async () => {
+        const { error: recUpsertError } = await supabase.from('recommendations').upsert(recommendationRows, { onConflict: 'gameweek_id,plan_index' })
+        if (recUpsertError) {
+          if (isMissingTable(recUpsertError, 'recommendations')) {
+            throw new GenerateRecommendationsError(`the "recommendations" table does not exist. Apply ${RECOMMENDATIONS_MIGRATION} first.`, 'recommendations')
+          }
+          throw new GenerateRecommendationsError(`recommendations upsert failed: ${recUpsertError.message}`, 'recommendations')
+        }
 
-    const { error: reasonsUpsertError } = await supabase
-      .from('recommendation_reasons')
-      .upsert(reasonRows, { onConflict: 'gameweek_id,plan_index,order_index' })
-    if (reasonsUpsertError) {
-      if (isMissingTable(reasonsUpsertError, 'recommendation_reasons')) {
-        throw new GenerateRecommendationsError(
-          `the "recommendation_reasons" table does not exist. Apply ${RECOMMENDATIONS_MIGRATION} first.`,
-          'recommendation_reasons',
-        )
-      }
-      throw new GenerateRecommendationsError(`recommendation_reasons upsert failed: ${reasonsUpsertError.message}`, 'recommendation_reasons')
-    }
+        const { error: reasonsUpsertError } = await supabase
+          .from('recommendation_reasons')
+          .upsert(reasonRows, { onConflict: 'gameweek_id,plan_index,order_index' })
+        if (reasonsUpsertError) {
+          if (isMissingTable(reasonsUpsertError, 'recommendation_reasons')) {
+            throw new GenerateRecommendationsError(
+              `the "recommendation_reasons" table does not exist. Apply ${RECOMMENDATIONS_MIGRATION} first.`,
+              'recommendation_reasons',
+            )
+          }
+          throw new GenerateRecommendationsError(`recommendation_reasons upsert failed: ${reasonsUpsertError.message}`, 'recommendation_reasons')
+        }
+      },
+      deleteStalePlans: async (spec) => {
+        // Scoped to exactly this gameweek, at plan_index values at or above this run's new plan
+        // count — never a bare delete, never cross-gameweek (ticket #60 condition B). The
+        // `.gte(...)` filter is redundant with `.in('plan_index', spec.stalePlanIndices)` given
+        // plan_index is always stored contiguously from 0 (assignContiguousPlanIndices) — kept
+        // anyway so the query itself states the literal condition, not just the array that
+        // happens to satisfy it today.
+        const { error: staleDeleteError } = await supabase
+          .from('recommendations')
+          .delete()
+          .eq('gameweek_id', spec.gameweekId)
+          .in('plan_index', spec.stalePlanIndices)
+          .gte('plan_index', distinctPlans.length)
+        if (staleDeleteError) {
+          throw new GenerateRecommendationsError(
+            `deleting stale recommendations rows for gameweek ${spec.gameweekId} (plan_index ${spec.stalePlanIndices.join(', ')}) failed: ` +
+              `${staleDeleteError.message}. If this is "permission denied for table recommendations", apply ` +
+              `${RECOMMENDATIONS_DELETE_GRANT_MIGRATION} first.`,
+            'recommendations',
+          )
+        }
+      },
+    })
 
     const details: JsonRecord = {
       gameweekId: currentGw,
@@ -799,9 +948,15 @@ async function main(): Promise<void> {
       scoreGapPlanAToB: Number.isFinite(scoreGap) ? scoreGap : null,
       plansWithCoverageGap,
       freeTransfersAvailable,
-      picksRowsFetched: allPicks.length,
+      // Ticket #60: previously/now-stored plan_index rows for this gameweek, and which of the
+      // previous ones were removed as stale — see writeRecommendationsWithStaleCleanup above.
+      previousPlanIndices,
+      stalePlanIndicesRemoved: stalePlanIndices,
+      picksRowsFetched: runPicks.length,
       picksRowsExpectedByCount: picksExpectedByCount ?? 0,
       picksPagesFetched,
+      runIdRowsScanned: runIdRows.length,
+      runIdPagesFetched,
       playersRowsFetched: playerRows.length,
       playersPagesFetched,
       matchStatsRowsFetched,

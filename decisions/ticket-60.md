@@ -2,6 +2,43 @@
 
 ## HIGH-IMPACT
 
+- **The Tier 1 DELETE question is resolved — `computeStalePlanIndices` is now wired in.** The
+  issue owner granted DELETE on `public.recommendations` to `service_role` via
+  `supabase/migrations/20260820100000_recommendations_delete_grant.sql`, already applied to live
+  Supabase (added on a different branch/session — not this ticket's Scope constraint, so it is
+  not re-added or re-applied here). `writeRecommendationsWithStaleCleanup` (new,
+  `scripts/generate-recommendations.ts`) enforces both required conditions: (1) this run's new
+  plans are upserted FIRST, and only once that succeeds is anything computed as stale (via the
+  already-existing, already-tested `computeStalePlanIndices`) deleted — never the reverse, so a
+  crash or a failed delete can never leave a gameweek without its just-written Plan A; (2) the
+  delete is scoped with BOTH `.eq('gameweek_id', ...)` and `.in('plan_index', staleIndices)` AND a
+  redundant `.gte('plan_index', newPlanCount)` — belt and suspenders, never a bare delete, never
+  spanning gameweeks — and is skipped entirely (no delete call at all) when nothing is stale.
+  `recommendation_reasons` rows are not separately deleted: they follow the deleted
+  `recommendations` row via that table's own `ON DELETE CASCADE` FK
+  (`20260817090000_recommendations.sql`), and Postgres performs a cascade without needing a
+  DELETE grant on the child table — confirmed by reading that migration directly, not assumed.
+  (Tier 2 — implementing an already-authorized Tier 1 resolution)
+- **The `solver_picks` double-counting bug (found 20 Aug 2026) does not reproduce in
+  `generate-recommendations.ts` as committed before this session — traced, not assumed.** The
+  script already filtered `runPicks` to `findLatestRunId(allPicks)` before any transfer/lineup
+  computation touched the data, so `transfers_made` was already scoped to one solver_runs
+  execution. **Because** that filtering was an inline, unnamed, untested `.filter()` in `main()`
+  — nothing would have caught a future edit that reordered these lines or dropped the filter — I
+  hardened it rather than leaving it as-is: (1) the main `solver_picks` data fetch now filters at
+  the QUERY level (`.eq('run_id', latestRunId)`), determined via a separate, minimal `run_id`-only
+  scan (itself paginated and count-verified) rather than reading every column of every run's rows;
+  (2) the in-memory filter is now the named, exported, unit-tested `filterPicksToRun`, applied to
+  the already-query-filtered result as a second, independent guard; (3) added the required named
+  test proving a gameweek with two runs' worth of `solver_picks` (an older run's dangling
+  transfer-in row for a player no longer part of the newer run's plan — which happens because
+  `store-solver-output.ts`'s upsert is keyed on `(solution_index, gameweek_id, player_id)`, not
+  `run_id`, so such a row is never overwritten) yields the same `transfers_made` as building from
+  the latest run's rows alone. `job_runs.details.picksRowsFetched` now also reports only the
+  latest run's row count, not the whole table's — a side benefit, since the table has no cleanup
+  job and grows without bound. (Tier 2 — how solver_picks is read, HIGH-IMPACT because a silent
+  regression here produces a wrong `hit_cost`)
+
 - **`iteration_criteria` changed from `this_gw_transfer_in_out` to `this_gw_transfer_in`** —
   **because** the first real recommendation run produced three "plans" with the same incoming
   player, the same captain and identical scores, differing only in which bench player was sold.
