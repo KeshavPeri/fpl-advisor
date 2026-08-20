@@ -21,14 +21,15 @@ export interface CoverageEntry {
 
 /**
  * One starting-XI `solver_picks` row for the recommendation's own
- * `gameweek_id` + `solution_index` (ticket #68) — used only to derive THIS
- * gameweek's projected points, which is a different figure from
- * `netPointsRounded`/`grossPointsRounded` below (those are totals across
- * the whole multi-gameweek solve horizon). `isLineup` is carried through
- * even though api.ts's own query already filters to `is_lineup = true` at
- * the database layer, so `deriveVerdictView` can defend the same rule in
+ * `gameweek_id` + `solution_index` + solver run (ticket #68, run-filtered
+ * by #72) — used only to derive THIS gameweek's projected points, which is
+ * a different figure from `netPointsRounded`/`grossPointsRounded` below
+ * (those are totals across the whole multi-gameweek solve horizon).
+ * `isLineup` is carried through even though api.ts's own query already
+ * filters to `is_lineup = true` at the database layer, so `deriveVerdictView`
+ * can defend the same rule — AND the eleven-player guard (ticket #72) — in
  * the one place its arithmetic actually lives rather than trusting the
- * caller silently (see derive.ts's bench-exclusion test).
+ * caller silently (see derive.ts's bench-exclusion and lineup-size tests).
  */
 export interface GameweekPick {
   expectedPoints: number
@@ -61,10 +62,14 @@ export interface VerdictRecommendationData {
   playerNames: ReadonlyMap<number, string>
   /**
    * Starting-XI `solver_picks` rows for this recommendation's own
-   * `gameweek_id` + `solution_index` (ticket #68) — see api.ts. Null when
-   * the rows could not be found at all (the read failed, or no rows exist
-   * for this gameweek+solution): `deriveVerdictView` must fall back to an
-   * explicit "unavailable" figure rather than 0/NaN/blank.
+   * `gameweek_id` + `solution_index` + solver run (ticket #68, run-filtered
+   * by #72) — see api.ts. Null when the rows could not be found at all (the
+   * read failed, no run could be resolved, or no rows exist for this
+   * gameweek+solution+run): `deriveVerdictView` must fall back to an
+   * explicit "unavailable" figure rather than 0/NaN/blank. Even when
+   * non-null, `deriveVerdictView` treats it as unavailable unless exactly
+   * eleven rows survive its own `isLineup` filter (ticket #72's guard) —
+   * see derive.ts.
    */
   gameweekPicks: readonly GameweekPick[] | null
 }
@@ -93,11 +98,13 @@ export interface VerdictView {
   /**
    * This gameweek's projected points (ticket #68) — sum of starting-XI
    * `solver_picks.expected_points` for the recommendation's own
-   * `gameweekId` + solution, captain's contribution counted twice, rounded
-   * to a whole number. Null when `data.gameweekPicks` held no lineup rows —
-   * the component must render an explicit "unavailable" message, never
-   * 0/NaN/blank. This, not a horizon total, is the card's primary figure —
-   * see api.ts and derive.ts for the full "because".
+   * `gameweekId` + solution + solver run (ticket #72), captain's
+   * contribution counted twice, rounded to a whole number. Null when
+   * `data.gameweekPicks` held no lineup rows, or held anything other than
+   * exactly eleven of them (ticket #72's guard) — the component must render
+   * an explicit "unavailable" message, never 0/NaN/blank. This, not a
+   * horizon total, is the card's primary figure — see api.ts and derive.ts
+   * for the full "because".
    */
   gameweekPoints: number | null
   /**

@@ -33,6 +33,18 @@ interface RecommendationRow {
    *  — joins into solver_picks alongside gameweek_id. NOT the same as
    *  plan_index; see the recommendations migration's own comment. */
   solution_index: number
+  /** Which solver_runs row this plan's picks came from (ticket #72) — see
+   *  the recommendations migration's own comment on this column. Nullable:
+   *  older rows written before this column existed, or any future write
+   *  path that omits it, fall back to resolveRunId's most-recent-run
+   *  lookup below rather than summing every run for the gameweek. */
+  solver_run_id: number | null
+}
+
+/** One solver_runs row, read only to resolve a run id when the
+ *  recommendation's own solver_run_id is null (ticket #72). */
+interface SolverRunRow {
+  id: number
 }
 
 interface ReasonRow {
@@ -83,7 +95,8 @@ export async function fetchVerdict(): Promise<VerdictRecommendationData | null> 
     .select(
       'gameweek_id, is_roll, transfer_in_player_id, transfer_out_player_id, ' +
         'captain_player_id, vice_captain_player_id, hit_cost, gross_points_rounded, ' +
-        'net_points_rounded, confidence_band, coverage, gameweeks(name), solution_index'
+        'net_points_rounded, confidence_band, coverage, gameweeks(name), solution_index, ' +
+        'solver_run_id'
     )
     .eq('plan_index', 0)
     .order('gameweek_id', { ascending: false })
@@ -133,31 +146,59 @@ export async function fetchVerdict(): Promise<VerdictRecommendationData | null> 
     }
   }
 
-  // This gameweek's projected points (ticket #68) — a single additional
-  // read, filtered in the database to exactly this recommendation's own
-  // gameweek_id + solution_index + starting XI (is_lineup = true), never
-  // fetched-all-then-filtered-in-memory. Deliberately NOT passed through
-  // raise(): a failed or missing solver_picks read must fall back to an
-  // "unavailable" figure on the card (see deriveVerdictView), not blank the
-  // whole card the way raise() would via VerdictCard's error state — every
-  // other field this function resolves is unaffected by this read failing.
+  // This gameweek's projected points (ticket #68, run-filtered by #72) — a
+  // single additional read, filtered in the database to exactly this
+  // recommendation's own gameweek_id + solution_index + solver run +
+  // starting XI (is_lineup = true), never fetched-all-then-filtered-in-
+  // memory. Deliberately NOT passed through raise(): a failed or missing
+  // solver_picks (or solver_runs) read must fall back to an "unavailable"
+  // figure on the card (see deriveVerdictView), not blank the whole card
+  // the way raise() would via VerdictCard's error state — every other field
+  // this function resolves is unaffected by either read failing.
+  //
+  // solver_picks holds more than one solver run's rows for the same
+  // gameweek/solution (an earlier solve and a later one both leave rows
+  // behind — see the ticket's evidence), so summing everything for a
+  // gameweek/solution roughly doubles the figure. recommendations.solver_run_id
+  // already identifies exactly which run this recommendation's picks came
+  // from; when it is null (older rows, or any future write path that omits
+  // it) fall back to the most recently created solver_runs row for this
+  // gameweek — never sum across every run.
   let gameweekPicks: GameweekPick[] | null = null
   try {
-    const { data: pickRows, error: pickError } = await supabase
-      .from('solver_picks')
-      .select('expected_points, is_captain, is_lineup')
-      .eq('gameweek_id', recRow.gameweek_id)
-      .eq('solution_index', recRow.solution_index)
-      .eq('is_lineup', true)
-      .returns<SolverPickRow[]>()
+    let runId = recRow.solver_run_id
 
-    if (pickError) throw pickError
-    if (pickRows && pickRows.length > 0) {
-      gameweekPicks = pickRows.map((row) => ({
-        expectedPoints: row.expected_points,
-        isCaptain: row.is_captain,
-        isLineup: row.is_lineup,
-      }))
+    if (runId === null) {
+      const { data: runRows, error: runError } = await supabase
+        .from('solver_runs')
+        .select('id')
+        .eq('gameweek_id', recRow.gameweek_id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .returns<SolverRunRow[]>()
+
+      if (runError) throw runError
+      runId = (runRows ?? [])[0]?.id ?? null
+    }
+
+    if (runId !== null) {
+      const { data: pickRows, error: pickError } = await supabase
+        .from('solver_picks')
+        .select('expected_points, is_captain, is_lineup')
+        .eq('gameweek_id', recRow.gameweek_id)
+        .eq('solution_index', recRow.solution_index)
+        .eq('is_lineup', true)
+        .eq('run_id', runId)
+        .returns<SolverPickRow[]>()
+
+      if (pickError) throw pickError
+      if (pickRows && pickRows.length > 0) {
+        gameweekPicks = pickRows.map((row) => ({
+          expectedPoints: row.expected_points,
+          isCaptain: row.is_captain,
+          isLineup: row.is_lineup,
+        }))
+      }
     }
   } catch {
     gameweekPicks = null
