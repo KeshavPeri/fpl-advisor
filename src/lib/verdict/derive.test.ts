@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { deriveVerdictView } from './derive.ts'
-import type { VerdictRecommendationData } from './types.ts'
+import type { GameweekPick, VerdictRecommendationData } from './types.ts'
 
 const PLAYER_NAMES = new Map<number, string>([
   [1, 'Haaland'],
@@ -25,8 +25,26 @@ function baseData(overrides: Partial<VerdictRecommendationData> = {}): VerdictRe
     coverage: [],
     reasons: ['Transfer in Haaland. Transfer out Isak.', 'Captain Salah. Vice-captain Saliba.'],
     playerNames: PLAYER_NAMES,
+    // Most tests don't care about this gameweek's projected-points figure —
+    // null (the "unavailable" input, ticket #68) is the safe default so
+    // every unrelated test isn't forced to invent a starting XI just to
+    // satisfy the type. Tests that DO care override it explicitly below.
+    gameweekPicks: null,
     ...overrides,
   }
+}
+
+/** Eleven starting-XI rows, one flagged captain, all identical value —
+ *  a minimal realistic lineup fixture for the gameweek-points tests below. */
+function elevenLineupPicks(captainExpectedPoints: number, othersExpectedPoints: number): GameweekPick[] {
+  return [
+    { expectedPoints: captainExpectedPoints, isCaptain: true, isLineup: true },
+    ...Array.from({ length: 10 }, () => ({
+      expectedPoints: othersExpectedPoints,
+      isCaptain: false,
+      isLineup: true,
+    })),
+  ]
 }
 
 describe('deriveVerdictView', () => {
@@ -40,9 +58,27 @@ describe('deriveVerdictView', () => {
     expect(view.headline).toBe('Roll your transfer.')
   })
 
-  it('builds the captain/vice-captain line from resolved player names', () => {
+  it('builds the captain/vice-captain line from resolved player names, adding a full stop when the name has none', () => {
     const view = deriveVerdictView(baseData(), 5)
     expect(view.captainLine).toBe('Captain Salah. Vice-captain Saliba.')
+  })
+
+  it('does not double the full stop on a name that already ends in one ("Bruno G.")', () => {
+    const names = new Map<number, string>([
+      [3, 'Guéhi'],
+      [4, 'Bruno G.'],
+    ])
+    const view = deriveVerdictView(baseData({ playerNames: names }), 5)
+    expect(view.captainLine).toBe('Captain Guéhi. Vice-captain Bruno G.')
+  })
+
+  it('does not strip a full stop from the middle of a name', () => {
+    const names = new Map<number, string>([
+      [3, 'A.Test'],
+      [4, 'Saliba'],
+    ])
+    const view = deriveVerdictView(baseData({ playerNames: names }), 5)
+    expect(view.captainLine).toBe('Captain A.Test. Vice-captain Saliba.')
   })
 
   it('is not stale when the recommendation gameweek matches the current one', () => {
@@ -138,18 +174,130 @@ describe('deriveVerdictView', () => {
 
   it('never renders a decimal point anywhere in its numeric output', () => {
     const view = deriveVerdictView(
-      baseData({ hitCost: 4, grossPointsRounded: 62, netPointsRounded: 58 }),
+      baseData({
+        hitCost: 4,
+        grossPointsRounded: 62,
+        netPointsRounded: 58,
+        gameweekPicks: elevenLineupPicks(4.6, 3.3),
+      }),
       5
     )
     const numericStrings = [
-      String(view.netPoints),
+      ...(view.gameweekPoints !== null ? [String(view.gameweekPoints)] : []),
       ...(view.hit ? [String(view.hit.cost), String(view.hit.gross), String(view.hit.net)] : []),
       ...(view.staleGameweeksOld !== null ? [String(view.staleGameweeksOld)] : []),
     ]
     for (const value of numericStrings) {
       expect(value).not.toContain('.')
     }
-    expect(Number.isInteger(view.netPoints)).toBe(true)
+    expect(view.gameweekPoints).not.toBeNull()
+    expect(Number.isInteger(view.gameweekPoints)).toBe(true)
+  })
+
+  it('carries no hit basis label when there is no hit', () => {
+    const view = deriveVerdictView(baseData({ hitCost: 0 }), 5)
+    expect(view.hitBasisLabel).toBeNull()
+  })
+
+  it('states the hit figures are a multi-gameweek total, distinct from the gameweek figure, when a hit is recommended', () => {
+    const view = deriveVerdictView(
+      baseData({ hitCost: 4, grossPointsRounded: 62, netPointsRounded: 58 }),
+      5
+    )
+    expect(view.hitBasisLabel).toBe('Across the full transfer plan')
+  })
+
+  describe('this gameweek\'s projected points (ticket #68)', () => {
+    it("doubles the captain's contribution — a lineup where the captain projects 5 scores 5 higher than the same lineup with no captain flagged", () => {
+      const withoutCaptain: GameweekPick[] = [
+        { expectedPoints: 5, isCaptain: false, isLineup: true },
+        ...Array.from({ length: 10 }, () => ({
+          expectedPoints: 3,
+          isCaptain: false,
+          isLineup: true,
+        })),
+      ]
+      const withCaptain: GameweekPick[] = [
+        { expectedPoints: 5, isCaptain: true, isLineup: true },
+        ...Array.from({ length: 10 }, () => ({
+          expectedPoints: 3,
+          isCaptain: false,
+          isLineup: true,
+        })),
+      ]
+
+      const viewWithout = deriveVerdictView(baseData({ gameweekPicks: withoutCaptain }), 5)
+      const viewWith = deriveVerdictView(baseData({ gameweekPicks: withCaptain }), 5)
+
+      expect(viewWithout.gameweekPoints).toBe(35)
+      expect(viewWith.gameweekPoints).toBe(40)
+      expect(viewWith.gameweekPoints).toBe((viewWithout.gameweekPoints ?? 0) + 5)
+    })
+
+    it('excludes bench rows — a fifteen-row set (eleven lineup, four bench) is unaffected by the four bench rows', () => {
+      const lineup: GameweekPick[] = Array.from({ length: 11 }, () => ({
+        expectedPoints: 4,
+        isCaptain: false,
+        isLineup: true,
+      }))
+      const bench: GameweekPick[] = Array.from({ length: 4 }, () => ({
+        expectedPoints: 100,
+        isCaptain: false,
+        isLineup: false,
+      }))
+
+      const view = deriveVerdictView(baseData({ gameweekPicks: [...lineup, ...bench] }), 5)
+
+      expect(view.gameweekPoints).toBe(44)
+    })
+
+    it('rounds a fractional total to the nearest whole number', () => {
+      // captain: 4.6 * 2 = 9.2; ten others: 3.3 * 10 = 33; raw total 42.2.
+      const view = deriveVerdictView(
+        baseData({ gameweekPicks: elevenLineupPicks(4.6, 3.3) }),
+        5
+      )
+      expect(view.gameweekPoints).toBe(42)
+    })
+
+    it("labels the figure with the recommendation's own gameweek name", () => {
+      const view = deriveVerdictView(baseData({ gameweekName: 'Gameweek 7' }), 5)
+      expect(view.gameweekPointsLabel).toBe('Gameweek 7 projected points')
+    })
+
+    it('falls back to an unavailable figure, without blanking the rest of the card, when solver_picks rows are missing', () => {
+      const view = deriveVerdictView(baseData({ gameweekPicks: null }), 5)
+
+      expect(view.gameweekPoints).toBeNull()
+      expect(view.headline).toBe('Transfer in Haaland. Transfer out Isak.')
+      expect(view.captainLine).toBe('Captain Salah. Vice-captain Saliba.')
+      expect(view.confidenceWord).toBe('clear')
+    })
+
+    it('falls back to an unavailable figure when solver_picks rows exist but none are lineup rows', () => {
+      const view = deriveVerdictView(
+        baseData({
+          gameweekPicks: [{ expectedPoints: 10, isCaptain: false, isLineup: false }],
+        }),
+        5
+      )
+      expect(view.gameweekPoints).toBeNull()
+    })
+
+    it("derives a stale recommendation's figure from ITS OWN gameweek's picks, not the current gameweek", () => {
+      const view = deriveVerdictView(
+        baseData({
+          gameweekId: 3,
+          gameweekName: 'Gameweek 3',
+          gameweekPicks: elevenLineupPicks(6, 2),
+        }),
+        6
+      )
+
+      expect(view.isStale).toBe(true)
+      expect(view.gameweekPoints).toBe(32) // 6*2 + 10*2
+      expect(view.gameweekPointsLabel).toBe('Gameweek 3 projected points')
+    })
   })
 
   it('uses the stored roll reason verbatim as the headline for a rolled transfer', () => {

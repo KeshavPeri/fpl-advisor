@@ -8,6 +8,11 @@
   Colour follows the DoD directly: --accent-cyan marks the recommended
   action (the points figure); --accent-coral marks risk language — a hit, a
   stale recommendation, a coverage gap. No green, no yellow, no purple.
+
+  Ticket #68 makes THIS gameweek's projected points the primary figure
+  (previously the multi-gameweek horizon total) and adds the "unavailable"
+  fallback state plus the subordinate, separately-labelled hit block below
+  it — no new token, everything still drawn from src/index.css.
 */
 
 .verdict-card {
@@ -63,10 +68,35 @@
   letter-spacing: 0.01em;
 }
 
-/* Risk language: a hit always costs points, so it's coral, never cyan
-   (design-reference.md: "coral for risk"). Only rendered when hit_cost > 0
-   — see VerdictCard.tsx; product-brief.md §6d forbids hit language of any
-   kind when there is no hit. */
+/* solver_picks for this recommendation's gameweek+solution couldn't be
+   found (ticket #68 DoD) — a real data gap, not a zero, so it takes the
+   same coral used for the coverage note below rather than the cyan used
+   for a real figure, and sits at --text-title (not --text-display) so an
+   absent figure doesn't visually outweigh a present one elsewhere on the
+   card. */
+.verdict-card__points-value--unavailable {
+  font: var(--text-title);
+  color: var(--accent-coral);
+}
+
+/* The hit block (ticket #68) sits below the gameweek figure and is
+   visually subordinate to it — --text-label for the basis line, --text-body
+   for the figures themselves, both well under --text-display. Risk
+   language throughout: a hit always costs points, so it's coral, never
+   cyan (design-reference.md: "coral for risk"). Only rendered when
+   hit_cost > 0 — see VerdictCard.tsx; product-brief.md §6d forbids hit
+   language of any kind when there is no hit. */
+.verdict-card__hit-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.verdict-card__hit-label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
 .verdict-card__hit {
   font: var(--text-body);
   color: var(--accent-coral);
