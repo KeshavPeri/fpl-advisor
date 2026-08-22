@@ -22,7 +22,7 @@
  *  - premierleague.com/en/news/4679946 — the 2026/27 BPS changes article.
  */
 import type { Position } from './types.ts'
-import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from './types.ts'
+import { DEFENDER, GOALKEEPER, MIDFIELDER } from './types.ts'
 import type { SaveEvent } from './types.ts'
 
 export const CBI_ACTIONS_PER_BPS = 3
@@ -56,7 +56,7 @@ export const RECOVERY_ACTIONS_PER_BPS = 3
 export function goalBps(position: Position): number {
   if (position === GOALKEEPER || position === DEFENDER) return GOAL_BPS_GOALKEEPER_DEFENDER
   if (position === MIDFIELDER) return GOAL_BPS_MIDFIELDER
-  return GOAL_BPS_FORWARD
+  return GOAL_BPS_FORWARD // FORWARD is the only remaining Position value
 }
 
 /** BPS for a clean sheet, by position — {@link CLEAN_SHEET_BPS_GOALKEEPER_DEFENDER} for goalkeepers and defenders, 0 for midfielders and forwards. */
