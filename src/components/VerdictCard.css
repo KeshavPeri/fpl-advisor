@@ -137,6 +137,18 @@
   color: var(--accent-coral);
 }
 
+/* Ticket #79 — the card's one way through to the full reasoning screen
+   (design-reference.md: "a bare number is never the whole story"). Same
+   link treatment as home-invitation__link (HomeScreen.css): cyan,
+   text-body, no underline chrome — a quiet way forward, not a button. */
+.verdict-card__reasoning-link {
+  align-self: flex-start;
+  margin-top: var(--space-1);
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-cyan);
+}
+
 /* Loading placeholder — four bars shaped roughly like the ordinary
    (non-stale, non-hit) card's own content: headline, captain line, points
    figure, confidence line. Same technique as PitchSkeleton.css: real
