@@ -8,24 +8,35 @@ Depends on the preflight check (merged, ticket #69).
 
 ### What happened
 
-The first live run reported **8 pass, 1 warn, 1 fail**, and the fail was:
+The first live run, 20 Aug 2026, reported **8 pass, 1 warn, 1 fail**, and the fail was:
 
 ```
 Projections — FAIL — 87 of 595 projection row(s) have zero expected_points AND zero expected_minutes.
 ```
 
-Those 87 rows were queried directly against live data on 20 Aug 2026. **Every single one belongs to
-an unavailable player:**
+**It failed again on 21 Aug**, after the gameweek rolled over, with different numbers and the same
+non-reason:
 
-| `players.status` | Count |
-|---|---|
-| `i` — injured | 47 |
-| `u` — unavailable | 37 |
-| `s` — suspended | 3 |
-| **available (`a`)** | **0** |
+```
+Projections — FAIL — 98 of 600 projection row(s) have zero expected_points AND zero expected_minutes.
+```
 
-The most expensive names in the set are Ekitiké, J. Timber, Kulusevski, Saliba, Mitoma and
+Both populations were queried directly against live data. **In both cases every single row belongs
+to an unavailable player, and not one belongs to an available one:**
+
+| `players.status` | 20 Aug (GW1) | 21 Aug (GW2) |
+|---|---|---|
+| `i` — injured | 47 | 56 |
+| `u` — unavailable | 37 | 39 |
+| `s` — suspended | 3 | 3 |
+| **available (`a`)** | **0** | **0** |
+| **total** | **87** | **98** |
+
+The most expensive names in the 20 Aug set were Ekitiké, J. Timber, Kulusevski, Saliba, Mitoma and
 Joelinton — all carrying a real injury flag on `players.status`.
+
+**Two failures, two different counts, zero available players either time.** That is the shape of an
+assertion that can never pass, not of a defect that comes and goes.
 
 **The model is behaving exactly as specified.** `src/lib/projection/minutes.ts` resolves availability
 to `0.0` for `status` in `i` / `s` / `u` with a null chance, which correctly zeroes expected minutes
@@ -84,9 +95,10 @@ written can effectively never pass.
       `chance_of_playing_next_round` is below 100. Named test.
 - [ ] The check **does not fail** on an all-zero row for a player whose team has no fixture in that
       gameweek. Named test.
-- [ ] **Against the live 20 Aug 2026 shape — 87 all-zero rows, all of them `i`/`u`/`s` — the check
-      passes.** There is a named test using exactly that composition (47 / 37 / 3 / 0) asserting a
-      pass verdict.
+- [ ] **Against both observed live shapes the check passes**, with a named test for each: the
+      20 Aug 2026 composition (47 `i` / 37 `u` / 3 `s` / 0 `a`, 87 rows) and the 21 Aug 2026
+      composition (56 `i` / 39 `u` / 3 `s` / 0 `a`, 98 rows). Both assert a pass verdict, and both
+      counts reconcile exactly to their stated total.
 - [ ] A single fit, fixtured, all-zero player among otherwise healthy data produces a **fail**, and
       the reason **names that player** — an unnamed count is not actionable at 3am on a Friday.
       Named test.
@@ -128,9 +140,10 @@ written can effectively never pass.
   reference-schema migration's own column comment. `d` is doubtful and legitimately produces a
   reduced, non-zero projection; if a `d` player comes out all-zero it is because of thin minutes
   history, not availability, so it is still not a failure.
-- **Keep the count visible on a pass.** The point of the breakdown is that a jump from 87 to 200
-  unavailable players would be worth noticing even while the check is green. A number that only
-  appears on failure is a number nobody watches.
+- **Keep the count visible on a pass.** The point of the breakdown is that the number moves — it
+  was 87 on 20 Aug and 98 the next day, both entirely legitimate — and a jump to 200 would be worth
+  noticing even while the check is green. A number that only appears on failure is a number nobody
+  watches.
 - **Do not "fix" this by excluding unavailable players from the projection job.** They need a row —
   the projections CSV feeds the solver's player pool, and a player missing from it cannot be
   transferred in at all. Zero is the right value and the row must exist.
@@ -138,10 +151,15 @@ written can effectively never pass.
   chain healthy two days before the deadline; the warn correctly surfaced the three promoted clubs
   with no ClubElo rating. Only the tenth was mis-specified. Fixing it is what keeps the other nine
   worth reading.
-- **Another ticket may be running in this batch** that owns `scripts/build-solver-input.ts`,
-  `scripts/generate-recommendations.ts` and `src/lib/recommendation/`. This ticket touches none of
-  them.
-- **What a substitute cannot catch.** The tests prove every branch, including the exact live
-  composition observed on 20 Aug. They cannot prove the check now passes against the real database —
-  **run the workflow manually the moment this merges.** Green, with the 87 still reported in the
-  reason, is the outcome that closes this ticket.
+- **Do not touch the other four failing checks.** The 21 Aug preflight run reported five failures.
+  Four of them — squad, recommendation, solver and job freshness — all trace to a single unrelated
+  defect in `scripts/sync-squad.ts`, fixed by its own ticket, and those four assertions are
+  **correct**: the chain really was broken and they really should have been red. **This ticket
+  corrects the one assertion that was wrong, and only that one.** If a Builder is tempted to soften
+  any of the other four because they are also red, that is the opposite of what this ticket is for.
+- **What a substitute cannot catch.** The tests prove every branch, including both exact live
+  compositions observed. They cannot prove the check now passes against the real database — **run
+  the workflow manually the moment this merges.** The projections check green, with the all-zero
+  count still reported in its reason, is the outcome that closes this ticket. Note that the overall
+  preflight verdict may still be FAIL for the unrelated reasons above; judge this ticket on check 3
+  alone.
