@@ -179,6 +179,29 @@ export class BuildInputError extends Error {
   }
 }
 
+/**
+ * Ticket #83. Mid-season a missing `squads` row for the target gameweek is a failure, not a
+ * benign early-season state — `scripts/sync-squad.ts` runs 35 minutes before this job in
+ * scheduled-jobs.yml and writes that row every gameweek, so its absence here means the sync
+ * failed or never ran (see this file's own header). Writes squad_found=false to $GITHUB_OUTPUT
+ * FIRST, before throwing, so .github/workflows/solver-run.yml's step gating sees 'false'
+ * regardless of what happens to the thrown error afterwards. Then throws a BuildInputError —
+ * main()'s existing catch block turns any BuildInputError into a job_runs row with
+ * status: 'failure' (message = this error's message) and a non-zero exit, the same generic
+ * mechanism every other failure path in this file already uses. Exported (rather than left
+ * inline in main()) so both effects — the $GITHUB_OUTPUT write and the failure message — are
+ * directly provable by a unit test without mocking Supabase; see build-solver-input.test.ts.
+ */
+export async function failNoSquad(gameweekId: number): Promise<never> {
+  await writeGithubOutput('squad_found', 'false')
+  throw new BuildInputError(
+    `no squad is stored in "squads" for gameweek ${gameweekId}. The solver has nothing to solve against — check that ` +
+      `scripts/sync-squad.ts ran successfully for gameweek ${gameweekId} (it should run before this job, in ` +
+      'scheduled-jobs.yml), then re-check the registered squad.',
+    'squads',
+  )
+}
+
 interface PostgrestLikeError {
   code?: string
   message?: string
@@ -494,9 +517,12 @@ async function main(): Promise<void> {
     }
 
     // --------------------------------------------------------------------
-    // 2. Squad existence — a normal pre-GW1 state, not a failure. Same
-    //    shape as scripts/sync-squad.ts's unset-FPL_ENTRY_ID path: print,
-    //    signal the workflow to skip the solve, exit 0, no job_runs row.
+    // 2. Squad existence — mid-season this is a FAILURE, not a benign
+    //    state (ticket #83). scripts/sync-squad.ts writes a `squads` row
+    //    for every gameweek and runs 35 minutes before this job
+    //    (scheduled-jobs.yml, 17:45 UTC, vs. this workflow's 18:20 UTC), so
+    //    a missing row here means that sync failed or never ran. See
+    //    failNoSquad() above for the write-then-throw mechanics.
     // --------------------------------------------------------------------
     const { data: squadRows, error: squadError } = await supabase
       .from('squads')
@@ -511,14 +537,7 @@ async function main(): Promise<void> {
     }
     const squadRow = squadRows?.[0]
     if (!squadRow) {
-      console.log(
-        `${JOB_NAME}/build-solver-input: no squad stored in "squads" for gameweek ${nextGw.id}. Nothing to solve — making no ` +
-          'further request. This is a normal pre-GW1 state, not a failure: enter the squad manually (#13) or wait for the ' +
-          'post-deadline API sync (#14).',
-      )
-      await writeGithubOutput('squad_found', 'false')
-      process.exit(0)
-      return
+      await failNoSquad(nextGw.id)
     }
 
     // --------------------------------------------------------------------
