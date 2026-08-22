@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router'
 import { toErrorMessage } from '../lib/format'
 import { deriveVerdictView } from '../lib/verdict/derive.ts'
 import { fetchVerdict } from '../lib/verdict/api.ts'
@@ -69,6 +70,12 @@ export function VerdictPointsFigure({ label, points }: VerdictPointsFigureProps)
  * derived. `view.gameweekPoints` renders as a number when available and as
  * an explicit "Unavailable" state when the underlying solver_picks rows
  * couldn't be found — never as 0, NaN, or a blank card.
+ *
+ * Ticket #79 adds one thing: a link through to the full reasoning screen
+ * (`/reasoning`), per design-reference.md's "one-line summary on the
+ * verdict card so a bare number is never the whole story." Everything else
+ * about the card is unchanged — no commit action, no override registration,
+ * still out of scope here (items 19, 20).
  */
 function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
   const [state, setState] = useState<VerdictState>({ status: 'loading' })
@@ -170,6 +177,10 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
       {view.coinFlipNote && <p className="verdict-card__confidence-note">{view.coinFlipNote}</p>}
 
       {view.coverageNote && <p className="verdict-card__coverage">{view.coverageNote}</p>}
+
+      <Link className="verdict-card__reasoning-link" to="/reasoning">
+        Full reasoning →
+      </Link>
     </Surface>
   )
 }

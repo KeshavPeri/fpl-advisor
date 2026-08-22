@@ -1,0 +1,278 @@
+/*
+  The reasoning screen (ticket #79, feature-list item 21) — the one screen in
+  this app where information density is correct (design-reference.md,
+  reference 4: Linear). Everywhere else in the app stays calm and spare;
+  here, more state is communicated per screen — through tighter spacing,
+  small labels and weight, not through extra chrome or borders. Still built
+  entirely from Surface (translucent layered material, never a flat card
+  with a 1px border) and the existing token set from src/index.css — no new
+  token is introduced here.
+*/
+
+.reasoning-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.reasoning-back {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-cyan);
+}
+
+.reasoning-mark {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* ---- Loading / error / empty ---- */
+
+.reasoning-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.reasoning-skeleton-line {
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: reasoning-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.reasoning-skeleton-line--title {
+  height: var(--space-8);
+  width: 60%;
+}
+
+.reasoning-skeleton-line--body {
+  height: var(--space-4);
+  width: 90%;
+}
+
+@keyframes reasoning-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.reasoning-error {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+.reasoning-empty-title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.reasoning-empty-body {
+  font: var(--text-body);
+  color: var(--text-secondary);
+  margin-top: var(--space-2);
+}
+
+/* ---- Summary: gameweek, headline, every stored reason line ---- */
+
+.reasoning-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.reasoning-gameweek {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.reasoning-headline {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.reasoning-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reasoning-list__item {
+  font: var(--text-body);
+  color: var(--text-secondary);
+  padding-left: var(--space-3);
+  position: relative;
+}
+
+.reasoning-list__item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.65em;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent-cyan);
+}
+
+/* ---- Totals: the horizon figure, the hit block, the confidence word ---- */
+
+.reasoning-totals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.reasoning-total__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.reasoning-total__value {
+  font: var(--text-display);
+  color: var(--accent-cyan);
+  letter-spacing: 0.01em;
+}
+
+.reasoning-hit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reasoning-hit__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.reasoning-hit__figures {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+.reasoning-confidence__label {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+/* ---- Captain confidence ---- */
+
+.reasoning-captain {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reasoning-captain__label {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.reasoning-captain__note {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+/* A coin-flip captaincy is a real gap in the recommendation, same coral
+   family as risk/warning language elsewhere in the app. */
+.reasoning-captain--coin-flip .reasoning-captain__label {
+  color: var(--accent-coral);
+}
+
+.reasoning-captain--coin-flip .reasoning-captain__note {
+  color: var(--text-primary);
+}
+
+/* ---- Per-player component breakdown — the dense part ---- */
+
+.reasoning-players {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.reasoning-player {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  /* Tighter than the default Surface padding (--space-6) — this is the one
+     place density is correct; four to eight of these stack on one screen
+     and the default panel padding would push the last one off-screen on an
+     iPhone. */
+  padding: var(--space-4);
+}
+
+.reasoning-player__role {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.reasoning-player__name {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.reasoning-player__coverage {
+  font: var(--text-label);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-1);
+}
+
+.reasoning-player__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.reasoning-player__table tr + tr {
+  border-top: 1px solid var(--panel-border);
+}
+
+.reasoning-player__component-label {
+  font: var(--text-label);
+  color: var(--text-secondary);
+  padding: var(--space-1) 0;
+  text-align: left;
+}
+
+.reasoning-player__component-value {
+  font: var(--text-label);
+  color: var(--text-primary);
+  padding: var(--space-1) 0;
+  text-align: right;
+}
+
+.reasoning-player__unavailable {
+  font: var(--text-label);
+  color: var(--accent-coral);
+}
+
+/* ---- Model version / computed-at footer ---- */
+
+.reasoning-meta {
+  padding: var(--space-3) var(--space-4);
+}
+
+.reasoning-meta__line {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-skeleton-line {
+    animation: none;
+  }
+}
