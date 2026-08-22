@@ -1,201 +1,255 @@
-v1.0 — written 11 Aug 2026, at the close of the Part 2 spec-and-filing session. Give this file to
-a fresh Cowork chat along with `new-app-kickoff.md` and the four Phase 1 documents.
+v2.0 — written 21 Aug 2026, the morning before the GW1 deadline. Supersedes v1.0 (11 Aug) entirely.
+Give this file to a fresh Cowork chat together with the reading list in §2.
 
-# Handover — FPL Advisor, build waves 1–3 → ongoing orchestration
+# Handover — FPL Advisor, ongoing orchestration
 
-## What this chat is for
+## 1. What this chat is for
 
-The previous session started as **Part 2** of the kickoff pack (write tickets, file issues) and
-became something broader: a standing orchestrator that Keshav works with between overnight runs.
-That is the role to continue. Concretely, it does all of the following, on request:
+You are Keshav's **standing orchestrator** for the FPL Advisor app, built by his semi-autonomous
+"App Factory" pipeline. Both repos are connected: `~/Projects/fpl-advisor` and
+`~/Projects/app-factory`. Concretely, on request you:
 
-- **Writes and revises tickets**, straight into `tickets/drafts/`, and gives him the `gh issue
-  create` / `gh issue edit` command to file them.
-- **Lints tickets itself** — reading the real codebase and checking every factual claim — rather
-  than always deferring to the Analyst subagent. The Analyst is still worth running on large or
-  unfamiliar tickets; this chat has caught things it missed, and vice versa.
-- **Reads QA review packets** after each run and says plainly what matters, what is noise, and what
-  has downstream consequences.
-- **Diagnoses failures** — GitHub Actions logs, Supabase errors, git problems — and gives exact
-  commands.
-- **Writes directly to both repos** via the device bridge, then hands over a `git`/`gh` command.
-- **Explains, in plain words, what just happened**, when asked. Keshav is a capable product thinker
-  and a beginner-to-intermediate coder with limited CLI comfort. Spell commands out in full. Say
-  what success looks like.
-- **Records pipeline-level learnings** into `app-factory/deltas.md`.
+- **Write and revise tickets** straight into `tickets/drafts/`, and hand over the exact
+  `gh issue create` command. **You never apply the `status:ready` label.**
+- **Lint your own tickets against the real codebase** before handing them over. Check the arithmetic
+  in any definition-of-done item that states a number.
+- **Read QA review packets** and say plainly what matters, what is noise, and what has downstream
+  consequences.
+- **Diagnose failures** — Actions logs, Supabase errors, git problems — and give exact commands.
+- **Write directly to both repos** via the device bridge, then hand over a `git` command.
+- **Explain things in plain words.** He is a strong product thinker and a beginner-to-intermediate
+  coder with limited CLI comfort.
+- **Record learnings** into `app-factory/deltas.md` and the learnings files.
 
-He values directness. When he is wrong, say so. When a previous answer of yours was wrong, say that
-too — that happened repeatedly in the last session and it saved real time.
+### How he wants you to work — read this twice
+
+- **Be direct. Tell him when he is wrong, and tell him when your own earlier answer was wrong.**
+  This has happened repeatedly and every time it saved real work. Two examples worth internalising:
+  an alarm about defenders being over-projected was raised, then disproved by measurement, then the
+  measurement itself turned out to be built on contaminated data. Saying so each time was the
+  correct move.
+- **He asks for crisp answers and means it.** When he says "crisp", cut the preamble and lead with
+  the answer. Long analyses are welcome when he asks a hard question; they are not welcome when he
+  asks a short one.
+- **Give commands in full, with no trailing `#` comments** — they break when pasted as a block.
+  Assume Terminal. He has `ship "message"` (add, commit, pull --rebase, push) and `sync`
+  (pull --rebase, show recent commits, list migrations) in `~/.zshrc`.
+- **He notices things.** The two most valuable bugs in this project were both spotted by him reading
+  output — a 38-game season showing 54 matches, and a projected-points figure that felt too high.
+  **When he says "this seems off", stop and check. He has been right every time.**
+- **Never write a ticket from the brief alone.** That failure has cost time more than twice. Read
+  the actual code, and verify external claims against the live source at ticket-writing time.
 
 ---
 
-## Read these first
+## 2. Read these first
 
 | File | Repo | Why |
 |---|---|---|
-| `new-app-kickoff.md` | app-factory `assets/` | The pipeline's own rules. Part 0 and Part 3 especially. |
-| `product-brief.md` | fpl-advisor root | Scope, data sources, escalation pre-answers. Check it before reasoning about anything. |
-| `design-reference.md` | fpl-advisor root | Visual direction. Read on every UI ticket. |
-| `feature-list.md` | fpl-advisor root | 33 items in build order. **Now partly stale — see "Where the plan diverged".** |
-| `escalation.md` | fpl-advisor root | The three tiers. Canonical copy. |
-| `CLAUDE.md` | fpl-advisor root | How work flows, labels, agent roles. |
-| `deltas.md` | app-factory root | Platform facts proven by experiment. **D1, D6, D7, D8 all matter.** |
-| `LEARNINGS-first-build-wave.md` | app-factory root | Everything learned in waves 1–3, written for the docs rewrite. |
-| `supabase/README.md` | fpl-advisor | Which migrations have actually been applied to the live database. |
-| `docs/solver-notes.md` | fpl-advisor | The solver's required input columns. The next ticket builds on this. |
+| `assets/new-app-kickoff.md` | app-factory | The pipeline's rules. Part 0 and Part 3 especially. |
+| `product-brief.md` | fpl-advisor | Scope, data sources, pre-answered escalations. §6c, §6d and §8 bind constantly. |
+| `design-reference.md` | fpl-advisor | Visual direction. Read on every UI ticket. |
+| `CLAUDE.md` | fpl-advisor | How work flows, labels, agent roles. **Binding on the batch limit.** |
+| `escalation.md` | fpl-advisor | The three tiers. Canonical copy. |
+| `feature-list.md` | fpl-advisor | v2.0, current as of 21 Aug. Status and what to build next. |
+| `docs/projection-model-backlog.md` | fpl-advisor | **Eight known model gaps.** Read before any projection ticket. |
+| `docs/solver-notes.md` | fpl-advisor | The solver's real required input columns. |
+| `supabase/README.md` | fpl-advisor | Which migrations are actually applied to live Supabase. |
+| `deltas.md` | app-factory | Platform facts proven by experiment. **D1, D6–D10 all matter.** |
+| `LEARNINGS-first-build-wave.md` | app-factory | Waves 1–3. |
+| `LEARNINGS-second-build-wave.md` | app-factory | Waves 4–8, the value loop. **Read this one.** |
 
 ---
 
-## Where things stand — 11 Aug 2026
+## 3. Where things stand — 21 Aug 2026
 
-**Deadline:** GW1 is **01:30 Singapore time, Saturday 22 August 2026**. Ten days out.
+**GW1 deadline: 01:30 Singapore time, Saturday 22 August 2026.** About 16 hours out at the time of
+writing.
 
-### Shipped and merged
+**The value loop is closed and verified on live data.** Feature-list items 1–15 are shipped, plus
+16, 17, 18 and 23. 36 pull requests merged, 15 migrations all applied, 15 background jobs,
+7 workflows, 31 per-ticket decision logs.
 
-| Issue | What | Feature-list item |
+The chain, end to end: FPL API and FPL-Core-Insights ingest → baseline projection model →
+solver-format CSV → `sertalpbilal/FPL-Optimization-Tools` at a pinned commit → recommendation with
+confidence bands → Telegram message on the phone. **A real message has been received.**
+
+### What runs, and when
+
+| Workflow | Trigger | Does |
 |---|---|---|
-| #8 | App shell, dark design tokens, Geist self-hosted | 1 |
-| #9 | Supabase reference schema — `teams`, `players`, `fixtures`, `gameweeks` | 2 |
-| #10 | Scheduled GitHub Action + heartbeat + `job_runs` + `tsx` | 3 |
-| #11 | FPL API ingest job | 4 |
-| #12 | FPL-Core-Insights ingest job + `player_match_stats` | 5 |
-| #13 | Squad state schema, react-router, manual squad entry at `/squad` | 6 |
-| #14 | Squad sync from the public FPL API | 7 |
-| #15 | 2026/27 scoring rules module + Vitest | 8 |
-| #22 | `player_code` stable join key on `player_match_stats` | — (follow-up) |
-| #26 | Fixed backdrop behind scrolling content | — (UI fix) |
-| #28 | Defensive-contribution hit-rate estimator | 9 |
-| #29 | Solver GitHub Action smoke test | part of 12 |
+| `scheduled-jobs.yml` | `45 17 * * *` UTC (01:45 SGT next day) | heartbeat, core-insights ingest, FPL ingest, squad sync, projections |
+| `solver-run.yml` | schedule + dispatch | build solver input, emit CSV, solve, store, generate recommendations, send |
+| `send-notification.yml` | hourly + dispatch | the 24h / 10h notification schedule |
+| `preflight-check.yml` | schedule + dispatch | ten health assertions across the whole chain |
+| `prediction-log.yml` | schedule + dispatch | snapshot projections, settle after lockdown |
+| `calibration-report.yml` | dispatch | model calibration against last season's actuals |
+| `solver-smoke.yml` | dispatch | proves the solver toolchain installs |
 
-**Feature-list items 1–9 are done.** The value loop closes at item 15.
+### Verified healthy, 20 Aug
 
-### Live state you can rely on
+The preflight check reported **8 pass, 1 warn, 1 fail** and the numbers behind each reconcile:
 
-- Supabase has data: ~570 players, 20 teams, 38 gameweeks, fixtures, and 2025/26 per-match stats.
-- The scheduled workflow runs daily at `45 17 * * *` UTC (01:45 SGT next day) and writes `job_runs`.
-- `solver-smoke.yml` is manual-dispatch only and **has run green on real GitHub infrastructure** —
-  the solver toolchain installs. Confirmed 11 Aug.
-- Keshav's FPL entry exists; `FPL_ENTRY_ID` and `VITE_FPL_ENTRY_ID` may or may not be set — check.
-- Secrets in GitHub Actions: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and possibly `FPL_ENTRY_ID`.
-
-### ⚠️ Open items to resolve early
-
-1. **`20260811190000_squad_api_sync_fields.sql` may not be applied to live Supabase.** It is #14's
-   migration and nobody was ever told to run it. Have him check the Supabase Table Editor for those
-   columns before trusting any squad-sync run. `supabase/README.md` marks it VERIFY.
-2. **Two migrations share the timestamp `20260811180000`.** Harmless this time; do not let it happen
-   again when two tickets in a batch each add a migration.
-3. **#26 (fixed backdrop) — verify it actually worked on the phone.** Last report was that it looked
-   unchanged, and it was never confirmed whether that was the wrong preview URL, a cached service
-   worker, or a genuine defect. The PWA service worker caches CSS on iOS; test in a private tab.
+- Squad correct, projections covering every player, a proven-optimal solve, a fresh recommendation,
+  every job green within nine hours, both notification triggers reachable, all five secrets set.
+- **The warn is expected** — three promoted clubs have no ClubElo rating, so 14 of 50 fixtures use
+  FPL's coarser difficulty scale. That is the correct, honest fallback.
+- **The fail is a bad assertion, not a bad system.** It fails on 87 all-zero projection rows, and all
+  87 belong to injured, suspended or unavailable players — verified by query. A draft fixing it
+  exists at `tickets/drafts/32-preflight-available-players-only.md` and is deliberately unqueued.
 
 ---
 
-## The single most important downstream fact
+## 4. Facts that bind future tickets
 
-**`docs/solver-notes.md` exists and contains the solver's real required input columns**, read
-directly from its source code. That file is the input to the next ticket.
+These have each cost real time. None are obvious.
 
-But QA on #29 found something that changes the design:
+**Ids are not stable across seasons — at every level.** FPL element ids: 453 of 458 players changed
+between 2025/26 and 2026/27. FPL team ids: only 5 of 20 referred to the same club. **`code` is the
+stable key for both.** Anywhere a reference must outlive a season, store `code`. This was learned
+twice, on players and then on teams, because the first fix was applied to the instance rather than
+the class — `deltas.md` D9.
 
-> **The solver's own `prep_data` function calls the live FPL `bootstrap-static` endpoint directly
-> when it runs.**
+**`player_match_stats` contains every competition, not just the Premier League.** About 18% of rows
+are Champions League, Europa League, Conference League and EFL Cup. Cup matches score no FPL points,
+and their xG per 90 is 34% higher than league matches — a bias that lands only on clubs playing in
+Europe. Every consumer must filter on `competition = 'prem'`.
 
-`product-brief.md` §6c rests on the solver reading projections from a CSV and *not caring where they
-came from* — that is what makes the projection model replaceable without touching the solver, the
-app, the data layer or the notifications. If the solver also fetches FPL itself, that boundary is
-less clean than the brief assumes.
+**`goals_conceded` on `player_match_stats` is a goalkeeper stat** — populated on 74% of goalkeeper
+rows and 1.1% of outfield rows. **Use `team_goals_conceded` for clean sheets.** It is 97% populated
+and yields a realistic 28% clean-sheet rate.
 
-**This must be resolved when the projections-CSV adapter ticket (feature item 11) is written.**
-Options to weigh at that point: bypass `prep_data` and call the solver's model-building code
-directly; pre-populate whatever `prep_data` would fetch; or accept the fetch and give it graceful
-failure handling per §6c's stated solver failure modes. Do not let a Builder decide this at 3am —
-it is a Tier 2 architectural call about the most important boundary in the system.
+**Supabase silently caps a query at 1,000 rows.** No error, no flag, no partial-result marker. A
+truncated read is indistinguishable from missing data at the call site. **Every read of a table that
+grows must paginate and then assert its count against an independent count query.** A shared helper
+exists at `scripts/lib/paginate.ts`.
 
----
+**RLS and GRANTs are two independent gates.** A policy without a grant gives `permission denied for
+table X`; a grant without a policy gives `new row violates row-level security policy`. The secret
+key's `service_role` bypasses RLS but not GRANTs. **Every table-creating migration must GRANT in the
+same file** — and a local-Postgres test cannot catch a missing grant, because it runs as superuser.
+`deltas.md` D8.
 
-## Other facts that bind future tickets
+**`solver_picks` accumulates rows across solver runs.** Two runs for one gameweek coexist by design;
+`run_id` distinguishes them and `recommendations.solver_run_id` points at the right one. **Any count
+or sum over that table must filter by run**, or it doubles.
 
-**FPL element ids are not stable across seasons.** Verified on real data during #12: of 458 players
-matched between the 2025/26 and 2026/27 snapshots, only **5 kept the same id and 453 changed**.
-`code` is the stable cross-season identifier. Anywhere a player reference must outlive a season,
-store `code`. `players.code` and `player_match_stats.player_code` both exist; `squad_picks` carries
-`player_code NOT NULL`.
+**The FPL API is never authenticated.** `my-team/` is never called. The solver's own error message
+tells you to download `data/team.json` from that endpoint — **do not follow it.** We build that file
+from our own `squads` / `squad_picks`. Any ticket proposing to store an FPL credential is a Tier 1
+stop, and this is the reason the whole app needs no account.
 
-**RLS and GRANTs are two independent gates.** A policy without a grant yields `permission denied for
-table X`; a grant without a policy yields `new row violates row-level security policy`. The secret
-key's `service_role` bypasses RLS but **not** GRANTs. **Every ticket that creates a table must GRANT
-in the same migration** — and note that a local-Postgres test cannot catch a missing grant, because
-it runs as superuser. See `deltas.md` D8.
+**The solver's shipped defaults are wrong for us and crash on contact.** Its `horizon` is 8 and our
+CSV carries 5, and `prep_data` raises on the first missing column. Its `xmin_lb` is 300, not the 100
+the code falls back to. Its `team_data` default reads a file from the authenticated endpoint. Its
+`preseason: true` wipes the squad. All are overridden in `scripts/build-solver-input.ts`.
 
-**The squad tables grant `anon` but the reference tables do not.** `squads` and `squad_picks` allow
-`anon` SELECT/INSERT/UPDATE/DELETE because the browser is the only writer and the app has no auth.
-Reference tables are read-only to `anon`; their writer is the Action's secret key. Keep that split.
+**A new `workflow_dispatch` workflow cannot be run until its file is on the default branch.** So a
+ticket adding one can never prove it runs; that is Keshav's post-merge check, and the ticket should
+say so rather than setting an unsatisfiable definition of done.
 
-**`src/lib/scoring/` and `src/lib/projection/` are pure — no I/O.** That is deliberate and is what
-makes them provable without a database. Protect it.
+**`api.telegram.org` is not reachable from inside a cloud run.** It is reachable from a GitHub
+Action. Compose-and-assert in tests; the real send is a post-merge check.
 
-**The FPL API is never authenticated.** `my-team/` is never called. Any ticket proposing to store an
-FPL credential, cookie or session is a Tier 1 stop. This is the reason the whole app needs no
-credentials, and it must not be undone.
-
-**FPL-Core-Insights paths:** season root has `players.csv`, `teams.csv`, `playerstats.csv`,
-`gameweek_summaries.csv`. Per-match rows are under `data/{season}/By Gameweek/GW{x}/
-playermatchstats.csv` — note the space, percent-encode it. Refresh is **07:30 and 17:30 UTC**
-(the brief's original 05:00/17:00 was wrong and has been corrected).
-
----
-
-## Where the plan diverged from `feature-list.md`
-
-`feature-list.md` has not been rewritten and is now partly stale. Reconcile before trusting it.
-
-- **Item 12 was split.** Its infrastructure half — proving the solver installs in an Action — was
-  pulled forward and shipped as #29, because it was the largest unproven risk and had no
-  dependencies. The remaining half (run the solver on our data, store output) still sits at item 12.
-- **Three tickets exist that are not on the list at all:** #22 (`player_code`), #26 (fixed
-  backdrop), #29 (solver smoke test).
-- **Items 10–15 have no tickets yet.** That is the whole remaining value loop.
+**Europe/London observes daylight saving; Asia/Singapore does not.** Every other piece of time
+handling in this repo can treat a zone as a fixed offset. Lockdown settlement cannot.
 
 ---
 
-## Next steps, in order
+## 5. The open question you will be asked about
 
-**Immediate — the value loop, items 10 to 15.** None of these are written.
+**Is a defender — or a midfielder — the right captain?** Recorded as **G7** in
+`docs/projection-model-backlog.md` with the full mechanism.
 
-| Item | What | Notes for whoever writes it |
-|---|---|---|
-| 10 | Baseline projection model | Five inputs, each explainable in one sentence: minutes probability, xG/xA rates, ClubElo fixture difficulty, clean-sheet probability, defcon hit rate. #28 supplies the last one. This is the first ticket that reads from Supabase *and* uses the pure modules — the mapping layer belongs here, not in `src/lib/projection/`. |
-| 11 | **Projections CSV adapter — the seam** | Guard this above everything. Build against `docs/solver-notes.md`. Resolve the `prep_data` question first. |
-| 12 | Solver integration | The remaining half. #29 proved install; this runs it on our data and stores output. |
-| 13 | Recommendation generation | Plan A/B/C via the solver's `iteration` / `iteration_criteria`. Confidence bands, stored reasoning, explicit hit cost. No decimals in the primary view. |
-| 14 | Telegram sender | Needs a bot token + chat ID from BotFather — **Tier 1, owner-only**. Check whether Keshav has done this; it was on the original setup list and may still be outstanding. |
-| 15 | Notification schedule | 24h and 10h before each deadline, Singapore time. |
+Short version: the model gives defenders a floor forwards do not have (appearance + defensive
+contribution + clean sheet ≈ 4.5 points before any attacking return), and **bonus points are not
+modelled at all**, which removes the term most favouring attackers.
 
-**Sequencing rule that has held all week:** a ticket may only be queued alongside another if neither
-depends on the other **and neither depends on the other's merge**. Merging is manual, so two tickets
-queued together both build against the `main` that existed when the run started. Items 10–15 are a
-strict chain, so expect mostly one-per-night unless a UI ticket is paired in as a night-mate.
+A worked example from GW1, verified line by line and arithmetically correct: B. Fernandes projected
+5.79 against Haaland's 5.59 — a 0.20 gap on a ~5.7 projection, which is noise. Haaland's expected
+bonus would plausibly exceed Fernandes' by more than that.
 
-**Realistic assessment for 22 August.** Six chained items in ten days, with manual triggering, is
-tight but not impossible. If it slips, cut from feature-list item 16 downward — never from the
-middle. A working Telegram notification with no app UI still solves the problem; a beautiful pitch
-view with no recommendation does not.
+**The fix is buildable and should be the next model ticket.** See §6.
 
 ---
 
-## How to run a normal cycle
+## 6. What the next tickets should be
 
-1. Keshav asks for the next tickets. Read the actual codebase first — not the brief — then write
-   drafts into `tickets/drafts/NN-slug.md`, body only, no title line.
-2. Lint them yourself against real code. Check every factual claim. Then give the `gh issue create`
-   command with the title inline.
-3. He labels `status:ready` himself. **You never apply that label.**
-4. Overnight run produces draft PRs with a five-part QA packet.
+**Do not write these from this file.** Read the codebase, read
+`docs/projection-model-backlog.md`, and verify every external claim at ticket-writing time.
+
+**1. Bonus-point projection — the highest-value model work available.**
+Everything needed exists. `src/lib/scoring/bps.ts` already implements the 2026/27 BPS rules for
+CBI, saves and the removed tackled penalty; `src/lib/scoring/bonus.ts` already implements
+`allocateBonusPoints`, the 3/2/1 rank allocation. `player_match_stats` carries the raw actions.
+What is missing: BPS values for goals, assists and clean sheets (verify against the current rules,
+do not take them from memory), a per-fixture projection of expected BPS, and an allocation of the
+six available bonus points across the 22 players in each match in proportion to it. The structural
+change is that `project-points.ts` currently works per player and this needs a second pass grouped
+by fixture — both teams' players are already projected, so the data is there.
+**Direction of the current error: attackers and high-BPS defenders are undervalued.**
+
+**2. Item 21 — the reasoning screen.** The app cannot currently explain itself; the only way to see
+why a recommendation was made is a SQL query against `player_projections.components`. This is also
+where the horizon total belongs, now that the verdict card shows the gameweek figure.
+Add a confidence signal to the **captain** choice, not just the transfer — the GW1 captaincy was a
+0.20-point coin-flip presented as a decision.
+
+**3. Item 24 — rolling accuracy display.** The prediction log has nowhere to surface.
+
+**4. Widen the solver's player pool.** `keep_top_ev_percent` (5) and `ev_per_price_cutoff` (30)
+prune hard; the solver has only ever surfaced a handful of distinct transfer targets. **Change these
+in isolation** — changing them alongside anything else makes it impossible to tell which worked.
+
+**5. Items 19 and 20 together** — the commit action and override registration.
+
+**6. Narrow the preflight projections check.** Draft already written and deliberately unqueued:
+`tickets/drafts/32-preflight-available-players-only.md`.
+
+---
+
+## 7. How a normal cycle runs
+
+1. He asks for tickets. **Read the codebase first**, then write drafts into
+   `tickets/drafts/NN-slug.md`, body only, no title line.
+2. Lint them yourself against real code. Then give the `gh issue create` command with the title
+   inline.
+3. **He labels `status:ready` himself. You never apply that label.**
+4. The overnight routine builds up to **three** tickets and opens draft PRs with a five-part QA
+   packet.
 5. He pastes the packet; you say what matters and what is noise.
 6. He merges. **Then he applies any new migration by hand in the Supabase SQL editor** — no agent
    touches live data — and updates the applied table in `supabase/README.md`.
 7. Repeat.
 
-His shell has two helpers, defined in `~/.zshrc`: **`ship "message"`** (add, commit, pull --rebase,
-push) and **`sync`** (pull --rebase, show recent commits, list migrations).
+**Batch limit is 3, and `CLAUDE.md` is the binding copy.** The routine holds its own copy of the
+orchestrator prompt that only changes when it is re-pasted into the Instructions box, so the two
+drift. When they disagree, `CLAUDE.md` wins and the run says so — that has already happened once,
+correctly.
+
+**Scope constraints are what make a multi-ticket batch safe.** Two tickets in one batch may only run
+together if neither depends on the other **and neither writes to a file the other writes to**. Check
+the file lists against each other before recommending a batch. Pin migration filenames explicitly —
+two have collided on a timestamp already.
+
+**Write the scope constraint last**, after the rest of the ticket exists, by reading back over it and
+collecting every file the ticket names *or implies* — the decisions log, a doc it asks to update, a
+build config an instructed import requires. Writing it early has produced a self-contradicting
+ticket twice. `deltas.md` D10.
+
+---
+
+## 8. Housekeeping quirks
+
+- **The device bridge cannot delete files.** Move unwanted files to a `_to_delete/` folder and tell
+  him to remove it.
+- **A stale `.git/index.lock` appears periodically** and blocks commits with an unhelpful error.
+  `rm -f ~/Projects/fpl-advisor/.git/index.lock`.
+- **GitHub's REST and GraphQL APIs fail independently.** `gh issue edit` uses GraphQL; when it 503s,
+  `gh api --method POST /repos/OWNER/REPO/issues/N/labels -f "labels[]=status:ready"` uses REST and
+  often works. Also worth knowing: `gh` validates a label name and errors rather than silently
+  creating a typo'd one, unlike the web UI.
+- **Comments on an issue never reach the Builder.** The routine dispatches it with the title, scope
+  and definition of done only. **Feedback on a built ticket must be edited into the ticket body.**
+- **The applied-migrations table in `supabase/README.md` drifts.** It has fallen behind twice. Check
+  it against `ls supabase/migrations/` whenever a migration is applied.

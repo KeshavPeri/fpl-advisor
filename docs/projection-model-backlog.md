@@ -200,3 +200,39 @@ Two candidates, both untested: the elo-to-goals mapping (`2 × (1 - expectedScor
 range, and `leagueBaselineGoals` is still on its pre-season fallback constant rather than computed
 from results. **The second resolves itself once the season has fixtures with scores** — which makes
 this worth re-measuring after a few gameweeks rather than tuning now.
+
+---
+
+## G3 addendum — the worked case, 21 Aug 2026
+
+G7's open question resolved into a concrete, verified example. GW1 captaincy, both projections
+recomputed from their raw inputs and confirmed arithmetically exact:
+
+| Component | Haaland (FWD) | B. Fernandes (MID) |
+|---|---|---|
+| Goals | **3.49** | 1.91 |
+| Assists | 0.30 | **1.24** |
+| Appearance | 1.80 | **2.00** |
+| Clean sheet | 0 | **0.34** |
+| Defensive contribution | 0.00 | **0.30** |
+| **Bonus** | **0** | **0** |
+| **Total** | 5.59 | **5.79** |
+
+**The model is not wrong. It is incomplete, and the incompleteness decides the outcome.** Haaland
+wins on goals by 1.58 and loses everything else by 1.79 — expected minutes of 72 against 90 scaling
+his goal output down a fifth and costing 0.2 appearance points, plus 0.64 points of clean sheet and
+defensive contribution a striker cannot earn.
+
+**The 0.20 gap is inside the noise of a ~5.7 projection**, and the one term missing entirely —
+bonus — plausibly favours Haaland by more than that. A striker who scores almost always tops the
+bonus chart.
+
+**Two secondary observations from the same data.** Haaland's `pSixtyPlus` of 0.8 implies a
+one-in-five chance of not reaching an hour, which is pessimistic for a nailed starter. And
+Fernandes' fixture used the FPL-difficulty fallback (`eloFallbackUsed: true`, `expectedScore` exactly
+0.625) because Manchester United face one of the three promoted clubs with no ClubElo rating — so
+the two players were not rated on the same instrument.
+
+**Consequence for the interface, and it is a real requirement:** the captain choice needs its own
+confidence signal. A 0.20-point coin-flip is currently presented as a decision, which is exactly
+what `product-brief.md` §8 forbids for the transfer decision and never extended to captaincy.
