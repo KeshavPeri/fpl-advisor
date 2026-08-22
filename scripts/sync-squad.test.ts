@@ -49,6 +49,7 @@ describe('parseEntryData', () => {
       totalTransfers: 3,
       overallPoints: 120,
       overallRank: 456789,
+      overallRankCoercedToNull: false,
     })
   })
 
@@ -74,6 +75,65 @@ describe('parseEntryData', () => {
   it('throws on a non-object response rather than silently returning nulls', () => {
     expect(() => parseEntryData([], 'url')).toThrow(/not a JSON object/)
     expect(() => parseEntryData('oops', 'url')).toThrow(/not a JSON object/)
+  })
+
+  // ==========================================================================
+  // Ticket #77 — summary_overall_rank of 0 (or below) is FPL's sentinel for
+  // "no overall rank yet," not a real rank. squads.overall_rank's check
+  // constraint (overall_rank IS NULL OR overall_rank >= 1) correctly rejects
+  // it, so it must become null before it reaches the upsert. Every input the
+  // DoD names, one at a time.
+  // ==========================================================================
+
+  it.each([
+    { input: 0, expected: null, coerced: true, label: 'zero — the FPL "unranked" sentinel' },
+    { input: -1, expected: null, coerced: true, label: 'a negative number' },
+    { input: null, expected: null, coerced: false, label: 'explicit null' },
+    { input: 1, expected: 1, coerced: false, label: 'the lowest real rank' },
+    { input: 1523104, expected: 1523104, coerced: false, label: 'a normal positive rank' },
+  ])('summary_overall_rank $label ($input) -> overallRank $expected, coerced=$coerced', ({ input, expected, coerced }) => {
+    const body: Record<string, unknown> = {
+      last_deadline_bank: 5,
+      last_deadline_value: 998,
+      last_deadline_total_transfers: 3,
+      summary_overall_points: 120,
+      summary_overall_rank: input,
+    }
+    const result = parseEntryData(body, 'url')
+    expect(result.overallRank).toBe(expected)
+    expect(result.overallRankCoercedToNull).toBe(coerced)
+  })
+
+  it('coerces to null when summary_overall_rank is absent entirely, without flagging it as a coercion', () => {
+    const result = parseEntryData(
+      {
+        last_deadline_bank: 5,
+        last_deadline_value: 998,
+        last_deadline_total_transfers: 3,
+        summary_overall_points: 120,
+        // summary_overall_rank deliberately omitted
+      },
+      'url'
+    )
+    expect(result.overallRank).toBeNull()
+    expect(result.overallRankCoercedToNull).toBe(false)
+  })
+
+  it('keeps a real zero for summary_overall_points — only rank is coerced, per ticket #77', () => {
+    const result = parseEntryData(
+      {
+        last_deadline_bank: 5,
+        last_deadline_value: 998,
+        last_deadline_total_transfers: 0,
+        summary_overall_points: 0,
+        summary_overall_rank: 0,
+      },
+      'url'
+    )
+    expect(result.overallPoints).toBe(0)
+    expect(result.totalTransfers).toBe(0)
+    expect(result.overallRank).toBeNull()
+    expect(result.overallRankCoercedToNull).toBe(true)
   })
 })
 
