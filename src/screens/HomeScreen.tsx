@@ -34,6 +34,10 @@ import './HomeScreen.css'
  * playerId, so fetchPlayers is the only existing read that supplies those.
  * Ticket #61 added `status` and `chance_of_playing_next_round` to
  * fetchPlayers, so every player's availability ring below is now real.
+ *
+ * Ticket #85's only change here is the "Chips →" link next to the mark,
+ * through to the new /chips screen — that screen owns its own fetch
+ * entirely (src/lib/chips/api.ts), independent of everything above.
  */
 
 type LoadState =
@@ -131,7 +135,12 @@ function HomeScreen() {
   return (
     <AppShell>
       <DeadlineCountdown state={countdownState} />
-      <header className="home-mark">FPL Advisor</header>
+      <div className="home-header">
+        <header className="home-mark">FPL Advisor</header>
+        <Link className="home-chips-link" to="/chips">
+          Chips →
+        </Link>
+      </div>
 
       {targetGameweek && (
         <VerdictCard gameweekId={targetGameweek.id} gameweekName={targetGameweek.name} />

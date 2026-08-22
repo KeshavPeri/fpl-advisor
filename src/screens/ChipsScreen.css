@@ -1,0 +1,213 @@
+/*
+  The chips screen (ticket #85, feature-list item 25). Built entirely from
+  Surface (translucent layered material, never a flat card with a 1px
+  border) and the existing token set from src/index.css — no new token, no
+  new colour, no new font. Cyan marks a used chip (a fact already banked,
+  the app's "positive" accent); coral marks a lost one (the app's only
+  warning colour); a locked/not-yet-available slot stays in the quiet
+  tertiary text tone rather than reaching for either accent — nothing here
+  is a warning yet, per the ticket's own Scope OUT (no escalation, no nag).
+*/
+
+.chips-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.chips-back {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-cyan);
+}
+
+.chips-mark {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* ---- Loading / error ---- */
+
+.chips-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.chips-skeleton-line {
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: chips-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.chips-skeleton-line--title {
+  height: var(--space-8);
+  width: 50%;
+}
+
+.chips-skeleton-line--body {
+  height: var(--space-6);
+  width: 100%;
+}
+
+@keyframes chips-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.chips-error {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+/* ---- Summary ---- */
+
+.chips-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.chips-summary__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.chips-summary__headline {
+  font: var(--text-display);
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+/* ---- One set (first / second) ---- */
+
+.chips-set {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* The set that hasn't opened yet reads as quietly deferred, not broken or
+   greyed-out-disabled — it will look exactly like the other set once it's
+   available. Only the panel dims very slightly; every number and label
+   inside stays fully legible. */
+.chips-set--locked {
+  opacity: 0.86;
+}
+
+.chips-set__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.chips-set__title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.chips-set__status {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.chips-set__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.chips-slot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.chips-set__list .chips-slot:first-child {
+  border-top: none;
+}
+
+.chips-slot__name {
+  font: var(--text-body);
+  color: var(--text-primary);
+}
+
+.chips-slot__meta {
+  font: var(--text-label);
+  text-align: right;
+}
+
+.chips-slot--used .chips-slot__meta {
+  color: var(--accent-cyan);
+}
+
+.chips-slot--used .chips-slot__name {
+  color: var(--text-secondary);
+}
+
+.chips-slot--lost .chips-slot__meta {
+  color: var(--accent-coral);
+}
+
+.chips-slot--lost .chips-slot__name {
+  color: var(--text-tertiary);
+}
+
+.chips-slot--remaining .chips-slot__meta {
+  color: var(--text-tertiary);
+}
+
+.chips-set__time {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.chips-set__time--unavailable {
+  color: var(--text-tertiary);
+}
+
+.chips-set__unknown {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* ---- Chip activity with no recorded gameweek — rare, defensive ---- */
+
+.chips-unclassified {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.chips-unclassified__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.chips-unclassified__line {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chips-skeleton-line {
+    animation: none;
+  }
+}

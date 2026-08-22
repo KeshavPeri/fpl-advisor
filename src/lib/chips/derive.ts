@@ -131,14 +131,30 @@ function buildSlots(
 
 export function deriveChipState(data: ChipSourceData, nowMs: number): DerivedChipState {
   const usedChips: UsedChipView[] = data.chipsUsed.map((entry) => {
-    const known = isKnownChipId(entry.name)
+    const name = entry.name
+    const gameweekLabel = entry.event !== null ? `Gameweek ${entry.event}` : 'gameweek unknown'
+    const set = classifySet(entry.event)
+    // Narrowing on `name` directly (rather than a separately-computed
+    // boolean) is what lets TS accept the CHIP_DISPLAY_NAMES lookup below
+    // without a cast — CHIP_DISPLAY_NAMES is keyed by KnownChipId, not by
+    // the raw `string` every chips_used entry actually carries.
+    if (isKnownChipId(name)) {
+      return {
+        id: name,
+        displayName: CHIP_DISPLAY_NAMES[name],
+        isKnown: true,
+        gameweekId: entry.event,
+        gameweekLabel,
+        set,
+      }
+    }
     return {
-      id: entry.name,
-      displayName: known ? CHIP_DISPLAY_NAMES[entry.name] : `Unknown chip (${entry.name})`,
-      isKnown: known,
+      id: name,
+      displayName: `Unknown chip (${name})`,
+      isKnown: false,
       gameweekId: entry.event,
-      gameweekLabel: entry.event !== null ? `Gameweek ${entry.event}` : 'gameweek unknown',
-      set: classifySet(entry.event),
+      gameweekLabel,
+      set,
     }
   })
 
