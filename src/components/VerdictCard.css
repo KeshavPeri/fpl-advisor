@@ -137,6 +137,79 @@
   color: var(--accent-coral);
 }
 
+/* The commit action (ticket #84, feature-list item 19) —
+   design-reference.md: "One tap to commit each recommendation,
+   individually" and one of only two interactions the whole app allows to
+   animate. Cyan, not coral: committing is the positive/recommended action,
+   same accent role as .verdict-card__points-value above. Built from a
+   plain <button>, not Surface — this sits INSIDE a surface already (the
+   card itself), the same relationship .squad-save-button has to its own
+   screen (SquadEntryScreen.css). */
+.verdict-card__commit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.verdict-card__commit-button {
+  border: none;
+  border-radius: var(--radius-control);
+  padding: var(--space-3) var(--space-6);
+  background: var(--accent-cyan);
+  color: var(--surface-0);
+  font: var(--text-title);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.verdict-card__commit-button:active {
+  transform: scale(0.97);
+}
+
+.verdict-card__commit-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* The committed state — a quiet confirmation, not a second button, so the
+   control can never be mistaken for still-actionable. Fades and settles in
+   rather than snapping, the same "orientation and state change" motion
+   design-reference.md scopes animation to; prefers-reduced-motion is
+   already handled globally in src/index.css (zeroes every
+   animation-duration), so no local override is needed here. */
+.verdict-card__commit-badge {
+  font: var(--text-title);
+  color: var(--accent-cyan);
+  animation: verdict-card-commit-in 0.22s ease-out;
+}
+
+@keyframes verdict-card-commit-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* A failed write (or a failed check for whether this gameweek is already
+   committed) — coral, same risk/error family as .verdict-card__error and
+   .verdict-card__coverage above. The message itself (built by
+   src/lib/commit/derive.ts's deriveCommitView, or written inline for a
+   failed initial check) always states what happened and what to do, per
+   design-reference.md's interface-writing rule. */
+.verdict-card__commit-error {
+  font: var(--text-label);
+  color: var(--accent-coral);
+}
+
 /* Ticket #79 — the card's one way through to the full reasoning screen
    (design-reference.md: "a bare number is never the whole story"). Same
    link treatment as home-invitation__link (HomeScreen.css): cyan,
