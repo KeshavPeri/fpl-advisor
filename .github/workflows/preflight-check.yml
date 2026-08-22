@@ -28,7 +28,7 @@ name: Preflight check
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: '0 19 * * *'
+    - cron: '30 19 * * *'
 
 env:
   PREFLIGHT_REPORT_PATH: out/preflight-report.md
