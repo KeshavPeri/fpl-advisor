@@ -42,12 +42,29 @@
 // definition-of-done item matched the comment saying so and had to be
 // special-cased by hand. A guarantee written in a form that defeats the check
 // meant to verify it is worse than no comment.
+//
+// BONUS (ticket #78). Bonus needs every player projected for the SAME
+// fixture at once -- a different shape of input than a single player's
+// gameweek total -- so it cannot be computed inline in the main player loop
+// the way every other component is. This job therefore runs in two passes:
+// (5) stage a per-(player, gameweek, fixture) FixtureProjection for every
+// player and every fixture in the horizon, calling projectPlayerFixture
+// directly rather than projectPlayerGameweek; then (5b) group the staged
+// fixtures by fixtureId, call allocateFixtureBonus across each group, write
+// the result into that fixture's components.bonusPoints, and RECOMPUTE that
+// fixture's expectedPoints via totalMatchPoints -- never by hand-adding the
+// bonus figure onto a total computed before bonus existed. Only after both
+// passes does (6) aggregate the (now bonus-corrected) per-fixture rows back
+// to one row per (player, gameweek) for the upsert, unchanged in shape from
+// before this ticket.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
 import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import type { Position } from '../src/lib/scoring/types.ts'
 import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
+import type { MatchPointComponents } from '../src/lib/scoring/totalMatchPoints.ts'
+import { totalMatchPoints } from '../src/lib/scoring/totalMatchPoints.ts'
 import {
   availabilityFactor,
   estimateMinutes,
@@ -56,11 +73,15 @@ import {
   positionPriorHitRate,
   estimateDefconHitRate,
   LEAGUE_BASELINE_GOALS_PER_TEAM,
-  projectPlayerGameweek,
+  projectPlayerFixture,
+  allocateFixtureBonus,
   type PlayerRates,
   type RateHistoryMatch,
   type PlayerProjectionInput,
   type FixtureContext,
+  type FixtureProjection,
+  type FixtureProjectionComponents,
+  type FixtureBonusEntry,
 } from '../src/lib/projection/index.ts'
 import type { DefensiveContributionMatch } from '../src/lib/projection/types.ts'
 
@@ -468,6 +489,10 @@ async function main(): Promise<void> {
         xg: row.xg ?? 0,
         xa: row.xa ?? 0,
         saves: row.saves ?? 0,
+        // CBI = clearances + blocks + interceptions -- NOT tackles, same
+        // definition src/lib/scoring/bps.ts uses (ticket #78).
+        cbi: (row.clearances ?? 0) + (row.blocks ?? 0) + (row.interceptions ?? 0),
+        recoveries: row.recoveries ?? 0,
       })
       defconMatchesByPosition[position].push({
         minutesPlayed: row.minutes_played ?? 0,
@@ -488,14 +513,42 @@ async function main(): Promise<void> {
     ) as Record<Position, number>
 
     // --------------------------------------------------------------------
-    // 5. Per player: build the pure model's input, project every horizon
-    //    gameweek, and stage the rows to upsert.
+    // 5. Per player: build the pure model's input and stage a
+    //    per-(player, gameweek, fixture) FixtureProjection for every fixture
+    //    in the horizon, via projectPlayerFixture directly. Bonus cannot be
+    //    finalised here -- it needs every player projected for the SAME
+    //    fixture, which this per-player loop does not have visibility into
+    //    -- so it is allocated in pass 5b below, after every player has been
+    //    staged. See the BONUS note in this file's header (ticket #78).
     // --------------------------------------------------------------------
     let playersWithHistoricalMatches = 0
     let playersWithNoHistoricalMatches = 0
-    let fixtureEloFallbackCount = 0
 
-    const rowsToUpsert: JsonRecord[] = []
+    interface StagedFixture {
+      playerId: number
+      position: Position
+      gameweekId: number
+      fixture: FixtureProjection
+    }
+
+    interface PlayerLevelInputs {
+      pAppears: number
+      pSixtyPlus: number
+      xgPer90: number
+      xaPer90: number
+      savesPer90: number
+      defconHitRate: number
+    }
+
+    interface PlayerGwKey {
+      playerId: number
+      playerCode: number | null
+      gameweekId: number
+      playerLevel: PlayerLevelInputs
+    }
+
+    const stagedFixtures: StagedFixture[] = []
+    const playerGwKeys: PlayerGwKey[] = []
 
     for (const player of playerRows) {
       const position = player.element_type as Position
@@ -516,8 +569,12 @@ async function main(): Promise<void> {
           totalXg: totals.totalXg + (m.xg ?? 0),
           totalXa: totals.totalXa + (m.xa ?? 0),
           totalSaves: totals.totalSaves + (m.saves ?? 0),
+          // CBI = clearances + blocks + interceptions -- NOT tackles, same
+          // definition src/lib/scoring/bps.ts uses (ticket #78).
+          totalCbi: totals.totalCbi + (m.clearances ?? 0) + (m.blocks ?? 0) + (m.interceptions ?? 0),
+          totalRecoveries: totals.totalRecoveries + (m.recoveries ?? 0),
         }),
-        { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0 },
+        { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
       )
 
       const defconMatches: DefensiveContributionMatch[] = allMatches.map((m) => ({
@@ -566,61 +623,173 @@ async function main(): Promise<void> {
           }
         })
 
-        const gameweekProjection = projectPlayerGameweek(projectionInput, fixtureContexts)
-
-        for (const fp of gameweekProjection.fixtures) {
-          if (fp.modelInputs.eloFallbackUsed) fixtureEloFallbackCount++
+        for (const fixtureContext of fixtureContexts) {
+          stagedFixtures.push({
+            playerId: player.id,
+            position,
+            gameweekId: gw.id,
+            fixture: projectPlayerFixture(projectionInput, fixtureContext),
+          })
         }
 
-        const components = gameweekProjection.fixtures.reduce(
-          (totals, fp) => ({
-            appearancePoints: totals.appearancePoints + fp.components.appearancePoints,
-            goalPoints: totals.goalPoints + fp.components.goalPoints,
-            assistPoints: totals.assistPoints + fp.components.assistPoints,
-            cleanSheetPoints: totals.cleanSheetPoints + fp.components.cleanSheetPoints,
-            goalsConcededPoints: totals.goalsConcededPoints + fp.components.goalsConcededPoints,
-            savePoints: totals.savePoints + fp.components.savePoints,
-            defensiveContributionPoints: totals.defensiveContributionPoints + fp.components.defensiveContributionPoints,
-            bonusPoints: totals.bonusPoints + fp.components.bonusPoints,
-          }),
-          {
-            appearancePoints: 0,
-            goalPoints: 0,
-            assistPoints: 0,
-            cleanSheetPoints: 0,
-            goalsConcededPoints: 0,
-            savePoints: 0,
-            defensiveContributionPoints: 0,
-            bonusPoints: 0,
+        playerGwKeys.push({
+          playerId: player.id,
+          playerCode: player.code,
+          gameweekId: gw.id,
+          playerLevel: {
+            pAppears: minutesEstimate.pAppears,
+            pSixtyPlus: minutesEstimate.pSixtyPlus,
+            xgPer90: playerRates.xgPer90,
+            xaPer90: playerRates.xaPer90,
+            savesPer90: playerRates.savesPer90,
+            defconHitRate,
           },
-        )
-
-        rowsToUpsert.push({
-          gameweek_id: gw.id,
-          player_id: player.id,
-          player_code: player.code,
-          model_version: MODEL_VERSION,
-          expected_points: gameweekProjection.expectedPoints,
-          expected_minutes: gameweekProjection.expectedMinutes,
-          components: {
-            playerLevel: {
-              pAppears: minutesEstimate.pAppears,
-              pSixtyPlus: minutesEstimate.pSixtyPlus,
-              xgPer90: playerRates.xgPer90,
-              xaPer90: playerRates.xaPer90,
-              savesPer90: playerRates.savesPer90,
-              defconHitRate,
-            },
-            points: components,
-            fixtures: gameweekProjection.fixtures.map((fp) => fp.modelInputs),
-          },
-          computed_at: new Date().toISOString(),
         })
       }
     }
 
     // --------------------------------------------------------------------
-    // 6. Upsert, batched. Never deletes.
+    // 5b. Bonus allocation (ticket #78) -- grouped by fixture, across every
+    //     player staged for that fixture (both clubs, ~50 players -- see the
+    //     ticket's Notes on why no "predicted starting eleven" filter is
+    //     applied). Recomputes each fixture's expectedPoints via
+    //     totalMatchPoints once bonusPoints is filled in -- never hand-added
+    //     onto the total computed in pass 5, before bonus existed.
+    // --------------------------------------------------------------------
+    const stagedByFixtureId = new Map<number, StagedFixture[]>()
+    for (const staged of stagedFixtures) {
+      const list = stagedByFixtureId.get(staged.fixture.fixtureId) ?? []
+      list.push(staged)
+      stagedByFixtureId.set(staged.fixture.fixtureId, list)
+    }
+
+    let fixturesBonusAllocated = 0
+    let fixturesZeroExcess = 0
+    let playerFixturesBonusClamped = 0
+    let maxProjectedBonusPerPlayerFixture = 0
+    const likelyStarterBonusValues: number[] = []
+
+    for (const group of stagedByFixtureId.values()) {
+      const entries: FixtureBonusEntry<number>[] = group.map((staged, index) => ({
+        id: index,
+        position: staged.position,
+        events: staged.fixture.expectedEvents,
+      }))
+      const results = allocateFixtureBonus(entries)
+      const totalAllocated = results.reduce((sum, r) => sum + r.bonusPoints, 0)
+      if (totalAllocated > 0) {
+        fixturesBonusAllocated++
+      } else {
+        fixturesZeroExcess++
+      }
+
+      for (let i = 0; i < group.length; i++) {
+        const staged = group[i]
+        const result = results[i]
+
+        if (result.clamped) playerFixturesBonusClamped++
+        maxProjectedBonusPerPlayerFixture = Math.max(maxProjectedBonusPerPlayerFixture, result.bonusPoints)
+        if (staged.fixture.expectedEvents.pSixtyPlus >= 0.5) {
+          likelyStarterBonusValues.push(result.bonusPoints)
+        }
+
+        const updatedComponents: FixtureProjectionComponents = {
+          ...staged.fixture.components,
+          bonusPoints: result.bonusPoints,
+        }
+        const fullComponents: MatchPointComponents = {
+          ...updatedComponents,
+          penaltySavePoints: 0,
+          penaltyMissPoints: 0,
+          yellowCardPoints: 0,
+          redCardPoints: 0,
+          ownGoalPoints: 0,
+        }
+
+        staged.fixture = {
+          ...staged.fixture,
+          components: updatedComponents,
+          expectedPoints: totalMatchPoints(fullComponents),
+        }
+      }
+    }
+
+    const meanProjectedBonusAmongLikelyStarters =
+      likelyStarterBonusValues.length > 0
+        ? likelyStarterBonusValues.reduce((sum, v) => sum + v, 0) / likelyStarterBonusValues.length
+        : 0
+
+    // --------------------------------------------------------------------
+    // 6. Aggregate the (now bonus-corrected) per-fixture projections back to
+    //    one row per (player, gameweek) -- same shape as before ticket #78,
+    //    now running on corrected values. A player-gameweek with no fixture
+    //    (a blank gameweek) still gets a row: playerGwKeys records every
+    //    (player, gameweek) pair regardless of fixture count, and an empty
+    //    fixture group reduces to 0 expected points / 0 expected minutes.
+    // --------------------------------------------------------------------
+    const stagedByPlayerGw = new Map<string, StagedFixture[]>()
+    for (const staged of stagedFixtures) {
+      const key = `${staged.playerId}:${staged.gameweekId}`
+      const list = stagedByPlayerGw.get(key) ?? []
+      list.push(staged)
+      stagedByPlayerGw.set(key, list)
+    }
+
+    let fixtureEloFallbackCount = 0
+    const rowsToUpsert: JsonRecord[] = []
+
+    for (const key of playerGwKeys) {
+      const group = stagedByPlayerGw.get(`${key.playerId}:${key.gameweekId}`) ?? []
+      const fixtureProjections = group.map((g) => g.fixture)
+
+      for (const fp of fixtureProjections) {
+        if (fp.modelInputs.eloFallbackUsed) fixtureEloFallbackCount++
+      }
+
+      const expectedPoints = fixtureProjections.reduce((sum, fp) => sum + fp.expectedPoints, 0)
+      const expectedMinutes = fixtureProjections.reduce((sum, fp) => sum + fp.expectedMinutes, 0)
+
+      const components = fixtureProjections.reduce(
+        (totals, fp) => ({
+          appearancePoints: totals.appearancePoints + fp.components.appearancePoints,
+          goalPoints: totals.goalPoints + fp.components.goalPoints,
+          assistPoints: totals.assistPoints + fp.components.assistPoints,
+          cleanSheetPoints: totals.cleanSheetPoints + fp.components.cleanSheetPoints,
+          goalsConcededPoints: totals.goalsConcededPoints + fp.components.goalsConcededPoints,
+          savePoints: totals.savePoints + fp.components.savePoints,
+          defensiveContributionPoints: totals.defensiveContributionPoints + fp.components.defensiveContributionPoints,
+          bonusPoints: totals.bonusPoints + fp.components.bonusPoints,
+        }),
+        {
+          appearancePoints: 0,
+          goalPoints: 0,
+          assistPoints: 0,
+          cleanSheetPoints: 0,
+          goalsConcededPoints: 0,
+          savePoints: 0,
+          defensiveContributionPoints: 0,
+          bonusPoints: 0,
+        },
+      )
+
+      rowsToUpsert.push({
+        gameweek_id: key.gameweekId,
+        player_id: key.playerId,
+        player_code: key.playerCode,
+        model_version: MODEL_VERSION,
+        expected_points: expectedPoints,
+        expected_minutes: expectedMinutes,
+        components: {
+          playerLevel: key.playerLevel,
+          points: components,
+          fixtures: fixtureProjections.map((fp) => fp.modelInputs),
+        },
+        computed_at: new Date().toISOString(),
+      })
+    }
+
+    // --------------------------------------------------------------------
+    // 7. Upsert, batched. Never deletes.
     // --------------------------------------------------------------------
     for (let i = 0; i < rowsToUpsert.length; i += UPSERT_BATCH_SIZE) {
       const batch = rowsToUpsert.slice(i, i + UPSERT_BATCH_SIZE)
@@ -658,13 +827,23 @@ async function main(): Promise<void> {
       matchStatsRowsRead: matchStatsRows.length,
       matchStatsRowsExcludedNonPremierLeague: matchStatsRowsExcludedNonPremierLeague ?? 0,
       matchStatsRowsExcludedNullCompetition: matchStatsRowsNullCompetition ?? 0,
+      // Ticket #78 -- bonus allocation. fixturesBonusAllocated + fixturesZeroExcess ==
+      // the total number of distinct fixtures staged. See docs/projection-model-backlog.md
+      // G3 for what these mean and the expected range for the last one.
+      fixturesBonusAllocated,
+      fixturesZeroExcess,
+      playerFixturesBonusClamped,
+      maxProjectedBonusPerPlayerFixture,
+      meanProjectedBonusAmongLikelyStarters,
     }
     const message =
       `${JOB_NAME}: projected ${horizonGameweeks.length} gameweek(s) ` +
       `(${horizonGameweeks.map((gw) => gw.id).join(', ')}) for ${playerRows.length} players ` +
       `(${rowsToUpsert.length} rows written). player_match_stats: ${matchStatsRows.length} Premier League row(s) read, ` +
       `${matchStatsRowsExcludedNonPremierLeague ?? 0} non-Premier-League row(s) excluded, ` +
-      `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded.`
+      `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded. Bonus: ${fixturesBonusAllocated} fixture(s) ` +
+      `allocated, ${fixturesZeroExcess} zero-excess, ${playerFixturesBonusClamped} player-fixture(s) clamped, mean ` +
+      `${meanProjectedBonusAmongLikelyStarters.toFixed(2)} among likely starters.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {

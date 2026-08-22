@@ -73,3 +73,43 @@ describe('project-points.ts — Premier League filter (source invariants)', () =
     expect(source).not.toMatch(/\.delete\(\s*\)/)
   })
 })
+
+// ============================================================================
+// Ticket #78 — bonus allocation source invariants. Same technique as above:
+// grep the shipped source rather than re-deriving the logic, since main()'s
+// Supabase reads cannot be exercised without a live project.
+// ============================================================================
+
+describe('project-points.ts — bonus allocation (source invariants, ticket #78)', () => {
+  it('imports projectPlayerFixture and allocateFixtureBonus from src/lib/projection/index.ts', () => {
+    expect(source).toMatch(/projectPlayerFixture/)
+    expect(source).toMatch(/allocateFixtureBonus/)
+  })
+
+  it('never imports or calls projectPlayerGameweek -- bonus needs a second, fixture-grouped pass that per-player gameweek aggregation cannot provide (a header comment naming it as the thing NOT used is fine)', () => {
+    expect(source).not.toMatch(/\bprojectPlayerGameweek\s*\(/)
+    expect(source).not.toMatch(/import\s*\{[^}]*\bprojectPlayerGameweek\b[^}]*\}/)
+  })
+
+  it('recomputes expectedPoints via totalMatchPoints -- bonus is never hand-added onto a previously computed total', () => {
+    // The exact bug the DoD warns against: `... + bonus` or `+= bonus`-style
+    // arithmetic directly on an expectedPoints variable, bypassing
+    // totalMatchPoints. Neither pattern (nor a "bonusPoints" variant) may
+    // appear anywhere in the file.
+    expect(source).not.toMatch(/expectedPoints\s*\+=?\s*bonus/i)
+    expect(source).not.toMatch(/\+\s*bonus(Points)?\b/)
+    expect(source).toMatch(/totalMatchPoints\(fullComponents\)/)
+  })
+
+  it('reports all five ticket #78 counters as separate named job_runs.details fields', () => {
+    expect(source).toMatch(/fixturesBonusAllocated/)
+    expect(source).toMatch(/fixturesZeroExcess/)
+    expect(source).toMatch(/playerFixturesBonusClamped/)
+    expect(source).toMatch(/maxProjectedBonusPerPlayerFixture/)
+    expect(source).toMatch(/meanProjectedBonusAmongLikelyStarters/)
+  })
+
+  it('the likely-starters bonus mean is gated on pSixtyPlus >= 0.5, per the DoD', () => {
+    expect(source).toMatch(/pSixtyPlus\s*>=\s*0\.5/)
+  })
+})

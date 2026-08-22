@@ -81,15 +81,19 @@
 // ============================================================================
 // player_match_stats carries neither bonus nor cards, so both are reported
 // as exactly 0 on the actual side — an honest UNDER-count, not a claim that
-// nobody earned bonus. The projected side is compared on the same basis:
-// src/lib/projection/expectedPoints.ts hardcodes bonusPoints to 0 too (G3 in
-// docs/projection-model-backlog.md — bonus needs a per-match BPS
-// distribution across 22 players, which is a different shape of input than
-// this model has). See the report's own caveats section for the rough
-// average bonus is worth per match, computed from the FPL bonus system's
-// known 3/2/1 structure (BONUS_POINTS_PER_MATCH_TOTAL /
-// PLAYERS_ON_PITCH_PER_MATCH below) — NOT derived from any per-player data
-// this job reads, and not used in any point total.
+// nobody earned bonus. Cards remain out of scope on both sides (G4). Bonus
+// is DIFFERENT since ticket #78: src/lib/projection/expectedPoints.ts still
+// hardcodes bonusPoints to 0 for a single player-fixture, but
+// scripts/project-points.ts's second, fixture-grouped pass now allocates a
+// real (projected) bonus figure into player_projections.expected_points
+// before this report reads it — so the two sides are NOT on the same basis
+// any more, and this report's own caveats section says so explicitly rather
+// than claiming a like-for-like comparison it can no longer make. See the
+// report's own caveats section for the rough average bonus is worth per
+// match, computed from the FPL bonus system's known 3/2/1 structure
+// (BONUS_POINTS_PER_MATCH_TOTAL / PLAYERS_ON_PITCH_PER_MATCH below) — NOT
+// derived from any per-player data this job reads, and not used in any
+// point total.
 //
 // ============================================================================
 // Wiring.
@@ -288,7 +292,7 @@ export interface ActualMatchStatsInput {
   recoveries: number | null
 }
 
-/** The seven point components this report compares actual against projected — appearance, goals, assists, clean sheets, goals conceded, saves, defensive contribution. Deliberately excludes bonus/cards: both are always 0 on both sides (see file header) and are covered as text in the report's caveats, not as a ratio row that would divide by zero. */
+/** The seven point components this report compares actual against projected — appearance, goals, assists, clean sheets, goals conceded, saves, defensive contribution. Deliberately excludes bonus/cards from this per-component breakdown: the actual side has no data for either (see file header), and since ticket #78 the projected side's bonus is no longer 0 either, so a ratio row here would compare a real number against an always-missing one rather than divide by zero. Both stay covered as text in the report's caveats instead. */
 export interface ComponentTotals {
   appearancePoints: number
   goalPoints: number
@@ -769,15 +773,19 @@ function generateReportMarkdown(data: ReportData): string {
       'This is not a point-in-time backtest (feature item 29); it uses full-season hindsight on both sides, which is invalid for ' +
       'judging any one prediction but fine for judging a position-level distribution.\n' +
       `2. **${TARGET_SEASON} was played under the PREVIOUS BPS rules.** The 2026/27 BPS rebalance (CBI at 1 per 3 actions instead ` +
-      'of 2, the tackled penalty removed, revised goalkeeper save BPS) changes who earns bonus. This report cannot see bonus at ' +
-      'all either way — see point 3.\n' +
-      '3. **Neither side includes bonus or cards.** `player_match_stats` carries neither, so the actual figures below are an ' +
-      `**under-count**. The FPL bonus system awards ${BONUS_POINTS_PER_MATCH_TOTAL} points (3/2/1) to three players out of the ` +
-      `~${PLAYERS_ON_PITCH_PER_MATCH} who appear in a match — roughly **${avgBonus.toFixed(2)} points per player-appearance on ` +
-      'average**, concentrated among a match\'s standout performers rather than spread evenly, so this under-count is larger for ' +
-      'the top of the distribution (the Top-20 tables below) than for the position means. **The projected side is compared on ' +
-      `the same basis** — src/lib/projection/expectedPoints.ts hardcodes bonusPoints to 0 too (G3 in the backlog), so this is ` +
-      'like-for-like, not a thumb on the scale.',
+      'of 2, the tackled penalty removed, revised goalkeeper save BPS) changes who earns bonus. The actual side below still ' +
+      'cannot see bonus at all regardless of which rules apply — see point 3.\n' +
+      '3. **The actual side has no bonus or cards data; the projected side now has projected bonus (ticket #78), so the two are ' +
+      'NOT on the same basis any more.** `player_match_stats` carries neither bonus nor cards, so the actual figures below are ' +
+      `an **under-count**. The FPL bonus system awards ${BONUS_POINTS_PER_MATCH_TOTAL} points (3/2/1) to three players out of ` +
+      `the ~${PLAYERS_ON_PITCH_PER_MATCH} who appear in a match — roughly **${avgBonus.toFixed(2)} points per player-appearance ` +
+      'on average**, concentrated among a match\'s standout performers rather than spread evenly, so this under-count is larger ' +
+      'for the top of the distribution (the Top-20 tables below) than for the position means. The projected side is DIFFERENT: ' +
+      'since ticket #78, `scripts/project-points.ts` allocates a projected bonus share into `player_projections.expected_points` ' +
+      '(the totals and Top-20 tables below read that figure), computed from expected BPS above a bare-appearance baseline — a ' +
+      'proportional share, not a simulated BPS ranking, and still not validated against any real bonus or BPS figure (nothing in ' +
+      'the database records either — see `docs/projection-model-backlog.md` G3). Cards remain unmodelled on both sides. The ' +
+      '**By point component** table below is unaffected by this asymmetry: it omits bonus/cards entirely (see its own note).',
   )
 
   sections.push('## Headline: are defenders over-projected?\n\n' + defenderHeadline(data.actualByPosition, data.projectedByPosition))
@@ -791,7 +799,9 @@ function generateReportMarkdown(data: ReportData): string {
   sections.push(
     '## By point component\n\n' +
       'Per-90 rates, actual vs projected, so a gap in the totals above is attributable to a specific component rather than only ' +
-      'visible in aggregate. Bonus and cards are omitted from this table — both sides are fixed at exactly 0 (see caveats above).\n\n' +
+      'visible in aggregate. Bonus and cards are omitted from this table: the actual side is fixed at exactly 0 for both (no data), ' +
+      'and the projected side\'s bonus (non-zero since ticket #78) has no actual-side counterpart to compare it against here — see ' +
+      'the caveats above for how the totals tables elsewhere in this report are affected instead.\n\n' +
       buildComponentTable(data.actualByPosition, data.projectedByPosition),
   )
 
@@ -808,8 +818,9 @@ function generateReportMarkdown(data: ReportData): string {
 
   sections.push(
     '## What this bears on, in `docs/projection-model-backlog.md`\n\n' +
-      '- **G3 (bonus not modelled):** this report\'s numbers speak to it directly — see the caveats section above for the rough ' +
-      'per-appearance bonus figure and why it under-counts the actual side more at the top of the distribution than at the mean.\n' +
+      '- **G3 (bonus):** addressed by ticket #78 — the projected side\'s totals now include a projected bonus share, so this ' +
+      'report\'s numbers speak to it differently than before: see the caveats section above for why the two sides are no longer ' +
+      'on the same basis, and the rough per-appearance bonus figure for how large the actual side\'s remaining under-count is.\n' +
       `- **G6 (last season's behaviour under this season's rules):** this report is itself an instance of the residual risk G6 ` +
       'names — the actual side is scored under 2026/27 rules applied to 2025/26 raw actions, exactly as `src/lib/scoring/` is built to do, ' +
       'but the *behaviour* that produced those raw actions was not shaped by 2026/27 incentives.\n' +

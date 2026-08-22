@@ -1,5 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { bpsFromBeingTackled, bpsFromCbi, bpsFromSave, bpsFromSaves } from './bps.ts'
+import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from './types.ts'
+import {
+  APPEARANCE_BPS_60_PLUS,
+  APPEARANCE_BPS_UNDER_60,
+  ASSIST_BPS,
+  CBI_ACTIONS_PER_BPS,
+  CLEAN_SHEET_BPS_GOALKEEPER_DEFENDER,
+  GOAL_BPS_FORWARD,
+  GOAL_BPS_GOALKEEPER_DEFENDER,
+  GOAL_BPS_MIDFIELDER,
+  ORDINARY_SAVE_BPS,
+  RECOVERY_ACTIONS_PER_BPS,
+  bpsFromBeingTackled,
+  bpsFromCbi,
+  bpsFromSave,
+  bpsFromSaves,
+  cleanSheetBps,
+  goalBps,
+} from './bps.ts'
 
 describe('BPS from CBI — 2026/27 is 1 per 3 actions (was 2)', () => {
   it('2 CBI actions score 0 BPS', () => {
@@ -53,5 +71,62 @@ describe('goalkeeper BPS from saves — 2026/27 values, per save', () => {
       { insideBox: false, isBigChance: false, isPenaltySave: false },
     ]
     expect(bpsFromSaves(saves)).toBe(6)
+  })
+})
+
+// ============================================================================
+// Ticket #78 — the wider BPS table needed to project bonus, not just settle
+// a finished match's CBI/save/tackle terms. Values verified against
+// premierleague.com/en/news/106533 and .../4679946 — see bps.ts's header.
+// ============================================================================
+
+describe('the wider BPS table (ticket #78) matches the two named Premier League sources', () => {
+  it('appearance: 3 BPS for 1-59 minutes, 6 BPS for 60+', () => {
+    expect(APPEARANCE_BPS_UNDER_60).toBe(3)
+    expect(APPEARANCE_BPS_60_PLUS).toBe(6)
+  })
+
+  it('assist is a flat 9 BPS', () => {
+    expect(ASSIST_BPS).toBe(9)
+  })
+
+  it('CBI and recoveries both convert at 1 BPS per 3 actions (the same divisor, verified independently)', () => {
+    expect(CBI_ACTIONS_PER_BPS).toBe(3)
+    expect(RECOVERY_ACTIONS_PER_BPS).toBe(3)
+  })
+
+  it('ORDINARY_SAVE_BPS (already used by bpsFromSave) is exported and equals 2', () => {
+    expect(ORDINARY_SAVE_BPS).toBe(2)
+  })
+})
+
+describe('goalBps — NOT the fplai.app-inverted values (12 for GK/DEF, not 24)', () => {
+  it('goalkeeper and defender goals score 12 BPS', () => {
+    expect(goalBps(GOALKEEPER)).toBe(12)
+    expect(goalBps(DEFENDER)).toBe(12)
+    expect(GOAL_BPS_GOALKEEPER_DEFENDER).toBe(12)
+  })
+
+  it('midfielder goals score 18 BPS', () => {
+    expect(goalBps(MIDFIELDER)).toBe(18)
+    expect(GOAL_BPS_MIDFIELDER).toBe(18)
+  })
+
+  it('forward goals score 24 BPS', () => {
+    expect(goalBps(FORWARD)).toBe(24)
+    expect(GOAL_BPS_FORWARD).toBe(24)
+  })
+})
+
+describe('cleanSheetBps — goalkeepers and defenders only', () => {
+  it('goalkeeper and defender clean sheets score 12 BPS', () => {
+    expect(cleanSheetBps(GOALKEEPER)).toBe(12)
+    expect(cleanSheetBps(DEFENDER)).toBe(12)
+    expect(CLEAN_SHEET_BPS_GOALKEEPER_DEFENDER).toBe(12)
+  })
+
+  it('midfielders and forwards score 0 clean-sheet BPS', () => {
+    expect(cleanSheetBps(MIDFIELDER)).toBe(0)
+    expect(cleanSheetBps(FORWARD)).toBe(0)
   })
 })

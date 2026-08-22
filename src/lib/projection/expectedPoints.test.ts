@@ -11,7 +11,7 @@ import {
   type PlayerProjectionInput,
 } from './expectedPoints.ts'
 
-const zeroRates = { xgPer90: 0, xaPer90: 0, savesPer90: 0 }
+const zeroRates = { xgPer90: 0, xaPer90: 0, savesPer90: 0, cbiPer90: 0, recoveriesPer90: 0 }
 
 function player(overrides: Partial<PlayerProjectionInput> = {}): PlayerProjectionInput {
   return {
@@ -19,7 +19,7 @@ function player(overrides: Partial<PlayerProjectionInput> = {}): PlayerProjectio
     status: 'a',
     chanceOfPlayingNextRound: null,
     recentMinutes: [90, 90, 90, 90, 90],
-    rateHistory: { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0 },
+    rateHistory: { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
     ratePositionPrior: zeroRates,
     defconMatches: [],
     defconPositionPrior: 0,
@@ -229,8 +229,8 @@ describe('every returned expected-points value is finite', () => {
       p: player({
         position,
         recentMinutes: [90, 90, 90, 90, 90],
-        rateHistory: { minutesPlayed: 900, totalXg: 4.3, totalXa: 2.1, totalSaves: 30 },
-        ratePositionPrior: { xgPer90: 0.3, xaPer90: 0.15, savesPer90: 3 },
+        rateHistory: { minutesPlayed: 900, totalXg: 4.3, totalXa: 2.1, totalSaves: 30, totalCbi: 40, totalRecoveries: 60 },
+        ratePositionPrior: { xgPer90: 0.3, xaPer90: 0.15, savesPer90: 3, cbiPer90: 4, recoveriesPer90: 6 },
         defconMatches: [],
         defconPositionPrior: 0.4,
       }),
@@ -238,7 +238,11 @@ describe('every returned expected-points value is finite', () => {
     })
     scenarios.push({
       name: `${position} with zero history (new signing)`,
-      p: player({ position, recentMinutes: [], rateHistory: { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0 } }),
+      p: player({
+        position,
+        recentMinutes: [],
+        rateHistory: { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
+      }),
       f: fixture({ teamElo: null, opponentElo: null }),
     })
     scenarios.push({
@@ -255,5 +259,61 @@ describe('every returned expected-points value is finite', () => {
     for (const value of Object.values(projection.components)) {
       expect(Number.isFinite(value)).toBe(true)
     }
+    for (const value of Object.values(projection.expectedEvents)) {
+      expect(Number.isFinite(value)).toBe(true)
+    }
+  })
+})
+
+// ============================================================================
+// Ticket #78 — expectedEvents surfaced, bonus stays 0 in this function
+// ============================================================================
+
+describe('projectPlayerFixture never sets bonus -- that is the second pass (bonus.ts) alone', () => {
+  it('components.bonusPoints is always exactly 0, regardless of position or fixture', () => {
+    const projection = projectPlayerFixture(player({ position: FORWARD }), fixture())
+    expect(projection.components.bonusPoints).toBe(0)
+  })
+})
+
+describe('expectedEvents carries the raw event counts projectPlayerFixture already computes, not thrown away', () => {
+  it('expectedGoals, expectedAssists, expectedSaves, expectedCbi, expectedRecoveries, pCleanSheet, pAppears, pSixtyPlus are all present and finite', () => {
+    const p = player({
+      position: MIDFIELDER,
+      recentMinutes: [90, 90, 90, 90, 90],
+      rateHistory: { minutesPlayed: 900, totalXg: 4.3, totalXa: 2.1, totalSaves: 0, totalCbi: 18, totalRecoveries: 27 },
+      ratePositionPrior: { xgPer90: 0.3, xaPer90: 0.15, savesPer90: 0, cbiPer90: 2, recoveriesPer90: 3 },
+    })
+    const projection = projectPlayerFixture(p, fixture())
+    const events = projection.expectedEvents
+
+    expect(events.expectedGoals).toBeGreaterThan(0)
+    expect(events.expectedAssists).toBeGreaterThan(0)
+    expect(events.expectedCbi).toBeGreaterThan(0)
+    expect(events.expectedRecoveries).toBeGreaterThan(0)
+    expect(events.pCleanSheet).toBe(projection.modelInputs.pCleanSheet)
+    expect(events.pAppears).toBe(projection.modelInputs.pAppears)
+    expect(events.pSixtyPlus).toBe(projection.modelInputs.pSixtyPlus)
+  })
+
+  it('expectedCbi and expectedRecoveries scale with minutesFraction only -- no fixture attacking multiplier applied', () => {
+    // A heavily favoured fixture (high expectedScore) inflates expectedGoals/expectedAssists via the
+    // attacking multiplier, but must leave expectedCbi/expectedRecoveries untouched -- they are
+    // defensive-action counts, scaled by minutes exposure only (see expectedPoints.ts's comment).
+    const p = player({
+      rateHistory: { minutesPlayed: 900, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 45, totalRecoveries: 90 },
+      ratePositionPrior: { xgPer90: 0, xaPer90: 0, savesPer90: 0, cbiPer90: 5, recoveriesPer90: 10 },
+    })
+    const evenFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 3 }) // expectedScore 0.5 -> multiplier 1.0
+    const favouredFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 1 }) // expectedScore 0.75 -> multiplier 1.5
+
+    const evenProjection = projectPlayerFixture(p, evenFixture)
+    const favouredProjection = projectPlayerFixture(p, favouredFixture)
+
+    expect(favouredProjection.expectedEvents.expectedCbi).toBeCloseTo(evenProjection.expectedEvents.expectedCbi, 10)
+    expect(favouredProjection.expectedEvents.expectedRecoveries).toBeCloseTo(
+      evenProjection.expectedEvents.expectedRecoveries,
+      10,
+    )
   })
 })

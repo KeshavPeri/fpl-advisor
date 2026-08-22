@@ -103,18 +103,43 @@ solver's player pool has a hole in it and it cannot transfer them in at all.
 
 ---
 
-## G3 — Bonus points are not modelled
+## G3 — Bonus points — ADDRESSED by ticket #78, 22 Aug 2026
 
-`bonusPoints` is passed to `totalMatchPoints` as `0`. Bonus needs a BPS distribution across all 22
-players in a match, which is a different shape of input than a per-player projection has. This is a
-stated out-of-scope line in ticket #33, not an oversight.
+**Previously:** `bonusPoints` was passed to `totalMatchPoints` as `0`. Bonus needs a BPS
+distribution across every player in a match, which is a different shape of input than a
+per-player projection has. That was a stated out-of-scope line in ticket #33, not an oversight.
 
-**Direction of the error.** Systematically **undervalues** the players who attract bonus most —
-high-BPS defenders and goalkeepers, and attackers who score. Because it undervalues them roughly in
-proportion to how good they already are, it compresses the gap between the best players and the
-rest, which is precisely the gap a transfer recommendation turns on. `src/lib/scoring/bps.ts` and
-`bonus.ts` already implement the 2026/27 rules and the allocation — the missing piece is projecting
-BPS per player, not scoring it.
+**What ticket #78 did.** `src/lib/projection/bonus.ts` (`expectedBps`, `allocateFixtureBonus`)
+projects each match's expected BPS per player from the model's existing inputs — expected goals,
+assists, saves, CBI, recoveries, appearance and clean-sheet probability — and shares that
+match's 6 real bonus points across every player projected for the fixture **in proportion to
+expected BPS above a bare-appearance baseline**. `scripts/project-points.ts` runs this as a
+second, fixture-grouped pass after the per-player projection loop, then recomputes each
+fixture's `expectedPoints` via `totalMatchPoints` with the allocated bonus filled in.
+`projectPlayerFixture` itself still returns `bonusPoints: 0` — projecting bonus needs every
+player in the fixture at once, which a single player-fixture function cannot see.
+
+**What this is, stated plainly: a proportional share, not a simulated BPS ranking.** The model
+does not attempt to predict which three players will finish 1st/2nd/3rd on BPS and award them
+3/2/1 (that is `src/lib/scoring/bonus.ts`'s `allocateBonusPoints`, correct for *settling* a
+finished match, wrong for a projection — rejected for this use, see the ticket). It distributes
+the six points continuously, in proportion to each player's modelled share of the match's
+BPS-above-appearance, clamped at 3.0 per player.
+
+**What is still NOT modelled, unchanged by this ticket.** `player_match_stats` carries six of
+the roughly thirty BPS-scoring actions (minutes, goals, assists, saves, CBI, recoveries) — no
+passing, dribbling, shots-on-target, key-pass or big-chance data, and no negative BPS terms.
+Every BPS term this app cannot see stays invisible to the projection; goalkeeper saves are
+approximated at a flat 2 BPS each (no inside-box/big-chance detail); cards remain entirely
+unmodelled (G4). **No validation against actual bonus or BPS exists** — `player_match_stats`
+records neither, so nothing in this app can currently check whether a projected bonus figure
+resembles a real one. That is deferred to the backtest (feature-list item 32).
+
+**Direction of the error this fixes.** Before #78, the model systematically **undervalued** the
+players who attract bonus most — high-BPS defenders and goalkeepers, and attackers who score —
+compressing the gap between the best players and the rest, which is precisely the gap a transfer
+or captaincy recommendation turns on (see the worked GW1 case in the addendum below). Ticket #78
+narrows that gap; whether it closes it correctly is a question for the backtest, not this file.
 
 ---
 
@@ -204,6 +229,11 @@ this worth re-measuring after a few gameweeks rather than tuning now.
 ---
 
 ## G3 addendum — the worked case, 21 Aug 2026
+
+**Historical record — pre-#78.** The table below reflects the model as it stood before ticket
+#78 (22 Aug 2026) projected bonus. It is kept exactly as computed at the time as the evidence
+that motivated the ticket; it is not re-run here. See the G3 entry above for what changed and
+what did not.
 
 G7's open question resolved into a concrete, verified example. GW1 captaincy, both projections
 recomputed from their raw inputs and confirmed arithmetically exact:

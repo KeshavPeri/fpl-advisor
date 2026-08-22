@@ -139,6 +139,28 @@ export interface FixtureProjectionComponents {
   bonusPoints: number
 }
 
+/**
+ * Expected event counts for one player-fixture, surfaced so a second pass
+ * (bonus allocation — ticket #78, `bonus.ts`) can consume them without
+ * recomputing anything. `projectPlayerFixture` already computes every one
+ * of these internally to build `components` above; this field just stops
+ * them being thrown away. Bonus needs every player projected for the SAME
+ * fixture at once, which is a different shape of input than a single
+ * player-fixture projection has, so bonus itself is never computed here —
+ * see `components.bonusPoints` staying `0` below.
+ */
+export interface FixtureExpectedEvents {
+  expectedGoals: number
+  expectedAssists: number
+  expectedSaves: number
+  /** Clearances + blocks + interceptions expected this fixture — NOT tackles, same definition as `src/lib/scoring/bps.ts`. */
+  expectedCbi: number
+  expectedRecoveries: number
+  pCleanSheet: number
+  pAppears: number
+  pSixtyPlus: number
+}
+
 export interface FixtureModelInputs {
   fixtureId: number
   pAppears: number
@@ -160,6 +182,7 @@ export interface FixtureProjection {
   expectedMinutes: number
   components: FixtureProjectionComponents
   modelInputs: FixtureModelInputs
+  expectedEvents: FixtureExpectedEvents
 }
 
 /**
@@ -191,6 +214,12 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
   const expectedGoals = playerRates.xgPer90 * minutesFraction * attackMultiplier
   const expectedAssists = playerRates.xaPer90 * minutesFraction * attackMultiplier
   const expectedSaves = playerRates.savesPer90 * minutesFraction
+  // CBI and recoveries are defensive-action counts, not attacking output --
+  // scaled by minutes exposure only, same as expectedSaves above, with no
+  // fixture attacking multiplier applied (matching defconRate.ts, which
+  // also does not fixture-adjust its hit-rate estimate). Ticket #78.
+  const expectedCbi = playerRates.cbiPer90 * minutesFraction
+  const expectedRecoveries = playerRates.recoveriesPer90 * minutesFraction
 
   const pCleanSheet = cleanSheetProbability(teamLambdaConceded)
   // Goals-conceded exposure scales continuously with minutes played, unlike
@@ -236,6 +265,16 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
       expectedGoalsConceded: teamLambdaConceded,
       pCleanSheet,
       eloFallbackUsed,
+    },
+    expectedEvents: {
+      expectedGoals,
+      expectedAssists,
+      expectedSaves,
+      expectedCbi,
+      expectedRecoveries,
+      pCleanSheet,
+      pAppears: minutesEstimate.pAppears,
+      pSixtyPlus: minutesEstimate.pSixtyPlus,
     },
   }
 }
