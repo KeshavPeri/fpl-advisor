@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
@@ -90,7 +90,13 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
       <Surface className="chips-summary">
         <p className="chips-summary__label">Season chips</p>
         <p className="chips-summary__headline">
-          {state.hasUsedAnyChip ? `${totalUsed} of 8 used` : 'No chips used yet'}
+          {state.hasUsedAnyChip ? (
+            <>
+              <span className="num">{totalUsed}</span> of <span className="num">8</span> used
+            </>
+          ) : (
+            'No chips used yet'
+          )}
         </p>
       </Surface>
 
@@ -98,9 +104,17 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
         title="First set"
         set={state.firstSet}
         statusLine={
-          state.firstSet.expired
-            ? `Closed — ${state.firstSet.lostCount} ${state.firstSet.lostCount === 1 ? 'chip' : 'chips'} lost`
-            : `${state.firstSet.usedCount} of ${state.firstSet.totalCount} used`
+          state.firstSet.expired ? (
+            <>
+              Closed — <span className="num">{state.firstSet.lostCount}</span>{' '}
+              {state.firstSet.lostCount === 1 ? 'chip' : 'chips'} lost
+            </>
+          ) : (
+            <>
+              <span className="num">{state.firstSet.usedCount}</span> of{' '}
+              <span className="num">{state.firstSet.totalCount}</span> used
+            </>
+          )
         }
         timeRemaining={state.firstSet.timeRemaining}
         deadlineUnknownNote={!state.firstSet.deadlineKnown && !state.firstSet.expired}
@@ -111,9 +125,14 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
         title="Second set"
         set={state.secondSet}
         statusLine={
-          state.secondSet.isAvailable
-            ? `${state.secondSet.usedCount} of ${state.secondSet.totalCount} used`
-            : 'Not yet available'
+          state.secondSet.isAvailable ? (
+            <>
+              <span className="num">{state.secondSet.usedCount}</span> of{' '}
+              <span className="num">{state.secondSet.totalCount}</span> used
+            </>
+          ) : (
+            'Not yet available'
+          )
         }
         timeRemaining={null}
         deadlineUnknownNote={false}
@@ -138,7 +157,7 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
 interface ChipSetSectionProps {
   title: string
   set: ChipSetView
-  statusLine: string
+  statusLine: ReactNode
   timeRemaining: ChipSetTimeRemaining | null
   deadlineUnknownNote: boolean
   unknownChips: readonly UsedChipView[]
@@ -194,7 +213,21 @@ function ChipSetSection({
 
       {unknownChips.length > 0 && (
         <p className="chips-set__unknown">
-          Also used: {unknownChips.map((chip) => `${chip.displayName} (${chip.gameweekLabel})`).join(', ')}
+          Also used:{' '}
+          {unknownChips.map((chip, index) => (
+            <span key={chip.id}>
+              {index > 0 && ', '}
+              {chip.displayName} (
+              {chip.gameweekId !== null ? (
+                <>
+                  Gameweek <span className="num">{chip.gameweekId}</span>
+                </>
+              ) : (
+                'gameweek unknown'
+              )}
+              )
+            </span>
+          ))}
         </p>
       )}
     </Surface>
