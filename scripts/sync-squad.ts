@@ -253,6 +253,33 @@ export interface EntryData {
   totalTransfers: number | null
   overallPoints: number | null
   overallRank: number | null
+  // true iff summary_overall_rank arrived as a real number below 1 (0 or
+  // negative) and was coerced to null before it reached the caller — see
+  // coerceOverallRank below. Distinguishes "the API told us there is no
+  // rank yet" from "the API already sent null/omitted the field", so
+  // job_runs.details can carry an honest counter instead of an
+  // unexplained null (ticket #77).
+  overallRankCoercedToNull: boolean
+}
+
+// PERMANENT RULE, not a one-week patch — expect this every new season.
+// summary_overall_rank is the one field on entry/{id}/ whose zero is
+// impossible: FPL ranks start at 1, and the squads.overall_rank check
+// constraint (supabase/migrations/20260811190000_squad_api_sync_fields.sql:
+// `overall_rank IS NULL OR overall_rank >= 1`) encodes exactly that. Before
+// a manager has an overall rank (pre-GW1, or any entry with zero completed
+// gameweeks) the FPL API reports summary_overall_rank as 0, which is a
+// sentinel for "unranked," not a value. Coerce it to null here, at the
+// edge, rather than relaxing the constraint or inventing a placeholder
+// rank. summary_overall_points and last_deadline_total_transfers are
+// deliberately NOT touched by this same logic — 0 is a genuine, legitimate
+// value for both (scored nothing / made no transfers yet).
+function coerceOverallRank(row: JsonRecord, key: string): { value: number | null; coerced: boolean } {
+  const raw = numOrNull(row, key)
+  if (raw !== null && raw < 1) {
+    return { value: null, coerced: true }
+  }
+  return { value: raw, coerced: false }
 }
 
 /** entry/{id}/ — bank, squad value, transfer count, overall points and rank. */
@@ -260,12 +287,14 @@ export function parseEntryData(body: unknown, url: string): EntryData {
   if (!isRecord(body)) {
     throw new SyncError(`entry/{id}/ response is not a JSON object`, url)
   }
+  const { value: overallRank, coerced: overallRankCoercedToNull } = coerceOverallRank(body, 'summary_overall_rank')
   return {
     bank: numOrNull(body, 'last_deadline_bank'),
     squadValue: numOrNull(body, 'last_deadline_value'),
     totalTransfers: numOrNull(body, 'last_deadline_total_transfers'),
     overallPoints: numOrNull(body, 'summary_overall_points'),
-    overallRank: numOrNull(body, 'summary_overall_rank'),
+    overallRank,
+    overallRankCoercedToNull,
   }
 }
 
@@ -639,7 +668,19 @@ async function main(): Promise<void> {
       gameweekId,
       deadlinePassed,
       picksHttpStatus: picksResp.status,
+      // 0 or 1, not a boolean: a counter a reader can scan across many
+      // job_runs rows, per the ticket #77 DoD. See coerceOverallRank above
+      // for what it means.
+      overallRankCoercedToNull: entryData.overallRankCoercedToNull ? 1 : 0,
     }
+
+    // Appended to the message on every path below that actually writes
+    // entry-level state (bank/value/transfers/points/rank) to `squads`, so
+    // a coerced run reads as "no rank yet" in words rather than as a
+    // silent, unexplained null in the row.
+    const rankNote = entryData.overallRankCoercedToNull
+      ? ' FPL reports no overall rank yet for this entry (summary_overall_rank was non-positive) — overall_rank stored as NULL, not 0.'
+      : ''
 
     if (!deadlinePassed) {
       const message =
@@ -692,7 +733,8 @@ async function main(): Promise<void> {
       const message =
         `${JOB_NAME}: picks not yet published for entry ${entryId}, event ${gameweekId} ` +
         `(404 from entry/${entryId}/event/${gameweekId}/picks/). Entry-level state (bank, squad value, ` +
-        'transfers, chips, points, rank) synced; existing squad picks left untouched.'
+        'transfers, chips, points, rank) synced; existing squad picks left untouched.' +
+        rankNote
       console.log(message)
       await recordJobRun(supabase, {
         status: 'skipped',
@@ -734,7 +776,8 @@ async function main(): Promise<void> {
       // surfaced (src/lib/squad/syncStatus.ts reads it back for the UI).
       const message =
         `${JOB_NAME}: squad for gameweek ${gameweekId} differs from FPL (entry ${entryId}) — not ` +
-        `overwritten. ${summarizeDiff(diff)}.`
+        `overwritten. ${summarizeDiff(diff)}.` +
+        rankNote
       console.log(message)
       await recordJobRun(supabase, {
         status: 'success',
@@ -752,7 +795,9 @@ async function main(): Promise<void> {
       const { error: insertError } = await supabase.from('squad_picks').insert(apiRows)
       if (insertError) throw new SyncError(`squad_picks insert failed: ${insertError.message}`, 'squad_picks')
 
-      const message = `${JOB_NAME}: squad for gameweek ${gameweekId} established from FPL for entry ${entryId} (15 picks written).`
+      const message =
+        `${JOB_NAME}: squad for gameweek ${gameweekId} established from FPL for entry ${entryId} (15 picks written).` +
+        rankNote
       console.log(message)
       await recordJobRun(supabase, {
         status: 'success',
@@ -763,7 +808,8 @@ async function main(): Promise<void> {
       return
     }
 
-    const message = `${JOB_NAME}: squad for gameweek ${gameweekId} confirmed against FPL for entry ${entryId} — no changes.`
+    const message =
+      `${JOB_NAME}: squad for gameweek ${gameweekId} confirmed against FPL for entry ${entryId} — no changes.` + rankNote
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
