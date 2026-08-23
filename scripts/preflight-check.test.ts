@@ -21,10 +21,12 @@ import {
   checkSolver,
   checkSquad,
   checkTeamRatings,
+  classifyZeroProjectionPlayer,
   computeOverallVerdict,
   worstVerdict,
   type CheckResult,
   type JobFreshnessTarget,
+  type ZeroProjectionPlayer,
 } from './preflight-check.js'
 
 const HOUR = 60 * 60 * 1000
@@ -178,34 +180,192 @@ describe('checkSquad', () => {
 // 3. Projections
 // ============================================================================
 
+// ============================================================================
+// classifyZeroProjectionPlayer — the per-row rule, ticket #89. Order:
+// unavailability first, no-fixture second, everything remaining ("available")
+// is the failing population.
+// ============================================================================
+
+function zeroPlayer(overrides: Partial<ZeroProjectionPlayer> = {}): ZeroProjectionPlayer {
+  return { playerId: 1, webName: 'Test Player', status: 'a', chanceOfPlayingNextRound: null, teamHasFixture: true, ...overrides }
+}
+
+describe('classifyZeroProjectionPlayer', () => {
+  it.each(['i', 's', 'u', 'd'])('status %s (with no published chance) is "unavailable"', (status) => {
+    expect(classifyZeroProjectionPlayer(zeroPlayer({ status }))).toBe('unavailable')
+  })
+
+  it('an available player (status a) with chance_of_playing_next_round below 100 is "unavailable"', () => {
+    expect(classifyZeroProjectionPlayer(zeroPlayer({ status: 'a', chanceOfPlayingNextRound: 75 }))).toBe('unavailable')
+  })
+
+  it('status a with chance exactly 100 is fully available, not "unavailable"', () => {
+    expect(classifyZeroProjectionPlayer(zeroPlayer({ status: 'a', chanceOfPlayingNextRound: 100, teamHasFixture: true }))).toBe('available')
+  })
+
+  it('status a with a null chance and a fixtured team is "no-fixture" when the team has no fixture', () => {
+    expect(classifyZeroProjectionPlayer(zeroPlayer({ status: 'a', chanceOfPlayingNextRound: null, teamHasFixture: false }))).toBe('no-fixture')
+  })
+
+  it('status a, chance null or 100, team fixtured — the only "available" (failing) case', () => {
+    expect(classifyZeroProjectionPlayer(zeroPlayer({ status: 'a', chanceOfPlayingNextRound: null, teamHasFixture: true }))).toBe('available')
+  })
+
+  it('an unresolved team_id (teamHasFixture null) is folded into "available", not a fourth bucket — cannot prove innocent', () => {
+    expect(classifyZeroProjectionPlayer(zeroPlayer({ status: 'a', chanceOfPlayingNextRound: null, teamHasFixture: null }))).toBe('available')
+  })
+})
+
+// ============================================================================
+// checkProjections
+// ============================================================================
+
 describe('checkProjections', () => {
   const base = { gameweekId: 5, modelVersion: 'baseline-v1', coverageWarnThreshold: 0.95, coverageFailThreshold: 0.5 }
 
-  it('pass: full coverage, no all-zero rows', () => {
-    const result = checkProjections({ ...base, projectionRowCount: 600, playersCount: 600, allZeroRowCount: 0 })
+  it('pass: full coverage, no all-zero rows at all', () => {
+    const result = checkProjections({ ...base, projectionRowCount: 600, playersCount: 600, zeroProjectionPlayers: [] })
     expect(result.verdict).toBe('pass')
   })
 
   it('fail: zero projection rows at all', () => {
-    const result = checkProjections({ ...base, projectionRowCount: 0, playersCount: 600, allZeroRowCount: 0 })
+    const result = checkProjections({ ...base, projectionRowCount: 0, playersCount: 600, zeroProjectionPlayers: [] })
     expect(result.verdict).toBe('fail')
     expect(result.reason).toContain('no "player_projections" rows')
   })
 
-  it('fail: an all-zero projection row exists, even with otherwise full coverage', () => {
-    const result = checkProjections({ ...base, projectionRowCount: 600, playersCount: 600, allZeroRowCount: 3 })
+  // ----------------------------------------------------------------------
+  // The narrowed assertion itself.
+  // ----------------------------------------------------------------------
+
+  it('fail: a single fit, fixtured, all-zero player among otherwise healthy data — and the reason NAMES the player', () => {
+    const result = checkProjections({
+      ...base,
+      projectionRowCount: 600,
+      playersCount: 600,
+      zeroProjectionPlayers: [zeroPlayer({ webName: 'Erling Haaland', status: 'a', chanceOfPlayingNextRound: null, teamHasFixture: true })],
+    })
     expect(result.verdict).toBe('fail')
-    expect(result.reason).toContain('3 of 600')
+    expect(result.reason).toContain('Erling Haaland')
+    expect(result.values.availableZeroRowCount).toBe(1)
   })
 
+  it.each(['i', 's', 'u', 'd'] as const)('does not fail on an all-zero row for a player whose status is %s', (status) => {
+    const result = checkProjections({
+      ...base,
+      projectionRowCount: 600,
+      playersCount: 600,
+      zeroProjectionPlayers: [zeroPlayer({ status, chanceOfPlayingNextRound: null, teamHasFixture: true })],
+    })
+    expect(result.verdict).not.toBe('fail')
+  })
+
+  it('does not fail on an all-zero row for an available player whose chance_of_playing_next_round is below 100', () => {
+    const result = checkProjections({
+      ...base,
+      projectionRowCount: 600,
+      playersCount: 600,
+      zeroProjectionPlayers: [zeroPlayer({ status: 'a', chanceOfPlayingNextRound: 25, teamHasFixture: true })],
+    })
+    expect(result.verdict).not.toBe('fail')
+  })
+
+  it('does not fail on an all-zero row for a player whose team has no fixture in the gameweek', () => {
+    const result = checkProjections({
+      ...base,
+      projectionRowCount: 600,
+      playersCount: 600,
+      zeroProjectionPlayers: [zeroPlayer({ status: 'a', chanceOfPlayingNextRound: null, teamHasFixture: false })],
+    })
+    expect(result.verdict).not.toBe('fail')
+  })
+
+  // ----------------------------------------------------------------------
+  // The two observed live shapes — both must pass, and both breakdowns
+  // must reconcile exactly to the stated total.
+  // ----------------------------------------------------------------------
+
+  function liveComposition(counts: { i: number; u: number; s: number; a: number }): ZeroProjectionPlayer[] {
+    const players: ZeroProjectionPlayer[] = []
+    let id = 1
+    for (const status of ['i', 'u', 's'] as const) {
+      for (let n = 0; n < counts[status]; n++) {
+        players.push(zeroPlayer({ playerId: id++, webName: `Unavailable Player ${id}`, status, chanceOfPlayingNextRound: null, teamHasFixture: true }))
+      }
+    }
+    for (let n = 0; n < counts.a; n++) {
+      players.push(zeroPlayer({ playerId: id++, webName: `Available Player ${id}`, status: 'a', chanceOfPlayingNextRound: null, teamHasFixture: true }))
+    }
+    return players
+  }
+
+  it('pass: the 20 Aug 2026 live composition — 47 i / 37 u / 3 s / 0 a, 87 rows, reconciling exactly', () => {
+    const zeroProjectionPlayers = liveComposition({ i: 47, u: 37, s: 3, a: 0 })
+    expect(zeroProjectionPlayers).toHaveLength(87)
+    const result = checkProjections({ ...base, projectionRowCount: 595, playersCount: 595, zeroProjectionPlayers })
+    expect(result.verdict).toBe('pass')
+    expect(result.values.allZeroRowCount).toBe(87)
+    expect(result.values.unavailableZeroRowCount).toBe(87)
+    expect(result.values.noFixtureZeroRowCount).toBe(0)
+    expect(result.values.availableZeroRowCount).toBe(0)
+    expect((result.values.unavailableZeroRowCount as number) + (result.values.noFixtureZeroRowCount as number) + (result.values.availableZeroRowCount as number)).toBe(
+      result.values.allZeroRowCount,
+    )
+    expect(result.reason).toContain('87')
+  })
+
+  it('pass: the 21 Aug 2026 live composition — 56 i / 39 u / 3 s / 0 a, 98 rows, reconciling exactly', () => {
+    const zeroProjectionPlayers = liveComposition({ i: 56, u: 39, s: 3, a: 0 })
+    expect(zeroProjectionPlayers).toHaveLength(98)
+    const result = checkProjections({ ...base, projectionRowCount: 600, playersCount: 600, zeroProjectionPlayers })
+    expect(result.verdict).toBe('pass')
+    expect(result.values.allZeroRowCount).toBe(98)
+    expect(result.values.unavailableZeroRowCount).toBe(98)
+    expect(result.values.noFixtureZeroRowCount).toBe(0)
+    expect(result.values.availableZeroRowCount).toBe(0)
+    expect((result.values.unavailableZeroRowCount as number) + (result.values.noFixtureZeroRowCount as number) + (result.values.availableZeroRowCount as number)).toBe(
+      result.values.allZeroRowCount,
+    )
+    expect(result.reason).toContain('98')
+  })
+
+  // ----------------------------------------------------------------------
+  // Reporting: the breakdown stays visible even on a pass.
+  // ----------------------------------------------------------------------
+
+  it('states the all-zero breakdown in the reason even on a pass', () => {
+    const zeroProjectionPlayers = liveComposition({ i: 2, u: 1, s: 0, a: 0 })
+    const result = checkProjections({ ...base, projectionRowCount: 600, playersCount: 600, zeroProjectionPlayers })
+    expect(result.verdict).toBe('pass')
+    expect(result.reason).toContain('all-zero breakdown')
+    expect(result.reason).toContain('3 total')
+  })
+
+  it('a player whose team_id does not resolve to any known team is not given a pass — folded into the failing population', () => {
+    const result = checkProjections({
+      ...base,
+      projectionRowCount: 600,
+      playersCount: 600,
+      zeroProjectionPlayers: [zeroPlayer({ webName: 'Orphaned Team Player', status: 'a', chanceOfPlayingNextRound: null, teamHasFixture: null })],
+    })
+    expect(result.verdict).toBe('fail')
+    expect(result.values.unresolvedTeamRowCount).toBe(1)
+    expect(result.values.availableZeroRowCount).toBe(1)
+    expect(result.reason).toContain('Orphaned Team Player')
+  })
+
+  // ----------------------------------------------------------------------
+  // The unchanged coverage assertion.
+  // ----------------------------------------------------------------------
+
   it('fail: coverage catastrophically below the players count', () => {
-    const result = checkProjections({ ...base, projectionRowCount: 100, playersCount: 600, allZeroRowCount: 0 })
+    const result = checkProjections({ ...base, projectionRowCount: 100, playersCount: 600, zeroProjectionPlayers: [] })
     expect(result.verdict).toBe('fail')
     expect(result.reason).toContain('below the 50% floor')
   })
 
   it('warn: coverage slightly below the players count', () => {
-    const result = checkProjections({ ...base, projectionRowCount: 560, playersCount: 600, allZeroRowCount: 0 })
+    const result = checkProjections({ ...base, projectionRowCount: 560, playersCount: 600, zeroProjectionPlayers: [] })
     expect(result.verdict).toBe('warn')
     expect(result.reason).toContain('below the 95% target')
   })

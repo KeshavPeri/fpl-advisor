@@ -994,8 +994,23 @@ interface SquadPickRow {
 }
 
 interface ProjectionRow {
+  player_id: number
   expected_points: number
   expected_minutes: number
+}
+
+/** players columns check 3 needs to classify an all-zero row — see ZeroProjectionPlayer. */
+interface PlayerAvailabilityRow {
+  id: number
+  web_name: string
+  status: string
+  chance_of_playing_next_round: number | null
+  team_id: number
+}
+
+/** A minimal teams read (id only) for check 3's own team-resolution guard — independent of check 6's own `teams` read, matching this file's per-check, non-shared query convention. */
+interface TeamIdRow {
+  id: number
 }
 
 interface SolverRunRow {
@@ -1130,7 +1145,15 @@ async function main(): Promise<void> {
     checks.push(squadCheck)
 
     // --------------------------------------------------------------------
-    // 3. Projections
+    // 3. Projections. Ticket #89: an all-zero row is only a failure for a
+    //    player who is available, expected to play, AND whose team has a
+    //    fixture this gameweek — see checkProjections/classifyZeroProjectionPlayer.
+    //    That means this check now also needs, for every all-zero row, the
+    //    owning player's status/chance/team_id (players) and whether that
+    //    team has a fixture THIS gameweek (fixtures, filtered to
+    //    targetGameweekId only — a narrower window than check 6's own
+    //    PREFLIGHT_HORIZON read, and an independent query, matching this
+    //    file's per-check convention of not sharing reads across checks).
     // --------------------------------------------------------------------
     let projectionsCheck: CheckResult
     if (targetGameweekId === null) {
@@ -1141,7 +1164,7 @@ async function main(): Promise<void> {
         (from, to) =>
           supabase
             .from('player_projections')
-            .select('expected_points, expected_minutes')
+            .select('player_id, expected_points, expected_minutes')
             .eq('gameweek_id', targetGameweekId as number)
             .eq('model_version', MODEL_VERSION)
             .range(from, to)
@@ -1153,19 +1176,82 @@ async function main(): Promise<void> {
             .eq('gameweek_id', targetGameweekId as number)
             .eq('model_version', MODEL_VERSION),
       )
-      const playersCountRead = await safeCount('players', () => supabase.from('players').select('*', { count: 'exact', head: true }))
+      const playersRead = await safeFetchAllPages<PlayerAvailabilityRow>(
+        'players',
+        (from, to) =>
+          supabase
+            .from('players')
+            .select('id, web_name, status, chance_of_playing_next_round, team_id')
+            .range(from, to)
+            .returns<PlayerAvailabilityRow[]>(),
+        () => supabase.from('players').select('*', { count: 'exact', head: true }),
+      )
+      const teamIdsRead = await safeFetchAllPages<TeamIdRow>(
+        'teams',
+        (from, to) => supabase.from('teams').select('id').range(from, to).returns<TeamIdRow[]>(),
+        () => supabase.from('teams').select('*', { count: 'exact', head: true }),
+      )
+      // Filtered in the database (eq on event_id) and read via the shared
+      // pagination helper, matching every other multi-row read in this file.
+      const gwFixturesRead = await safeFetchAllPages<FixtureRow>(
+        'fixtures',
+        (from, to) => supabase.from('fixtures').select('team_h, team_a').eq('event_id', targetGameweekId as number).range(from, to).returns<FixtureRow[]>(),
+        () => supabase.from('fixtures').select('*', { count: 'exact', head: true }).eq('event_id', targetGameweekId as number),
+      )
+
       if (projRead.error) {
         projectionsCheck = buildCannotEvaluateResult('projections', projRead.error)
-      } else if (playersCountRead.error) {
-        projectionsCheck = buildCannotEvaluateResult('projections', playersCountRead.error)
+      } else if (playersRead.error) {
+        projectionsCheck = buildCannotEvaluateResult('projections', playersRead.error)
+      } else if (teamIdsRead.error) {
+        projectionsCheck = buildCannotEvaluateResult('projections', teamIdsRead.error)
+      } else if (gwFixturesRead.error) {
+        projectionsCheck = buildCannotEvaluateResult('projections', gwFixturesRead.error)
       } else {
-        const allZeroRowCount = projRead.rows.filter((r) => r.expected_points === 0 && r.expected_minutes === 0).length
+        const playersById = new Map(playersRead.rows.map((p) => [p.id, p]))
+        const knownTeamIds = new Set(teamIdsRead.rows.map((t) => t.id))
+        const teamsWithFixture = new Set<number>()
+        for (const f of gwFixturesRead.rows) {
+          teamsWithFixture.add(f.team_h)
+          teamsWithFixture.add(f.team_a)
+        }
+
+        const zeroProjectionPlayers: ZeroProjectionPlayer[] = projRead.rows
+          .filter((r) => r.expected_points === 0 && r.expected_minutes === 0)
+          .map((r) => {
+            const player = playersById.get(r.player_id)
+            if (!player) {
+              // player_projections.player_id has a NOT NULL FK to players.id,
+              // so this should not happen against a consistent snapshot. If
+              // it does anyway (a read racing a delete), it is exactly the
+              // "could not evaluate" case this file never lets pass silently
+              // — treated the same as an unresolved team_id (teamHasFixture:
+              // null), which classifyZeroProjectionPlayer folds into the
+              // failing "available" bucket, not a legitimate cause.
+              return {
+                playerId: r.player_id,
+                webName: `player_id ${r.player_id} (no matching "players" row)`,
+                status: 'a',
+                chanceOfPlayingNextRound: null,
+                teamHasFixture: null,
+              }
+            }
+            const teamHasFixture = knownTeamIds.has(player.team_id) ? teamsWithFixture.has(player.team_id) : null
+            return {
+              playerId: player.id,
+              webName: player.web_name,
+              status: player.status,
+              chanceOfPlayingNextRound: player.chance_of_playing_next_round,
+              teamHasFixture,
+            }
+          })
+
         projectionsCheck = checkProjections({
           gameweekId: targetGameweekId,
           modelVersion: MODEL_VERSION,
           projectionRowCount: projRead.rows.length,
-          playersCount: playersCountRead.count,
-          allZeroRowCount,
+          playersCount: playersRead.rows.length,
+          zeroProjectionPlayers,
           coverageWarnThreshold: PROJECTION_COVERAGE_WARN_THRESHOLD,
           coverageFailThreshold: PROJECTION_COVERAGE_FAIL_THRESHOLD,
         })
