@@ -14,12 +14,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   BuildInputError,
+  EV_PER_PRICE_CUTOFF,
   HIT_COST,
   ITERATION_CRITERION,
+  KEEP_TOP_EV_PERCENT,
   XMIN_LB,
   analyzeProjectionsCsv,
   buildSolverConfig,
   buildTeamJson,
+  buildWideningJobRunDetails,
   deriveDatasource,
   failNoSquad,
   type TeamJsonPickInput,
@@ -120,6 +123,43 @@ describe('buildSolverConfig', () => {
   it('keeps every chip_limits value at 0', () => {
     const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
     expect(config.chip_limits).toEqual({ bb: 0, wc: 0, fh: 0, tc: 0 })
+  })
+
+  // --------------------------------------------------------------------
+  // Ticket #95 — widening keep_top_ev_percent (shipped default 5) and
+  // ev_per_price_cutoff (shipped default 30), explicitly, for the first
+  // time. See KEEP_TOP_EV_PERCENT's and EV_PER_PRICE_CUTOFF's own comments
+  // in build-solver-input.ts for the percentile semantics and rationale.
+  // --------------------------------------------------------------------
+
+  it('sets keep_top_ev_percent to 25 and ev_per_price_cutoff to 10 — widened from the shipped 5 and 30', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
+    expect(config.keep_top_ev_percent).toBe(25)
+    expect(config.ev_per_price_cutoff).toBe(10)
+    expect(config.keep_top_ev_percent).toBe(KEEP_TOP_EV_PERCENT)
+    expect(config.ev_per_price_cutoff).toBe(EV_PER_PRICE_CUTOFF)
+  })
+
+  it('is the ONLY thing that changed by this ticket: every other key in the built config matches the pre-#95 baseline exactly, so an accidental edit to xmin_lb, horizon, decay_base-style settings, or chip_limits fails this test', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300 })
+    expect(config).toEqual({
+      horizon: 3,
+      team_data: 'json',
+      preseason: false,
+      xmin_lb: 150,
+      keep_top_ev_percent: 25,
+      ev_per_price_cutoff: 10,
+      datasource: 'fpladvisor',
+      chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
+      secs: 300,
+      solver: 'highs',
+      num_iterations: 3,
+      iteration_criteria: 'this_gw_transfer_in',
+      verbose: true,
+      print_result_table: true,
+      print_squads: true,
+      print_transfer_chip_summary: true,
+    })
   })
 
   it('sets num_iterations to 3 — ticket #47, so the solve produces Plan A/B/C — and iteration_criteria explicitly rather than the shipped default', () => {
@@ -236,6 +276,30 @@ describe('buildTeamJson', () => {
   it('throws if given anything other than exactly 15 picks', () => {
     expect(() => buildTeamJson(squad, fifteenPicks().slice(0, 14))).toThrow(BuildInputError)
     expect(() => buildTeamJson(squad, fifteenPicks().slice(0, 14))).toThrow(/expected exactly 15/)
+  })
+})
+
+// ============================================================================
+// buildWideningJobRunDetails — ticket #95's "counters proving the widening
+// happened", written into build-solver-input's job_runs details. Deliberately
+// does NOT include a post-filter pool size — that number only exists in
+// dev/solver.py's own stdout, not visible to this job.
+// ============================================================================
+
+describe('buildWideningJobRunDetails', () => {
+  it('carries the projections-CSV player count and both configured widening values', () => {
+    const details = buildWideningJobRunDetails(487)
+    expect(details).toEqual({
+      projectionsPlayerCount: 487,
+      keepTopEvPercent: 25,
+      evPerPriceCutoff: 10,
+    })
+  })
+
+  it('always reflects the current KEEP_TOP_EV_PERCENT / EV_PER_PRICE_CUTOFF constants, not a copied value', () => {
+    const details = buildWideningJobRunDetails(1)
+    expect(details.keepTopEvPercent).toBe(KEEP_TOP_EV_PERCENT)
+    expect(details.evPerPriceCutoff).toBe(EV_PER_PRICE_CUTOFF)
   })
 })
 

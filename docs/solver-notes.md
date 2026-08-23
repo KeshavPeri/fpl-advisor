@@ -125,3 +125,33 @@ Columns present in the wider community "FPL Review" / "solio" format but not req
 solver code path used here (`read_solio`/`read_fplreview`, both a plain `pd.read_csv`):
 `Name`, `Value`, `Team`. Those are only read by the `mixed`/`mikkel` conversion helpers in
 `dev/data_parser.py`.
+
+## Shipped settings audit — every key `data/user_settings.json` sets at the pinned commit (ticket #95)
+
+The pinned commit (`45131c5a41d7caadb5cb626c012bfa9111dca7a2`) ships `data/user_settings.json`
+with a full set of defaults. `scripts/build-solver-input.ts`'s `buildSolverConfig` passes its
+own settings-override object to `run/solve.py --config <path>`, which merges on top of the
+shipped file — **not the other way round**. The merge is one line, `run/solve.py`:
+
+```python
+options.update(config_options)
+```
+
+`options` starts as whatever the shipped `data/user_settings.json` loaded; `config_options` is
+our `--config` file. `dict.update` means **our key always wins when we set it explicitly, and
+the shipped default silently survives for any key we never mention.** That silent-survival path
+is exactly how `keep_top_ev_percent` and `ev_per_price_cutoff` went unnoticed for as long as
+they did — `buildSolverConfig` never set them, so the shipped values governed every solve
+without anyone deciding that on purpose.
+
+| Key | Shipped default | What we set | Status |
+|---|---|---|---|
+| `keep_top_ev_percent` | `5` | `25` | **Overridden (ticket #95).** Percentile of `total_ev` exempted from every other pool filter. 5% (~30 of ~600 players) was narrower than one gameweek's genuinely reasonable transfer targets across 4 positions/20 clubs. Deliberately not tuned — see `KEEP_TOP_EV_PERCENT`'s comment in `scripts/build-solver-input.ts`. |
+| `ev_per_price_cutoff` | `30` | `10` | **Overridden (ticket #95).** Bottom percentile by EV-per-price dropped from the pool (unless already in the `keep_top_ev_percent` safe set). 30% systematically pruned expensive players, since EV-per-price is structurally lower for them even at high raw EV — exactly the players a transfer recommendation often turns on. Deliberately not tuned — see `EV_PER_PRICE_CUTOFF`'s comment in `scripts/build-solver-input.ts`. |
+| `xmin_lb` | `300` | `150` | Overridden (ticket #41) — see `XMIN_LB`'s comment in `scripts/build-solver-input.ts`. Untouched by ticket #95. |
+| `preseason` | `true` | `false` | Overridden (ticket #41) — the shipped `true` replaces the whole squad with an empty one. Untouched by ticket #95. |
+| `no_transfer_last_gws` | `2` | *(not set — inherited)* | **Inherited, undocumented until now.** Forbids transfers in the last 2 gameweeks of the solve horizon. This distorts the multi-week plan shown on the reasoning screen, since the horizon's later weeks show "no transfer" not because that's the best decision but because the solver was forbidden from proposing one — but it does **not** corrupt the actual GW1 decision this app acts on, since GW1 is never inside that forbidden window at a 5-gameweek horizon. Left as-is; flagged here so a future ticket touching multi-week display doesn't mistake it for a real recommendation. |
+| `decay_base` | `0.9` | *(not set — inherited)* | **Inherited, reasonable.** Discounts future gameweeks' projected points by `0.9^n` when computing `total_ev`, so nearer gameweeks weigh more. Worth noting explicitly that this is inherited, not a value this app chose — if the discount ever looks wrong in practice, this is where to look. |
+
+Both `no_transfer_last_gws` and `decay_base` are documented here for completeness (ticket #95's
+scope), not changed — see the ticket's Scope OUT.
