@@ -395,30 +395,110 @@ export function checkSquad(input: SquadCheckInput): CheckResult {
 // ----------------------------------------------------------------------------
 // 3. Projections
 // ----------------------------------------------------------------------------
+//
+// Ticket #89. An all-zero projection (expected_points = 0 AND
+// expected_minutes = 0) is the CORRECT output for at least three legitimate
+// populations — an injured/suspended/unavailable/doubtful player, an
+// available player whose team has no fixture that gameweek, and (folded
+// into "unavailability" below) an available player whose own published
+// chance_of_playing_next_round is under 100. None of those may fail this
+// check. The only population for which an all-zero row is genuinely wrong
+// is: players.status = 'a', chance_of_playing_next_round null or 100, and
+// the player's team has at least one fixture that gameweek — see
+// isFullyAvailable below, which is this rule verbatim.
+//
+// A player whose team_id cannot be resolved against the known teams read
+// (should not happen given the FK, but this file never trusts a snapshot
+// it cannot itself prove — see the file header's "never returns pass for
+// something it could not evaluate") is NOT given the benefit of the doubt:
+// classifyZeroProjectionPlayer folds it into the "available" (failing)
+// bucket rather than a fourth cause, per the ticket's own Notes ("anything
+// that cannot be attributed to a [legitimate] cause belongs in the failing
+// population, not in a fourth bucket") — while still being counted
+// separately (unresolvedTeamRowCount) purely for diagnostics.
+
+export type ZeroProjectionCause = 'unavailable' | 'no-fixture' | 'available'
+
+export interface ZeroProjectionPlayer {
+  playerId: number
+  webName: string
+  status: string
+  chanceOfPlayingNextRound: number | null
+  /**
+   * true: the player's team has >=1 fixture in the target gameweek.
+   * false: the player's team has zero fixtures in the target gameweek.
+   * null: the player's team_id did not resolve against the known teams —
+   * fixture status cannot be determined for this player.
+   */
+  teamHasFixture: boolean | null
+}
+
+/** The narrowed rule verbatim: status 'a', chance null or 100 — i.e. nothing on record casts doubt on availability. */
+function isFullyAvailable(status: string, chanceOfPlayingNextRound: number | null): boolean {
+  return status === 'a' && (chanceOfPlayingNextRound === null || chanceOfPlayingNextRound === 100)
+}
+
+/** Order matters, per the ticket's own Notes: unavailability first, no-fixture second, everything remaining is the failing population. */
+export function classifyZeroProjectionPlayer(player: ZeroProjectionPlayer): ZeroProjectionCause {
+  if (!isFullyAvailable(player.status, player.chanceOfPlayingNextRound)) return 'unavailable'
+  if (player.teamHasFixture === false) return 'no-fixture'
+  return 'available' // teamHasFixture === true, or === null (unresolved team — cannot prove innocent, see file header above).
+}
 
 export interface ProjectionsCheckInput {
   gameweekId: number
   modelVersion: string
   projectionRowCount: number
   playersCount: number
-  allZeroRowCount: number
+  /** Every projection row with expected_points = 0 AND expected_minutes = 0, one entry per row. */
+  zeroProjectionPlayers: readonly ZeroProjectionPlayer[]
   coverageWarnThreshold: number
   coverageFailThreshold: number
 }
 
+function formatBreakdown(allZeroRowCount: number, unavailableZeroRowCount: number, noFixtureZeroRowCount: number, availableZeroRowCount: number): string {
+  return `all-zero breakdown: ${allZeroRowCount} total (${unavailableZeroRowCount} unavailable, ${noFixtureZeroRowCount} no fixture, ${availableZeroRowCount} available)`
+}
+
 export function checkProjections(input: ProjectionsCheckInput): CheckResult {
-  const { gameweekId, modelVersion, projectionRowCount, playersCount, allZeroRowCount, coverageWarnThreshold, coverageFailThreshold } = input
+  const { gameweekId, modelVersion, projectionRowCount, playersCount, zeroProjectionPlayers, coverageWarnThreshold, coverageFailThreshold } = input
   const coverage = playersCount > 0 ? projectionRowCount / playersCount : 0
-  const values = { gameweekId, modelVersion, projectionRowCount, playersCount, coverage, allZeroRowCount }
+
+  const unavailable = zeroProjectionPlayers.filter((p) => classifyZeroProjectionPlayer(p) === 'unavailable')
+  const noFixture = zeroProjectionPlayers.filter((p) => classifyZeroProjectionPlayer(p) === 'no-fixture')
+  const available = zeroProjectionPlayers.filter((p) => classifyZeroProjectionPlayer(p) === 'available')
+  const unresolvedTeamRowCount = zeroProjectionPlayers.filter((p) => p.teamHasFixture === null).length
+
+  const allZeroRowCount = zeroProjectionPlayers.length
+  const unavailableZeroRowCount = unavailable.length
+  const noFixtureZeroRowCount = noFixture.length
+  const availableZeroRowCount = available.length
+
+  const values = {
+    gameweekId,
+    modelVersion,
+    projectionRowCount,
+    playersCount,
+    coverage,
+    allZeroRowCount,
+    unavailableZeroRowCount,
+    noFixtureZeroRowCount,
+    availableZeroRowCount,
+    unresolvedTeamRowCount,
+  }
+  const breakdown = formatBreakdown(allZeroRowCount, unavailableZeroRowCount, noFixtureZeroRowCount, availableZeroRowCount)
 
   if (projectionRowCount === 0) {
     return { id: 'projections', verdict: 'fail', reason: `no "player_projections" rows for gameweek ${gameweekId}, model_version "${modelVersion}".`, values }
   }
-  if (allZeroRowCount > 0) {
+  if (availableZeroRowCount > 0) {
+    const names = available.map((p) => p.webName).join(', ')
     return {
       id: 'projections',
       verdict: 'fail',
-      reason: `${allZeroRowCount} of ${projectionRowCount} projection row(s) have zero expected_points AND zero expected_minutes.`,
+      reason:
+        `${availableZeroRowCount} of ${projectionRowCount} projection row(s) are zero for a player who is available, ` +
+        `expected to play, and whose team has a fixture this gameweek — cannot be explained away: ${names}. ${breakdown}.`,
       values,
     }
   }
@@ -426,7 +506,7 @@ export function checkProjections(input: ProjectionsCheckInput): CheckResult {
     return {
       id: 'projections',
       verdict: 'fail',
-      reason: `projections cover only ${(coverage * 100).toFixed(1)}% of players (${projectionRowCount}/${playersCount}) — below the ${(coverageFailThreshold * 100).toFixed(0)}% floor.`,
+      reason: `projections cover only ${(coverage * 100).toFixed(1)}% of players (${projectionRowCount}/${playersCount}) — below the ${(coverageFailThreshold * 100).toFixed(0)}% floor. ${breakdown}.`,
       values,
     }
   }
@@ -434,14 +514,14 @@ export function checkProjections(input: ProjectionsCheckInput): CheckResult {
     return {
       id: 'projections',
       verdict: 'warn',
-      reason: `projections cover ${(coverage * 100).toFixed(1)}% of players (${projectionRowCount}/${playersCount}), below the ${(coverageWarnThreshold * 100).toFixed(0)}% target.`,
+      reason: `projections cover ${(coverage * 100).toFixed(1)}% of players (${projectionRowCount}/${playersCount}), below the ${(coverageWarnThreshold * 100).toFixed(0)}% target. ${breakdown}.`,
       values,
     }
   }
   return {
     id: 'projections',
     verdict: 'pass',
-    reason: `${projectionRowCount} projection rows cover ${(coverage * 100).toFixed(1)}% of ${playersCount} players, none all-zero.`,
+    reason: `${projectionRowCount} projection rows cover ${(coverage * 100).toFixed(1)}% of ${playersCount} players. ${breakdown}.`,
     values,
   }
 }
@@ -914,8 +994,23 @@ interface SquadPickRow {
 }
 
 interface ProjectionRow {
+  player_id: number
   expected_points: number
   expected_minutes: number
+}
+
+/** players columns check 3 needs to classify an all-zero row — see ZeroProjectionPlayer. */
+interface PlayerAvailabilityRow {
+  id: number
+  web_name: string
+  status: string
+  chance_of_playing_next_round: number | null
+  team_id: number
+}
+
+/** A minimal teams read (id only) for check 3's own team-resolution guard — independent of check 6's own `teams` read, matching this file's per-check, non-shared query convention. */
+interface TeamIdRow {
+  id: number
 }
 
 interface SolverRunRow {
@@ -1050,7 +1145,15 @@ async function main(): Promise<void> {
     checks.push(squadCheck)
 
     // --------------------------------------------------------------------
-    // 3. Projections
+    // 3. Projections. Ticket #89: an all-zero row is only a failure for a
+    //    player who is available, expected to play, AND whose team has a
+    //    fixture this gameweek — see checkProjections/classifyZeroProjectionPlayer.
+    //    That means this check now also needs, for every all-zero row, the
+    //    owning player's status/chance/team_id (players) and whether that
+    //    team has a fixture THIS gameweek (fixtures, filtered to
+    //    targetGameweekId only — a narrower window than check 6's own
+    //    PREFLIGHT_HORIZON read, and an independent query, matching this
+    //    file's per-check convention of not sharing reads across checks).
     // --------------------------------------------------------------------
     let projectionsCheck: CheckResult
     if (targetGameweekId === null) {
@@ -1061,7 +1164,7 @@ async function main(): Promise<void> {
         (from, to) =>
           supabase
             .from('player_projections')
-            .select('expected_points, expected_minutes')
+            .select('player_id, expected_points, expected_minutes')
             .eq('gameweek_id', targetGameweekId as number)
             .eq('model_version', MODEL_VERSION)
             .range(from, to)
@@ -1073,19 +1176,82 @@ async function main(): Promise<void> {
             .eq('gameweek_id', targetGameweekId as number)
             .eq('model_version', MODEL_VERSION),
       )
-      const playersCountRead = await safeCount('players', () => supabase.from('players').select('*', { count: 'exact', head: true }))
+      const playersRead = await safeFetchAllPages<PlayerAvailabilityRow>(
+        'players',
+        (from, to) =>
+          supabase
+            .from('players')
+            .select('id, web_name, status, chance_of_playing_next_round, team_id')
+            .range(from, to)
+            .returns<PlayerAvailabilityRow[]>(),
+        () => supabase.from('players').select('*', { count: 'exact', head: true }),
+      )
+      const teamIdsRead = await safeFetchAllPages<TeamIdRow>(
+        'teams',
+        (from, to) => supabase.from('teams').select('id').range(from, to).returns<TeamIdRow[]>(),
+        () => supabase.from('teams').select('*', { count: 'exact', head: true }),
+      )
+      // Filtered in the database (eq on event_id) and read via the shared
+      // pagination helper, matching every other multi-row read in this file.
+      const gwFixturesRead = await safeFetchAllPages<FixtureRow>(
+        'fixtures',
+        (from, to) => supabase.from('fixtures').select('team_h, team_a').eq('event_id', targetGameweekId as number).range(from, to).returns<FixtureRow[]>(),
+        () => supabase.from('fixtures').select('*', { count: 'exact', head: true }).eq('event_id', targetGameweekId as number),
+      )
+
       if (projRead.error) {
         projectionsCheck = buildCannotEvaluateResult('projections', projRead.error)
-      } else if (playersCountRead.error) {
-        projectionsCheck = buildCannotEvaluateResult('projections', playersCountRead.error)
+      } else if (playersRead.error) {
+        projectionsCheck = buildCannotEvaluateResult('projections', playersRead.error)
+      } else if (teamIdsRead.error) {
+        projectionsCheck = buildCannotEvaluateResult('projections', teamIdsRead.error)
+      } else if (gwFixturesRead.error) {
+        projectionsCheck = buildCannotEvaluateResult('projections', gwFixturesRead.error)
       } else {
-        const allZeroRowCount = projRead.rows.filter((r) => r.expected_points === 0 && r.expected_minutes === 0).length
+        const playersById = new Map(playersRead.rows.map((p) => [p.id, p]))
+        const knownTeamIds = new Set(teamIdsRead.rows.map((t) => t.id))
+        const teamsWithFixture = new Set<number>()
+        for (const f of gwFixturesRead.rows) {
+          teamsWithFixture.add(f.team_h)
+          teamsWithFixture.add(f.team_a)
+        }
+
+        const zeroProjectionPlayers: ZeroProjectionPlayer[] = projRead.rows
+          .filter((r) => r.expected_points === 0 && r.expected_minutes === 0)
+          .map((r) => {
+            const player = playersById.get(r.player_id)
+            if (!player) {
+              // player_projections.player_id has a NOT NULL FK to players.id,
+              // so this should not happen against a consistent snapshot. If
+              // it does anyway (a read racing a delete), it is exactly the
+              // "could not evaluate" case this file never lets pass silently
+              // — treated the same as an unresolved team_id (teamHasFixture:
+              // null), which classifyZeroProjectionPlayer folds into the
+              // failing "available" bucket, not a legitimate cause.
+              return {
+                playerId: r.player_id,
+                webName: `player_id ${r.player_id} (no matching "players" row)`,
+                status: 'a',
+                chanceOfPlayingNextRound: null,
+                teamHasFixture: null,
+              }
+            }
+            const teamHasFixture = knownTeamIds.has(player.team_id) ? teamsWithFixture.has(player.team_id) : null
+            return {
+              playerId: player.id,
+              webName: player.web_name,
+              status: player.status,
+              chanceOfPlayingNextRound: player.chance_of_playing_next_round,
+              teamHasFixture,
+            }
+          })
+
         projectionsCheck = checkProjections({
           gameweekId: targetGameweekId,
           modelVersion: MODEL_VERSION,
           projectionRowCount: projRead.rows.length,
-          playersCount: playersCountRead.count,
-          allZeroRowCount,
+          playersCount: playersRead.rows.length,
+          zeroProjectionPlayers,
           coverageWarnThreshold: PROJECTION_COVERAGE_WARN_THRESHOLD,
           coverageFailThreshold: PROJECTION_COVERAGE_FAIL_THRESHOLD,
         })
