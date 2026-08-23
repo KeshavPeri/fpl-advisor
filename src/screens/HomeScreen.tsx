@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
+import AccuracyCard from '../components/AccuracyCard'
 import AppShell from '../components/AppShell'
 import DeadlineCountdown, { type DeadlineCountdownState } from '../components/DeadlineCountdown'
 import { deriveAvailability } from '../components/pitchAvailability'
@@ -38,6 +39,12 @@ import './HomeScreen.css'
  * Ticket #85's only change here is the "Chips →" link next to the mark,
  * through to the new /chips screen — that screen owns its own fetch
  * entirely (src/lib/chips/api.ts), independent of everything above.
+ *
+ * Ticket #96 adds AccuracyCard below the pitch — product-brief.md §2's
+ * rolling accuracy figure — completing design-reference.md's home-screen
+ * order (countdown, verdict, pitch, then this card). It owns its own read
+ * (src/lib/accuracy/api.ts) and renders unconditionally, the same
+ * independence VerdictCard already has from the pitch's own load state.
  */
 
 type LoadState =
@@ -195,6 +202,15 @@ function HomeScreen() {
           <Pitch players={loadState.players} />
         </>
       )}
+
+      {/* Ticket #96 — the rolling accuracy display, below the pitch per
+          design-reference.md's home-screen order (countdown, verdict,
+          pitch, then this card). Owns its own read, independent of every
+          state above (loadState, countdownState, VerdictCard's own fetch)
+          — same "a failed or slow read here must never block or blank
+          something else" principle those already follow, so it renders
+          unconditionally regardless of whether a squad is saved. */}
+      <AccuracyCard />
     </AppShell>
   )
 }
