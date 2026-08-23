@@ -183,6 +183,37 @@
   color: var(--text-tertiary);
 }
 
+/* ---- Expiry warning (ticket #97) ----
+   Understated by default, escalating — the same posture design-reference.md
+   sets for the deadline countdown, applied here in gameweeks rather than
+   hours. No icon, no exclamation point; the escalation is carried entirely
+   by weight, size and how much coral is present, never by louder copy. */
+
+.chips-expiry {
+  margin: 0;
+}
+
+.chips-expiry--noted {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.chips-expiry--pressing {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-coral);
+}
+
+.chips-expiry--final {
+  font: var(--text-title);
+  font-weight: 550;
+  color: var(--accent-coral);
+  padding: var(--space-3);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--accent-coral-line);
+  background: var(--accent-coral-dim);
+}
+
 .chips-set__unknown {
   font: var(--text-label);
   color: var(--text-tertiary);
