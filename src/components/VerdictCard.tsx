@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { toErrorMessage } from '../lib/format'
+import { formatSyncTimestamp, toErrorMessage } from '../lib/format'
 import { deriveVerdictView } from '../lib/verdict/derive.ts'
 import { fetchVerdict } from '../lib/verdict/api.ts'
 import type { VerdictRecommendationData } from '../lib/verdict/types.ts'
+import { commitRecommendation, fetchCommitContext } from '../lib/commit/api.ts'
+import { deriveCommitView } from '../lib/commit/derive.ts'
+import type { CommitTarget, StoredCommitDecision } from '../lib/commit/types.ts'
 import Surface from './Surface'
 import './VerdictCard.css'
 
@@ -50,6 +53,130 @@ export function VerdictPointsFigure({ label, points }: VerdictPointsFigureProps)
   )
 }
 
+type CommitFetchState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; decision: StoredCommitDecision | null; solverRunId: number | null }
+
+/** Everything the commit control needs to know about the plan it belongs
+ *  to, resolved by VerdictCard from its own already-fetched
+ *  VerdictRecommendationData — the one field it does NOT have
+ *  (solverRunId) is read separately inside CommitControl itself, via
+ *  fetchCommitContext (see src/lib/commit/api.ts's own comment on why). */
+type CommitControlTarget = Omit<CommitTarget, 'solverRunId'>
+
+/**
+ * The commit action (ticket #84, feature-list item 19) — one tap, on the
+ * recommendation it belongs to, individually (design-reference.md: "One tap
+ * to commit each recommendation, individually. No 'accept all'."). Commits
+ * whichever plan is actually shown on this card — `target.gameweekId` is
+ * the recommendation's OWN gameweek (VerdictRecommendationData.gameweekId),
+ * not the home screen's current target gameweek, so a stale card commits
+ * the stale plan it displays, never silently substitutes today's gameweek
+ * id for it.
+ *
+ * Committing records a decision. It never calls any FPL-authenticated
+ * endpoint — see src/lib/commit/api.ts's own header and the migration's.
+ *
+ * Owns its own read (fetchCommitContext), independent of VerdictCard's own
+ * recommendation read — same "a failed or slow read here must never block
+ * or blank something else" principle VerdictCard's own header comment
+ * states for its relationship to the pitch below it. Renders nothing while
+ * that read is in flight, deliberately: showing a "Commit" button before
+ * we know whether this gameweek is already committed risks a flash of the
+ * wrong state.
+ */
+function CommitControl(target: CommitControlTarget) {
+  const { gameweekId, planIndex } = target
+  const [fetchState, setFetchState] = useState<CommitFetchState>({ status: 'loading' })
+  const [writing, setWriting] = useState(false)
+  const [writeErrorMessage, setWriteErrorMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setFetchState({ status: 'loading' })
+    setWriteErrorMessage(null)
+
+    async function load() {
+      try {
+        const context = await fetchCommitContext(gameweekId, planIndex)
+        if (cancelled) return
+        setFetchState({
+          status: 'ready',
+          decision: context.decision,
+          solverRunId: context.solverRunId,
+        })
+      } catch (err) {
+        if (cancelled) return
+        setFetchState({ status: 'error', message: toErrorMessage(err) })
+      }
+    }
+
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [gameweekId, planIndex])
+
+  if (fetchState.status === 'loading') return null
+
+  if (fetchState.status === 'error') {
+    return (
+      <p className="verdict-card__commit-error" role="alert">
+        Couldn't check whether this gameweek is committed: {fetchState.message}. Reload this
+        page to try again.
+      </p>
+    )
+  }
+
+  const { decision, solverRunId } = fetchState
+  const view = deriveCommitView(decision, writeErrorMessage)
+
+  async function handleCommit() {
+    if (writing || view.isCommitted) return
+    setWriting(true)
+    setWriteErrorMessage(null)
+    try {
+      const committed = await commitRecommendation({ ...target, solverRunId })
+      setFetchState({ status: 'ready', decision: committed, solverRunId })
+    } catch (err) {
+      setWriteErrorMessage(toErrorMessage(err))
+    } finally {
+      setWriting(false)
+    }
+  }
+
+  return (
+    <div className="verdict-card__commit">
+      {view.isCommitted ? (
+        <p className="verdict-card__commit-badge">
+          Committed
+          {decision && (
+            <>
+              {' · '}
+              <span className="num">{formatSyncTimestamp(decision.decidedAt)}</span>
+            </>
+          )}
+        </p>
+      ) : (
+        <button
+          type="button"
+          className="verdict-card__commit-button"
+          onClick={() => void handleCommit()}
+          disabled={writing}
+        >
+          {writing ? 'Committing…' : view.buttonLabel}
+        </button>
+      )}
+      {view.errorMessage && (
+        <p className="verdict-card__commit-error" role="alert">
+          {view.errorMessage}
+        </p>
+      )}
+    </div>
+  )
+}
+
 /**
  * The recommendation, on the home screen (ticket #61, feature-list item 17).
  * product-brief.md §1: home screen order is countdown, verdict, pitch — this
@@ -60,9 +187,8 @@ export function VerdictPointsFigure({ label, points }: VerdictPointsFigureProps)
  * never block or blank the squad pitch below it, and vice versa. Plan A
  * only (`plan_index = 0`); Plan B/C rendering is item 19+, out of scope here.
  *
- * No commit action, no override registration, no link to a reasoning
- * screen — all out of scope (items 19, 20, 21). This card displays; it
- * never acts.
+ * No override registration — still out of scope (item 20, a separate
+ * later ticket that depends on this one).
  *
  * The card's primary figure is THIS gameweek's projected points (ticket
  * #68), not the multi-gameweek horizon total — see derive.ts's
@@ -71,11 +197,16 @@ export function VerdictPointsFigure({ label, points }: VerdictPointsFigureProps)
  * an explicit "Unavailable" state when the underlying solver_picks rows
  * couldn't be found — never as 0, NaN, or a blank card.
  *
- * Ticket #79 adds one thing: a link through to the full reasoning screen
- * (`/reasoning`), per design-reference.md's "one-line summary on the
- * verdict card so a bare number is never the whole story." Everything else
- * about the card is unchanged — no commit action, no override registration,
- * still out of scope here (items 19, 20).
+ * Ticket #79 added a link through to the full reasoning screen (`/reasoning`),
+ * per design-reference.md's "one-line summary on the verdict card so a bare
+ * number is never the whole story."
+ *
+ * Ticket #84 adds the commit action (feature-list item 19, see
+ * `CommitControl` above): one tap to record that this recommendation was
+ * accepted, via `src/lib/commit/`. Rendered for every ready plan, stale or
+ * fresh — see CommitControl's own comment for why staleness doesn't gate
+ * it. No override registration, no undo/edit/delete, no accept-all — all
+ * still out of scope.
  */
 function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
   const [state, setState] = useState<VerdictState>({ status: 'loading' })
@@ -177,6 +308,22 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
       {view.coinFlipNote && <p className="verdict-card__confidence-note">{view.coinFlipNote}</p>}
 
       {view.coverageNote && <p className="verdict-card__coverage">{view.coverageNote}</p>}
+
+      {/* Ticket #84: commits the plan actually on screen — state.data's OWN
+          gameweek_id, not the `gameweekId` prop (the home screen's current
+          target). Those two only differ when view.isStale is true, and
+          committing the stale plan on the card is the correct behaviour —
+          see CommitControl's own comment. */}
+      <CommitControl
+        gameweekId={state.data.gameweekId}
+        planIndex={0}
+        isRoll={state.data.isRoll}
+        transferInPlayerId={state.data.transferInPlayerId}
+        transferOutPlayerId={state.data.transferOutPlayerId}
+        captainPlayerId={state.data.captainPlayerId}
+        viceCaptainPlayerId={state.data.viceCaptainPlayerId}
+        hitCost={state.data.hitCost}
+      />
 
       <Link className="verdict-card__reasoning-link" to="/reasoning">
         Full reasoning →
