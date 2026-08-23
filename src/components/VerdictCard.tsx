@@ -256,7 +256,6 @@ function OverrideLink({ gameweekId, planIndex }: { gameweekId: number; planIndex
  * gameweek, enforced by `deriveOverrideAccess` reading the same
  * `recommendation_decisions` table both controls write to.
  *
-
  * The card's primary figure is THIS gameweek's projected points (ticket
  * #68), not the multi-gameweek horizon total — see derive.ts's
  * `sumGameweekPoints` and api.ts's solver_picks read for how that's
