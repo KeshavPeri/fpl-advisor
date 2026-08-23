@@ -1,0 +1,368 @@
+/*
+  The override screen (ticket #91, feature-list item 20) — `/override`.
+  Built entirely from Surface (translucent layered material, never a flat
+  card with a 1px border) and the existing token set from src/index.css —
+  no new token is introduced here. Matches SquadEntryScreen.css's field
+  pattern (the established position-filtered-select shape this ticket
+  reuses) and ReasoningScreen.css's header/skeleton/empty-state pattern.
+
+  design-reference.md: "Registering an override carries deliberate
+  friction — a confirm step that shows what the model expected and what it
+  is being overridden with." The confirm step's two-column comparison
+  (.override-compare) is the one piece of layout unique to this screen; a
+  differing row is marked with coral, the app-wide risk/attention colour —
+  never green or yellow (explicitly excluded, design-reference.md Colour).
+*/
+
+.override-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.override-back {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-cyan);
+}
+
+.override-mark {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* ---- Loading / error / empty ---- */
+
+.override-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.override-skeleton-line {
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: override-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.override-skeleton-line--title {
+  height: var(--space-8);
+  width: 60%;
+}
+
+.override-skeleton-line--body {
+  height: var(--space-4);
+  width: 90%;
+}
+
+@keyframes override-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.override-error {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+.override-empty-title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.override-empty-body {
+  font: var(--text-body);
+  color: var(--text-secondary);
+  margin-top: var(--space-2);
+}
+
+/* ---- Blocked (already committed) ---- */
+
+.override-blocked__title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.override-blocked__body {
+  font: var(--text-body);
+  color: var(--text-secondary);
+  margin-top: var(--space-2);
+}
+
+/* ---- Registered override — a read-only record, same family as
+   .verdict-card__commit-badge: cyan, quiet, never a second form. ---- */
+
+.override-registered {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.override-registered__title {
+  font: var(--text-title);
+  color: var(--accent-cyan);
+}
+
+.override-registered__gameweek {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.override-registered__list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.override-registered__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.override-registered__row dt {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.override-registered__row dd {
+  margin: 0;
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--text-primary);
+  text-align: right;
+}
+
+.override-registered__meta {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* ---- Which recommendation this is being registered against ---- */
+
+.override-recommendation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.override-recommendation__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.override-recommendation__gameweek {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+/* ---- Step one: entry ---- */
+
+.override-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.override-entry__title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.override-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.override-field__label {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.override-field__input {
+  background: var(--surface-1);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-control);
+  padding: var(--space-3);
+  color: var(--text-primary);
+  font: var(--text-body);
+}
+
+.override-field__input:disabled {
+  opacity: 0.5;
+}
+
+.override-transfer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.override-transfer__modes {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.override-radio {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--text-body);
+  color: var(--text-primary);
+}
+
+.override-limitation {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.override-missing {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font: var(--text-label);
+  color: var(--accent-coral);
+}
+
+.override-continue-button {
+  align-self: flex-start;
+  border: none;
+  border-radius: var(--radius-control);
+  padding: var(--space-3) var(--space-6);
+  background: var(--panel-fill-raised);
+  color: var(--text-primary);
+  font: var(--text-title);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.override-continue-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- Step two: confirm — the friction (design-reference.md) ---- */
+
+.override-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.override-confirm__title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.override-refusal {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+.override-compare {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.override-compare__header,
+.override-compare__row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.override-compare__col-label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.override-compare__row {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.override-compare__field-label {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--text-secondary);
+}
+
+.override-compare__value {
+  font: var(--text-body);
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+}
+
+/* A differing field is what the friction exists to surface — coral, same
+   risk/attention family used everywhere else in the app, never green. */
+.override-compare__row--differs .override-compare__field-label,
+.override-compare__row--differs .override-compare__value {
+  color: var(--accent-coral);
+}
+
+.override-write-error {
+  font: var(--text-label);
+  color: var(--accent-coral);
+}
+
+.override-confirm__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.override-back-button {
+  border: none;
+  border-radius: var(--radius-control);
+  padding: var(--space-3) var(--space-6);
+  background: transparent;
+  color: var(--text-secondary);
+  font: var(--text-body);
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.override-register-button {
+  border: none;
+  border-radius: var(--radius-control);
+  padding: var(--space-3) var(--space-6);
+  background: var(--accent-cyan);
+  color: var(--surface-0);
+  font: var(--text-title);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.override-register-button:active {
+  transform: scale(0.97);
+}
+
+.override-register-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .override-skeleton-line {
+    animation: none;
+  }
+}
