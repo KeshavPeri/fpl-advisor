@@ -210,6 +210,22 @@
   color: var(--accent-coral);
 }
 
+/* Ticket #91 — the card's doorway into override registration
+   (design-reference.md: "Registering an override carries deliberate
+   friction"). Same quiet link treatment as .verdict-card__reasoning-link
+   below — cyan, text-body, no button chrome, because the friction this
+   design decision commits to belongs entirely on /override itself, not on
+   the doorway to it. Hidden outright when this gameweek is already
+   committed (OverrideLink in VerdictCard.tsx renders nothing in that case),
+   so its mere presence never contradicts the one-decision-per-gameweek
+   rule. */
+.verdict-card__override-link {
+  align-self: flex-start;
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-cyan);
+}
+
 /* Ticket #79 — the card's one way through to the full reasoning screen
    (design-reference.md: "a bare number is never the whole story"). Same
    link treatment as home-invitation__link (HomeScreen.css): cyan,

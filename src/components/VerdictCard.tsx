@@ -7,6 +7,8 @@ import type { VerdictRecommendationData } from '../lib/verdict/types.ts'
 import { commitRecommendation, fetchCommitContext } from '../lib/commit/api.ts'
 import { deriveCommitView } from '../lib/commit/derive.ts'
 import type { CommitTarget, StoredCommitDecision } from '../lib/commit/types.ts'
+import { fetchOverrideDecisions } from '../lib/override/api.ts'
+import { deriveOverrideAccess, type OverrideAccessStatus } from '../lib/override/derive.ts'
 import Surface from './Surface'
 import './VerdictCard.css'
 
@@ -177,6 +179,68 @@ function CommitControl(target: CommitControlTarget) {
   )
 }
 
+type OverrideLinkFetchState =
+  | { status: 'loading' }
+  | { status: 'error' }
+  | { status: 'ready'; access: OverrideAccessStatus }
+
+/**
+ * The override entry point (ticket #91, feature-list item 20) —
+ * design-reference.md: "Registering an override carries deliberate
+ * friction — a confirm step that shows what the model expected and what it
+ * is being overridden with." This link is only the doorway to that flow;
+ * the friction itself lives entirely on `/override` (src/screens/
+ * OverrideScreen.tsx).
+ *
+ * Owns its own read (fetchOverrideDecisions), independent of CommitControl's
+ * own fetch and of VerdictCard's own recommendation read — same "a failed or
+ * slow read here must never block or blank something else" principle
+ * CommitControl's own comment states. Renders nothing while that read is in
+ * flight or if it fails: a link that might be wrong (offering "Register
+ * override" on an already-committed gameweek, say) is worse than a link
+ * that's briefly absent.
+ *
+ * DoD: "A gameweek with an existing commit row does not offer the override
+ * entry point" — deriveOverrideAccess returns 'blocked-commit' and this
+ * renders nothing at all in that case. "a gameweek with an existing
+ * override row shows the registered override rather than the form" is
+ * `/override`'s own job once reached; here the link's own label just
+ * reflects which case applies, so the label promises the state the screen
+ * will actually show.
+ */
+function OverrideLink({ gameweekId, planIndex }: { gameweekId: number; planIndex: number }) {
+  const [fetchState, setFetchState] = useState<OverrideLinkFetchState>({ status: 'loading' })
+
+  useEffect(() => {
+    let cancelled = false
+    setFetchState({ status: 'loading' })
+
+    fetchOverrideDecisions(gameweekId, planIndex)
+      .then((decisions) => {
+        if (cancelled) return
+        setFetchState({
+          status: 'ready',
+          access: deriveOverrideAccess(decisions.commitDecidedAt, decisions.existingOverride),
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setFetchState({ status: 'error' })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [gameweekId, planIndex])
+
+  if (fetchState.status !== 'ready' || fetchState.access === 'blocked-commit') return null
+
+  return (
+    <Link className="verdict-card__override-link" to="/override">
+      {fetchState.access === 'registered' ? 'Override registered' : 'Register override'} →
+    </Link>
+  )
+}
+
 /**
  * The recommendation, on the home screen (ticket #61, feature-list item 17).
  * product-brief.md §1: home screen order is countdown, verdict, pitch — this
@@ -187,9 +251,12 @@ function CommitControl(target: CommitControlTarget) {
  * never block or blank the squad pitch below it, and vice versa. Plan A
  * only (`plan_index = 0`); Plan B/C rendering is item 19+, out of scope here.
  *
- * No override registration — still out of scope (item 20, a separate
- * later ticket that depends on this one).
+ * Ticket #91 adds the override entry point (item 20, see `OverrideLink`
+ * above) alongside the commit control — the two are mutually exclusive per
+ * gameweek, enforced by `deriveOverrideAccess` reading the same
+ * `recommendation_decisions` table both controls write to.
  *
+
  * The card's primary figure is THIS gameweek's projected points (ticket
  * #68), not the multi-gameweek horizon total — see derive.ts's
  * `sumGameweekPoints` and api.ts's solver_picks read for how that's
@@ -205,8 +272,9 @@ function CommitControl(target: CommitControlTarget) {
  * `CommitControl` above): one tap to record that this recommendation was
  * accepted, via `src/lib/commit/`. Rendered for every ready plan, stale or
  * fresh — see CommitControl's own comment for why staleness doesn't gate
- * it. No override registration, no undo/edit/delete, no accept-all — all
- * still out of scope.
+ * it. Ticket #91 adds the override entry point alongside it (see
+ * `OverrideLink` above). No undo/edit/delete, no accept-all — still out of
+ * scope.
  */
 function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
   const [state, setState] = useState<VerdictState>({ status: 'loading' })
@@ -324,6 +392,8 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
         viceCaptainPlayerId={state.data.viceCaptainPlayerId}
         hitCost={state.data.hitCost}
       />
+
+      <OverrideLink gameweekId={state.data.gameweekId} planIndex={0} />
 
       <Link className="verdict-card__reasoning-link" to="/reasoning">
         Full reasoning →

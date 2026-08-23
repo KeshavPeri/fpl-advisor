@@ -171,9 +171,9 @@ export async function fetchOverrideDecisions(
 /**
  * Writes one `recommendation_decisions` row with `kind = 'override'` — the
  * write this ticket exists for. Registers a DECISION; it never calls any
- * FPL-authenticated endpoint (Tier 1 guard — see the migration file and
- * this ticket's own Context: the FPL API is never authenticated and
- * my-team/ is never called). `hit_cost` is always written as `null` in the
+ * private, write-capable FPL endpoint of any kind (Tier 1 guard — see the
+ * migration file and this ticket's own Context: the FPL API is never
+ * authenticated by this app). `hit_cost` is always written as `null` in the
  * snapshot — see types.ts's `OverrideTarget` and the ticket's Notes on why
  * a hit is never hand-typed here.
  *
