@@ -30,7 +30,8 @@
 // entry point, wrong for a caller like scripts/notification-schedule.ts
 // that needs to keep running afterwards to write ITS OWN job_runs row
 // regardless of whether this send succeeded. runSend() is the same logic
-// with every process.exit(1) replaced by `return false`; main() is the
+// with every process.exit(1) replaced by `return 'failed'` (a three-way
+// SendOutcome — see runSend's own header, ticket #90); main() is the
 // process-exit-owning wrapper every direct invocation of this file already
 // went through, unchanged in observable behaviour.
 //
@@ -93,6 +94,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
 import {
+  applyWindowMarker,
   classifyAvailability,
   composeCurrentMessage,
   composeInfeasibleMessage,
@@ -349,15 +351,24 @@ export async function sendTelegramMessage(params: {
 // file's header ("Why main() is a thin wrapper") for why: a caller other
 // than this file's own direct invocation (scripts/notification-schedule.ts)
 // needs to keep running after this returns, to write its own job_runs row
-// regardless of the outcome here. Returns true on success (including the
-// benign "already sent" skips — a race lost to another run, or an identical
-// message already sent, is not a failure of THIS run), false on any failure
-// that should be treated as one. Every branch that used to call
-// process.exit(1) now returns false instead; every other branch is
-// unchanged from ticket #55's original main().
+// regardless of the outcome here.
+//
+// Returns a three-way SendOutcome, not a boolean (ticket #90): a benign
+// "already sent" skip (a race lost to another run, or an identical message
+// already sent for this trigger) is still not a failure of THIS run, but it
+// is also not a send — collapsing the two into one boolean is exactly what
+// let scripts/notification-schedule.ts report a skipped send as "fired" for
+// ten straight hours before GW1's deadline (see this ticket's own Notes).
+// 'sent': a Telegram call was actually made and succeeded. 'skipped': no
+// Telegram call was made at all (idempotency short-circuit, either path).
+// 'failed': everything that used to call process.exit(1) — gameweeks table
+// empty, the Telegram call itself failed, or an uncaught error. Every
+// caller of this function is updated for the new return type.
 // ============================================================================
 
-export async function runSend(trigger: NotificationTrigger, supabase: SupabaseClient, telegramEnv: TelegramEnv, startedAt: Date): Promise<boolean> {
+export type SendOutcome = 'sent' | 'skipped' | 'failed'
+
+export async function runSend(trigger: NotificationTrigger, supabase: SupabaseClient, telegramEnv: TelegramEnv, startedAt: Date): Promise<SendOutcome> {
   try {
     // ------------------------------------------------------------------
     // 1. Current gameweek.
@@ -378,7 +389,7 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
       const message = `${JOB_NAME}: the "gameweeks" table is empty — nothing to determine a current gameweek from. Run scripts/ingest-fpl.ts first.`
       console.error(message)
       await recordJobRun(supabase, { status: 'failure', message, details: {}, startedAt })
-      return false
+      return 'failed'
     }
     const currentGameweekId = determineCurrentGameweekId(gwRows, Date.now())
 
@@ -519,15 +530,34 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
       }
     }
 
+    // ticket #90: a short leading line naming the window (24h/10h), so two
+    // notifications for the same unchanged recommendation a day apart read
+    // as distinguishable, not as a repeat — see src/lib/notification/
+    // message.ts's own header for why this alone is not the duplicate-send
+    // fix (the trigger-scoped query just below is).
+    messageText = applyWindowMarker(messageText, trigger)
+
     // ------------------------------------------------------------------
     // Idempotency: an identical message already sent successfully for this
-    // gameweek is not sent again. Bounded single-row lookup, not paginated.
+    // gameweek AND THIS TRIGGER is not sent again. Scoped to `trigger` as
+    // well as gameweek_id/outcome/message_text (ticket #90) — the 24h and
+    // 10h messages for an unchanged recommendation used to be byte-
+    // identical (no window marker existed yet), so this query suppressed
+    // the 10h send as a "duplicate" of the 24h one and the more urgent of
+    // the two reminders silently never went out. A different trigger is a
+    // different notification, never a duplicate of another window's send —
+    // matching the partial unique index in
+    // supabase/migrations/20260819090000_notification_trigger.sql, which
+    // already keyed its own guarantee on (gameweek_id, trigger). This query
+    // was the one place that disagreed with it. Bounded single-row lookup,
+    // not paginated.
     // ------------------------------------------------------------------
     const { data: existingSent, error: existingSentError } = await supabase
       .from('notifications')
       .select('id')
       .eq('gameweek_id', currentGameweekId)
       .eq('outcome', 'sent')
+      .eq('trigger', trigger)
       .eq('message_text', messageText)
       .limit(1)
       .maybeSingle<{ id: number }>()
@@ -538,10 +568,10 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
       throw new SendTelegramError(`notifications lookup failed: ${existingSentError.message}`, 'notifications')
     }
     if (existingSent) {
-      const message = `${JOB_NAME}: an identical message was already sent for gameweek ${currentGameweekId} (notifications.id=${existingSent.id}) — skipping to avoid a duplicate send.`
+      const message = `${JOB_NAME}: an identical "${trigger}" message was already sent for gameweek ${currentGameweekId} (notifications.id=${existingSent.id}) — skipping to avoid a duplicate send.`
       console.log(message)
       await recordJobRun(supabase, { status: 'skipped', message, details: { currentGameweekId, sendKind, trigger, gwPages, recGwPages }, startedAt })
-      return true
+      return 'skipped'
     }
 
     // ------------------------------------------------------------------
@@ -576,7 +606,7 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
         const message = `${JOB_NAME}: a "${trigger}" notification for gameweek ${currentGameweekId} was already recorded as sent by another run (unique-index race) — not treating this as a failure.`
         console.log(message)
         await recordJobRun(supabase, { status: 'skipped', message, details: { currentGameweekId, sendKind, trigger }, startedAt })
-        return true
+        return 'skipped'
       }
       throw new SendTelegramError(`failed to record notifications row: ${notifInsertError.message}`, 'notifications')
     }
@@ -592,7 +622,7 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
         details: { currentGameweekId, sendKind, trigger, httpStatus: sendOutcome.status, telegramError: sendOutcome.errorText, attempts: sendOutcome.attempts },
         startedAt,
       })
-      return false
+      return 'failed'
     }
 
     const message =
@@ -606,7 +636,7 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
       details: { currentGameweekId, sendKind, trigger, recommendationGameweekId, httpStatus: sendOutcome.status, attempts: sendOutcome.attempts },
       startedAt,
     })
-    return true
+    return 'sent'
   } catch (err) {
     const message =
       err instanceof SendTelegramError ? err.message : err instanceof Error ? `unexpected failure: ${err.message}` : `unexpected failure: ${String(err)}`
@@ -617,7 +647,7 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
       const recordMessage = recordErr instanceof Error ? recordErr.message : String(recordErr)
       console.error(`${JOB_NAME}: additionally failed to record the failed job_runs row: ${recordMessage}`)
     }
-    return false
+    return 'failed'
   }
 }
 
@@ -649,8 +679,8 @@ export async function main(trigger: NotificationTrigger = 'manual'): Promise<voi
   }
   const supabase = createClient(supabaseEnv.url, supabaseEnv.secretKey)
 
-  const ok = await runSend(trigger, supabase, telegramEnv, startedAt)
-  if (!ok) {
+  const outcome = await runSend(trigger, supabase, telegramEnv, startedAt)
+  if (outcome === 'failed') {
     process.exit(1)
   }
 }

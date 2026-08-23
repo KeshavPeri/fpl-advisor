@@ -45,7 +45,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
-import { determineCurrentGameweekId, readTelegramEnv, runSend, type GameweekRow, type TelegramEnv } from './send-telegram.ts'
+import { determineCurrentGameweekId, readTelegramEnv, runSend, type GameweekRow, type SendOutcome, type TelegramEnv } from './send-telegram.ts'
 import { decideNotificationTrigger, type ScheduledTrigger } from '../src/lib/notification/index.ts'
 
 const JOB_NAME = 'notification-schedule'
@@ -263,19 +263,38 @@ export async function main(): Promise<void> {
     //    runSend() never calls process.exit() (see scripts/send-telegram.ts's
     //    own header) — that is the entire reason this file calls runSend()
     //    directly instead of scripts/send-telegram.ts's main().
+    //
+    //    ticket #90: runSend() now reports back a three-way SendOutcome
+    //    ('sent' / 'skipped' / 'failed'), not a boolean. This is the exact
+    //    spot where a benign "already sent" skip used to get reported to
+    //    job_runs as "fired" — the schedule job claimed success for ten
+    //    straight hourly runs before GW1's deadline while sending nothing
+    //    (see this ticket's own Context). The word "fired" is now used only
+    //    when a Telegram call actually succeeded; a skip writes
+    //    status: 'skipped' with the word "skipped" in the message.
     // ------------------------------------------------------------------
-    console.log(`${JOB_NAME}: gameweek ${targetGameweekId}, ${decision.hoursRemaining.toFixed(2)}h remaining — firing ${decision.trigger}.`)
-    const sendOk = await runSend(decision.trigger, supabase, telegramEnv, new Date())
+    console.log(`${JOB_NAME}: gameweek ${targetGameweekId}, ${decision.hoursRemaining.toFixed(2)}h remaining — attempting to fire ${decision.trigger}.`)
+    const sendOutcome = await runSend(decision.trigger, supabase, telegramEnv, new Date())
 
-    const message = `${JOB_NAME}: ${sendOk ? 'fired' : 'attempted'} ${decision.trigger} for gameweek ${targetGameweekId} (${decision.hoursRemaining.toFixed(2)}h remaining).`
+    const JOB_RUN_STATUS_BY_OUTCOME: Record<SendOutcome, 'success' | 'skipped' | 'failure'> = {
+      sent: 'success',
+      skipped: 'skipped',
+      failed: 'failure',
+    }
+    const VERB_BY_OUTCOME: Record<SendOutcome, string> = {
+      sent: 'fired',
+      skipped: 'skipped sending',
+      failed: 'attempted (and failed to send)',
+    }
+    const message = `${JOB_NAME}: ${VERB_BY_OUTCOME[sendOutcome]} ${decision.trigger} for gameweek ${targetGameweekId} (${decision.hoursRemaining.toFixed(2)}h remaining).`
     console.log(message)
     await recordJobRun(supabase, {
-      status: sendOk ? 'success' : 'failure',
+      status: JOB_RUN_STATUS_BY_OUTCOME[sendOutcome],
       message,
-      details: { targetGameweekId, hoursRemaining: decision.hoursRemaining, sentTriggers: sentTriggersList, decision: decision.trigger },
+      details: { targetGameweekId, hoursRemaining: decision.hoursRemaining, sentTriggers: sentTriggersList, decision: decision.trigger, sendOutcome },
       startedAt,
     })
-    if (!sendOk) {
+    if (sendOutcome === 'failed') {
       process.exit(1)
     }
   } catch (err) {

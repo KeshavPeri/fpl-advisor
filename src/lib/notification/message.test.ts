@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyWindowMarker,
   composeCurrentMessage,
   composeInfeasibleMessage,
   composeNoRecommendationMessage,
@@ -231,5 +232,63 @@ describe('truncateMessage', () => {
 
     expect(message.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE_LENGTH)
     expect(message.startsWith(headline)).toBe(true)
+  })
+})
+
+// ============================================================================
+// applyWindowMarker — ticket #90. The 24h and 10h deadline reminders must be
+// distinguishable at a glance even when the underlying recommendation (and
+// therefore the composed message) has not changed between the two sends.
+// ============================================================================
+
+describe('applyWindowMarker', () => {
+  it('the 24-hour and 10-hour markers produced from an IDENTICAL composed message are not byte-identical', () => {
+    const base = composeCurrentMessage({ reasonLines: WORKED_EXAMPLE_REASON_LINES, planB: null, solverStatus: OPTIMAL })
+
+    const twentyFourHour = applyWindowMarker(base, 'deadline_24h')
+    const tenHour = applyWindowMarker(base, 'deadline_10h')
+
+    expect(twentyFourHour).not.toBe(tenHour)
+  })
+
+  it('the 24-hour message says it is the first look', () => {
+    const base = composeCurrentMessage({ reasonLines: WORKED_EXAMPLE_REASON_LINES, planB: null, solverStatus: OPTIMAL })
+    const message = applyWindowMarker(base, 'deadline_24h')
+    expect(message.split('\n')[0]).toMatch(/first look/i)
+  })
+
+  it('the 10-hour message says the deadline is close', () => {
+    const base = composeCurrentMessage({ reasonLines: WORKED_EXAMPLE_REASON_LINES, planB: null, solverStatus: OPTIMAL })
+    const message = applyWindowMarker(base, 'deadline_10h')
+    expect(message.split('\n')[0]).toMatch(/deadline is close/i)
+  })
+
+  it('the marker leads the message, ahead of the underlying decision', () => {
+    const base = composeCurrentMessage({ reasonLines: WORKED_EXAMPLE_REASON_LINES, planB: null, solverStatus: OPTIMAL })
+    const message = applyWindowMarker(base, 'deadline_10h')
+    const lines = message.split('\n\n')
+    expect(lines[0]).not.toBe(WORKED_EXAMPLE_REASON_LINES[0])
+    expect(message).toContain(base)
+  })
+
+  it('a manual send carries no window framing — the message passes through unchanged', () => {
+    const base = composeCurrentMessage({ reasonLines: WORKED_EXAMPLE_REASON_LINES, planB: null, solverStatus: OPTIMAL })
+    expect(applyWindowMarker(base, 'manual')).toBe(base)
+  })
+
+  it('carries no live countdown or exact hours-remaining figure — the message is composed once and read later', () => {
+    const base = composeCurrentMessage({ reasonLines: WORKED_EXAMPLE_REASON_LINES, planB: null, solverStatus: OPTIMAL })
+    expect(applyWindowMarker(base, 'deadline_24h')).not.toMatch(/\d+\s*h(ours?)?\b/i)
+    expect(applyWindowMarker(base, 'deadline_10h')).not.toMatch(/\d+\s*h(ours?)?\b/i)
+  })
+
+  it('contains no emoji, no decimals, and no exclamation point — product-brief.md §8 / design-reference.md interface-writing rules', () => {
+    const base = composeCurrentMessage({ reasonLines: WORKED_EXAMPLE_REASON_LINES, planB: null, solverStatus: OPTIMAL })
+    for (const trigger of ['deadline_24h', 'deadline_10h'] as const) {
+      const message = applyWindowMarker(base, trigger)
+      expect(message).not.toMatch(NO_EMOJI_PATTERN)
+      expect(message).not.toMatch(DECIMAL_NUMBER_PATTERN)
+      expect(message).not.toContain('!')
+    }
   })
 })

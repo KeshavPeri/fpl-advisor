@@ -28,6 +28,7 @@
  * written by the same ticket #47 logic).
  */
 import { composeSolverCaveat, type SolverStatusInfo } from './solverStatus.ts'
+import type { NotificationTrigger, ScheduledTrigger } from './schedule.ts'
 
 /** Telegram's own `sendMessage` `text` length ceiling, in UTF-16 code units (matching plain JS `.length`; Telegram actually counts UTF-8 bytes for multi-byte characters, but this app's message text is plain ASCII English, so the two never diverge in practice — see this ticket's DoD: "under Telegram's 4,096-char limit"). */
 export const TELEGRAM_MAX_MESSAGE_LENGTH = 4096
@@ -165,4 +166,39 @@ export function composeNoRecommendationMessage(gameweekId: number): string {
   const headline = `No recommendation is available for gameweek ${gameweekId}.`
   const body = 'Nothing usable has been generated yet — check the solver run before the next deadline.'
   return truncateMessage(`${headline}\n${body}`, headline)
+}
+
+/**
+ * Ticket #90. The 24h and 10h deadline reminders can carry the exact same
+ * decision — the recommendation hasn't changed since the first send — and
+ * product-brief.md §1 makes the message a thing acted on from a phone: two
+ * identical-looking notifications a day apart read as a bug and train the
+ * reader to ignore the second one, which is the one that matters most (the
+ * last chance to act before the deadline). This prepends one short leading
+ * line naming which window the message is for, so the two are
+ * distinguishable at a glance without touching anything else about
+ * composition.
+ *
+ * Deliberately NOT a live countdown or an hours-remaining figure: this text
+ * is composed once (at send time) and read later, so a number that was true
+ * at composition time would be a lie by the time it's read — see this
+ * ticket's own Notes. `manual` sends carry no window framing at all (there
+ * is no window to name) and are returned unchanged.
+ *
+ * The fix for the actual duplicate-suppression bug is the trigger-scoped
+ * query in `scripts/send-telegram.ts`, not this function — relying on the
+ * two texts merely happening to differ would leave a system whose
+ * correctness depends on two strings never coinciding. This is a
+ * readability improvement that sits next to that fix, not a substitute for
+ * it.
+ */
+export function applyWindowMarker(messageText: string, trigger: NotificationTrigger): string {
+  const marker = WINDOW_MARKERS[trigger as ScheduledTrigger]
+  if (marker === undefined) return messageText
+  return `${marker}\n\n${messageText}`
+}
+
+const WINDOW_MARKERS: Record<ScheduledTrigger, string> = {
+  deadline_24h: "First look at this gameweek's plan.",
+  deadline_10h: 'Deadline is close.',
 }
