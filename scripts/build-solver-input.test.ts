@@ -9,6 +9,9 @@
 
 import { describe, expect, it } from 'vitest'
 import { parse } from 'csv-parse/sync'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   BuildInputError,
   HIT_COST,
@@ -18,6 +21,7 @@ import {
   buildSolverConfig,
   buildTeamJson,
   deriveDatasource,
+  failNoSquad,
   type TeamJsonPickInput,
 } from './build-solver-input.js'
 
@@ -232,5 +236,35 @@ describe('buildTeamJson', () => {
   it('throws if given anything other than exactly 15 picks', () => {
     expect(() => buildTeamJson(squad, fifteenPicks().slice(0, 14))).toThrow(BuildInputError)
     expect(() => buildTeamJson(squad, fifteenPicks().slice(0, 14))).toThrow(/expected exactly 15/)
+  })
+})
+
+// ============================================================================
+// failNoSquad — ticket #83. No Supabase involved: the function only touches
+// $GITHUB_OUTPUT and throws, so both effects are provable here the same way
+// the rest of this file proves things — no mocking required.
+// ============================================================================
+
+describe('failNoSquad', () => {
+  it('rejects with a BuildInputError whose message names the gameweek id and says no squad is stored', async () => {
+    await expect(failNoSquad(7)).rejects.toBeInstanceOf(BuildInputError)
+    await expect(failNoSquad(7)).rejects.toThrow(/no squad is stored/)
+    await expect(failNoSquad(7)).rejects.toThrow(/gameweek 7/)
+  })
+
+  it('writes squad_found=false to $GITHUB_OUTPUT before throwing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'build-solver-input-test-'))
+    const outputPath = join(dir, 'github_output')
+    const previousGithubOutput = process.env.GITHUB_OUTPUT
+    process.env.GITHUB_OUTPUT = outputPath
+    try {
+      await expect(failNoSquad(9)).rejects.toBeInstanceOf(BuildInputError)
+      const written = await readFile(outputPath, 'utf8')
+      expect(written).toBe('squad_found=false\n')
+    } finally {
+      if (previousGithubOutput === undefined) delete process.env.GITHUB_OUTPUT
+      else process.env.GITHUB_OUTPUT = previousGithubOutput
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

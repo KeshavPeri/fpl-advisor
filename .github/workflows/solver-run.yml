@@ -126,9 +126,11 @@ jobs:
         # Writes TEAM_JSON_PATH and SOLVER_CONFIG_PATH from squads/squad_picks
         # and the projections CSV above — never from FPL's authenticated
         # squad endpoint (see scripts/build-solver-input.ts's own header).
-        # Sets the `squad_found` step output the next two steps gate on: a
-        # missing squad is a normal pre-GW1 state (exits 0, no solve
-        # attempted), not a failure.
+        # Sets the `squad_found` step output the next two steps still gate
+        # on: a missing squad is a failure mid-season (ticket #83) — this
+        # step records it as a job_runs failure row and exits non-zero, but
+        # still writes squad_found=false first so "no solve to attempt" and
+        # "the solve itself" stay separate signals for downstream gating.
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
@@ -191,23 +193,33 @@ jobs:
         run: npx tsx scripts/generate-recommendations.ts
 
       - name: Send Telegram notification
-        # Ticket #55 (feature-list item 14). Runs whenever a squad was found
-        # for this gameweek, REGARDLESS of whether "Store solver output" or
-        # "Generate recommendations" above succeeded — product-brief.md
-        # §6a/§6c/§6d all require a failure notice (not silence) on exactly
-        # the failure paths those steps can produce (crash, timeout,
-        # infeasible), and scripts/send-telegram.ts's own read of
-        # solver_runs/recommendations is what tells those cases apart. Using
-        # `if: always()` here (scoped to squad_found, not to the whole job)
-        # is therefore deliberate, not a copy-paste default — do not add
-        # `&& steps.store.outcome == 'success'` the way the step above does.
+        # Ticket #55 (feature-list item 14), unconditional as of ticket #83.
+        # Runs REGARDLESS of whether "Build solver input", "Store solver
+        # output" or "Generate recommendations" above succeeded —
+        # product-brief.md §6a/§6c/§6d all require a failure notice (not
+        # silence) on exactly the paths that produce no recommendation, and
+        # scripts/send-telegram.ts's own read of job_runs/solver_runs/
+        # recommendations is what tells those cases apart (it already
+        # classifies "no recommendation for this gameweek" and composes the
+        # right message — this step only decides when that script runs, not
+        # what it does). Do not add `&& steps.store.outcome == 'success'`
+        # the way the step above does.
+        #
+        # Previously gated on `steps.build-input.outputs.squad_found ==
+        # 'true'`, which made a missing squad — now a real failure, see
+        # scripts/build-solver-input.ts's file header — produce no
+        # notification at all: a dead chain reported green in the Actions
+        # list with total silence as the only symptom (ticket #83's
+        # Context). `if: always()` with no squad_found clause is what makes
+        # a failure notice fire on exactly the same paths that now produce a
+        # job_runs failure row.
         #
         # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are optional at the secrets
         # level: scripts/send-telegram.ts exits zero with a named message and
         # makes no request (Supabase included) if either is unset, same
         # contract as sync-squad.ts's unset FPL_ENTRY_ID — so this step is
         # safe to run before the bot exists.
-        if: always() && steps.build-input.outputs.squad_found == 'true'
+        if: always()
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
