@@ -6,7 +6,9 @@
 // is pure and needs no I/O at all.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { determineCurrentGameweekId, main, readTelegramEnv, sendTelegramMessage, type GameweekRow } from './send-telegram.js'
+import type { SupabaseClient } from '@supabase/supabase-js'
+import { determineCurrentGameweekId, main, readTelegramEnv, runSend, sendTelegramMessage, type GameweekRow, type TelegramEnv } from './send-telegram.js'
+import { applyWindowMarker, composeCurrentMessage } from '../src/lib/notification/index.ts'
 
 const ORIGINAL_ENV = { ...process.env }
 
@@ -202,5 +204,152 @@ describe('sendTelegramMessage', () => {
     expect(url).toBe('https://api.telegram.org/botunit-test-token/sendMessage')
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body as string)).toEqual({ chat_id: 'unit-test-chat', text: 'hello' })
+  })
+})
+
+// ============================================================================
+// runSend — trigger-scoped duplicate suppression (ticket #90's own DoD).
+// A minimal fake Postgrest layer, same convention as
+// src/lib/verdict/api.test.ts's own fakeFrom: filtering happens INSIDE the
+// fake "server" layer so a query that forgot a filter really does get rows
+// back it should not have. Covers every table runSend() touches for a
+// 'current' recommendation send (gameweeks, recommendations,
+// recommendation_reasons, solver_runs, notifications, job_runs); no live
+// Supabase project and no real Telegram bot — `fetch` itself is mocked, api.
+// telegram.org is unreachable from this sandbox regardless (this ticket's
+// own Notes).
+// ============================================================================
+
+type Row = Record<string, unknown>
+type Tables = Record<string, Row[]>
+
+let tables: Tables = {}
+
+function resetTables(overrides: Partial<Tables> = {}): void {
+  tables = { gameweeks: [], recommendations: [], recommendation_reasons: [], solver_runs: [], notifications: [], job_runs: [], ...overrides }
+}
+
+function fakeFrom(table: string) {
+  const filters: Array<(row: Row) => boolean> = []
+  let isCountHead = false
+  let single = false
+
+  const builder = {
+    select(_cols?: string, opts?: { count?: string; head?: boolean }) {
+      if (opts?.head) isCountHead = true
+      return builder
+    },
+    eq(col: string, val: unknown) {
+      filters.push((row) => row[col] === val)
+      return builder
+    },
+    in(col: string, vals: readonly unknown[]) {
+      filters.push((row) => vals.includes(row[col]))
+      return builder
+    },
+    order() {
+      return builder
+    },
+    range() {
+      return builder
+    },
+    limit() {
+      return builder
+    },
+    returns() {
+      return builder
+    },
+    maybeSingle() {
+      single = true
+      return builder
+    },
+    insert(payload: Row) {
+      return {
+        then(resolve: (result: { error: null }) => void) {
+          const rows = tables[table] ?? (tables[table] = [])
+          rows.push({ id: rows.length + 1, ...payload })
+          resolve({ error: null })
+        },
+      }
+    },
+    then(resolve: (result: { data: unknown; error: null; count?: number }) => void) {
+      const rows = tables[table] ?? []
+      const matched = rows.filter((row) => filters.every((f) => f(row)))
+      if (isCountHead) {
+        resolve({ data: null, error: null, count: matched.length })
+        return
+      }
+      if (single) {
+        resolve({ data: matched[0] ?? null, error: null })
+        return
+      }
+      resolve({ data: matched, error: null })
+    },
+  }
+  return builder
+}
+
+const fakeSupabase = { from: (table: string) => fakeFrom(table) }
+
+function futureIsoDate(hoursFromNow: number): string {
+  return new Date(Date.now() + hoursFromNow * 60 * 60 * 1000).toISOString()
+}
+
+const UNIT_TEST_TELEGRAM_ENV: TelegramEnv = { botToken: 'unit-test-token', chatId: 'unit-test-chat' }
+const ROLL_HEADLINE = 'Roll your transfer. No changes recommended this gameweek.'
+
+describe('runSend — trigger-scoped duplicate suppression (ticket #90)', () => {
+  beforeEach(() => {
+    resetTables({
+      gameweeks: [{ id: 9, deadline_time: futureIsoDate(72) }],
+      recommendations: [{ gameweek_id: 9, plan_index: 0, solver_run_id: 1 }],
+      recommendation_reasons: [{ gameweek_id: 9, plan_index: 0, order_index: 0, reason: ROLL_HEADLINE }],
+      solver_runs: [{ id: 1, solver_status: 'Optimal' }],
+    })
+  })
+
+  it('a stored deadline_24h row whose text is byte-identical to the pending deadline_10h message does NOT suppress the 10h send; a second, same-trigger send with that same text then IS suppressed', async () => {
+    // The exact text runSend() will independently compute for a deadline_10h
+    // send of this fixture recommendation — precomputed here from the same
+    // pure functions runSend() itself calls, so this test proves the
+    // trigger-scoped query, not a coincidence of wording.
+    const tenHourMessage = applyWindowMarker(
+      composeCurrentMessage({ reasonLines: [ROLL_HEADLINE], planB: null, solverStatus: { isOptimal: true, status: 'Optimal' } }),
+      'deadline_10h',
+    )
+
+    // Fabricate the collision that used to swallow GW1's real 10h reminder:
+    // a successful 24h send recorded with text byte-identical to what the
+    // 10h send is about to produce.
+    tables.notifications.push({ id: 1, gameweek_id: 9, outcome: 'sent', trigger: 'deadline_24h', message_text: tenHourMessage })
+
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, result: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(fetchImpl as unknown as typeof fetch)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const firstOutcome = await runSend('deadline_10h', fakeSupabase as unknown as SupabaseClient, UNIT_TEST_TELEGRAM_ENV, new Date())
+
+    expect(firstOutcome).toBe('sent')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    const sentDeadline10hRows = tables.notifications.filter((r) => r.trigger === 'deadline_10h' && r.outcome === 'sent')
+    expect(sentDeadline10hRows).toHaveLength(1)
+    expect(sentDeadline10hRows[0].message_text).toBe(tenHourMessage)
+
+    // A second deadline_10h attempt now finds ITS OWN trigger's row already
+    // sent with identical text — this one IS suppressed.
+    const secondOutcome = await runSend('deadline_10h', fakeSupabase as unknown as SupabaseClient, UNIT_TEST_TELEGRAM_ENV, new Date())
+
+    logSpy.mockRestore()
+    fetchSpy.mockRestore()
+
+    expect(secondOutcome).toBe('skipped')
+    expect(fetchImpl).toHaveBeenCalledTimes(1) // no second Telegram call
+    expect(tables.notifications.filter((r) => r.trigger === 'deadline_10h' && r.outcome === 'sent')).toHaveLength(1) // no second row
+  })
+
+  it('sanity check: the fabricated 24h/10h text collision above is real — the same recommendation composes byte-identical text for both windows before the marker is applied', () => {
+    const base = composeCurrentMessage({ reasonLines: [ROLL_HEADLINE], planB: null, solverStatus: { isOptimal: true, status: 'Optimal' } })
+    expect(applyWindowMarker(base, 'deadline_24h').endsWith(base)).toBe(true)
+    expect(applyWindowMarker(base, 'deadline_10h').endsWith(base)).toBe(true)
   })
 })
