@@ -180,13 +180,20 @@ function formatChipNames(names: readonly string[]): string {
  * design-reference.md's interface-writing rules. The same wording at every
  * band; escalation is carried entirely by the CSS class (chips-expiry--…)
  * per design-reference.md's "understated by default and escalates," not by
- * louder copy.
+ * louder copy. Returns JSX rather than a string so the gameweeks figure
+ * renders through the app's shared `.num` token (Geist Mono, tabular) like
+ * every other number on this screen — design-reference.md's typography
+ * rule, not a plain string this app's own convention would flag.
  */
-function expiryWarningText(warning: Extract<ChipExpiryWarning, { band: 'noted' | 'pressing' | 'final' }>): string {
+function ExpiryWarningLine({ warning }: { warning: Extract<ChipExpiryWarning, { band: 'noted' | 'pressing' | 'final' }> }) {
   const names = formatChipNames(warning.chipsAtRisk.map((chip) => chip.displayName))
   const pronoun = warning.chipsAtRisk.length === 1 ? 'it' : 'them'
   const gwWord = warning.gameweeksRemaining === 1 ? 'gameweek' : 'gameweeks'
-  return `${names} — ${warning.gameweeksRemaining} ${gwWord} left to use ${pronoun}.`
+  return (
+    <>
+      {names} — <span className="num">{warning.gameweeksRemaining}</span> {gwWord} left to use {pronoun}.
+    </>
+  )
 }
 
 function ChipSetSection({
@@ -238,7 +245,9 @@ function ChipSetSection({
       )}
 
       {expiryWarning && expiryWarning.band !== 'none' && (
-        <p className={`chips-expiry chips-expiry--${expiryWarning.band}`}>{expiryWarningText(expiryWarning)}</p>
+        <p className={`chips-expiry chips-expiry--${expiryWarning.band}`}>
+          <ExpiryWarningLine warning={expiryWarning} />
+        </p>
       )}
 
       {unknownChips.length > 0 && (
