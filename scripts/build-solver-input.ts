@@ -109,6 +109,51 @@ const MAX_ALLOWED_HORIZON = 5
  */
 export const ITERATION_CRITERION = 'this_gw_transfer_in'
 
+/**
+ * Ticket #95. `buildSolverConfig` never used to set this explicitly, so it silently inherited
+ * the shipped `data/user_settings.json`'s `keep_top_ev_percent: 5` at the pinned commit
+ * (45131c5a41d7caadb5cb626c012bfa9111dca7a2) — the solver has only ever surfaced a handful of
+ * distinct transfer targets as a result.
+ *
+ * dev/solver.py's actual use of this percentile (NOT a percentage of anything intuitive):
+ *   cutoff = merged_data["total_ev"].quantile((100 - keep_top_ev_percent) / 100)
+ *   safe_players_due_ev = merged_data[(merged_data["total_ev"] > cutoff)]["ID"].tolist()
+ * `safe_players_due_ev` (the "safe" set) is EXEMPT from every other pool filter below
+ * (EV-per-price efficiency, minutes floor) — so this is the widest lever in the pipeline. At
+ * the shipped 5% (~30 of ~600 players) it is narrower than one gameweek's genuinely reasonable
+ * transfer targets spread across 4 positions and 20 clubs.
+ *
+ * Widened to 25 (~150 players) — deliberately, not by measurement: wide enough to plausibly
+ * contain a real gameweek's worth of options, still much narrower than the full pool.
+ * Deliberately NOT 100 — solve time grows with pool size, and a solver timeout is meant to be a
+ * visible signal that the pool is too wide, not something hidden by making the pool so wide the
+ * solve simply never finishes. NEITHER this constant NOR EV_PER_PRICE_CUTOFF below is tuned or
+ * measured — this is a deliberate widening, argued from the filter mechanics, not evidence. The
+ * next ticket to touch this area should narrow with a number, not an argument. See
+ * docs/solver-notes.md for the full audit of shipped-vs-overridden solver settings.
+ */
+export const KEEP_TOP_EV_PERCENT = 25
+
+/**
+ * Ticket #95. `buildSolverConfig` never used to set this explicitly, so it silently inherited
+ * the shipped `data/user_settings.json`'s `ev_per_price_cutoff: 30`.
+ *
+ * dev/solver.py's actual use of this percentile:
+ *   ev_per_price = merged_data["total_ev"].div(merged_data["now_cost"])
+ *   cutoff = ev_per_price.quantile(ev_per_price_cutoff / 100)
+ *   merged_data = merged_data[(ev_per_price > cutoff) | (merged_data["ID"].isin(safe_players))].copy()
+ * Players below this percentile of EV-per-price are dropped from the pool UNLESS already in
+ * the keep_top_ev_percent "safe" set above. At the shipped 30%, this systematically prunes
+ * EXPENSIVE players: their EV-per-price is structurally lower than cheap players' even when
+ * their raw EV is high, since price is the divisor — and expensive players are exactly the ones
+ * a transfer recommendation often turns on.
+ *
+ * Widened to 10 — removing only genuine dead weight (the bottom decile by efficiency) rather
+ * than pruning on a metric that structurally disfavours expensive players. Not tuned or
+ * measured — see KEEP_TOP_EV_PERCENT's comment above; the same caveat applies here.
+ */
+export const EV_PER_PRICE_CUTOFF = 10
+
 // ============================================================================
 // Env
 // ============================================================================
@@ -217,11 +262,25 @@ function isMissingTable(error: PostgrestLikeError, tableName: string): boolean {
 // job_runs — job_name is 'solver-run' for every row this ticket's two
 // scripts write, so the whole workflow's history reads as one execution log
 // regardless of which script (or workflow step) detected the outcome. See
-// "One job_runs row per execution" in the ticket's DoD: exactly one of
+// "One job_runs row per execution" in ticket #41's DoD: exactly one of
 // {this script's own failure write, an install/checkout-failure write in the
 // workflow YAML, scripts/store-solver-output.ts's final write} fires per run
-// — never more than one, because each only runs on the exit path that is
-// exclusively its own.
+// on the pipeline's overall SUCCESS/FAILURE outcome — never more than one,
+// because each only runs on the exit path that is exclusively its own.
+//
+// Ticket #95 adds a SECOND kind of row on top of that invariant, not a
+// replacement for it: a 'success' row written by THIS script, right after
+// solverConfig and the projections-CSV player count are known, carrying the
+// widened pool-filter counters (see recordWideningJobRun below). It is
+// deliberately independent of whether the downstream solve or
+// store-solver-output.ts ever runs at all — the whole point of recording the
+// widening here is that it must be provable even when the solve times out
+// (25% is meant to be tunable from evidence; a timeout is the evidence that
+// it's too wide, and that evidence must survive alongside the config that
+// produced it). job_runs is an append-only audit log by design (see its
+// migration's own COMMENT ON TABLE) — a second row per run for a distinct
+// purpose is exactly what it exists for, not a violation of the invariant
+// above.
 // ============================================================================
 
 type JsonRecord = Record<string, unknown>
@@ -299,6 +358,8 @@ export interface SolverConfig {
   team_data: 'json'
   preseason: false
   xmin_lb: number
+  keep_top_ev_percent: number
+  ev_per_price_cutoff: number
   datasource: string
   chip_limits: { bb: 0; wc: 0; fh: 0; tc: 0 }
   secs: number
@@ -331,6 +392,13 @@ export interface SolverConfig {
  * solve that returns fewer than three distinct solutions is not a failure —
  * scripts/generate-recommendations.ts stores whatever it got (collapsing any that are still the
  * same decision — src/lib/recommendation/distinctness.ts) and records the shortfall.
+ *
+ * `keep_top_ev_percent: KEEP_TOP_EV_PERCENT` (25) and `ev_per_price_cutoff: EV_PER_PRICE_CUTOFF`
+ * (10) — ticket #95. Both are set EXPLICITLY (never left to the shipped
+ * data/user_settings.json defaults of 5 and 30) because those shipped defaults were the reason
+ * the solver had only ever surfaced a handful of distinct transfer targets. See each constant's
+ * own comment above for the percentile semantics and the widening rationale; both values are a
+ * deliberate widening, not a measured one — see docs/solver-notes.md.
  */
 export function buildSolverConfig(params: { horizon: number; datasource: string; secs?: number }): SolverConfig {
   if (!Number.isInteger(params.horizon) || params.horizon <= 0) {
@@ -353,6 +421,8 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
     team_data: 'json',
     preseason: false,
     xmin_lb: XMIN_LB,
+    keep_top_ev_percent: KEEP_TOP_EV_PERCENT,
+    ev_per_price_cutoff: EV_PER_PRICE_CUTOFF,
     datasource: params.datasource,
     chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
     secs: params.secs ?? SOLVER_TIME_LIMIT_SECS,
@@ -363,6 +433,29 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
     print_result_table: true,
     print_squads: true,
     print_transfer_chip_summary: true,
+  }
+}
+
+export interface WideningJobRunDetails {
+  /** Row count of the projections CSV this job read — the pool the two percentile filters below are computed against. */
+  projectionsPlayerCount: number
+  keepTopEvPercent: number
+  evPerPriceCutoff: number
+}
+
+/**
+ * Ticket #95's "counters proving the widening happened" — pure so the shape is provable without
+ * mocking Supabase, matching this file's existing pattern for everything test-relevant. Always
+ * reads the two widening constants directly (never a value threaded through from elsewhere), so
+ * the job_runs row this feeds can never disagree with the config actually built in the same run.
+ * Deliberately does NOT compute or accept a "post-filter pool size" — that number only exists in
+ * dev/solver.py's own stdout at solve time, not visible to this job (see the file header).
+ */
+export function buildWideningJobRunDetails(projectionsPlayerCount: number): WideningJobRunDetails {
+  return {
+    projectionsPlayerCount,
+    keepTopEvPercent: KEEP_TOP_EV_PERCENT,
+    evPerPriceCutoff: EV_PER_PRICE_CUTOFF,
   }
 }
 
@@ -662,6 +755,25 @@ async function main(): Promise<void> {
     await writeGithubOutput('gameweek_id', String(nextGw.id))
     await writeGithubOutput('horizon', String(solverConfig.horizon))
     await writeGithubOutput('datasource', solverConfig.datasource)
+
+    // --------------------------------------------------------------------
+    // 7. Widening counters (ticket #95) — a job_runs row independent of the
+    //    pipeline's overall success/failure write; see the "job_runs"
+    //    section header above for why this is a deliberate second row, not
+    //    a violation of the one-row-per-outcome invariant.
+    // --------------------------------------------------------------------
+    const wideningDetails = buildWideningJobRunDetails(records.length)
+    const wideningMessage =
+      `${JOB_NAME}/build-solver-input: solver pool widened deliberately (ticket #95) — ` +
+      `keep_top_ev_percent=${wideningDetails.keepTopEvPercent}, ev_per_price_cutoff=${wideningDetails.evPerPriceCutoff}, ` +
+      `projections CSV has ${wideningDetails.projectionsPlayerCount} players.`
+    console.log(wideningMessage)
+    await recordJobRun(supabase, {
+      status: 'success',
+      message: wideningMessage,
+      details: { ...wideningDetails },
+      startedAt,
+    })
   } catch (err) {
     const message =
       err instanceof BuildInputError
