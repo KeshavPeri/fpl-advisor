@@ -44,7 +44,7 @@ const BASE_DELAY_MS = 300
 // Ticket #101: how many gameweeks before the target we're willing to walk
 // back looking for a squad to carry forward. A squad more than this many
 // gameweeks stale isn't one worth solving against — see the ticket notes.
-const MAX_PICKS_LOOKBACK = 3
+export const MAX_PICKS_LOOKBACK = 3
 
 // ============================================================================
 // Position codes and squad shape — duplicated locally rather than imported
