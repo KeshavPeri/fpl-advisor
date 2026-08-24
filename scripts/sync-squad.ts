@@ -41,6 +41,11 @@ const API_BASE_URL = process.env.FPL_API_BASE_URL ?? DEFAULT_API_BASE_URL
 const MAX_ATTEMPTS = 4 // 1 initial try + 3 retries
 const BASE_DELAY_MS = 300
 
+// Ticket #101: how many gameweeks before the target we're willing to walk
+// back looking for a squad to carry forward. A squad more than this many
+// gameweeks stale isn't one worth solving against — see the ticket notes.
+const MAX_PICKS_LOOKBACK = 3
+
 // ============================================================================
 // Position codes and squad shape — duplicated locally rather than imported
 // from src/lib/squad/positions.ts. scripts/ and src/ are deliberately
@@ -212,6 +217,105 @@ export async function fetchWithRetry(url: string): Promise<FetchResult> {
   }
 
   throw new SyncError(`request to ${url} failed after ${MAX_ATTEMPTS} attempts: ${lastReason}`, url)
+}
+
+// ============================================================================
+// Picks lookup with carry-forward fallback — ticket #101.
+//
+// FPL only publishes a gameweek's picks after that gameweek's deadline has
+// passed. The job always targets the *next* gameweek (the one whose
+// deadline hasn't passed), so its own picks are never fetchable — every run
+// would otherwise see a 404 forever. The fix: if the target's picks/ 404s,
+// walk backwards through the gameweeks immediately before it (nearest
+// first, capped at MAX_PICKS_LOOKBACK) and use the first one that returns
+// 200. That squad is the manager's *actual* current squad — see the
+// ticket's one-sentence rule — carried forward onto the target gameweek's
+// row.
+//
+// A 404 at any step is "not published yet," the normal/expected outcome.
+// Anything else (5xx already retried away by fetchFn, or an unexpected 4xx)
+// is a real error and must not be silently read as an empty gameweek.
+// ============================================================================
+
+export type PicksLookupOutcome = 'direct' | 'carried_forward' | 'not_published'
+
+export interface PicksLookupResult {
+  outcome: PicksLookupOutcome
+  body: unknown | null
+  url: string | null
+  // The gameweek id whose picks/ actually returned the 200 — the target
+  // gameweek itself for 'direct', an earlier gameweek for 'carried_forward',
+  // null for 'not_published'.
+  sourceGameweekId: number | null
+  // How many look-back gameweeks were checked (0 for 'direct' — the
+  // fallback never ran).
+  lookbackCount: number
+  // HTTP status of the *target* gameweek's own picks/ call, independent of
+  // how the lookup was ultimately resolved.
+  primaryStatus: number
+}
+
+/**
+ * priorGameweekIds must already be ordered nearest-first (descending by id)
+ * — this function caps to MAX_PICKS_LOOKBACK itself but does not sort.
+ */
+export async function resolvePicks(
+  fetchFn: (url: string) => Promise<FetchResult>,
+  apiBaseUrl: string,
+  entryId: string,
+  targetGameweekId: number,
+  priorGameweekIds: number[]
+): Promise<PicksLookupResult> {
+  const primaryUrl = `${apiBaseUrl}/entry/${entryId}/event/${targetGameweekId}/picks/`
+  const primaryResp = await fetchFn(primaryUrl)
+  if (primaryResp.status !== 200 && primaryResp.status !== 404) {
+    throw new SyncError(`picks/ returned unexpected HTTP ${primaryResp.status}`, primaryUrl, primaryResp.status)
+  }
+  if (primaryResp.status === 200) {
+    return {
+      outcome: 'direct',
+      body: primaryResp.body,
+      url: primaryUrl,
+      sourceGameweekId: targetGameweekId,
+      lookbackCount: 0,
+      primaryStatus: primaryResp.status,
+    }
+  }
+
+  const candidates = priorGameweekIds.slice(0, MAX_PICKS_LOOKBACK)
+  let lookbackCount = 0
+  for (const candidateId of candidates) {
+    const url = `${apiBaseUrl}/entry/${entryId}/event/${candidateId}/picks/`
+    const resp = await fetchFn(url)
+    lookbackCount++
+    if (resp.status === 200) {
+      return {
+        outcome: 'carried_forward',
+        body: resp.body,
+        url,
+        sourceGameweekId: candidateId,
+        lookbackCount,
+        primaryStatus: primaryResp.status,
+      }
+    }
+    if (resp.status !== 404) {
+      throw new SyncError(
+        `picks/ look-back to gameweek ${candidateId} returned unexpected HTTP ${resp.status}`,
+        url,
+        resp.status
+      )
+    }
+    // 404 — not published for this gameweek either; keep walking back.
+  }
+
+  return {
+    outcome: 'not_published',
+    body: null,
+    url: null,
+    sourceGameweekId: null,
+    lookbackCount,
+    primaryStatus: primaryResp.status,
+  }
 }
 
 // ============================================================================
@@ -533,6 +637,67 @@ export function summarizeDiff(diff: SquadDiff): string {
 }
 
 // ============================================================================
+// Message wording for carry-forward provenance — ticket #101 DoD: "the
+// job's job_runs.message says in words that the squad was carried forward
+// from gameweek N, rather than reporting a normal sync." Each function
+// below is a drop-in replacement for the clause the pre-#101 message used
+// at that spot, so a 'direct' outcome (target's own picks/ returned 200)
+// reproduces the exact pre-#101 wording byte-for-byte, and a
+// 'carried_forward' outcome names the source gameweek explicitly.
+// ============================================================================
+
+export function picksEstablishedMessage(
+  gameweekId: number,
+  entryId: string,
+  picksLookup: PicksLookupResult,
+  rankNote: string
+): string {
+  const provenance =
+    picksLookup.outcome === 'carried_forward'
+      ? `using picks carried forward from gameweek ${picksLookup.sourceGameweekId} (FPL has not yet published gameweek ${gameweekId}'s picks)`
+      : `from FPL for entry ${entryId}`
+  return `${JOB_NAME}: squad for gameweek ${gameweekId} established ${provenance} (15 picks written).${rankNote}`
+}
+
+export function picksConfirmedMessage(gameweekId: number, entryId: string, picksLookup: PicksLookupResult, rankNote: string): string {
+  const provenance =
+    picksLookup.outcome === 'carried_forward'
+      ? `confirmed against gameweek ${picksLookup.sourceGameweekId}'s carried-forward picks`
+      : `confirmed against FPL for entry ${entryId}`
+  return `${JOB_NAME}: squad for gameweek ${gameweekId} ${provenance} — no changes.${rankNote}`
+}
+
+export function picksDiffMessage(
+  gameweekId: number,
+  entryId: string,
+  picksLookup: PicksLookupResult,
+  diffSummary: string,
+  rankNote: string
+): string {
+  const provenance =
+    picksLookup.outcome === 'carried_forward'
+      ? `differs from gameweek ${picksLookup.sourceGameweekId}'s carried-forward picks`
+      : `differs from FPL (entry ${entryId})`
+  return `${JOB_NAME}: squad for gameweek ${gameweekId} ${provenance} — not overwritten. ${diffSummary}.${rankNote}`
+}
+
+export function picksNotPublishedMessage(entryId: string, gameweekId: number, picksLookup: PicksLookupResult, rankNote: string): string {
+  const base =
+    `${JOB_NAME}: picks not yet published for entry ${entryId}, event ${gameweekId} ` +
+    `(404 from entry/${entryId}/event/${gameweekId}/picks/).`
+  const lookbackNote =
+    picksLookup.lookbackCount > 0
+      ? ` Checked the preceding ${picksLookup.lookbackCount} gameweek(s) for a squad to carry forward — none published either.`
+      : ''
+  return (
+    base +
+    lookbackNote +
+    ' Entry-level state (bank, squad value, transfers, chips, points, rank) synced; existing squad picks left untouched.' +
+    rankNote
+  )
+}
+
+// ============================================================================
 // job_runs — one row per execution, same shape as
 // scripts/ingest-core-insights.ts's recordJobRun. 'skipped' covers both
 // no-op paths the DoD names as normal, not failing, states: no deadline
@@ -654,12 +819,18 @@ async function main(): Promise<void> {
     // Picks are always attempted, independent of whether a deadline has
     // passed — a 404 here is handled below either way, and this is the path
     // exercised end-to-end every night between now and the GW1 deadline.
-    const picksUrl = `${API_BASE_URL}/entry/${entryId}/event/${gameweekId}/picks/`
-    const picksResp = await fetchWithRetry(picksUrl)
-    if (picksResp.status !== 200 && picksResp.status !== 404) {
-      throw new SyncError(`picks/ returned unexpected HTTP ${picksResp.status}`, picksUrl, picksResp.status)
-    }
-    const picksAvailable = picksResp.status === 200
+    //
+    // Ticket #101: the target gameweek's own picks/ 404s by construction
+    // (FPL hasn't published it yet), so on a 404 we walk backwards through
+    // the gameweeks immediately before it looking for the manager's last
+    // known true squad to carry forward. priorGameweekIds is nearest-first;
+    // resolvePicks caps the walk at MAX_PICKS_LOOKBACK itself.
+    const priorGameweekIds = gwRows
+      .filter((gw) => gw.id < gameweekId)
+      .map((gw) => gw.id)
+      .sort((a, b) => b - a)
+    const picksLookup = await resolvePicks(fetchWithRetry, API_BASE_URL, entryId, gameweekId, priorGameweekIds)
+    const picksAvailable = picksLookup.outcome !== 'not_published'
 
     const deadlinePassed = entryData.bank !== null && entryData.squadValue !== null
 
@@ -667,7 +838,16 @@ async function main(): Promise<void> {
       entryId,
       gameweekId,
       deadlinePassed,
-      picksHttpStatus: picksResp.status,
+      picksHttpStatus: picksLookup.primaryStatus,
+      // Ticket #101 — provenance of the squad_picks rows (if any get
+      // written this run): which gameweek the picks actually came from,
+      // whether that required carrying forward from an earlier gameweek,
+      // and how many gameweeks were looked back to find (or fail to find)
+      // them. A carried-forward squad must be distinguishable from a
+      // directly-synced one by reading this job_runs row alone.
+      picksSourceGameweekId: picksLookup.sourceGameweekId,
+      picksCarriedForward: picksLookup.outcome === 'carried_forward',
+      picksLookbackCount: picksLookup.lookbackCount,
       // 0 or 1, not a boolean: a counter a reader can scan across many
       // job_runs rows, per the ticket #77 DoD. See coerceOverallRank above
       // for what it means.
@@ -730,11 +910,12 @@ async function main(): Promise<void> {
       const { error: upsertError } = await upsertSquadRow()
       if (upsertError) throw new SyncError(`squads upsert failed: ${upsertError.message}`, 'squads')
 
-      const message =
-        `${JOB_NAME}: picks not yet published for entry ${entryId}, event ${gameweekId} ` +
-        `(404 from entry/${entryId}/event/${gameweekId}/picks/). Entry-level state (bank, squad value, ` +
-        'transfers, chips, points, rank) synced; existing squad picks left untouched.' +
-        rankNote
+      // Genuine pre-season/between-deadlines state with nothing to carry
+      // forward (either this is gameweek 1, or every gameweek in the
+      // look-back window also 404'd) — unchanged from pre-#101 behaviour:
+      // log it, sync entry-level state, leave squad_picks untouched, exit
+      // zero. Manual entry (#13) is the correct answer here, not a failure.
+      const message = picksNotPublishedMessage(entryId, gameweekId, picksLookup, rankNote)
       console.log(message)
       await recordJobRun(supabase, {
         status: 'skipped',
@@ -745,7 +926,7 @@ async function main(): Promise<void> {
       return
     }
 
-    const apiPicks = parsePicks(picksResp.body, picksUrl)
+    const apiPicks = parsePicks(picksLookup.body, picksLookup.url ?? `${API_BASE_URL}/entry/${entryId}/event/${gameweekId}/picks/`)
     const elementIds = apiPicks.map((p) => p.element)
     const playerMap = await resolvePlayers(supabase, elementIds)
     const { rows: apiRows, missingElementIds } = buildSquadPickRows(apiPicks, playerMap, gameweekId)
@@ -774,10 +955,9 @@ async function main(): Promise<void> {
       // Reconcile, do not overwrite: neither squads nor squad_picks is
       // touched. The difference is recorded (job_runs.details.diff) and
       // surfaced (src/lib/squad/syncStatus.ts reads it back for the UI).
-      const message =
-        `${JOB_NAME}: squad for gameweek ${gameweekId} differs from FPL (entry ${entryId}) — not ` +
-        `overwritten. ${summarizeDiff(diff)}.` +
-        rankNote
+      // This is the exact same path a same-gameweek sync uses — a
+      // carried-forward squad goes through it unchanged (ticket #101).
+      const message = picksDiffMessage(gameweekId, entryId, picksLookup, summarizeDiff(diff), rankNote)
       console.log(message)
       await recordJobRun(supabase, {
         status: 'success',
@@ -795,9 +975,7 @@ async function main(): Promise<void> {
       const { error: insertError } = await supabase.from('squad_picks').insert(apiRows)
       if (insertError) throw new SyncError(`squad_picks insert failed: ${insertError.message}`, 'squad_picks')
 
-      const message =
-        `${JOB_NAME}: squad for gameweek ${gameweekId} established from FPL for entry ${entryId} (15 picks written).` +
-        rankNote
+      const message = picksEstablishedMessage(gameweekId, entryId, picksLookup, rankNote)
       console.log(message)
       await recordJobRun(supabase, {
         status: 'success',
@@ -808,8 +986,7 @@ async function main(): Promise<void> {
       return
     }
 
-    const message =
-      `${JOB_NAME}: squad for gameweek ${gameweekId} confirmed against FPL for entry ${entryId} — no changes.` + rankNote
+    const message = picksConfirmedMessage(gameweekId, entryId, picksLookup, rankNote)
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
