@@ -24,4 +24,15 @@
 
 ## ROUTINE
 
-(to be appended by the orchestrator as further routine decisions are reported by the Builder)
+- `gameweeksElapsed` is defined as `deadline_time <= now`, not `gameweeks.finished` — because a
+  decision has to beat the deadline, not wait for matches to finish; matches the countdown and
+  verdict card's own notion of "current gameweek."
+- `kindLabel` wording is "Committed" / "Registered override" — reuses the exact verbs the commit
+  control and override screen already use for these actions, per `design-reference.md`'s rule
+  that an action keeps the same name through the flow.
+- Headline arithmetic uses raw decision-row counts for `commits`/`overrides`, and a
+  distinct-gameweek count for the no-decision gap — documented in `derive.ts`'s
+  `computeHeadline` comment. These only diverge if a gameweek somehow carries both a commit and
+  an override row (the DB allows it via the per-kind unique index; the UI never intentionally
+  produces it), and per the ticket's own DoD ("a count that nearly reconciles is the finding")
+  that divergence is left visible rather than silently collapsed.
