@@ -1,0 +1,221 @@
+/*
+  The decision history screen (ticket #103). Built entirely from Surface
+  (translucent layered material, never a flat card with a 1px border) and
+  the existing token set from src/index.css — no new token, no new colour,
+  no new font, matching src/screens/ChipsScreen.css's own approach to
+  reusing an established surface rather than inventing a second one.
+
+  Coral is used for NOTHING here. An override is not a failure
+  (design-reference.md's explicit rule) — a commit and an override render in
+  exactly the same neutral tone, distinguished only by the kind label and
+  the honest recommendation-gap note, never by colour.
+*/
+
+.decisions-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.decisions-back {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-cyan);
+}
+
+.decisions-mark {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+/* ---- Loading / error ---- */
+
+.decisions-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.decisions-skeleton-line {
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: decisions-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.decisions-skeleton-line--title {
+  height: var(--space-8);
+  width: 50%;
+}
+
+.decisions-skeleton-line--body {
+  height: var(--space-6);
+  width: 100%;
+}
+
+@keyframes decisions-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.decisions-error {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+/* ---- Headline summary ---- */
+
+.decisions-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.decisions-summary__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.decisions-summary__grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-4);
+}
+
+.decisions-summary__figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.decisions-summary__value {
+  font: var(--text-display);
+  font-size: 1.75rem;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
+.decisions-summary__figure-label {
+  font: var(--text-label);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.decisions-summary__footnote {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+/* ---- Empty state — an invitation to act, not a mood ---- */
+
+.decisions-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.decisions-empty__text {
+  font: var(--text-body);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* ---- Entry list ---- */
+
+.decisions-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.decisions-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.decisions-entry__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.decisions-entry__gameweek {
+  font: var(--text-title);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+/* Both kinds share the exact same visual treatment — a commit and an
+   override are two equally legitimate decisions, never good/bad. */
+.decisions-entry__kind {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--accent-cyan);
+  white-space: nowrap;
+}
+
+.decisions-entry__kind--commit,
+.decisions-entry__kind--override {
+  color: var(--accent-cyan);
+}
+
+.decisions-entry__fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+}
+
+/* Each field is a <div> wrapping its own <dt>/<dd> pair (React needs a
+   single element per .map() item), so it must get out of the grid's way
+   itself for the dt/dd children to land in the two columns declared above. */
+.decisions-entry__field {
+  display: contents;
+}
+
+.decisions-entry__fields dt {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.decisions-entry__fields dd {
+  font: var(--text-body);
+  color: var(--text-primary);
+  margin: 0;
+  text-align: right;
+}
+
+.decisions-entry__gap-note {
+  font: var(--text-label);
+  color: var(--text-secondary);
+  margin: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--panel-border);
+}
+
+.decisions-entry__decided-at {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .decisions-skeleton-line {
+    animation: none;
+  }
+}

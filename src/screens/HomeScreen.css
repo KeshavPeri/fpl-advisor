@@ -15,6 +15,15 @@
   color: var(--text-tertiary);
 }
 
+/* Ticket #103: the mark row now holds two links through — Decisions and
+   Chips, side by side — rather than growing the single-link layout ticket
+   #85 left in place. */
+.home-header-links {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+}
+
 .home-chips-link {
   font: var(--text-label);
   font-weight: 550;
