@@ -1,0 +1,180 @@
+/*
+  The rolling accuracy card (ticket #96) — product-brief.md §2's "rolling
+  figure in-app", below the pitch on the home screen (design-reference.md's
+  home-screen order). Built entirely from Surface, same as every other panel
+  in this app — no new token introduced here, everything below draws from
+  src/index.css.
+
+  This card is a measurement, not a projection: unlike the verdict card's
+  projected points, decimals ARE permitted here (see derive.ts's own
+  header) — .num still carries every figure so digits stay tabular and
+  never jitter.
+*/
+
+.accuracy-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.accuracy-card__title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.accuracy-card__model-version {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* The rolling MAE — Revolut-style (design-reference.md reference 2): the
+   one important number, large and tabular, with a small quiet label. Same
+   treatment as .verdict-card__points. */
+.accuracy-card__rolling {
+  margin-top: var(--space-1);
+}
+
+.accuracy-card__figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.accuracy-card__figure-label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.accuracy-card__figure-value {
+  font: var(--text-display);
+  color: var(--accent-cyan);
+  letter-spacing: 0.01em;
+}
+
+/* A sample too small to read yet is a real state, not a missing number —
+   same coral-on-text-title treatment as VerdictCard's own "unavailable"
+   figure (VerdictCard.css), sized down from --text-display so an absent
+   result doesn't visually outweigh a present one elsewhere on the card. */
+.accuracy-card__figure-value--small {
+  font: var(--text-title);
+  color: var(--accent-coral);
+}
+
+.accuracy-card__figure-sample {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* The bias sentence — stated in words, never a signed number alone
+   (DoD: "Bias stated in words"). Neutral colour: a bias by itself isn't
+   risk, just a measurement. */
+.accuracy-card__bias {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.accuracy-card__empty {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.accuracy-card__error {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+/* Per-gameweek breakdown — a quiet list, not a table or a chart (ticket's
+   own Scope OUT: no charts, no graphing library, figures and words only).
+   Scrolls its own axis if the rolling history grows long rather than
+   letting the card (or the page) grow unbounded. */
+.accuracy-card__gw-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.accuracy-card__gw-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: var(--space-3);
+  row-gap: 0;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.accuracy-card__gw-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.accuracy-card__gw-label {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--text-secondary);
+}
+
+.accuracy-card__gw-value {
+  font: var(--text-label);
+  color: var(--accent-cyan);
+  text-align: right;
+}
+
+.accuracy-card__gw-value--small {
+  color: var(--accent-coral);
+}
+
+.accuracy-card__gw-sample {
+  grid-column: 1 / -1;
+  font: var(--text-label-tight);
+  color: var(--text-tertiary);
+}
+
+/* Loading placeholder — three bars shaped like the ordinary card's own
+   content: title, rolling figure, body line. Same technique as
+   VerdictCard.css's own skeleton, so the pitch/other cards below don't
+   jump when the read resolves. */
+.accuracy-card--loading {
+  gap: var(--space-4);
+}
+
+.accuracy-card__skeleton-line {
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: accuracy-card-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.accuracy-card__skeleton-line--title {
+  height: var(--space-4);
+  width: 55%;
+}
+
+.accuracy-card__skeleton-line--figure {
+  height: var(--space-8);
+  width: 35%;
+  margin-top: var(--space-2);
+}
+
+.accuracy-card__skeleton-line--body {
+  height: var(--space-4);
+  width: 75%;
+}
+
+@keyframes accuracy-card-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+/* prefers-reduced-motion is already handled globally in src/index.css,
+   which zeroes every element's animation-duration — no local override
+   needed here (same note as VerdictCard.css/DeadlineCountdown.css). */
