@@ -95,6 +95,27 @@ export interface SecondChipSetView extends ChipSetView {
   isAvailable: boolean
 }
 
+/**
+ * Ticket #97 (item 26). How urgent it is that the first set's unused chips
+ * get played before Gameweek 19's deadline. Gameweeks remaining is the unit
+ * — never days, never a live countdown (design-reference.md: the per-hour
+ * clock is the deadline countdown's job, not this one's). A discriminated
+ * union rather than nullable fields: 'none' carries nothing else, so a
+ * caller can never read a `gameweeksRemaining` or `chipsAtRisk` that is
+ * stale, zero-length, or meaningless for the band it's paired with.
+ */
+export type ChipExpiryBand = 'none' | 'noted' | 'pressing' | 'final'
+
+export type ChipExpiryWarning =
+  | { band: 'none' }
+  | {
+      band: 'noted' | 'pressing' | 'final'
+      /** Gameweeks left up to and including the Gameweek 19 deadline. Always present and non-negative when `band` is not 'none'. */
+      gameweeksRemaining: number
+      /** The unused first-set chips this warning is about, in the constant's own display order. Always non-empty when `band` is not 'none'. */
+      chipsAtRisk: readonly RemainingChipView[]
+    }
+
 /** Fully-resolved chip state for the /chips screen — no further derivation happens in the component. */
 export interface DerivedChipState {
   /** False only when `chipsUsed` was empty — drives the screen's "no chips used" message, never an error or a blank screen. */
@@ -102,4 +123,6 @@ export interface DerivedChipState {
   usedChips: readonly UsedChipView[]
   firstSet: FirstChipSetView
   secondSet: SecondChipSetView
+  /** Ticket #97: how urgent it is to play the first set's unused chips before they're lost. Always 'none' once the first set has expired or has nothing left unused, or while the second set is active — see deriveExpiryWarning's own comment in derive.ts. */
+  expiryWarning: ChipExpiryWarning
 }

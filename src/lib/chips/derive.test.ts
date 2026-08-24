@@ -190,3 +190,121 @@ describe('deriveChipState — the Gameweek 19 deadline is read from public.gamew
     expect(state.firstSet.timeRemaining).toBeNull()
   })
 })
+
+// ============================================================================
+// deriveChipState.expiryWarning — ticket #97 (item 26). "Gameweeks remaining"
+// is the unit throughout, per the ticket's own pre-answered table:
+//   more than 8  -> none      5 to 8 -> noted      3 to 4 -> pressing      2 or fewer -> final
+// plus the chip-count adjustment: 2+ unused chips in the active set moves
+// the band up one level.
+//
+// `nowForGameweeksRemaining(x)` reuses the exact "current gameweek" rule
+// deriveChipState itself applies (resolveCurrentGameweekId: the lowest
+// gameweek whose deadline hasn't passed) so each test controls
+// `gameweeksRemaining` precisely without touching any of this file's own
+// no-clock/no-hardcoded-date rules — every instant here is still derived
+// from the fixture `gameweeks` array, never a literal date.
+// gameweeksRemaining = FIRST_CHIP_SET_LAST_GAMEWEEK - currentGameweekId + 1,
+// so currentGameweekId = FIRST_CHIP_SET_LAST_GAMEWEEK + 1 - gameweeksRemaining;
+// "just before that gameweek's own deadline" makes it the current one.
+// ============================================================================
+
+function nowForGameweeksRemaining(gameweeksRemaining: number): number {
+  const targetGameweekId = FIRST_CHIP_SET_LAST_GAMEWEEK + 1 - gameweeksRemaining
+  const targetGameweek = gameweeks.find((gw) => gw.id === targetGameweekId)
+  if (!targetGameweek) throw new Error(`test fixture has no gameweek id ${targetGameweekId}`)
+  return targetGameweek.deadlineMs - 1
+}
+
+/** Exactly one first-set chip left unused (Triple Captain) — isolates the base gameweeks-remaining band from the chip-count escalation rule, which only fires at 2+ unused. */
+const THREE_OF_FOUR_USED = [
+  { name: 'wildcard', event: 5, time: '2026-09-01T10:00:00Z' },
+  { name: 'freehit', event: 6, time: '2026-09-08T10:00:00Z' },
+  { name: 'bboost', event: 7, time: '2026-09-15T10:00:00Z' },
+]
+
+describe('deriveChipState — expiryWarning band thresholds, one unused chip (no chip-count escalation)', () => {
+  it('9 gameweeks remaining (more than 8) is none', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: THREE_OF_FOUR_USED }), nowForGameweeksRemaining(9))
+    expect(state.expiryWarning).toEqual({ band: 'none' })
+  })
+
+  it('8 gameweeks remaining is noted', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: THREE_OF_FOUR_USED }), nowForGameweeksRemaining(8))
+    expect(state.expiryWarning.band).toBe('noted')
+  })
+
+  it('5 gameweeks remaining is noted', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: THREE_OF_FOUR_USED }), nowForGameweeksRemaining(5))
+    expect(state.expiryWarning.band).toBe('noted')
+  })
+
+  it('4 gameweeks remaining is pressing', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: THREE_OF_FOUR_USED }), nowForGameweeksRemaining(4))
+    expect(state.expiryWarning.band).toBe('pressing')
+  })
+
+  it('3 gameweeks remaining is pressing', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: THREE_OF_FOUR_USED }), nowForGameweeksRemaining(3))
+    expect(state.expiryWarning.band).toBe('pressing')
+  })
+
+  it('2 gameweeks remaining (2 or fewer) is final', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: THREE_OF_FOUR_USED }), nowForGameweeksRemaining(2))
+    expect(state.expiryWarning.band).toBe('final')
+  })
+
+  it('names Triple Captain and states gameweeksRemaining on a non-none band', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: THREE_OF_FOUR_USED }), nowForGameweeksRemaining(3))
+    expect(state.expiryWarning).toMatchObject({
+      band: 'pressing',
+      gameweeksRemaining: 3,
+      chipsAtRisk: [{ id: '3xc', displayName: 'Triple Captain' }],
+    })
+  })
+})
+
+describe('deriveChipState — expiryWarning is none when every first-set chip has been used', () => {
+  it('reports none even at 2 gameweeks remaining, where an unused chip would be final', () => {
+    const allFourUsed = [
+      { name: 'wildcard', event: 5, time: '2026-09-01T10:00:00Z' },
+      { name: 'freehit', event: 6, time: '2026-09-08T10:00:00Z' },
+      { name: 'bboost', event: 7, time: '2026-09-15T10:00:00Z' },
+      { name: '3xc', event: 8, time: '2026-09-22T10:00:00Z' },
+    ]
+    const state = deriveChipState(sourceData({ chipsUsed: allFourUsed }), nowForGameweeksRemaining(2))
+    expect(state.expiryWarning).toEqual({ band: 'none' })
+  })
+})
+
+describe('deriveChipState — expiryWarning is none once the first set has expired (the second set is active)', () => {
+  it('reports none after the Gameweek 19 deadline, with unused first-set chips remaining', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: [] }), GW19_DEADLINE_MS + 1)
+    expect(state.firstSet.expired).toBe(true)
+    expect(state.expiryWarning).toEqual({ band: 'none' })
+  })
+})
+
+describe('deriveChipState — expiryWarning chip-count escalation: more unused chips is more urgent, not just less time', () => {
+  it('one unused chip at 4 gameweeks remaining is pressing', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: THREE_OF_FOUR_USED }), nowForGameweeksRemaining(4))
+    expect(state.expiryWarning.band).toBe('pressing')
+  })
+
+  it('two unused chips at 4 gameweeks remaining is final — escalated one level past the one-chip case above', () => {
+    const twoOfFourUsed = [
+      { name: 'wildcard', event: 5, time: '2026-09-01T10:00:00Z' },
+      { name: 'freehit', event: 6, time: '2026-09-08T10:00:00Z' },
+    ]
+    const state = deriveChipState(sourceData({ chipsUsed: twoOfFourUsed }), nowForGameweeksRemaining(4))
+    expect(state.expiryWarning.band).toBe('final')
+    if (state.expiryWarning.band !== 'none') {
+      expect(state.expiryWarning.chipsAtRisk.map((c) => c.id)).toEqual(['bboost', '3xc'])
+    }
+  })
+
+  it('the escalation never promotes none to noted — 9 gameweeks remaining with all four chips unused stays none', () => {
+    const state = deriveChipState(sourceData({ chipsUsed: [] }), nowForGameweeksRemaining(9))
+    expect(state.expiryWarning).toEqual({ band: 'none' })
+  })
+})

@@ -1,20 +1,24 @@
 /**
  * Chip state derivation — ticket #85 (feature-list item 25, "the unblocker
- * for the rest of wave 7"). Pure, matching src/lib/notification/schedule.ts's
- * own convention exactly: `supabase`, `fetch` and `useEffect` appear nowhere
- * in this file, and no clock is ever read — `Date.now()` and an argument-less
- * `new Date()` never appear here. The current instant is always a parameter
- * (`nowMs` below), so the same (ChipSourceData, nowMs) pair always produces
- * the same result and this module is fully testable with no faked clock.
+ * for the rest of wave 7"), extended by ticket #97 (item 26, "warn before an
+ * unused chip expires") with the expiry urgency band below. Pure, matching
+ * src/lib/notification/schedule.ts's own convention exactly: `supabase`,
+ * `fetch` and `useEffect` appear nowhere in this file, and no clock is ever
+ * read — `Date.now()` and an argument-less `new Date()` never appear here.
+ * The current instant is always a parameter (`nowMs` below), so the same
+ * (ChipSourceData, nowMs) pair always produces the same result and this
+ * module is fully testable with no faked clock.
  *
- * This module only decides WHICH chips are used/remaining/lost and HOW LONG
- * the active set has left — it never warns, never escalates, and never
- * recommends a chip. That's items 26 and 27, both out of scope here (see the
- * ticket's own Scope OUT).
+ * This module decides WHICH chips are used/remaining/lost, HOW LONG the
+ * active set has left, and (ticket #97) HOW URGENT that remaining time is —
+ * it never recommends a chip to play. That's item 27, still out of scope
+ * here (see the ticket's own Scope OUT).
  */
 
 import { formatDeadlineInstant } from '../deadlineCountdown'
 import type {
+  ChipExpiryBand,
+  ChipExpiryWarning,
   ChipSetTimeRemaining,
   ChipSlotView,
   ChipSourceData,
@@ -129,6 +133,68 @@ function buildSlots(
   })
 }
 
+/**
+ * The escalation table, pre-answered by the ticket — do not invent other
+ * thresholds. Boundaries: strictly more than 8 is 'none'; 5 through 8
+ * inclusive is 'noted'; 3 through 4 inclusive is 'pressing'; 2 or fewer is
+ * 'final'. Only ever called with a non-negative `gameweeksRemaining` (the
+ * caller already excludes the expired case), but the fall-through to
+ * 'final' below is also the correct answer if it were ever called at 0 or
+ * negative — the tightest band, never a crash.
+ */
+function bandForGameweeksRemaining(gameweeksRemaining: number): ChipExpiryBand {
+  if (gameweeksRemaining > 8) return 'none'
+  if (gameweeksRemaining >= 5) return 'noted'
+  if (gameweeksRemaining >= 3) return 'pressing'
+  return 'final'
+}
+
+/**
+ * The ticket's own adjustment: "when 2+ chips in the active set are unused,
+ * the band moves up one level — because two chips can't both be played in
+ * the last gameweek." One step only, and 'final' has nowhere further to go.
+ * Never applied to 'none' — more than 8 gameweeks out is still nothing to
+ * warn about regardless of how many chips remain (the table's own "Nothing"
+ * row), so escalation only nudges an already-active band, never creates one.
+ */
+const CHIP_COUNT_ESCALATION: Readonly<Record<ChipExpiryBand, ChipExpiryBand>> = {
+  none: 'none',
+  noted: 'pressing',
+  pressing: 'final',
+  final: 'final',
+}
+
+/**
+ * The urgency band for the FIRST set only — ticket #97's own scope: "Band is
+ * 'none' when: no unused chips in the active set, OR the active set is the
+ * second one (doesn't expire before season end)." Once `firstSet.expired`,
+ * the second set is the active one (see `secondSet.isAvailable` above) and
+ * this always returns 'none' — the first set's own loss already happened
+ * and is reported via `lostCount`/`slots`, not re-litigated as a warning.
+ * `gameweeksRemaining` and `chipsAtRisk` are present on the return value
+ * only for the three non-'none' bands, by construction (a discriminated
+ * union in types.ts), so a caller can never read a stale/undefined number.
+ */
+function deriveExpiryWarning(firstSet: FirstChipSetView): ChipExpiryWarning {
+  const chipsAtRisk = firstSet.expired ? [] : firstSet.remaining
+  const gameweeksRemaining = firstSet.timeRemaining?.gameweeksRemaining ?? null
+
+  // No unused chips left to lose, or the countdown itself can't be resolved
+  // (deadline unknown, or the current gameweek can't be placed) — nothing
+  // safe to warn about either way.
+  if (chipsAtRisk.length === 0 || gameweeksRemaining === null) {
+    return { band: 'none' }
+  }
+
+  let band = bandForGameweeksRemaining(gameweeksRemaining)
+  if (chipsAtRisk.length >= 2) {
+    band = CHIP_COUNT_ESCALATION[band]
+  }
+
+  if (band === 'none') return { band: 'none' }
+  return { band, gameweeksRemaining, chipsAtRisk }
+}
+
 export function deriveChipState(data: ChipSourceData, nowMs: number): DerivedChipState {
   const usedChips: UsedChipView[] = data.chipsUsed.map((entry) => {
     const name = entry.name
@@ -230,5 +296,6 @@ export function deriveChipState(data: ChipSourceData, nowMs: number): DerivedChi
     usedChips,
     firstSet,
     secondSet,
+    expiryWarning: deriveExpiryWarning(firstSet),
   }
 }

@@ -202,3 +202,64 @@ const WINDOW_MARKERS: Record<ScheduledTrigger, string> = {
   deadline_24h: "First look at this gameweek's plan.",
   deadline_10h: 'Deadline is close.',
 }
+
+/**
+ * Ticket #97 (item 26, "warn before an unused chip expires"). One line
+ * naming the first chip set's unused chips and how many gameweeks remain
+ * before Gameweek 19's deadline, appended to the deadline_24h/deadline_10h
+ * reminders — but ONLY at the top two urgency bands src/lib/chips/derive.ts
+ * computes ('pressing' and 'final'). 'none' and 'noted' add nothing: per
+ * design-reference.md's countdown posture ("understated by default and
+ * escalates… It should feel like the app leaning forward, not like an
+ * alarm"), a chip warning that is months away is noise that trains Keshav to
+ * ignore the one message that matters. Gameweeks remaining is the unit, not
+ * days or hours — this line never escalates by date within a gameweek; the
+ * window marker above already owns that clock.
+ *
+ * Deliberately says nothing about WHICH chip to play — recommending one is
+ * item 27, out of scope for this ticket and this function alike (see
+ * src/lib/chips/derive.ts's own header).
+ *
+ * Takes already-resolved band/name/gameweek values, never a chips-module
+ * type or a live read of chip state — matching this file's own "composes
+ * from stored/resolved inputs, not domain objects" convention (see this
+ * file's header comment). The caller — wiring this into
+ * scripts/send-telegram.ts's own message composition so it actually reaches
+ * a live send — is out of this ticket's scope (its own scope constraint:
+ * "Nothing under scripts/"); this function is the tested, ready-to-call
+ * piece for whichever ticket does that wiring.
+ */
+export interface ChipExpiryNotificationInput {
+  band: 'none' | 'noted' | 'pressing' | 'final'
+  /** Display names of the first-set chips still unused, in display order, e.g. ["Wildcard", "Triple Captain"]. Only read when `band` is 'pressing' or 'final'. */
+  chipNames: readonly string[]
+  /** Gameweeks remaining up to and including the Gameweek 19 deadline. Only read when `band` is 'pressing' or 'final'. */
+  gameweeksRemaining: number
+}
+
+/** "Wildcard", "Wildcard and Free Hit", "Wildcard, Free Hit and Bench Boost". */
+function formatChipNameList(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+/**
+ * Appends the chip-expiry line as its own trailing paragraph when — and
+ * only when — `chipExpiry` is present and its band is 'pressing' or 'final'.
+ * `null` (no chip data supplied) and the 'none'/'noted' bands all leave
+ * `messageText` byte-for-byte unchanged, so every existing call site and
+ * every existing test of the functions above is unaffected by this
+ * function's mere existence.
+ */
+export function appendChipExpiryLine(messageText: string, chipExpiry: ChipExpiryNotificationInput | null): string {
+  if (chipExpiry === null) return messageText
+  if (chipExpiry.band !== 'pressing' && chipExpiry.band !== 'final') return messageText
+
+  const names = formatChipNameList(chipExpiry.chipNames)
+  const pronoun = chipExpiry.chipNames.length === 1 ? "it's" : "they're"
+  const gwWord = chipExpiry.gameweeksRemaining === 1 ? 'gameweek' : 'gameweeks'
+  const line = `${names} unused — ${chipExpiry.gameweeksRemaining} ${gwWord} left before ${pronoun} lost for the season.`
+
+  return `${messageText}\n\n${line}`
+}

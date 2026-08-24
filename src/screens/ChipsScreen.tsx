@@ -4,7 +4,7 @@ import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { fetchChipSourceData } from '../lib/chips/api.ts'
 import { deriveChipState } from '../lib/chips/derive.ts'
-import type { ChipSetTimeRemaining, ChipSetView, DerivedChipState, UsedChipView } from '../lib/chips/types.ts'
+import type { ChipExpiryWarning, ChipSetTimeRemaining, ChipSetView, DerivedChipState, UsedChipView } from '../lib/chips/types.ts'
 import { toErrorMessage } from '../lib/format'
 import './ChipsScreen.css'
 
@@ -119,6 +119,7 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
         timeRemaining={state.firstSet.timeRemaining}
         deadlineUnknownNote={!state.firstSet.deadlineKnown && !state.firstSet.expired}
         unknownChips={unknownFirst}
+        expiryWarning={state.expiryWarning}
       />
 
       <ChipSetSection
@@ -162,6 +163,37 @@ interface ChipSetSectionProps {
   deadlineUnknownNote: boolean
   unknownChips: readonly UsedChipView[]
   locked?: boolean
+  /** Ticket #97 — only ever passed for the first set; the second set has no expiry within this app's scope. */
+  expiryWarning?: ChipExpiryWarning
+}
+
+/** "Wildcard", "Wildcard and Free Hit", "Wildcard, Free Hit and Bench Boost". */
+function formatChipNames(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+/**
+ * Ticket #97's own DoD: names the specific unused chips and gameweeks
+ * remaining, sentence case, plain verbs, no filler, no exclamation point —
+ * design-reference.md's interface-writing rules. The same wording at every
+ * band; escalation is carried entirely by the CSS class (chips-expiry--…)
+ * per design-reference.md's "understated by default and escalates," not by
+ * louder copy. Returns JSX rather than a string so the gameweeks figure
+ * renders through the app's shared `.num` token (Geist Mono, tabular) like
+ * every other number on this screen — design-reference.md's typography
+ * rule, not a plain string this app's own convention would flag.
+ */
+function ExpiryWarningLine({ warning }: { warning: Extract<ChipExpiryWarning, { band: 'noted' | 'pressing' | 'final' }> }) {
+  const names = formatChipNames(warning.chipsAtRisk.map((chip) => chip.displayName))
+  const pronoun = warning.chipsAtRisk.length === 1 ? 'it' : 'them'
+  const gwWord = warning.gameweeksRemaining === 1 ? 'gameweek' : 'gameweeks'
+  return (
+    <>
+      {names} — <span className="num">{warning.gameweeksRemaining}</span> {gwWord} left to use {pronoun}.
+    </>
+  )
 }
 
 function ChipSetSection({
@@ -172,6 +204,7 @@ function ChipSetSection({
   deadlineUnknownNote,
   unknownChips,
   locked = false,
+  expiryWarning,
 }: ChipSetSectionProps) {
   return (
     <Surface className={locked ? 'chips-set chips-set--locked' : 'chips-set'}>
@@ -208,6 +241,12 @@ function ChipSetSection({
       {deadlineUnknownNote && (
         <p className="chips-set__time chips-set__time--unavailable">
           Deadline unavailable — Gameweek 19 hasn't been loaded yet.
+        </p>
+      )}
+
+      {expiryWarning && expiryWarning.band !== 'none' && (
+        <p className={`chips-expiry chips-expiry--${expiryWarning.band}`}>
+          <ExpiryWarningLine warning={expiryWarning} />
         </p>
       )}
 

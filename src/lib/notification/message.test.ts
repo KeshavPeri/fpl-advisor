@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  appendChipExpiryLine,
   applyWindowMarker,
   composeCurrentMessage,
   composeInfeasibleMessage,
@@ -8,6 +9,7 @@ import {
   composeStaleMessage,
   TELEGRAM_MAX_MESSAGE_LENGTH,
   truncateMessage,
+  type ChipExpiryNotificationInput,
 } from './message.ts'
 import type { SolverStatusInfo } from './solverStatus.ts'
 
@@ -290,5 +292,91 @@ describe('applyWindowMarker', () => {
       expect(message).not.toMatch(DECIMAL_NUMBER_PATTERN)
       expect(message).not.toContain('!')
     }
+  })
+})
+
+// ============================================================================
+// appendChipExpiryLine — ticket #97 (item 26). Appends a chip-expiry line to
+// the deadline_24h/deadline_10h reminders, ONLY at the top two urgency bands
+// src/lib/chips/derive.ts computes ('pressing' and 'final'); 'none' and
+// 'noted' — and a null input — leave the message untouched.
+// ============================================================================
+
+describe('appendChipExpiryLine', () => {
+  const base = composeCurrentMessage({ reasonLines: WORKED_EXAMPLE_REASON_LINES, planB: null, solverStatus: OPTIMAL })
+
+  const NONE: ChipExpiryNotificationInput = { band: 'none', chipNames: [], gameweeksRemaining: 0 }
+  const NOTED: ChipExpiryNotificationInput = { band: 'noted', chipNames: ['Wildcard'], gameweeksRemaining: 6 }
+  const PRESSING: ChipExpiryNotificationInput = { band: 'pressing', chipNames: ['Wildcard'], gameweeksRemaining: 3 }
+  const FINAL: ChipExpiryNotificationInput = {
+    band: 'final',
+    chipNames: ['Wildcard', 'Triple Captain'],
+    gameweeksRemaining: 2,
+  }
+
+  it('leaves the message unchanged when chipExpiry is null (no chip data supplied)', () => {
+    expect(appendChipExpiryLine(base, null)).toBe(base)
+  })
+
+  it('leaves the message unchanged at band "none"', () => {
+    expect(appendChipExpiryLine(base, NONE)).toBe(base)
+  })
+
+  it('leaves the message unchanged at band "noted" — quiet on the chips screen, silent in the notification', () => {
+    expect(appendChipExpiryLine(base, NOTED)).toBe(base)
+  })
+
+  it('appends a line at band "pressing"', () => {
+    const message = appendChipExpiryLine(base, PRESSING)
+    expect(message).not.toBe(base)
+    expect(message.startsWith(base)).toBe(true)
+    expect(message).toContain('Wildcard')
+    expect(message).toContain('3 gameweeks')
+  })
+
+  it('appends a line at band "final"', () => {
+    const message = appendChipExpiryLine(base, FINAL)
+    expect(message).not.toBe(base)
+    expect(message).toContain('Wildcard and Triple Captain')
+    expect(message).toContain('2 gameweeks')
+  })
+
+  it('names every chip at risk, joined in English, not just the first one', () => {
+    const threeChips: ChipExpiryNotificationInput = {
+      band: 'final',
+      chipNames: ['Wildcard', 'Free Hit', 'Triple Captain'],
+      gameweeksRemaining: 1,
+    }
+    const message = appendChipExpiryLine(base, threeChips)
+    expect(message).toContain('Wildcard, Free Hit and Triple Captain')
+  })
+
+  it('pluralises "gameweek" correctly for exactly one gameweek remaining', () => {
+    const oneGameweek: ChipExpiryNotificationInput = { band: 'final', chipNames: ['Wildcard'], gameweeksRemaining: 1 }
+    const message = appendChipExpiryLine(base, oneGameweek)
+    expect(message).toContain('1 gameweek left')
+    expect(message).not.toContain('1 gameweeks')
+  })
+
+  it('says nothing about which chip to play — only names it and states the gameweeks left', () => {
+    const message = appendChipExpiryLine(base, PRESSING)
+    expect(message.toLowerCase()).not.toMatch(/\bplay\b|\brecommend/)
+  })
+
+  it('never carries a live countdown, a decimal figure, an exclamation point, or an emoji', () => {
+    for (const input of [PRESSING, FINAL]) {
+      const message = appendChipExpiryLine(base, input)
+      expect(message).not.toMatch(DECIMAL_NUMBER_PATTERN)
+      expect(message).not.toContain('!')
+      expect(message).not.toMatch(NO_EMOJI_PATTERN)
+      expect(message).not.toMatch(/\d+\s*h(ours?)?\b/i)
+    }
+  })
+
+  it('composes after applyWindowMarker, on top of the fully-marked message', () => {
+    const marked = applyWindowMarker(base, 'deadline_10h')
+    const message = appendChipExpiryLine(marked, FINAL)
+    expect(message.startsWith(marked)).toBe(true)
+    expect(message).toContain('Wildcard and Triple Captain')
   })
 })
