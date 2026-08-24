@@ -1,5 +1,6 @@
 import { supabase } from '../supabase'
 import type {
+  AlternativePlanData,
   ConfidenceBand,
   CoverageEntry,
   PlayerProjectionData,
@@ -35,9 +36,23 @@ interface RecommendationRow {
    *  older rows fall back to the most-recent solver_runs row for the
    *  gameweek rather than summing every run. */
   solver_run_id: number | null
+  /** Which of the (at most three, contiguous-from-zero — see
+   *  src/lib/recommendation/distinctness.ts's assignContiguousPlanIndices)
+   *  distinct plans stored for this gameweek this row is. 0 is Plan A, the
+   *  one this app recommends; 1 and 2 (when present) are ticket #102's
+   *  alternatives. */
+  plan_index: number
+}
+
+/** Just enough to find the latest gameweek that has ANY stored
+ *  recommendation, without hardcoding a `plan_index` filter — see
+ *  fetchReasoning's own comment on why. */
+interface LatestGameweekRow {
+  gameweek_id: number
 }
 
 interface ReasonRow {
+  plan_index: number
   order_index: number
   reason: string
 }
@@ -75,55 +90,103 @@ interface ProjectionRow {
 }
 
 /**
- * Reads the most recently stored Plan A (plan_index = 0) — deliberately NOT
- * filtered to any particular gameweek, same "always show the latest plan
- * that exists at all" contract as src/lib/verdict/api.ts's fetchVerdict
- * (product-brief.md §6a). Returns null only when no recommendation exists
- * for ANY gameweek yet — the screen's empty-state invitation.
+ * Reads the most recently stored recommendation for the latest gameweek —
+ * every plan (`plan_index` 0, 1 and 2 when present), NOT just Plan A —
+ * deliberately NOT filtered to any particular gameweek at the top level,
+ * same "always show the latest plan that exists at all" contract as
+ * src/lib/verdict/api.ts's fetchVerdict (product-brief.md §6a). Returns null
+ * only when no recommendation exists for ANY gameweek yet — the screen's
+ * empty-state invitation.
+ *
+ * Finding "the latest gameweek" no longer filters on `plan_index` at all
+ * (ticket #102): #60's `assignContiguousPlanIndices` guarantees every
+ * gameweek that has any stored recommendation has a `plan_index = 0` row, so
+ * the plain max-`gameweek_id` row already identifies the right gameweek —
+ * a `plan_index` filter here would be redundant, not required. The second
+ * read below then pulls every plan for that one gameweek in a single
+ * request, ordered ascending, so Plan A is always `planRows[0]`.
  *
  * Every sub-read below is deliberately bounded by an explicit filter
- * (specific player ids, or the recommendation's own gameweek + solution +
- * run) rather than an unfiltered table scan, so none of them can approach
- * Supabase's silent 1,000-row cap regardless of how large
- * player_projections or solver_picks grow — contrast
+ * (specific player ids, one gameweek's plans, or the recommendation's own
+ * gameweek + solution + run) rather than an unfiltered table scan, so none
+ * of them can approach Supabase's silent 1,000-row cap regardless of how
+ * large player_projections or solver_picks grow — contrast
  * scripts/project-points.ts's own read of the FULL players table, which
  * does paginate because it has no such bound. There is nothing here for a
- * pagination loop to do.
+ * pagination loop to do, same reasoning as before #102, just now covering
+ * up to three plan rows and their reasons instead of one.
  */
 export async function fetchReasoning(): Promise<ReasoningRecommendationData | null> {
+  const { data: latestRows, error: latestError } = await supabase
+    .from('recommendations')
+    .select('gameweek_id')
+    .order('gameweek_id', { ascending: false })
+    .limit(1)
+    .returns<LatestGameweekRow[]>()
+
+  if (latestError) raise(latestError)
+
+  const latestGameweekId = (latestRows ?? [])[0]?.gameweek_id
+  if (latestGameweekId === undefined) return null
+
   const { data, error } = await supabase
     .from('recommendations')
     .select(
       'gameweek_id, is_roll, transfer_in_player_id, transfer_out_player_id, ' +
         'captain_player_id, vice_captain_player_id, hit_cost, gross_points_rounded, ' +
         'net_points_rounded, confidence_band, coverage, gameweeks(name), solution_index, ' +
-        'solver_run_id'
+        'solver_run_id, plan_index'
     )
-    .eq('plan_index', 0)
-    .order('gameweek_id', { ascending: false })
-    .limit(1)
+    .eq('gameweek_id', latestGameweekId)
+    .order('plan_index', { ascending: true })
     .returns<RecommendationRow[]>()
 
   if (error) raise(error)
 
-  const recRow = (data ?? [])[0]
+  // Bounded to at most three rows (see the header comment above) — Plan A
+  // is whichever row carries plan_index 0, not just planRows[0], so a
+  // future storage order change can't silently swap in an alternative.
+  const planRows = data ?? []
+  const recRow = planRows.find((row) => row.plan_index === 0)
   if (!recRow) return null
+
+  const alternateRows = planRows
+    .filter((row) => row.plan_index !== 0)
+    .sort((a, b) => a.plan_index - b.plan_index)
 
   const gwRelation = Array.isArray(recRow.gameweeks) ? recRow.gameweeks[0] : recRow.gameweeks
   const gameweekName = gwRelation?.name ?? `Gameweek ${recRow.gameweek_id}`
 
-  // Every reason line, in order — unlike the verdict card (order_index 0
-  // only), the reasoning screen renders the full stored list.
+  // Every reason line for every plan stored this gameweek, in order —
+  // unlike the verdict card (Plan A, order_index 0 only), the reasoning
+  // screen renders the full stored list for Plan A and carries each
+  // alternative's own reasons through for the alternatives section.
+  // Grouped by plan_index below rather than fetched once per plan — still
+  // one bounded request (this gameweek's reason rows only, a few dozen at
+  // most), never N requests for N plans.
   const { data: reasonRows, error: reasonError } = await supabase
     .from('recommendation_reasons')
-    .select('order_index, reason')
+    .select('plan_index, order_index, reason')
     .eq('gameweek_id', recRow.gameweek_id)
-    .eq('plan_index', 0)
+    .order('plan_index', { ascending: true })
     .order('order_index', { ascending: true })
     .returns<ReasonRow[]>()
 
   if (reasonError) raise(reasonError)
 
+  const reasonsByPlan = new Map<number, string[]>()
+  for (const row of reasonRows ?? []) {
+    const bucket = reasonsByPlan.get(row.plan_index)
+    if (bucket) {
+      bucket.push(row.reason)
+    } else {
+      reasonsByPlan.set(row.plan_index, [row.reason])
+    }
+  }
+
+  // Named players across EVERY plan (Plan A's four roles plus each
+  // alternative's transfer-in/out and captain) — still bounded (at most
+  // 4 + 3*3 = 13 ids before deduping), never the whole players table.
   const playerIds = Array.from(
     new Set(
       [
@@ -131,6 +194,11 @@ export async function fetchReasoning(): Promise<ReasoningRecommendationData | nu
         recRow.transfer_out_player_id,
         recRow.captain_player_id,
         recRow.vice_captain_player_id,
+        ...alternateRows.flatMap((row) => [
+          row.transfer_in_player_id,
+          row.transfer_out_player_id,
+          row.captain_player_id,
+        ]),
       ].filter((id): id is number => id !== null)
     )
   )
@@ -247,6 +315,25 @@ export async function fetchReasoning(): Promise<ReasoningRecommendationData | nu
     }
   }
 
+  // Alternatives (ticket #102) — every plan_index 1/2 row for this
+  // gameweek, in order. Reasons default to [] (never dropped, never
+  // erroring) when a plan has no recommendation_reasons rows of its own —
+  // see reasonsByPlan above and this ticket's DoD on a plan with missing
+  // reasons.
+  const alternatives: AlternativePlanData[] = alternateRows.map((row) => ({
+    planIndex: row.plan_index,
+    isRoll: row.is_roll,
+    transferInPlayerId: row.transfer_in_player_id,
+    transferOutPlayerId: row.transfer_out_player_id,
+    captainPlayerId: row.captain_player_id,
+    hitCost: row.hit_cost,
+    grossPointsRounded: row.gross_points_rounded,
+    netPointsRounded: row.net_points_rounded,
+    confidenceBand: row.confidence_band,
+    coverage: row.coverage ?? [],
+    reasons: reasonsByPlan.get(row.plan_index) ?? [],
+  }))
+
   return {
     gameweekId: recRow.gameweek_id,
     gameweekName,
@@ -260,10 +347,11 @@ export async function fetchReasoning(): Promise<ReasoningRecommendationData | nu
     netPointsRounded: recRow.net_points_rounded,
     confidenceBand: recRow.confidence_band,
     coverage: recRow.coverage ?? [],
-    reasons: (reasonRows ?? []).map((row) => row.reason),
+    reasons: reasonsByPlan.get(0) ?? [],
     playerNames,
     horizon,
     startingXI,
     projections,
+    alternatives,
   }
 }
