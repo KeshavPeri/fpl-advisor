@@ -15,7 +15,9 @@
  */
 import { formatSyncTimestamp } from '../format.ts'
 import type {
+  AlternativePlanData,
   ConfidenceBand,
+  CoverageEntry,
   PlayerProjectionData,
   ReasoningRecommendationData,
   StartingXIPick,
@@ -137,6 +139,209 @@ function captainNote(band: CaptainConfidenceBand, captainName: string, nextBestN
 }
 
 // ============================================================================
+// Alternatives (Plan B / Plan C) — ticket #102. product-brief.md §6c names
+// Plan A / Plan B / Plan C as a core requirement; §8 requires the app to say
+// plainly when the top options are statistically indistinguishable. Every
+// alternative is rendered as a DIFFERENCE from Plan A, never as a competing
+// option in its own right — Plan A never loses its position as the answer
+// (this ticket's own Notes). Nothing here re-implements #60's distinctness
+// collapse — whatever api.ts hands in is already the distinct set.
+// ============================================================================
+
+/** The subset of a plan's fields the difference/description helpers below
+ *  need — shared shape for Plan A (via ReasoningRecommendationData) and an
+ *  AlternativePlanData, so those two don't have to be structurally
+ *  duplicated just to call the same function. */
+interface PlanDecisionShape {
+  isRoll: boolean
+  transferInPlayerId: number | null
+  captainPlayerId: number
+}
+
+function transferFragment(
+  a: PlanDecisionShape,
+  b: PlanDecisionShape,
+  names: ReadonlyMap<number, string>
+): string | null {
+  if (a.isRoll && b.isRoll) return null
+  if (a.isRoll && !b.isRoll) {
+    return `transfers in ${nameFor(b.transferInPlayerId as number, names)} instead of rolling the transfer`
+  }
+  if (!a.isRoll && b.isRoll) {
+    return `rolls the transfer instead of transferring in ${nameFor(a.transferInPlayerId as number, names)}`
+  }
+  if (a.transferInPlayerId === b.transferInPlayerId) return null
+  return `transfers in ${nameFor(b.transferInPlayerId as number, names)} instead of ${nameFor(a.transferInPlayerId as number, names)}`
+}
+
+function captainFragment(
+  a: PlanDecisionShape,
+  b: PlanDecisionShape,
+  names: ReadonlyMap<number, string>
+): string | null {
+  if (a.captainPlayerId === b.captainPlayerId) return null
+  return `captains ${nameFor(b.captainPlayerId, names)} instead of ${nameFor(a.captainPlayerId, names)}`
+}
+
+/** How an alternative plan differs from Plan A, in one sentence — the
+ *  point of showing it at all (this ticket's Notes: "the difference is the
+ *  point, not the plan in isolation"). Covers all three tested shapes
+ *  (transfer only, captain only, both) plus the defensive case where
+ *  neither the transfer nor the captain differs (possible in principle: two
+ *  plans that #60 kept distinct on score alone, differing only in the
+ *  outgoing player, which isSameDecision deliberately never compares) —
+ *  that case still reads as a real sentence, never a blank line. */
+export function planDifferenceText(
+  planA: PlanDecisionShape,
+  alternative: PlanDecisionShape,
+  names: ReadonlyMap<number, string>
+): string {
+  const parts = [transferFragment(planA, alternative, names), captainFragment(planA, alternative, names)].filter(
+    (part): part is string => part !== null
+  )
+  if (parts.length === 0) {
+    return 'Differs in projected outcome only — the transfer and captain are the same as Plan A.'
+  }
+  const sentence = parts.join(' and ')
+  return sentence.charAt(0).toUpperCase() + sentence.slice(1) + '.'
+}
+
+/** A short, self-contained description of a plan's own decision — "bringing
+ *  in {X} and captaining {Y}" / "rolling the transfer and captaining {Y}" —
+ *  used only by the coin-flip note below, which has to name BOTH plans in
+ *  one sentence rather than phrase one as a diff off the other. */
+function planDescription(plan: PlanDecisionShape, names: ReadonlyMap<number, string>): string {
+  const transferPart = plan.isRoll
+    ? 'rolling the transfer'
+    : `bringing in ${nameFor(plan.transferInPlayerId as number, names)}`
+  return `${transferPart} and captaining ${nameFor(plan.captainPlayerId, names)}`
+}
+
+/** The horizon points gap between an alternative and Plan A — net points
+ *  (post-hit), the "real" expected outcome figure, computed purely from the
+ *  already-stored net_points_rounded on each plan's own recommendations
+ *  row (ticket DoD: "using the figures already stored on recommendations",
+ *  no re-derivation). Positive means the alternative projects HIGHER than
+ *  Plan A over the horizon. */
+export function planPointsGap(planANet: number, alternativeNet: number): number {
+  return alternativeNet - planANet
+}
+
+function pointsGapLabel(gap: number): string {
+  if (gap === 0) return 'Same projected points as Plan A over the horizon.'
+  const sign = gap > 0 ? '+' : ''
+  return `${sign}${gap} pts vs Plan A over the horizon.`
+}
+
+/** Reuses the exact wording convention Plan A's own player rows use
+ *  (coverageSentence above) — this ticket's Notes: "extend the same
+ *  treatment to the alternatives rather than inventing a new one." */
+function alternativePlayerCoverage(
+  role: string,
+  storageRole: string,
+  playerId: number,
+  coverage: readonly CoverageEntry[],
+  names: ReadonlyMap<number, string>
+): ReasoningAlternativePlayerView {
+  const name = nameFor(playerId, names)
+  const hasHistory = findCoverage(coverage, storageRole, playerId)
+  return { role, name, coverageNote: coverageSentence(name, hasHistory) }
+}
+
+export interface ReasoningAlternativePlayerView {
+  role: string
+  name: string
+  coverageNote: string
+}
+
+export interface ReasoningAlternativeView {
+  /** 'Plan B' for plan_index 1, 'Plan C' for plan_index 2. */
+  label: string
+  differenceText: string
+  pointsGap: number
+  pointsGapLabel: string
+  confidenceWord: ConfidenceBand
+  hit: ReasoningHitView | null
+  /** This alternative's own first stored reason line, or null when it has
+   *  none (ticket DoD: a plan missing its reasons still renders). */
+  reasonHeadline: string | null
+  players: readonly ReasoningAlternativePlayerView[]
+}
+
+const PLAN_LABELS: Readonly<Record<number, string>> = { 1: 'Plan B', 2: 'Plan C' }
+
+function deriveAlternativeView(
+  planA: ReasoningRecommendationData,
+  alternative: AlternativePlanData
+): ReasoningAlternativeView {
+  const players: ReasoningAlternativePlayerView[] = []
+  if (!alternative.isRoll && alternative.transferInPlayerId !== null) {
+    players.push(
+      alternativePlayerCoverage(
+        'Transfer in',
+        'transferIn',
+        alternative.transferInPlayerId,
+        alternative.coverage,
+        planA.playerNames
+      )
+    )
+  }
+  if (!alternative.isRoll && alternative.transferOutPlayerId !== null) {
+    players.push(
+      alternativePlayerCoverage(
+        'Transfer out',
+        'transferOut',
+        alternative.transferOutPlayerId,
+        alternative.coverage,
+        planA.playerNames
+      )
+    )
+  }
+  players.push(
+    alternativePlayerCoverage('Captain', 'captain', alternative.captainPlayerId, alternative.coverage, planA.playerNames)
+  )
+
+  const gap = planPointsGap(planA.netPointsRounded, alternative.netPointsRounded)
+
+  return {
+    label: PLAN_LABELS[alternative.planIndex] ?? `Plan ${alternative.planIndex + 1}`,
+    differenceText: planDifferenceText(planA, alternative, planA.playerNames),
+    pointsGap: gap,
+    pointsGapLabel: pointsGapLabel(gap),
+    confidenceWord: alternative.confidenceBand,
+    hit:
+      alternative.hitCost > 0
+        ? { cost: alternative.hitCost, gross: alternative.grossPointsRounded, net: alternative.netPointsRounded }
+        : null,
+    reasonHeadline: alternative.reasons[0] ?? null,
+    players,
+  }
+}
+
+/** design-reference.md's writing rules: an empty state is an invitation or
+ *  a confident answer, never an apology. #60 collapsing plans down to one
+ *  IS the confident case ("the week where the recommendation is 'roll your
+ *  transfer' is not an empty state") — this note must read the same way. */
+const NO_ALTERNATIVE_NOTE = 'This is a confident call — no distinct alternative plan was found for this gameweek.'
+
+/** Plan A's own confidence_band (product-brief.md §8) is derived from the
+ *  score gap between Plan A and Plan B specifically (see
+ *  src/lib/recommendation/confidence.ts) — so a coin-flip band names Plan A
+ *  and its first alternative, never Plan C. Only produced when there IS a
+ *  first alternative to name; a coin-flip band with zero stored
+ *  alternatives (Plan B collapsed into Plan A as the same decision) falls
+ *  through to NO_ALTERNATIVE_NOTE instead, which is the truer story. */
+function coinFlipNote(planA: ReasoningRecommendationData, firstAlternative: AlternativePlanData | undefined): string | null {
+  if (planA.confidenceBand !== 'coin-flip') return null
+  if (!firstAlternative) return null
+  return (
+    'The top options cannot be separated on this projection: Plan A ' +
+    `(${planDescription(planA, planA.playerNames)}) and Plan B ` +
+    `(${planDescription(firstAlternative, planA.playerNames)}).`
+  )
+}
+
+// ============================================================================
 // View types
 // ============================================================================
 
@@ -178,6 +383,21 @@ export interface ReasoningView {
   captainNote: string | null
   modelVersion: string | null
   computedAtLabel: string | null
+  /** Every OTHER stored plan for this gameweek, rendered as a difference off
+   *  Plan A — ticket #102. `[]` when Plan A is the only distinct plan #60
+   *  left standing; see `alternativesEmptyNote` for that case's wording. */
+  alternatives: readonly ReasoningAlternativeView[]
+  /** Set only when `alternatives` is empty on an otherwise-ready view — a
+   *  confident sentence, never an apology (design-reference.md's writing
+   *  rules; see NO_ALTERNATIVE_NOTE). Null whenever alternatives.length > 0
+   *  and null on the top-level 'empty' status (that case has its own
+   *  emptyMessage already). */
+  alternativesEmptyNote: string | null
+  /** Set only when Plan A's own confidence_band is 'coin-flip' AND there is
+   *  a first alternative to name (product-brief.md §8) — states plainly
+   *  that the top two options cannot be separated, naming both. Null
+   *  otherwise. */
+  coinFlipNote: string | null
 }
 
 const EMPTY_MESSAGE =
@@ -238,6 +458,9 @@ export function deriveReasoningView(data: ReasoningRecommendationData | null): R
       captainNote: null,
       modelVersion: null,
       computedAtLabel: null,
+      alternatives: [],
+      alternativesEmptyNote: null,
+      coinFlipNote: null,
     }
   }
 
@@ -296,6 +519,8 @@ export function deriveReasoningView(data: ReasoningRecommendationData | null): R
     }
   }
 
+  const alternatives = data.alternatives.map((alternative) => deriveAlternativeView(data, alternative))
+
   return {
     status: 'ready',
     emptyMessage: null,
@@ -318,6 +543,9 @@ export function deriveReasoningView(data: ReasoningRecommendationData | null): R
     captainNote: captainNoteText,
     modelVersion,
     computedAtLabel,
+    alternatives,
+    alternativesEmptyNote: alternatives.length === 0 ? NO_ALTERNATIVE_NOTE : null,
+    coinFlipNote: coinFlipNote(data, data.alternatives[0]),
   }
 }
 
