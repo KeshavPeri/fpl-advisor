@@ -154,6 +154,33 @@ export const KEEP_TOP_EV_PERCENT = 25
  */
 export const EV_PER_PRICE_CUTOFF = 10
 
+/**
+ * Ticket #108. `buildSolverConfig` never used to set this explicitly, so it silently inherited
+ * the shipped `data/user_settings.json`'s `no_transfer_last_gws: 2` at the pinned commit
+ * (45131c5a41d7caadb5cb626c012bfa9111dca7a2) — forbidding transfers in the LAST TWO gameweeks of
+ * whatever horizon is solved.
+ *
+ * Upstream's own use case: a horizon run out to the end of a season, where banning transfers in
+ * the final two gameweeks stops the optimiser burning a transfer it will never get to use before
+ * the season ends. This app's horizon is 5 and rolls forward every single night — gameweeks 4
+ * and 5 of tonight's horizon are next month, not the end of anything, and this app WILL be
+ * transferring then. Left inherited, the shipped value banned transfers across 40% of every plan
+ * the solver built (ticket #95's audit flagged it, ticket #108 fixes it): it distorted the
+ * stored multi-week plan shown on the reasoning screen (the Plan A/B/C horizon totals in
+ * product-brief.md §2), mis-valued a banked free transfer (`ft_value_list` prices a rolled
+ * transfer by how useful it will be later, and a false "can't transfer" constraint on weeks 4-5
+ * systematically under-valued rolling, biasing the solver toward transferring now instead), and —
+ * because a multi-period optimiser chooses this week's move partly on what it plans to do
+ * later — even affected the gameweek-1 recommendation the app actually acts on, not only the
+ * tail of the plan.
+ *
+ * Set to 0, not some smaller positive number: this app's horizon has no "end of season" to
+ * protect against, so ANY non-zero value bans transfers in weeks that will genuinely be used.
+ * See ticket #108's Notes for the full because. Deliberately the ONLY setting ticket #108
+ * changes — see docs/solver-notes.md for the full inherited-vs-overridden audit.
+ */
+export const NO_TRANSFER_LAST_GWS = 0
+
 // ============================================================================
 // Env
 // ============================================================================
@@ -360,6 +387,7 @@ export interface SolverConfig {
   xmin_lb: number
   keep_top_ev_percent: number
   ev_per_price_cutoff: number
+  no_transfer_last_gws: number
   datasource: string
   chip_limits: { bb: 0; wc: 0; fh: 0; tc: 0 }
   secs: number
@@ -399,6 +427,11 @@ export interface SolverConfig {
  * the solver had only ever surfaced a handful of distinct transfer targets. See each constant's
  * own comment above for the percentile semantics and the widening rationale; both values are a
  * deliberate widening, not a measured one — see docs/solver-notes.md.
+ *
+ * `no_transfer_last_gws: NO_TRANSFER_LAST_GWS` (0) — ticket #108. Set EXPLICITLY (never left to
+ * the shipped data/user_settings.json default of 2) because this app's 5-gameweek horizon rolls
+ * forward every night and has no "end of season" for that shipped setting to protect. See
+ * NO_TRANSFER_LAST_GWS's own comment above for the full because.
  */
 export function buildSolverConfig(params: { horizon: number; datasource: string; secs?: number }): SolverConfig {
   if (!Number.isInteger(params.horizon) || params.horizon <= 0) {
@@ -423,6 +456,7 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
     xmin_lb: XMIN_LB,
     keep_top_ev_percent: KEEP_TOP_EV_PERCENT,
     ev_per_price_cutoff: EV_PER_PRICE_CUTOFF,
+    no_transfer_last_gws: NO_TRANSFER_LAST_GWS,
     datasource: params.datasource,
     chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
     secs: params.secs ?? SOLVER_TIME_LIMIT_SECS,
