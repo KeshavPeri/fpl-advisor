@@ -260,6 +260,130 @@
   color: var(--accent-coral);
 }
 
+/* ---- Alternatives (Plan B / Plan C) — ticket #102 ----
+   Deliberately the quietest section on the screen: no --text-display
+   figure anywhere here (that size is Plan A's alone, above), smaller
+   heading than reasoning-headline, and a tighter Surface than
+   .reasoning-player so a stack of these still reads as "context for Plan A"
+   rather than a second recommendation. */
+
+.reasoning-alternatives {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.reasoning-alternatives__heading {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.reasoning-alternatives-coinflip {
+  padding: var(--space-3) var(--space-4);
+}
+
+.reasoning-alternatives-coinflip__note {
+  font: var(--text-body);
+  color: var(--text-primary);
+}
+
+.reasoning-alternatives-empty {
+  padding: var(--space-3) var(--space-4);
+}
+
+.reasoning-alternatives-empty__note {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.reasoning-alternative {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+}
+
+.reasoning-alternative__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.reasoning-alternative__label {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.reasoning-alternative__gap {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.reasoning-alternative__gap .num {
+  color: var(--text-primary);
+}
+
+.reasoning-alternative__diff {
+  font: var(--text-body);
+  color: var(--text-primary);
+}
+
+.reasoning-alternative__reason {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.reasoning-alternative__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.reasoning-alternative__hit {
+  color: var(--accent-coral);
+}
+
+.reasoning-alternative__players {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reasoning-alternative__player {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font: var(--text-label-tight);
+}
+
+.reasoning-alternative__player-role {
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.reasoning-alternative__player-name {
+  color: var(--text-primary);
+  font-weight: 550;
+}
+
+.reasoning-alternative__player-coverage {
+  color: var(--text-secondary);
+}
+
 /* ---- Model version / computed-at footer ---- */
 
 .reasoning-meta {

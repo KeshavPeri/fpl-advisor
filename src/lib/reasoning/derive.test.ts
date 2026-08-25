@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { deriveCaptainConfidenceBand, deriveReasoningView, formatComponentLabel } from './derive.ts'
 import type {
+  AlternativePlanData,
   PlayerProjectionData,
   ReasoningRecommendationData,
   StartingXIPick,
@@ -51,6 +52,24 @@ function baseData(overrides: Partial<ReasoningRecommendationData> = {}): Reasoni
     horizon: 5,
     startingXI: null,
     projections: new Map(),
+    alternatives: [],
+    ...overrides,
+  }
+}
+
+function alternativePlan(overrides: Partial<AlternativePlanData> = {}): AlternativePlanData {
+  return {
+    planIndex: 1,
+    isRoll: false,
+    transferInPlayerId: 1,
+    transferOutPlayerId: 2,
+    captainPlayerId: 3,
+    hitCost: 0,
+    grossPointsRounded: 55,
+    netPointsRounded: 55,
+    confidenceBand: 'clear',
+    coverage: [],
+    reasons: ['Transfer in Haaland. Transfer out Isak.'],
     ...overrides,
   }
 }
@@ -283,6 +302,136 @@ describe('deriveReasoningView — model version and computed-at', () => {
     const view = deriveReasoningView(baseData({ projections: new Map() }))
     expect(view.modelVersion).toBeNull()
     expect(view.computedAtLabel).toBeNull()
+  })
+})
+
+describe('deriveReasoningView — alternatives (Plan B / Plan C), difference from Plan A', () => {
+  it('states a transfer-only difference, naming both incoming players, without mentioning the captain', () => {
+    const view = deriveReasoningView(
+      baseData({
+        alternatives: [alternativePlan({ planIndex: 1, transferInPlayerId: 2, captainPlayerId: 3 })],
+      })
+    )
+    expect(view.alternatives).toHaveLength(1)
+    expect(view.alternatives[0].differenceText).toBe('Transfers in Isak instead of Haaland.')
+    expect(view.alternatives[0].differenceText).not.toContain('captain')
+  })
+
+  it('states a captain-only difference, naming both captains, without mentioning the transfer', () => {
+    const view = deriveReasoningView(
+      baseData({
+        alternatives: [alternativePlan({ planIndex: 1, transferInPlayerId: 1, captainPlayerId: 4 })],
+      })
+    )
+    expect(view.alternatives[0].differenceText).toBe('Captains Saliba instead of Salah.')
+    expect(view.alternatives[0].differenceText).not.toContain('transfer')
+  })
+
+  it('states both differences in one sentence when the alternative differs in transfer and captain', () => {
+    const view = deriveReasoningView(
+      baseData({
+        alternatives: [alternativePlan({ planIndex: 1, transferInPlayerId: 2, captainPlayerId: 4 })],
+      })
+    )
+    const text = view.alternatives[0].differenceText
+    expect(text).toContain('Transfers in Isak instead of Haaland')
+    expect(text).toContain('captains Saliba instead of Salah')
+  })
+
+  it('labels the first alternative Plan B and the second Plan C', () => {
+    const view = deriveReasoningView(
+      baseData({
+        alternatives: [
+          alternativePlan({ planIndex: 1, captainPlayerId: 4 }),
+          alternativePlan({ planIndex: 2, transferInPlayerId: 2 }),
+        ],
+      })
+    )
+    expect(view.alternatives[0].label).toBe('Plan B')
+    expect(view.alternatives[1].label).toBe('Plan C')
+  })
+})
+
+describe('deriveReasoningView — alternatives, horizon points gap', () => {
+  it('states the horizon points gap against Plan A, computed from the stored net figures', () => {
+    const view = deriveReasoningView(
+      baseData({
+        netPointsRounded: 58,
+        alternatives: [alternativePlan({ planIndex: 1, netPointsRounded: 60 })],
+      })
+    )
+    expect(view.alternatives[0].pointsGap).toBe(2)
+    expect(view.alternatives[0].pointsGapLabel).toBe('+2 pts vs Plan A over the horizon.')
+  })
+
+  it('signs a negative gap when the alternative projects lower than Plan A', () => {
+    const view = deriveReasoningView(
+      baseData({
+        netPointsRounded: 58,
+        alternatives: [alternativePlan({ planIndex: 1, netPointsRounded: 54 })],
+      })
+    )
+    expect(view.alternatives[0].pointsGap).toBe(-4)
+    expect(view.alternatives[0].pointsGapLabel).toBe('-4 pts vs Plan A over the horizon.')
+  })
+})
+
+describe('deriveReasoningView — fewer than three distinct plans', () => {
+  it('reads as a confident answer, with no apology or error framing, when Plan A is the only stored plan', () => {
+    const view = deriveReasoningView(baseData({ alternatives: [] }))
+    expect(view.alternatives).toEqual([])
+    expect(view.alternativesEmptyNote).not.toBeNull()
+    expect(view.alternativesEmptyNote).toMatch(/confident/i)
+    expect(view.alternativesEmptyNote).not.toMatch(/sorry|apolog|something went wrong|error|unfortunately/i)
+  })
+
+  it('carries no empty-alternatives note once at least one alternative exists', () => {
+    const view = deriveReasoningView(baseData({ alternatives: [alternativePlan()] }))
+    expect(view.alternativesEmptyNote).toBeNull()
+  })
+})
+
+describe('deriveReasoningView — coin-flip confidence names the alternative', () => {
+  it('states plainly that the top options cannot be separated, naming Plan A and Plan B by their decisions', () => {
+    const view = deriveReasoningView(
+      baseData({
+        confidenceBand: 'coin-flip',
+        transferInPlayerId: 1,
+        captainPlayerId: 3,
+        alternatives: [alternativePlan({ planIndex: 1, transferInPlayerId: 2, captainPlayerId: 3 })],
+      })
+    )
+    expect(view.coinFlipNote).not.toBeNull()
+    expect(view.coinFlipNote).toContain('cannot be separated')
+    expect(view.coinFlipNote).toContain('Plan A')
+    expect(view.coinFlipNote).toContain('Plan B')
+    expect(view.coinFlipNote).toContain('Haaland')
+    expect(view.coinFlipNote).toContain('Isak')
+  })
+
+  it('carries no coin-flip note when Plan A is clear, even with an alternative present', () => {
+    const view = deriveReasoningView(
+      baseData({ confidenceBand: 'clear', alternatives: [alternativePlan({ planIndex: 1 })] })
+    )
+    expect(view.coinFlipNote).toBeNull()
+  })
+
+  it('carries no coin-flip note when Plan A is coin-flip but no alternative was stored (collapsed into the same decision)', () => {
+    const view = deriveReasoningView(baseData({ confidenceBand: 'coin-flip', alternatives: [] }))
+    expect(view.coinFlipNote).toBeNull()
+    expect(view.alternativesEmptyNote).not.toBeNull()
+  })
+})
+
+describe('deriveReasoningView — alternative with missing recommendation_reasons', () => {
+  it('renders the alternative without its reason headline, rather than dropping it or erroring', () => {
+    const view = deriveReasoningView(
+      baseData({ alternatives: [alternativePlan({ planIndex: 1, reasons: [] })] })
+    )
+    expect(view.alternatives).toHaveLength(1)
+    expect(view.alternatives[0].reasonHeadline).toBeNull()
+    expect(view.alternatives[0].label).toBe('Plan B')
+    expect(view.alternatives[0].differenceText.length).toBeGreaterThan(0)
   })
 })
 

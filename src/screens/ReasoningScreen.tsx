@@ -16,8 +16,15 @@ import './ReasoningScreen.css'
  * verdict card — reached by tapping through from VerdictCard's new link,
  * but works as a direct navigation too.
  *
- * Renders Plan A only (`plan_index = 0`), matching the verdict card's own
- * scope. All display logic lives in `src/lib/reasoning/derive.ts`
+ * Plan A is the recommendation this screen exists to explain, and its own
+ * rendering (headline, totals, captain confidence, per-player breakdown) is
+ * unchanged since #79. Ticket #102 adds Plan B/Plan C below it, in their own
+ * visually subordinate section — every alternative is rendered as a
+ * difference off Plan A, never as a competing option; see
+ * ./ReasoningContent's own comment and design-reference.md's rule that only
+ * the home screen's verdict is "the loudest thing on the screen" — here
+ * Plan A keeps that role relative to B/C, not relative to the rest of the
+ * app. All display logic lives in `src/lib/reasoning/derive.ts`
  * (`deriveReasoningView`) — this component fetches, derives, and renders
  * whatever the view says, the same split VerdictCard/deriveVerdictView and
  * Pitch/pitchLayout already establish.
@@ -188,6 +195,68 @@ function ReasoningContent({ data }: { data: ReasoningRecommendationData | null }
           </Surface>
         ))}
       </div>
+
+      {/* Alternatives (ticket #102) — deliberately the quietest section on
+          the screen: smaller labels, no --text-display figures, no accent
+          headline. Plan A already had its say above; this section exists
+          only to show how close the call was, per product-brief.md §8. */}
+      <section className="reasoning-alternatives" aria-label="Alternative plans">
+        <p className="reasoning-alternatives__heading">Alternatives considered</p>
+
+        {view.coinFlipNote && (
+          <Surface className="reasoning-alternatives-coinflip" role="status">
+            <p className="reasoning-alternatives-coinflip__note">{view.coinFlipNote}</p>
+          </Surface>
+        )}
+
+        {view.alternativesEmptyNote && (
+          <Surface className="reasoning-alternatives-empty">
+            <p className="reasoning-alternatives-empty__note">{view.alternativesEmptyNote}</p>
+          </Surface>
+        )}
+
+        {view.alternatives.map((alternative) => (
+          <Surface key={alternative.label} className="reasoning-alternative">
+            <div className="reasoning-alternative__header">
+              <p className="reasoning-alternative__label">{alternative.label}</p>
+              <p className="reasoning-alternative__gap">
+                <span className="num">
+                  {alternative.pointsGap > 0 ? `+${alternative.pointsGap}` : alternative.pointsGap}
+                </span>{' '}
+                <span className="reasoning-alternative__gap-text">pts vs Plan A</span>
+              </p>
+            </div>
+
+            <p className="reasoning-alternative__diff">{alternative.differenceText}</p>
+
+            {alternative.reasonHeadline && (
+              <p className="reasoning-alternative__reason">{alternative.reasonHeadline}</p>
+            )}
+
+            <div className="reasoning-alternative__meta">
+              <span className="reasoning-alternative__confidence">
+                Confidence: {alternative.confidenceWord}
+              </span>
+              {alternative.hit && (
+                <span className="reasoning-alternative__hit">
+                  <span className="num">−{alternative.hit.cost}</span> hit ·{' '}
+                  <span className="num">{alternative.hit.net}</span> net
+                </span>
+              )}
+            </div>
+
+            <ul className="reasoning-alternative__players">
+              {alternative.players.map((player) => (
+                <li key={player.role} className="reasoning-alternative__player">
+                  <span className="reasoning-alternative__player-role">{player.role}</span>
+                  <span className="reasoning-alternative__player-name">{player.name}</span>
+                  <span className="reasoning-alternative__player-coverage">{player.coverageNote}</span>
+                </li>
+              ))}
+            </ul>
+          </Surface>
+        ))}
+      </section>
 
       <Surface className="reasoning-meta">
         <p className="reasoning-meta__line">

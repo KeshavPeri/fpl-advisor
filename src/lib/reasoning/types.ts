@@ -63,11 +63,45 @@ export interface PlayerProjectionData {
 export type ReasoningRole = 'transferIn' | 'transferOut' | 'captain' | 'viceCaptain'
 
 /**
+ * One stored alternative plan (`plan_index` 1 or 2) for the same gameweek as
+ * Plan A — ticket #102. Deliberately a much smaller shape than Plan A's own
+ * fields on `ReasoningRecommendationData`: no starting XI, no per-player
+ * projection breakdown. The alternatives section exists to show HOW an
+ * alternative differs from Plan A and by how much, not to re-render a whole
+ * second reasoning card (see this ticket's Notes — "not a menu").
+ */
+export interface AlternativePlanData {
+  /** 1 for Plan B, 2 for Plan C. Never 0 — Plan A is never itself an "alternative". */
+  planIndex: number
+  isRoll: boolean
+  transferInPlayerId: number | null
+  transferOutPlayerId: number | null
+  captainPlayerId: number
+  hitCost: number
+  grossPointsRounded: number
+  netPointsRounded: number
+  confidenceBand: ConfidenceBand
+  /** Same shape and same "no entry = no known gap" reading as Plan A's own
+   *  `coverage` field — this plan's own stored `recommendations.coverage`
+   *  row, not Plan A's. */
+  coverage: readonly CoverageEntry[]
+  /** `recommendation_reasons.reason` for this plan, order_index ascending.
+   *  Empty when this plan has no stored reasons at all (ticket DoD: a plan
+   *  missing its reasons still renders, just without them) — never used to
+   *  drop the plan. */
+  reasons: readonly string[]
+}
+
+/**
  * Everything `deriveReasoningView` needs for one recommendation — already
  * resolved by `src/lib/reasoning/api.ts` (player names looked up, every
  * reason line fetched in order, the starting XI and the four named players'
- * projections read). Plan A only (`plan_index = 0`), matching the verdict
- * card's own scope — this ticket never reads Plan B/C.
+ * projections read). Plan A's own fields below are unchanged from before
+ * ticket #102 (`plan_index = 0`, matching the verdict card's own scope for
+ * Plan A). `alternatives` is new in #102: every OTHER stored plan
+ * (`plan_index` 1 and 2 when present) for this same gameweek, ordered
+ * ascending — `[]` when Plan A is the only plan #60's distinctness collapse
+ * left standing, which is a normal, confident outcome, not a shortfall.
  */
 export interface ReasoningRecommendationData {
   gameweekId: number
@@ -103,4 +137,7 @@ export interface ReasoningRecommendationData {
    *  entry here (projection missing or read failed) gets an explicit
    *  "unavailable" breakdown in the view, never a blank screen. */
   projections: ReadonlyMap<number, PlayerProjectionData>
+  /** Every OTHER stored plan for this same gameweek (`plan_index` 1, 2),
+   *  ordered ascending. See `AlternativePlanData`'s own header. */
+  alternatives: readonly AlternativePlanData[]
 }
