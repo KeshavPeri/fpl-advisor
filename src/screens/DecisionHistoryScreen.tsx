@@ -31,6 +31,14 @@ import './DecisionHistoryScreen.css'
  * (design-reference.md's own explicit rule), so it renders in exactly the
  * same neutral tone as a commit, distinguished only by its label and its
  * honest recommendation-gap note.
+ *
+ * Ticket #107 adds the recommended-vs-decided comparison for an override
+ * that carries one — rendered the same neutral way, still no colour: the
+ * exact same "gap-note" visual slot now carries either the honest
+ * not-preserved note OR the comparison summary, never both. All decision
+ * logic (which note wins, exactly what differed) lives in
+ * src/lib/decisions/derive.ts; this file renders whichever of the two
+ * fields on `DecisionEntryView` is non-null.
  */
 
 type ScreenState =
@@ -165,8 +173,19 @@ function DecisionEntryRow({ entry }: { entry: DecisionEntryView }) {
         </div>
       </dl>
 
+      {/* Ticket #107: exactly one of the two notes below ever renders for an
+          override — the honest gap note when no `recommended` side was
+          stored, or the comparison summary when one was. Reuses the same
+          "gap-note" visual treatment (neutral secondary text, a hairline
+          separator) for both, per design-reference.md's rule for this
+          screen: an override compared against its recommendation is not a
+          failure, so it gets no colour treatment of its own — only the
+          words differ. */}
       {entry.recommendationGapNote && (
         <p className="decisions-entry__gap-note">{entry.recommendationGapNote}</p>
+      )}
+      {entry.recommendationComparison && (
+        <p className="decisions-entry__gap-note">{entry.recommendationComparison.summaryText}</p>
       )}
 
       <p className="decisions-entry__decided-at">
