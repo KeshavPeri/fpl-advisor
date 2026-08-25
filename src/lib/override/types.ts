@@ -31,6 +31,12 @@ export interface OverrideRecommendation {
    *  api.ts's own comment on why this is read from `recommendations`
    *  directly rather than threaded through a different fetch. */
   solverRunId: number | null
+  /** `recommendations.hit_cost` for this plan (NOT NULL in the schema —
+   *  20260817090000_recommendations.sql). Added by ticket #107 solely to
+   *  carry the recommended side into the override write (see
+   *  `RecommendedSnapshot` below) — the confirm panel does not display it
+   *  (Scope: no change to the confirm panel's fields). */
+  hitCost: number
 }
 
 /** One selectable player — the squad's 15, or the wider player pool for the
@@ -90,13 +96,33 @@ export interface OverrideDecisionsContext {
   existingOverride: StoredOverrideDecision | null
 }
 
+/** The recommended side of an override snapshot (ticket #107) — the same
+ *  seven field names as the decided side above, sourced unchanged from the
+ *  `OverrideRecommendation` the confirm step compared the entry against.
+ *  Written into `snapshot.recommended` alongside (never in place of) the
+ *  seven decided keys, so a later reader (src/lib/decisions/) can render
+ *  what was recommended without ever reading the live, upserted-in-place
+ *  `recommendations` table — see this ticket's Context for the full
+ *  "because". */
+export interface RecommendedSnapshot {
+  isRoll: boolean
+  transferInPlayerId: number | null
+  transferOutPlayerId: number | null
+  captainPlayerId: number
+  viceCaptainPlayerId: number
+  hitCost: number
+  solverRunId: number | null
+}
+
 /** Everything registerOverride needs to write exactly one row. `hitCost` is
  *  typed as the literal `null` — never a number — because a hit figure is
  *  never hand-typed here; see the ticket's Notes ("the real figure already
  *  arrives from the FPL API … leave hit_cost null in the override
  *  snapshot"). Mirrors `recommendation_decisions.snapshot`'s seven named
  *  keys exactly, same convention as src/lib/commit/types.ts's
- *  `CommitTarget`. */
+ *  `CommitTarget`. `recommended` (ticket #107) is threaded straight from
+ *  the `OverrideRecommendation` the confirm panel already compared the
+ *  entry against — it is not re-derived here. */
 export interface OverrideTarget {
   gameweekId: number
   planIndex: number
@@ -107,4 +133,5 @@ export interface OverrideTarget {
   viceCaptainPlayerId: number
   hitCost: null
   solverRunId: number | null
+  recommended: RecommendedSnapshot
 }

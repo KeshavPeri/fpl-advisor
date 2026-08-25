@@ -308,8 +308,12 @@ export function deriveOverrideFlowView(input: OverrideFlowInput): OverrideFlowVi
  * Assembles the row to write from a completed, non-identical entry — the
  * caller (OverrideScreen) only invokes this once deriveOverrideFlowView has
  * returned a non-null `comparison`, so the incomplete-entry throw below is
- * a defensive backstop, not a path the UI can reach. `hitCost` is always
- * the literal `null` — see types.ts's own comment on OverrideTarget.
+ * a defensive backstop, not a path the UI can reach. `hitCost` (the
+ * DECIDED value, top-level) is always the literal `null` — see types.ts's
+ * own comment on OverrideTarget. `recommended` (ticket #107) is threaded
+ * straight from `recommendation` unchanged — the same seven fields, the
+ * same values the confirm panel already compared the entry against — so
+ * this function does no extra data retrieval or re-deriving to build it.
  */
 export function buildOverrideTarget(
   recommendation: OverrideRecommendation,
@@ -330,6 +334,15 @@ export function buildOverrideTarget(
     viceCaptainPlayerId: entry.viceCaptainPlayerId,
     hitCost: null,
     solverRunId: recommendation.solverRunId,
+    recommended: {
+      isRoll: recommendation.isRoll,
+      transferInPlayerId: recommendation.transferInPlayerId,
+      transferOutPlayerId: recommendation.transferOutPlayerId,
+      captainPlayerId: recommendation.captainPlayerId,
+      viceCaptainPlayerId: recommendation.viceCaptainPlayerId,
+      hitCost: recommendation.hitCost,
+      solverRunId: recommendation.solverRunId,
+    },
   }
 }
 
