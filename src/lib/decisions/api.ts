@@ -26,6 +26,21 @@ function raise(error: { message: string }): never {
  */
 const PAGE_SIZE = 1000
 
+/** The raw `recommended` sub-object (ticket #107), snake_cased and
+ *  read exactly as stored — `jsonb` enforces no shape, so every field is
+ *  optional here even though src/lib/override/api.ts's `registerOverride`
+ *  always writes all seven; see ./types.ts's `RecommendedSnapshot` for why
+ *  a missing key must render as "not recorded", not error or fabricate. */
+interface DbRecommendedSnapshot {
+  is_roll?: boolean
+  transfer_in_player_id?: number | null
+  transfer_out_player_id?: number | null
+  captain_player_id?: number
+  vice_captain_player_id?: number
+  hit_cost?: number
+  solver_run_id?: number | null
+}
+
 interface DbDecisionRow {
   gameweek_id: number
   plan_index: number
@@ -39,6 +54,11 @@ interface DbDecisionRow {
     vice_captain_player_id: number
     hit_cost: number | null
     solver_run_id: number | null
+    // Absent (undefined) for a commit and for every override registered
+    // before #107 — normalized to `null` below, never left `undefined`, so
+    // ./types.ts's DecisionSnapshot has exactly one "absent" value to check
+    // for (see that type's own comment).
+    recommended?: DbRecommendedSnapshot | null
   }
 }
 
@@ -140,14 +160,22 @@ export async function fetchDecisionHistorySource(): Promise<DecisionHistorySourc
 
   const playerIds = Array.from(
     new Set(
-      decisionRows.flatMap((row) =>
-        [
+      decisionRows.flatMap((row) => {
+        const recommended = row.snapshot.recommended
+        return [
           row.snapshot.transfer_in_player_id,
           row.snapshot.transfer_out_player_id,
           row.snapshot.captain_player_id,
           row.snapshot.vice_captain_player_id,
-        ].filter((id): id is number => id !== null)
-      )
+          // Ticket #107: the recommended side (when present) references its
+          // own player ids, independent of the decided side's — both must
+          // resolve to a name for the comparison to render correctly.
+          recommended?.transfer_in_player_id,
+          recommended?.transfer_out_player_id,
+          recommended?.captain_player_id,
+          recommended?.vice_captain_player_id,
+        ].filter((id): id is number => id !== null && id !== undefined)
+      })
     )
   )
 
@@ -179,6 +207,24 @@ export async function fetchDecisionHistorySource(): Promise<DecisionHistorySourc
       viceCaptainPlayerId: row.snapshot.vice_captain_player_id,
       hitCost: row.snapshot.hit_cost,
       solverRunId: row.snapshot.solver_run_id,
+      // Ticket #107. `?? null` normalizes an absent key (undefined) to the
+      // same `null` used for "no recommended side at all" — never left as
+      // `undefined` (see DbDecisionRow's own comment and
+      // ./types.ts's DecisionSnapshot). A recommended object that IS
+      // present but missing one of ITS OWN seven keys is passed through
+      // as-is: derive.ts's comparison renders that specific field as "not
+      // recorded" (DoD), which is a different case from no object at all.
+      recommended: row.snapshot.recommended
+        ? {
+            isRoll: row.snapshot.recommended.is_roll,
+            transferInPlayerId: row.snapshot.recommended.transfer_in_player_id,
+            transferOutPlayerId: row.snapshot.recommended.transfer_out_player_id,
+            captainPlayerId: row.snapshot.recommended.captain_player_id,
+            viceCaptainPlayerId: row.snapshot.recommended.vice_captain_player_id,
+            hitCost: row.snapshot.recommended.hit_cost,
+            solverRunId: row.snapshot.recommended.solver_run_id,
+          }
+        : null,
     },
   }))
 
