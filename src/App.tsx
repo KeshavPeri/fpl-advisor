@@ -1,5 +1,6 @@
 import { Route, Routes } from 'react-router'
 import ChipsScreen from './screens/ChipsScreen'
+import DecisionHistoryScreen from './screens/DecisionHistoryScreen'
 import HomeScreen from './screens/HomeScreen'
 import OverrideScreen from './screens/OverrideScreen'
 import ReasoningScreen from './screens/ReasoningScreen'
@@ -13,7 +14,10 @@ import SquadEntryScreen from './screens/SquadEntryScreen'
  * link. `/chips` (ticket #85) renders the chip-state screen, reached from
  * the home screen's new link. `/override` (ticket #91) renders override
  * registration, reached from the verdict card's own new link alongside its
- * commit control. <BrowserRouter> is provided by main.tsx.
+ * commit control. `/decisions` (ticket #103) renders the decision history —
+ * the append-only ledger of what was actually committed or overridden,
+ * reached from the home screen's mark row alongside the existing `/chips`
+ * link. <BrowserRouter> is provided by main.tsx.
  */
 function App() {
   return (
@@ -23,6 +27,7 @@ function App() {
       <Route path="/reasoning" element={<ReasoningScreen />} />
       <Route path="/chips" element={<ChipsScreen />} />
       <Route path="/override" element={<OverrideScreen />} />
+      <Route path="/decisions" element={<DecisionHistoryScreen />} />
     </Routes>
   )
 }

@@ -45,6 +45,10 @@ import './HomeScreen.css'
  * order (countdown, verdict, pitch, then this card). It owns its own read
  * (src/lib/accuracy/api.ts) and renders unconditionally, the same
  * independence VerdictCard already has from the pitch's own load state.
+ *
+ * Ticket #103 adds the "Decisions →" link beside "Chips →" in the same mark
+ * row, through to the new /decisions screen — that screen owns its own read
+ * entirely (src/lib/decisions/api.ts), independent of everything above.
  */
 
 type LoadState =
@@ -144,9 +148,14 @@ function HomeScreen() {
       <DeadlineCountdown state={countdownState} />
       <div className="home-header">
         <header className="home-mark">FPL Advisor</header>
-        <Link className="home-chips-link" to="/chips">
-          Chips →
-        </Link>
+        <div className="home-header-links">
+          <Link className="home-chips-link" to="/decisions">
+            Decisions →
+          </Link>
+          <Link className="home-chips-link" to="/chips">
+            Chips →
+          </Link>
+        </div>
       </div>
 
       {targetGameweek && (
