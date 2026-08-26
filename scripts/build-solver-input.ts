@@ -57,9 +57,15 @@
 // Wiring
 // ============================================================================
 // Reads SUPABASE_URL, SUPABASE_SECRET_KEY (required), PROJECTIONS_CSV_PATH,
-// TEAM_JSON_PATH, SOLVER_CONFIG_PATH and SOLVER_SECS (all optional, sensible
-// defaults below). Writes no table other than job_runs, and only on a real
+// TEAM_JSON_PATH, SOLVER_CONFIG_PATH, SOLVER_SECS and CHIP_PROBE (all
+// optional, sensible defaults below). Writes no table other than job_runs, and only on a real
 // failure — see "No squad" and "One job_runs row per execution" below.
+//
+// CHIP_PROBE (ticket #114) — presence-gated, like GITHUB_OUTPUT above: when set to any
+// non-empty value, buildSolverConfig's chip_limits becomes { bb: 1, wc: 0, fh: 0, tc: 1 }
+// instead of all zeros. Unset (the live solver-run.yml never sets it) leaves every output
+// byte-for-byte identical to before this ticket. See buildSolverConfig's own comment on
+// chip_limits and .github/workflows/solver-chip-probe.yml, the only workflow that sets it.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { parse } from 'csv-parse/sync'
@@ -212,8 +218,20 @@ interface PathEnv {
   teamJsonPath: string
   solverConfigPath: string
   solverSecs: number
+  chipProbe: boolean
 }
 
+/**
+ * Ticket #114. `CHIP_PROBE` is read the same way `SOLVER_SECS` is above: a single environment
+ * variable, read once here into the typed env struct, then threaded explicitly into
+ * `buildSolverConfig` as a parameter — `buildSolverConfig` itself stays pure (no `process.env`
+ * read inside it), matching this file's "Pure functions" section below. Presence-gated, not
+ * value-gated (`Boolean('')` is `false`, so an accidentally-empty-but-set variable still means
+ * "off") — the same convention `writeGithubOutput`'s caller and `readSupabaseEnv` already use
+ * elsewhere in this file for "is this env var set at all". When unset, `chipProbe` is `false`
+ * and `buildSolverConfig`'s output is byte-for-byte identical to before this ticket — see
+ * `chip_limits` on `buildSolverConfig` below for the one line that reads this flag.
+ */
 function readPathEnv(): PathEnv {
   const rawSecs = process.env.SOLVER_SECS
   const parsedSecs = rawSecs ? Number(rawSecs) : NaN
@@ -222,6 +240,7 @@ function readPathEnv(): PathEnv {
     teamJsonPath: process.env.TEAM_JSON_PATH ?? DEFAULT_TEAM_JSON_PATH,
     solverConfigPath: process.env.SOLVER_CONFIG_PATH ?? DEFAULT_SOLVER_CONFIG_PATH,
     solverSecs: Number.isFinite(parsedSecs) && parsedSecs > 0 ? parsedSecs : SOLVER_TIME_LIMIT_SECS,
+    chipProbe: Boolean(process.env.CHIP_PROBE),
   }
 }
 
@@ -380,6 +399,15 @@ export function analyzeProjectionsCsv(records: ReadonlyArray<Record<string, stri
   return { horizonGwIds, emptyGameweekIds }
 }
 
+/**
+ * Ticket #114. Widened from the literal `{ bb: 0; wc: 0; fh: 0; tc: 0 }` to allow the
+ * `CHIP_PROBE`-triggered `{ bb: 1; wc: 0; fh: 0; tc: 1 }` shape as well — `wc` and `fh` stay
+ * pinned to the literal `0` because no wildcard or free hit probe is in scope (see
+ * `buildSolverConfig`'s own comment). This widens the TYPE only; the RUNTIME DEFAULT
+ * `buildSolverConfig` returns when `chipProbe` is unset/false is unchanged — still all zeros.
+ */
+export type ChipLimits = { bb: 0 | 1; wc: 0; fh: 0; tc: 0 | 1 }
+
 export interface SolverConfig {
   horizon: number
   team_data: 'json'
@@ -389,7 +417,7 @@ export interface SolverConfig {
   ev_per_price_cutoff: number
   no_transfer_last_gws: number
   datasource: string
-  chip_limits: { bb: 0; wc: 0; fh: 0; tc: 0 }
+  chip_limits: ChipLimits
   secs: number
   solver: 'highs'
   num_iterations: 3
@@ -432,8 +460,20 @@ export interface SolverConfig {
  * the shipped data/user_settings.json default of 2) because this app's 5-gameweek horizon rolls
  * forward every night and has no "end of season" for that shipped setting to protect. See
  * NO_TRANSFER_LAST_GWS's own comment above for the full because.
+ *
+ * `chip_limits` — ticket #114 (dispatch-only chip probe, feature-list item 27's diagnostic
+ * precursor). Defaults to `{ bb: 0, wc: 0, fh: 0, tc: 0 }`, exactly as before this ticket, UNLESS
+ * `params.chipProbe` is `true`, in which case it is `{ bb: 1, wc: 0, fh: 0, tc: 1 }` — Bench Boost
+ * and Triple Captain enabled, Wildcard and Free Hit still forbidden. Never wired to the live
+ * `solver-run.yml` workflow: enabling chips there would make the solver optimise assuming a chip
+ * is played with no way yet to read back which chip or gameweek it chose (only
+ * `print_transfer_chip_summary`'s stdout says that, and parsing it is explicitly the NEXT
+ * ticket) — the app would then present a transfer/captain recommendation without ever saying a
+ * chip was involved, which product-brief.md §6a forbids. `.github/workflows/solver-chip-probe.yml`
+ * (workflow_dispatch only) sets `CHIP_PROBE` to exercise this path in isolation, uploads the raw
+ * solver output as artefacts, and stores nothing. See docs/solver-notes.md.
  */
-export function buildSolverConfig(params: { horizon: number; datasource: string; secs?: number }): SolverConfig {
+export function buildSolverConfig(params: { horizon: number; datasource: string; secs?: number; chipProbe?: boolean }): SolverConfig {
   if (!Number.isInteger(params.horizon) || params.horizon <= 0) {
     throw new BuildInputError(`horizon must be a positive integer, got ${params.horizon}`, 'config')
   }
@@ -458,7 +498,7 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
     ev_per_price_cutoff: EV_PER_PRICE_CUTOFF,
     no_transfer_last_gws: NO_TRANSFER_LAST_GWS,
     datasource: params.datasource,
-    chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
+    chip_limits: params.chipProbe ? { bb: 1, wc: 0, fh: 0, tc: 1 } : { bb: 0, wc: 0, fh: 0, tc: 0 },
     secs: params.secs ?? SOLVER_TIME_LIMIT_SECS,
     solver: 'highs',
     num_iterations: 3,
@@ -767,7 +807,12 @@ async function main(): Promise<void> {
     }
 
     const datasource = deriveDatasource(paths.projectionsCsvPath)
-    const solverConfig = buildSolverConfig({ horizon: horizonGwIds.length, datasource, secs: paths.solverSecs })
+    const solverConfig = buildSolverConfig({
+      horizon: horizonGwIds.length,
+      datasource,
+      secs: paths.solverSecs,
+      chipProbe: paths.chipProbe,
+    })
 
     // --------------------------------------------------------------------
     // 6. Write both files. No file inside the solver checkout other than

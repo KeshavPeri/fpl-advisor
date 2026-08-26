@@ -1,0 +1,150 @@
+name: Solver chip probe
+
+# Ticket #114 — a dispatch-only diagnostic that removes a guess before
+# feature-list item 27 (chip recommendation) is written. Turning the
+# solver's chip options on is a one-line config change (CHIP_PROBE, see
+# scripts/build-solver-input.ts); reading back which chip it decided to
+# play, and in which gameweek, is UNSOLVED — the chip decision only appears
+# in stdout via print_transfer_chip_summary, and nobody has read that with
+# chips enabled, because chip_limits has been all-zero since ticket #41.
+# This workflow runs the solver with Bench Boost and Triple Captain enabled
+# and uploads its raw output as artefacts — nothing more. See
+# docs/solver-notes.md for the full write-up.
+#
+# workflow_dispatch ONLY — manual trigger, nothing automatic. Never wired
+# into any other workflow in this repo, including the one that ingests and
+# projects data every day or solver-run.yml itself: enabling chips in the
+# LIVE run without a way to read the decision back would make the
+# solver optimise assuming a chip is played, and the app would present the
+# resulting transfer/captain without ever saying a chip was involved — a
+# confidently wrong recommendation, which product-brief.md §6a forbids.
+#
+# Mirrors .github/workflows/solver-run.yml up to and including the solve
+# step, then stops — no store, no recommendations, no Telegram send, and no
+# job_runs row of its own beyond what scripts/emit-projections-csv.ts and
+# scripts/build-solver-input.ts already write as an unavoidable part of
+# doing exactly what those two (unmodified) scripts do in the live run. It
+# deliberately omits solver-run.yml's "Record install/checkout failure"
+# step: that step performs an EXTRA raw Supabase write outside "build the
+# CSV and team.json", which this probe's read-only promise does not cover.
+on:
+  workflow_dispatch: {}
+
+env:
+  PROJECTIONS_CSV_PATH: solver/data/fpladvisor.csv
+  TEAM_JSON_PATH: solver/data/team.json
+  SOLVER_CONFIG_PATH: solver/data/solver-config.json
+  SOLVER_LOG_PATH: solver/solve.log
+  SOLVER_RESULTS_DIR: solver/data/results
+
+jobs:
+  chip-probe:
+    runs-on: ubuntu-latest
+    # No store/recommend/notify steps here, so less headroom than
+    # solver-run.yml's 20 needs — checkout + npm ci + uv sync + CSV emit +
+    # build-input are low single-digit minutes; 15 covers the 5-minute
+    # solve (secs: 300, scripts/build-solver-input.ts's
+    # SOLVER_TIME_LIMIT_SECS) plus all of that with room to spare.
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check out solver at pinned commit
+        uses: actions/checkout@v6
+        with:
+          repository: sertalpbilal/FPL-Optimization-Tools
+          # Same pin as solver-run.yml — see decisions/ticket-29.md and
+          # decisions/ticket-41.md. Do not move this to a branch or tag.
+          ref: 45131c5a41d7caadb5cb626c012bfa9111dca7a2
+          path: solver
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install solver dependencies (and pinned Python, via uv sync)
+        working-directory: solver
+        run: uv sync
+
+      - name: Emit projections CSV
+        # Reuses the existing, unmodified scripts/emit-projections-csv.ts
+        # (item 11) — this workflow never regenerates or reshapes the CSV.
+        # Read-only against player_projections/players/teams/gameweeks; the
+        # one write it performs is its own job_runs row, the same as it
+        # writes in the live solver-run.yml.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/emit-projections-csv.ts
+
+      - name: Build solver input (CHIP_PROBE)
+        id: build-input
+        # CHIP_PROBE is the only difference from solver-run.yml's equivalent
+        # step: it makes buildSolverConfig emit chip_limits
+        # { bb: 1, wc: 0, fh: 0, tc: 1 } instead of all zeros — see
+        # scripts/build-solver-input.ts's own comment on CHIP_PROBE and
+        # buildSolverConfig's chip_limits. Everything else (team.json from
+        # squads/squad_picks, never from FPL's authenticated squad endpoint)
+        # is identical to the live run. Read-only against squads/
+        # squad_picks/players; the one write it performs is its own
+        # job_runs row (ticket #95's widening counters), the same as it
+        # writes in the live solver-run.yml.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SOLVER_SECS: '300'
+          CHIP_PROBE: '1'
+        run: npx tsx scripts/build-solver-input.ts
+
+      - name: Run solver
+        id: solve
+        if: steps.build-input.outputs.squad_found == 'true'
+        working-directory: solver
+        # Exit code swallowed deliberately, same reasoning as
+        # solver-run.yml's equivalent step: dev/solver.py's exit code alone
+        # cannot distinguish a genuine crash/infeasible solve from a
+        # time-limit-reached-but-usable one. This workflow has no
+        # store/parse step to make that determination, so the swallow here
+        # just ensures the artefact-upload steps below still run and yield
+        # whatever log/CSV/config the solve produced, however it ended.
+        run: |
+          set +e
+          uv run python run/solve.py --config data/solver-config.json > solve.log 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload solver stdout log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chip-probe-solver-log
+          path: ${{ env.SOLVER_LOG_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload results CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chip-probe-results-csv
+          path: ${{ env.SOLVER_RESULTS_DIR }}/*.csv
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload solver config JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chip-probe-config-json
+          path: ${{ env.SOLVER_CONFIG_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
