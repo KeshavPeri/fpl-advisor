@@ -151,10 +151,21 @@ without anyone deciding that on purpose.
 | `xmin_lb` | `300` | `150` | Overridden (ticket #41) — see `XMIN_LB`'s comment in `scripts/build-solver-input.ts`. Untouched by ticket #95. |
 | `preseason` | `true` | `false` | Overridden (ticket #41) — the shipped `true` replaces the whole squad with an empty one. Untouched by ticket #95. |
 | `no_transfer_last_gws` | `2` | `0` | **Overridden (ticket #108).** Shipped `2` forbids transfers in the last 2 gameweeks of the solve horizon — sensible for upstream's own use case (a horizon run to the end of a season, where the optimiser should stop banking transfers it will never use), wrong for this app: our horizon is 5 and rolls forward every night, so gameweeks 4 and 5 of tonight's horizon are next month, not the end of anything, and we will genuinely transfer there. Left inherited, it banned transfers across 40% of every plan the solver built, distorted the stored multi-week plan (the Plan A/B/C reasoning screen), under-valued a banked free transfer via `ft_value_list`, and — because a multi-period optimiser's earlier decisions depend on what it plans later — even affected the gameweek-1 recommendation the app acts on. Set to `0`, not a smaller positive number, because this app's horizon has no "end of season" for any non-zero value to protect. See `NO_TRANSFER_LAST_GWS`'s comment in `scripts/build-solver-input.ts` and `decisions/ticket-108.md`. |
-| `decay_base` | `0.9` | *(not set — inherited)* | **Inherited, reasonable.** Discounts future gameweeks' projected points by `0.9^n` when computing `total_ev`, so nearer gameweeks weigh more. Worth noting explicitly that this is inherited, not a value this app chose — if the discount ever looks wrong in practice, this is where to look. |
+| `decay_base` | `0.9` | `0.9` | **Overridden (ticket #120).** Discounts future gameweeks' projected points by `decay_base^n` when computing `total_ev` (`n` = gameweeks out from the first horizon gameweek), so nearer gameweeks weigh more — across this app's 5-gameweek horizon the last gameweek (`n = 4`) carries `0.9^4 ≈ 0.656`, about 66% of the weight of the first. Value unchanged from what has been running (ticket #95's audit flagged it as inherited-but-defensible, and it was); this ticket makes it a chosen, documented value instead of a silently-inherited one. See `DECAY_BASE`'s comment in `scripts/build-solver-input.ts`. Whether 0.9 is the right discount is a measurement question for the backtest, not this ticket. |
 
-`decay_base` remains documented here for completeness (ticket #95's original audit scope), not
-changed — it is defensible as shipped and any change belongs in its own ticket, later, alone.
+**Every scalar key `data/user_settings.json` ships is now explicitly set.** `run/solve.py`
+merges our `--config` file on top of the shipped file with `options.update(config_options)` (see
+above) — our key always wins when set, and the shipped default silently survives for any key we
+never mention. Ticket #95 audited every key the shipped file ships; #108 moved
+`no_transfer_last_gws` out of the inherited column; #120 (this ticket) moves `decay_base` out of
+it too, completing the scalar audit — every scalar setting in the table above is now overridden,
+none is silently inherited.
+
+**One key remains genuinely inherited: `ft_value_list`.** It is not a scalar (it is a per-horizon
+list valuing a banked free transfer at each point in the horizon) and was out of scope for #120
+by design — folding a list-shaped setting into a "set the last scalar" ticket would conflate two
+different kinds of change. It deserves its own future ticket to review and either set explicitly
+or document as deliberately inherited.
 
 ## Dispatch-only chip probe (ticket #114)
 
