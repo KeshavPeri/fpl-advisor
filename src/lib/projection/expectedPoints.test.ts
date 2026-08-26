@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../scoring/types.ts'
 import type { Position } from '../scoring/types.ts'
+import { defensiveMultiplier, expectedScore, expectedScoreFromDifficulty } from './fixture.ts'
+import { cleanSheetPoints as cleanSheetPointsFor } from './pointValues.ts'
 import {
   cleanSheetProbability,
   expectedGoalsConcededPoints,
@@ -184,6 +186,124 @@ describe('the elo fallback is used whenever either team in the fixture has a nul
   it('both elo present: the fallback is not used', () => {
     const projection = projectPlayerFixture(player(), fixture({ teamElo: 1500, opponentElo: 1500 }))
     expect(projection.modelInputs.eloFallbackUsed).toBe(false)
+  })
+})
+
+// ============================================================================
+// Ticket #109 -- expected saves scale with fixture difficulty
+// ============================================================================
+
+describe('expectedSaves scales with fixture difficulty (ticket #109)', () => {
+  it('a goalkeeper\'s projected save points are strictly higher in a hard fixture than an easy one, all else equal', () => {
+    const gk = player({
+      position: GOALKEEPER,
+      rateHistory: { minutesPlayed: 900, totalXg: 0, totalXa: 0, totalSaves: 27, totalCbi: 0, totalRecoveries: 0 }, // 3 saves/90 observed
+      ratePositionPrior: { xgPer90: 0, xaPer90: 0, savesPer90: 3, cbiPer90: 0, recoveriesPer90: 0 },
+    })
+    const hardFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 5 }) // expectedScore 0.25 -> savesMultiplier 1.5
+    const easyFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 1 }) // expectedScore 0.75 -> savesMultiplier 0.5
+
+    const hard = projectPlayerFixture(gk, hardFixture)
+    const easy = projectPlayerFixture(gk, easyFixture)
+
+    expect(hard.modelInputs.savesMultiplier).toBeCloseTo(1.5, 10)
+    expect(easy.modelInputs.savesMultiplier).toBeCloseTo(0.5, 10)
+    expect(hard.expectedEvents.expectedSaves).toBeGreaterThan(easy.expectedEvents.expectedSaves)
+    expect(hard.components.savePoints).toBeGreaterThan(easy.components.savePoints)
+  })
+
+  it('modelInputs.savesMultiplier equals defensiveMultiplier(expectedScore) and expectedSaves is savesPer90 x minutesFraction x that multiplier', () => {
+    const gk = player({
+      position: GOALKEEPER,
+      rateHistory: { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
+      ratePositionPrior: { xgPer90: 0, xaPer90: 0, savesPer90: 4, cbiPer90: 0, recoveriesPer90: 0 },
+      recentMinutes: [90, 90, 90, 90, 90], // minutesFraction = 1
+    })
+    const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 4 }) // expectedScore 0.375
+    const projection = projectPlayerFixture(gk, f)
+
+    expect(projection.modelInputs.expectedScore).toBeCloseTo(0.375, 10)
+    const expectedMultiplier = defensiveMultiplier(0.375)
+    expect(projection.modelInputs.savesMultiplier).toBeCloseTo(expectedMultiplier, 12)
+    expect(projection.expectedEvents.expectedSaves).toBeCloseTo(4 * 1 * expectedMultiplier, 10)
+  })
+
+  it('the FPL-FDR fallback path flows through the new multiplier identically to the elo path -- same expectedScore, same multiplier, either way', () => {
+    const gk = player({
+      position: GOALKEEPER,
+      rateHistory: { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
+      ratePositionPrior: { xgPer90: 0, xaPer90: 0, savesPer90: 5, cbiPer90: 0, recoveriesPer90: 0 },
+      recentMinutes: [90, 90, 90, 90, 90],
+    })
+
+    // Fallback path: three promoted clubs with no ClubElo rating -> null elo -> eloFallbackUsed.
+    const fallbackFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 2 })
+    const fallback = projectPlayerFixture(gk, fallbackFixture)
+    expect(fallback.modelInputs.eloFallbackUsed).toBe(true)
+    expect(fallback.modelInputs.expectedScore).toBeCloseTo(expectedScoreFromDifficulty(2), 12)
+    expect(fallback.modelInputs.savesMultiplier).toBeCloseTo(defensiveMultiplier(fallback.modelInputs.expectedScore), 12)
+
+    // Elo path: both teams rated -> not the fallback. Same formula (defensiveMultiplier)
+    // is applied to whatever expectedScore this path produces.
+    const eloFixture = fixture({ teamElo: 1620, opponentElo: 1480, isHome: true })
+    const elo = projectPlayerFixture(gk, eloFixture)
+    expect(elo.modelInputs.eloFallbackUsed).toBe(false)
+    const expectedEloScore = expectedScore(1620, 1480, true)
+    expect(elo.modelInputs.expectedScore).toBeCloseTo(expectedEloScore, 12)
+    expect(elo.modelInputs.savesMultiplier).toBeCloseTo(defensiveMultiplier(expectedEloScore), 12)
+
+    // Both paths apply the identical function to whatever expectedScore they produced --
+    // there is no separate branch or scaling for the fallback case.
+    expect(fallback.expectedEvents.expectedSaves).toBeCloseTo(5 * 1 * defensiveMultiplier(fallback.modelInputs.expectedScore), 10)
+    expect(elo.expectedEvents.expectedSaves).toBeCloseTo(5 * 1 * defensiveMultiplier(elo.modelInputs.expectedScore), 10)
+  })
+})
+
+describe('outfield players (defender, midfielder, forward) are byte-for-byte unchanged by ticket #109', () => {
+  // savesPer90 is near zero for real outfield players, so this would hold trivially --
+  // it is asserted here instead, with a deliberately large savesPer90 (9/90, absurd for
+  // an outfield player) and a fixture whose savesMultiplier is far from 1.0 (1.5), so
+  // that if the multiplier ever leaked into a component other than savePoints, this
+  // test would catch it. It cannot leak: expectedSaves feeds only
+  // expectedSavePoints(expectedSaves, position), and savePointsApply(position) is false
+  // for every outfield position regardless of the value of expectedSaves -- so
+  // savePoints is 0 both before and after this ticket's change, and every other
+  // component is computed from xgPer90/xaPer90/defconHitRate/teamLambdaConceded alone,
+  // none of which this ticket touches.
+  const rateHistory = { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 }
+  const ratePositionPrior = { xgPer90: 0, xaPer90: 0, savesPer90: 9, cbiPer90: 0, recoveriesPer90: 0 }
+  const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 5, leagueBaselineGoals: 1 }) // expectedScore 0.25 -> savesMultiplier 1.5, attackMultiplier 0.5
+
+  // Hand-computed pre-ticket values for this fixture (leagueBaselineGoals=1, expectedScore=0.25):
+  //   teamLambdaConceded = expectedGoalsConceded(1, 0.25) = 1 x 2 x 0.75 = 1.5
+  //   pCleanSheet = exp(-1.5); pSixtyPlus = 1 (recentMinutes all 90, status 'a')
+  //   expectedGoals = expectedAssists = 0 (xgPer90 = xaPer90 = 0)
+  //   defensiveContributionPoints = 0 (defconPositionPrior = 0, no matches)
+  //   appearancePoints = 1 x 1 + 1 x 1 = 2 (pAppears = pSixtyPlus = 1)
+  // None of these depend on savesPer90 or the new savesMultiplier -- unaffected by this ticket.
+  const teamLambdaConceded = 1.5
+  const pCleanSheet = cleanSheetProbability(teamLambdaConceded)
+
+  it.each([
+    [DEFENDER, 4],
+    [MIDFIELDER, 1],
+    [FORWARD, 0],
+  ] as const)('%s: every component matches the pre-ticket value', (position, expectedCleanSheetPointsValue) => {
+    const p = player({ position, rateHistory, ratePositionPrior, defconPositionPrior: 0, defconMatches: [] })
+    const projection = projectPlayerFixture(p, f)
+
+    expect(cleanSheetPointsFor(position)).toBe(expectedCleanSheetPointsValue) // sanity-check the table read above
+    expect(projection.components.appearancePoints).toBeCloseTo(2, 12)
+    expect(projection.components.goalPoints).toBe(0)
+    expect(projection.components.assistPoints).toBe(0)
+    expect(projection.components.cleanSheetPoints).toBeCloseTo(pCleanSheet * 1 * expectedCleanSheetPointsValue, 12)
+    expect(projection.components.goalsConcededPoints).toBeCloseTo(expectedGoalsConcededPoints(teamLambdaConceded, position), 12)
+    expect(projection.components.savePoints).toBe(0) // gated by savePointsApply(position), independent of expectedSaves
+    expect(projection.components.defensiveContributionPoints).toBe(0)
+    expect(projection.components.bonusPoints).toBe(0)
+
+    // The multiplied expectedSaves is real (surfaced in expectedEvents) but never reaches components.
+    expect(projection.expectedEvents.expectedSaves).toBeCloseTo(9 * 1 * 1.5, 10)
   })
 })
 

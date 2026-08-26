@@ -103,6 +103,29 @@ export function expectedGoalsConceded(leagueBaselineGoals: number, expectedScore
 }
 
 /**
+ * Multiplier applied to a goalkeeper's baseline saves rate for this fixture:
+ * `2 × (1 - expectedScore)`, clamped to `[0, 2]` — the exact defensive
+ * mirror of {@link attackingMultiplier} (`2 × expectedScore`), and the ratio
+ * form of {@link expectedGoalsConceded} (`leagueBaselineGoals × 2 × (1 -
+ * expectedScore)` — divide out `leagueBaselineGoals` and this is what is
+ * left). Saves and goals conceded share one cause, being under pressure from
+ * the same fixture, so they share one multiplier derived the same way: a
+ * team twice as likely to concede faces roughly twice the shot volume. At
+ * `expectedScore = 0.5` (an even fixture) this is exactly `1.0` — no
+ * adjustment. A heavily unfavoured fixture pushes toward `2.0` (double the
+ * expected saves workload); a heavily favoured one pushes toward `0.0`.
+ *
+ * `expectedGoalsConceded(b, s) === b * defensiveMultiplier(s)` by
+ * construction (see fixture.test.ts) -- the two are never allowed to drift
+ * apart. See docs/projection-model-backlog.md G1 for the caveat this does
+ * NOT resolve: shot volume and shot quality are correlated, not identical,
+ * so this slightly double-counts the fixture against expectedGoalsConceded.
+ */
+export function defensiveMultiplier(expectedScoreValue: number): number {
+  return clamp(2 * (1 - expectedScoreValue), 0, 2)
+}
+
+/**
  * Pre-season / early-season placeholder for the league-wide average goals
  * scored per team per match, used when fewer than 20 finished fixtures
  * exist to compute it from `public.fixtures` at runtime (true before GW1

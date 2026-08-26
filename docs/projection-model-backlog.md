@@ -18,39 +18,47 @@ building them into `baseline-v1` first would be wasted work.
 
 ---
 
-## G1 — Goalkeeper saves do not scale with fixture difficulty
+## G1 — Goalkeeper saves do not scale with fixture difficulty — ADDRESSED by ticket #109, 25 Aug 2026
 
-**The gap.** In `src/lib/projection/expectedPoints.ts`, expected saves are
-`savesPer90 × minutesFraction`. Every other attacking and defensive term is adjusted by the
-ClubElo-derived fixture number; this one is not. A goalkeeper facing the best attack in the league
-is projected for exactly the same number of saves as one facing the worst.
+**Addressed before the backtest existed, not after.** Ticket #109 shipped the fix described
+below — `defensiveMultiplier(expectedScore) = 2 × (1 - expectedScore)`, clamped to `[0, 2]`, the
+exact mirror of `attackingMultiplier` and the ratio form of `expectedGoalsConceded` — while item 32
+(the backtest) still does not exist. `expectedSaves` in `expectedPoints.ts` is now `savesPer90 ×
+minutesFraction × defensiveMultiplier(expectedScore)`, and the multiplier used is surfaced as
+`modelInputs.savesMultiplier`. Nothing else in the model moved: not goals, assists, clean sheets,
+goals conceded, defensive contribution, appearance, or bonus — this term alone.
 
-**Why it is wrong.** Saves are a *function of being under pressure*. The same fixture difficulty
+**What this does NOT resolve — the caveat stands, deliberately.** Shots faced and goals conceded
+are correlated but not identical: a keeper's save count depends on shot volume, while goals
+conceded depends on shot quality and his own shot-stopping. Scaling saves by the *same* factor as
+goals conceded double-counts the fixture slightly. Ticket #109 shipped anyway on the judgement that
+a term with no fixture adjustment at all is further from the truth than one adjusted slightly too
+hard, and shipping now beats waiting for a backtest that sits behind the largest piece of work on
+the feature list. Whether the double-counting matters more than the gap it replaces is still a
+question for the backtest (item 32), not for argument — see G7/G8's "do not act from argument
+alone" precedent.
+
+**The original gap, for context.** In `src/lib/projection/expectedPoints.ts`, expected saves were
+`savesPer90 × minutesFraction`. Every other attacking and defensive term was adjusted by the
+ClubElo-derived fixture number; this one was not. A goalkeeper facing the best attack in the league
+was projected for exactly the same number of saves as one facing the worst.
+
+**Why it was wrong.** Saves are a *function of being under pressure*. The same fixture difficulty
 that raises a keeper's expected goals conceded should raise his expected saves — they are two
 consequences of the same cause. Because save points accumulate in complete groups of three with **no
 cap** (`product-brief.md` §6d — a different function from defensive contribution, and a genuinely
 uncapped one), the upside for a busy keeper is real and this term is the one that captures it.
 
-**Direction of the error.** Goalkeepers at weaker clubs are **undervalued** — they face more shots
-than the model credits them for. Keepers at dominant clubs are marginally overvalued on saves,
-though they gain most of their points from clean sheets anyway. The error is partly self-cancelling:
-a hard fixture already lowers a keeper's clean-sheet and goals-conceded terms, so the total moves in
-roughly the right direction for the wrong reason. That is not the same as being correct, and it
-means the model cannot distinguish "cheap keeper at a bad club who saves a lot" — a well-known FPL
-value archetype — from "cheap keeper at a bad club who simply concedes."
+**Direction of the error, before the fix.** Goalkeepers at weaker clubs were **undervalued** — they
+faced more shots than the model credited them for. Keepers at dominant clubs were marginally
+overvalued on saves, though they gained most of their points from clean sheets anyway. The error was
+partly self-cancelling: a hard fixture already lowered a keeper's clean-sheet and goals-conceded
+terms, so the total moved in roughly the right direction for the wrong reason. That was not the same
+as being correct, and it meant the model could not distinguish "cheap keeper at a bad club who saves
+a lot" — a well-known FPL value archetype — from "cheap keeper at a bad club who simply concedes."
 
-**Shape of the fix.** The defensive mirror of the attacking multiplier already exists in
-`fixture.ts`: `expectedGoalsConceded` is `leagueBaselineGoals × 2 × (1 - expectedScore)`. A saves
-multiplier is the same quantity in ratio form — `2 × (1 - expectedScore)`, clamped, applied to
-`savesPer90`. That keeps the "explainable in one sentence" property: *a keeper facing a team twice
-as likely to score faces roughly twice the shot volume.* It is a small, pure, testable change
-confined to `expectedPoints.ts` and `fixture.ts`.
-
-**What to be careful about.** Shots faced and goals conceded are correlated but not identical — a
-keeper's save count depends on shot volume, while goals conceded depends on shot quality and his own
-shot-stopping. Scaling saves by the *same* factor as goals conceded double-counts the fixture
-slightly. Whether that matters more than the current gap is a judgement worth making with the
-backtest (item 32) rather than by argument.
+See the "ADDRESSED" note above for what shipped and the caveat that remains open — not restated
+twice in this entry.
 
 ---
 

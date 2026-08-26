@@ -21,7 +21,13 @@ import { estimateDefconHitRate, expectedDefensiveContributionPoints } from './de
 import type { DefensiveContributionMatch } from './types.ts'
 import { availabilityFactor, estimateMinutes } from './minutes.ts'
 import { computePlayerRates, type PlayerRateHistory, type PlayerRates } from './rates.ts'
-import { attackingMultiplier, expectedGoalsConceded, expectedScore, expectedScoreFromDifficulty } from './fixture.ts'
+import {
+  attackingMultiplier,
+  defensiveMultiplier,
+  expectedGoalsConceded,
+  expectedScore,
+  expectedScoreFromDifficulty,
+} from './fixture.ts'
 import {
   ASSIST_POINTS,
   GOALS_CONCEDED_DIVISOR,
@@ -171,6 +177,8 @@ export interface FixtureModelInputs {
   defconHitRate: number
   expectedScore: number
   expectedGoalsConceded: number
+  /** The defensive multiplier applied to savesPer90 for this fixture -- see fixture.ts's defensiveMultiplier. Ticket #109. */
+  savesMultiplier: number
   pCleanSheet: number
   /** True when this fixture's expectedScore came from the FPL-FDR fallback in fixture.ts because a team's elo was null. Counted in job_runs.details by the job. */
   eloFallbackUsed: boolean
@@ -209,11 +217,16 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
     : expectedScore(fixture.teamElo as number, fixture.opponentElo as number, fixture.isHome)
 
   const attackMultiplier = attackingMultiplier(expectedScoreValue)
+  const savesMultiplier = defensiveMultiplier(expectedScoreValue)
   const teamLambdaConceded = expectedGoalsConceded(fixture.leagueBaselineGoals, expectedScoreValue)
 
   const expectedGoals = playerRates.xgPer90 * minutesFraction * attackMultiplier
   const expectedAssists = playerRates.xaPer90 * minutesFraction * attackMultiplier
-  const expectedSaves = playerRates.savesPer90 * minutesFraction
+  // Saves scale with the same fixture pressure that raises goals conceded --
+  // a keeper facing a team twice as likely to score faces roughly twice the
+  // shot volume. See fixture.ts's defensiveMultiplier and
+  // docs/projection-model-backlog.md G1 for the caveat this does not resolve.
+  const expectedSaves = playerRates.savesPer90 * minutesFraction * savesMultiplier
   // CBI and recoveries are defensive-action counts, not attacking output --
   // scaled by minutes exposure only, same as expectedSaves above, with no
   // fixture attacking multiplier applied (matching defconRate.ts, which
@@ -263,6 +276,7 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
       defconHitRate,
       expectedScore: expectedScoreValue,
       expectedGoalsConceded: teamLambdaConceded,
+      savesMultiplier,
       pCleanSheet,
       eloFallbackUsed,
     },

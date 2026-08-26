@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   HOME_ADVANTAGE_ELO,
   attackingMultiplier,
+  defensiveMultiplier,
   expectedGoalsConceded,
   expectedScore,
   expectedScoreFromDifficulty,
@@ -98,6 +99,32 @@ describe('expectedGoalsConceded', () => {
   })
   it('never returns a negative value', () => {
     expect(expectedGoalsConceded(1.5, 1.0)).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('defensiveMultiplier -- ticket #109, the exact mirror of attackingMultiplier', () => {
+  it('equals 1.0 exactly at expectedScore = 0.5 (an even fixture must leave the term unadjusted)', () => {
+    expect(defensiveMultiplier(0.5)).toBe(1.0)
+  })
+  it('is 2 x (1 - expectedScore)', () => {
+    expect(defensiveMultiplier(0.3)).toBeCloseTo(2 * 0.7, 10)
+    expect(defensiveMultiplier(0.9)).toBeCloseTo(2 * 0.1, 10)
+  })
+  it('returns 2.0 at expectedScore = 0 (certain loss -- maximum shot pressure)', () => {
+    expect(defensiveMultiplier(0)).toBe(2.0)
+  })
+  it('returns 0.0 at expectedScore = 1 (certain win -- no shot pressure)', () => {
+    expect(defensiveMultiplier(1)).toBe(0.0)
+  })
+  it('is clamped to [0, 2] even for an out-of-range expectedScore', () => {
+    expect(defensiveMultiplier(-1)).toBe(2)
+    expect(defensiveMultiplier(2)).toBe(0)
+  })
+  it('agrees with expectedGoalsConceded by construction: expectedGoalsConceded(b, s) === b x defensiveMultiplier(s), across five values of s', () => {
+    const leagueBaselineGoals = 1.45
+    for (const s of [0, 0.25, 0.5, 0.75, 1]) {
+      expect(expectedGoalsConceded(leagueBaselineGoals, s)).toBeCloseTo(leagueBaselineGoals * defensiveMultiplier(s), 12)
+    }
   })
 })
 
