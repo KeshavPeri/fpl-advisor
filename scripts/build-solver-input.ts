@@ -191,7 +191,7 @@ export const NO_TRANSFER_LAST_GWS = 0
  * Ticket #120. `buildSolverConfig` never used to set this explicitly, so it silently inherited
  * the shipped `data/user_settings.json`'s `decay_base: 0.9` at the pinned commit
  * (45131c5a41d7caadb5cb626c012bfa9111dca7a2) — the last scalar setting ticket #95's audit table
- * left in the inherited column (#110 already moved `no_transfer_last_gws` out of it).
+ * left in the inherited column (#108 already moved `no_transfer_last_gws` out of it).
  *
  * dev/solver.py discounts each future gameweek in the objective by `decay_base^n`, where `n` is
  * how many gameweeks out from the first horizon gameweek: gameweek 2 of the horizon is worth
