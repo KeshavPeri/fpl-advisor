@@ -18,6 +18,7 @@ import {
   HIT_COST,
   ITERATION_CRITERION,
   KEEP_TOP_EV_PERCENT,
+  NO_TRANSFER_LAST_GWS,
   XMIN_LB,
   analyzeProjectionsCsv,
   buildSolverConfig,
@@ -140,7 +141,7 @@ describe('buildSolverConfig', () => {
     expect(config.ev_per_price_cutoff).toBe(EV_PER_PRICE_CUTOFF)
   })
 
-  it('is the ONLY thing that changed by this ticket: every other key in the built config matches the pre-#95 baseline exactly, so an accidental edit to xmin_lb, horizon, decay_base-style settings, or chip_limits fails this test', () => {
+  it('is the ONLY thing that changed by this ticket: every other key in the built config matches the pre-#108 baseline exactly, so an accidental edit to xmin_lb, horizon, decay_base-style settings, or chip_limits fails this test', () => {
     const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300 })
     expect(config).toEqual({
       horizon: 3,
@@ -149,6 +150,7 @@ describe('buildSolverConfig', () => {
       xmin_lb: 150,
       keep_top_ev_percent: 25,
       ev_per_price_cutoff: 10,
+      no_transfer_last_gws: 0,
       datasource: 'fpladvisor',
       chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
       secs: 300,
@@ -160,6 +162,18 @@ describe('buildSolverConfig', () => {
       print_squads: true,
       print_transfer_chip_summary: true,
     })
+  })
+
+  // --------------------------------------------------------------------
+  // Ticket #108 — stop inheriting no_transfer_last_gws (shipped default 2)
+  // from the solver. See NO_TRANSFER_LAST_GWS's own comment in
+  // build-solver-input.ts for the full because.
+  // --------------------------------------------------------------------
+
+  it('sets no_transfer_last_gws to 0, overriding the shipped default of 2', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
+    expect(config.no_transfer_last_gws).toBe(0)
+    expect(config.no_transfer_last_gws).toBe(NO_TRANSFER_LAST_GWS)
   })
 
   it('sets num_iterations to 3 — ticket #47, so the solve produces Plan A/B/C — and iteration_criteria explicitly rather than the shipped default', () => {
