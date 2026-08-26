@@ -64,6 +64,10 @@ twice in this entry.
 
 ## G2 — Players with no Premier League history in EITHER season get a generic projection with no signal
 
+**xG/xA half ADDRESSED by ticket #119, 26 Aug 2026 — see below for what remains open.**
+Everything else in this entry (the population, why it's not urgent, the non-price parts of the
+fix) is otherwise unchanged from the #113 narrowing.
+
 **Narrowed by ticket #113, 26 Aug 2026.** Before #113, "no history" meant no match rows at all,
 across the single season then ingested. Now that both the current season and last season are
 ingested (see G6), a player only falls back to the pure position prior if he has **no qualifying
@@ -113,11 +117,28 @@ The gap also shrinks every week of the season as real 2026/27 matches accumulate
   zero history should be *labelled* as such wherever it is shown, and should drop a confidence band
   (`product-brief.md` §8's clear / marginal / coin-flip). `player_projections.components` already
   carries enough to detect it. This belongs in item 13 or 21, not in a projection ticket.
-- **Use price as a weak prior.** FPL's own analysts price a new signing according to expected
-  returns, so `players.now_cost` carries real information about a player the model otherwise knows
-  nothing about. Blending a price-derived prior into the position prior, weighted only when history
-  is absent, is a small change and a genuine improvement. Needs a stated calibration, so it wants
-  the backtest.
+- **Use price as a weak prior — ADDRESSED for xG/xA by ticket #119, 26 Aug 2026.** FPL's own
+  analysts price a new signing according to expected returns, so `players.now_cost` carries real
+  information about a player the model otherwise knows nothing about.
+  `priceAdjustedPositionPrior`/`priceAdjustmentScale` (`src/lib/projection/rates.ts`) scale a
+  no-history player's xG/xA position prior by his price relative to the position's median
+  `now_cost`, clamped to `[0.6, 1.8]`. Applied ONLY when a player has zero minutes at every
+  ingested level (`scripts/project-points.ts`'s `effectiveRatePositionPrior`) — a player with any
+  real minutes is completely unaffected.
+
+  **What this does NOT fix, stated plainly:**
+  - **Minutes are untouched.** A no-history player still gets whatever `minutes.ts`'s no-history
+    default produces; price says nothing about whether a signing starts, and this ticket does not
+    change that model.
+  - **Defensive volume (saves, CBI, recoveries) is untouched, deliberately.** Price signals
+    attacking expectation, not clearances or tackles — those three rates still fall back to the
+    flat position prior for this population, unchanged.
+  - **The clamp bounds are not a calibration.** `[0.6, 1.8]` is a stated deliberate
+    under-correction — chosen so a correctly-priced outlier can't manufacture false confidence
+    (`product-brief.md` §8) — not a value fitted against outcomes. No backtest yet shows the
+    price-adjusted estimate lands closer to reality than the flat prior it replaces; that is still
+    open work, and belongs with whatever ticket eventually builds the backtest referenced
+    throughout this doc.
 - **Ingest non-Premier-League history.** Correct in principle, out of scope in practice — it needs a
   new external source, which is a Tier 2 data-source decision and a whole ticket of verification.
   Do not start here.
