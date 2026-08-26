@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   estimateDefconHitRate,
+  estimateTwoStageDefconHitRate,
   expectedDefensiveContributionPoints,
   isQualifyingMatch,
   positionPriorHitRate,
@@ -204,5 +207,88 @@ describe('position-prior helper', () => {
   it('returns the neutral value when every match is non-qualifying', () => {
     const onlyCameos = [match({ minutesPlayed: 20 }), match({ minutesPlayed: 45 })]
     expect(positionPriorHitRate(MIDFIELDER, onlyCameos)).toBe(0.5)
+  })
+})
+
+// ============================================================================
+// Ticket #113 — two-stage shrinkage, defcon sibling of rates.ts's
+// computeTwoStagePlayerRates. Same four named cases.
+// ============================================================================
+
+describe('estimateTwoStageDefconHitRate — ticket #113 two-stage shrinkage', () => {
+  const positionPrior = 0.3
+
+  // 20 qualifying matches, 12 hits -> an established historical rate (0.6
+  // raw) far from both the position prior and any current-season figure
+  // used below.
+  const establishedHistorical = [
+    ...Array.from({ length: 12 }, () => match({ clearances: 10 })), // hit
+    ...Array.from({ length: 8 }, () => match({ clearances: 0 })), // miss
+  ]
+
+  it('a player with zero current-season matches projects IDENTICALLY (to the last decimal) to the current single-stage rate -- the most important case', () => {
+    const singleStage = estimateDefconHitRate(DEFENDER, establishedHistorical, positionPrior)
+    const twoStage = estimateTwoStageDefconHitRate(DEFENDER, [], establishedHistorical, positionPrior)
+    expect(twoStage).toBeCloseTo(singleStage, 12)
+  })
+
+  it('a player with a full season of current-season qualifying matches converges on his current-season rate, historical contributing negligibly', () => {
+    // 30 qualifying current-season matches, all misses -> raw current rate
+    // 0.0, far from both the historical rate (0.6) and the position prior
+    // (0.3).
+    const fullCurrentSeason = Array.from({ length: 30 }, () => match({ clearances: 0 }))
+    const twoStage = estimateTwoStageDefconHitRate(DEFENDER, fullCurrentSeason, establishedHistorical, positionPrior)
+    // 30 qualifying matches against k = 5 phantom matches -- close to 0,
+    // regardless of how far off the personal prior sits.
+    expect(twoStage).toBeLessThan(0.1)
+  })
+
+  it('a player with two current-season matches sits close to his historical rate, not his current-season rate', () => {
+    // 2 qualifying current-season matches, both hits -> raw current rate
+    // 1.0, far above the historical rate.
+    const twoCurrentMatches = [match({ clearances: 10 }), match({ clearances: 10 })]
+    const twoStage = estimateTwoStageDefconHitRate(DEFENDER, twoCurrentMatches, establishedHistorical, positionPrior)
+    const personalPrior = estimateDefconHitRate(DEFENDER, establishedHistorical, positionPrior)
+    const rawCurrentRate = 1.0
+
+    const distanceToHistoricalEnd = Math.abs(twoStage - personalPrior)
+    const distanceToCurrentEnd = Math.abs(twoStage - rawCurrentRate)
+    expect(distanceToHistoricalEnd).toBeLessThan(distanceToCurrentEnd)
+  })
+
+  it('a player with no qualifying matches in either season returns the position prior exactly', () => {
+    const twoStage = estimateTwoStageDefconHitRate(DEFENDER, [], [], positionPrior)
+    expect(twoStage).toBeCloseTo(positionPrior, 12)
+  })
+
+  it('goalkeepers always return 0, regardless of stats or prior, at both stages', () => {
+    const twoStage = estimateTwoStageDefconHitRate(
+      GOALKEEPER,
+      [match({ clearances: 50 })],
+      establishedHistorical,
+      0.9,
+    )
+    expect(twoStage).toBe(0)
+  })
+})
+
+// ============================================================================
+// Ticket #113 — no fixed weighting literal, and no I/O. Same grep technique
+// rates.test.ts uses on its own source.
+// ============================================================================
+
+describe('defconRate.ts source invariants (ticket #113)', () => {
+  const source = readFileSync(fileURLToPath(new URL('./defconRate.ts', import.meta.url)), 'utf8')
+
+  it('contains no fixed weighting literal -- no "0.7", "0.3" or "weight"', () => {
+    expect(source).not.toMatch(/0\.7/)
+    expect(source).not.toMatch(/0\.3\b/)
+    expect(source).not.toMatch(/weight/i)
+  })
+
+  it('stays pure -- no supabase, fetch or process.env', () => {
+    expect(source).not.toMatch(/supabase/i)
+    expect(source).not.toMatch(/\bfetch\(/)
+    expect(source).not.toMatch(/process\.env/)
   })
 })

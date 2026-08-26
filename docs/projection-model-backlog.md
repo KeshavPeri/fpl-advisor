@@ -62,34 +62,50 @@ twice in this entry.
 
 ---
 
-## G2 — Players with no Premier League history get a generic projection with no signal
+## G2 — Players with no Premier League history in EITHER season get a generic projection with no signal
 
-**The gap.** The model's rate inputs come from `player_match_stats`, which holds **Premier League
-matches only**. A player with no rows falls back to the position prior for xG/xA and to the stated
-no-history default for minutes. On the first live run (15 Aug 2026) **265 of 587 players — 45% —
-had no historical match rows at all.**
+**Narrowed by ticket #113, 26 Aug 2026.** Before #113, "no history" meant no match rows at all,
+across the single season then ingested. Now that both the current season and last season are
+ingested (see G6), a player only falls back to the pure position prior if he has **no qualifying
+rows in either season** — a player with even a couple of 2026/27 appearances now gets a
+personal, evidence-shaped projection instead (see G6 for the mechanism). This entry is
+narrowed to the population that's left, not resolved: the underlying cause — `player_match_stats`
+holds Premier League matches only, and a player who has never featured in one has nothing to read
+— is unchanged.
+
+**The gap, as it stands after #113.** The model's rate inputs come from `player_match_stats`. A
+player with zero qualifying rows **in both the current season and every historical season ingested**
+falls back to the position prior for xG/xA and to the stated no-history default for minutes. Before
+#113, on the first live run (15 Aug 2026), **265 of 587 players — 45% — had no historical match rows
+at all**; that figure was for a single season and needs re-measuring against the narrower
+post-#113 population once the current-season directory is publishing (`job_runs.details`'s
+`playersWithNeitherSeasonRows` counter, added by #113, is exactly this number going forward — no
+more re-deriving it from a live run by hand).
 
 **Who they are.** Three populations, and only one of them is obvious:
 
-1. Players at the three promoted clubs, who played in the Championship last season.
-2. Players signed from outside the Premier League this summer.
+1. Players at the three promoted clubs, who played in the Championship last season **and have not
+   yet played a current-season Premier League minute either.**
+2. Players signed from outside the Premier League this summer, similarly still waiting on their
+   first current-season Premier League appearance.
 3. **The largest group, and the one that surprises people: squad-listed players who exist in FPL but
    never played a Premier League minute** — academy players, third-choice goalkeepers, long-term
    injured players, and fringe squad members at established clubs. Every club carries several.
 
 Group 3 is harmless — those players correctly project near zero and would never be recommended.
-Groups 1 and 2 are the real cost.
+Groups 1 and 2 are the real cost, and #113 shrinks them the moment either player takes the pitch —
+that's the whole point of making the current season load-bearing.
 
 **Direction of the error.** A genuinely good new signing gets an average projection instead of a
-good one, so **the model will not recommend him**, and cannot, until he has played enough Premier
-League minutes to build a rate. For a GW1 deadline this is a live blind spot: exactly the players a
-human is most excited about are the ones the model is quietest about.
+good one, so **the model will not recommend him**, and cannot, until he has played at least one
+qualifying Premier League minute in some ingested season. Before #113 that meant waiting for enough
+history to build a rate at all; after #113, a single current-season match already moves him off the
+pure position prior (see G6's two-stage rule) — the wait is shorter, not eliminated.
 
-**Why it is not urgent, and why it is honest.** At GW1 *nobody* has 2026/27 data — every projection
-in the system is running on last season's Premier League form. A player with no such form is a
-genuine unknown, and returning the position prior is the truthful answer rather than a confident
-wrong one. `product-brief.md` §6a's rule applies: **no recommendation beats a wrong one.** The gap
-also shrinks every week of the season as real 2026/27 matches accumulate.
+**Why it is not urgent, and why it is honest.** A player with no Premier League evidence at any
+level is a genuine unknown, and returning the position prior is the truthful answer rather than a
+confident wrong one. `product-brief.md` §6a's rule applies: **no recommendation beats a wrong one.**
+The gap also shrinks every week of the season as real 2026/27 matches accumulate — see G6.
 
 **Shape of the fix, in increasing order of effort.**
 
@@ -169,19 +185,60 @@ fixtures are not being ingested and that is a real failure wearing a normal-look
 
 ---
 
-## G6 — Every projection is currently built on 2025/26 form, under 2026/27 scoring rules
+## G6 — ADDRESSED by ticket #113, 26 Aug 2026 — every projection was built entirely on 2025/26 form
 
-`scripts/ingest-core-insights.ts` ingests the **2025-2026** season by design — 2026/27 has no played
-matches yet. But the 2026/27 BPS rebalance and the defensive-contribution rules mean last season's
-raw actions are being scored under this season's rules. That is the correct thing to do and it is
-what `src/lib/scoring/` exists for.
+**Previously:** `scripts/ingest-core-insights.ts` ingested only the **2025-2026** season, because
+2026/27 had no played matches yet at the time it was written. That stopped being true once gameweeks
+1 and 2 of 2026/27 were played and published, and nothing read them — a player who had actually
+started twice this season was judged purely on last season's form, or on the position prior if he
+had none.
 
-The residual risk is **behavioural, not arithmetic**: players change how they play when the rules
-reward different actions. Defensive-contribution thresholds already changed how midfielders press in
-2025/26; the 2026/27 BPS change to CBI will move it again. Last season's rates are a good prior for
-this season's behaviour, not a measurement of it. This is the same caveat `product-brief.md` §9
-open question 4 raises about backtest fidelity, and it resolves itself as 2026/27 matches
-accumulate.
+**What ticket #113 did.** `.github/workflows/scheduled-jobs.yml` now runs the same
+`ingest-core-insights.ts` job twice, once per season (`CORE_INSIGHTS_SEASON=2025-2026` and
+`2026-2027`) — no change to the ingest script's own logic, which already took the season as a
+parameter. `scripts/project-points.ts` splits each player's `player_match_stats` rows by season
+(joined on `player_code`, filtered to `competition = 'prem'` in both) into a current-season set and
+a historical set.
+
+**The two-stage rule, stated once, the way every v1 input must be (`product-brief.md` §6d):**
+**this season, shrunk toward (last season, shrunk toward the position average).** Concretely, in
+`src/lib/projection/rates.ts` and `defconRate.ts`:
+
+1. the player's **historical** rate (or defensive-contribution hit rate), shrunk toward the
+   position prior via the existing `SHRINKAGE_K` (rates) / `k = 5` (defcon) formula — this becomes
+   his **personal prior**;
+2. the player's **current-season** rate, shrunk toward that personal prior, via the identical
+   formula.
+
+No fixed percentage anywhere, and no new parameter — the shrinkage formula's own "phantom nineties"
+mechanism already produces the right shape: two gameweeks of current-season evidence barely move a
+player off his personal prior, and a full season of it dominates. A player with zero current-season
+minutes projects identically to the single-stage rate that shipped before this ticket; a player with
+no rows in either season still returns the pure position prior, exactly as before. `recentMinutes`
+(the last-five-matches window `estimateMinutes` reads) is built the same way — current-season matches
+sort ahead of historical ones, so a player who has started twice this season is not judged on last
+season's bench appearances. `job_runs.details` now carries `playersWithCurrentSeasonRows`,
+`playersWithHistoricalOnlyRows`, `playersWithNeitherSeasonRows` (summing to the total player count)
+and `currentSeasonRowsRead`, so the population size behind every figure in this file is checkable
+from a live run rather than re-derived by hand.
+
+**What this does NOT resolve — the residual risk is unchanged, and it is behavioural, not
+arithmetic.** Both seasons' raw actions are scored under 2026/27's rules (that is what
+`src/lib/scoring/` is for, and was already correct before this ticket) — but players change how they
+play when the rules reward different actions. Defensive-contribution thresholds already changed how
+midfielders press in 2025/26; the 2026/27 BPS change to CBI will move it again. Last season's rates
+are a good *prior* for this season's behaviour, not a *measurement* of it. This is the same caveat
+`product-brief.md` §9 open question 4 raises about backtest fidelity — ticket #113 makes it resolve
+itself faster (current-season evidence now reaches the model at all, and dominates within roughly
+`SHRINKAGE_K` nineties, about 3-4 matches for a nailed starter) rather than removing the caveat.
+
+**What this does NOT resolve — the position prior itself.** `positionPriorRates` /
+`positionPriorHitRate` are still computed from whatever Premier League rows this job reads across
+**both** ingested seasons combined, unchanged by this ticket. Early in the season that is
+overwhelmingly last season's data (a couple of current-season gameweeks is a rounding error against
+a full season of history), so the position prior itself is not yet meaningfully "this season's
+average" — only the *personal* prior, per player, is season-aware. See G2 for the population this
+still leaves with no personal signal at all.
 
 ---
 

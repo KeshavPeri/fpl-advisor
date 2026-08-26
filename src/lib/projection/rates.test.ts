@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { SHRINKAGE_K, computePlayerRates, positionPriorRates } from './rates.ts'
+import { SHRINKAGE_K, computePlayerRates, computeTwoStagePlayerRates, positionPriorRates } from './rates.ts'
 
 const zeroPrior = { xgPer90: 0, xaPer90: 0, savesPer90: 0, cbiPer90: 0, recoveriesPer90: 0 }
 
@@ -142,6 +144,91 @@ describe('no probability or rate literal appears outside SHRINKAGE_K and test fi
   })
 })
 
+// ============================================================================
+// Ticket #113 — two-stage shrinkage: this season, shrunk toward (last
+// season, shrunk toward the position average). Four named cases per the
+// DoD, plus the "no fixed weighting literal" source check.
+// ============================================================================
+
+describe('computeTwoStagePlayerRates — ticket #113 two-stage shrinkage', () => {
+  const positionPrior = { xgPer90: 0.2, xaPer90: 0.1, savesPer90: 0, cbiPer90: 3, recoveriesPer90: 4 }
+
+  // A full season's worth of established historical evidence -- big enough
+  // that stage 1 (historical shrunk toward positionPrior) sits close to the
+  // player's own historical rate, not the prior.
+  const establishedHistorical = {
+    minutesPlayed: 3420, // 38 nineties
+    totalXg: 19,
+    totalXa: 9.5,
+    totalSaves: 0,
+    totalCbi: 114,
+    totalRecoveries: 152,
+  }
+
+  const zeroHistory = { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 }
+
+  it('a player with zero current-season minutes projects IDENTICALLY (to the last decimal) to the current single-stage rate -- the most important case: a no-op for players with no new information', () => {
+    const singleStage = computePlayerRates(establishedHistorical, positionPrior)
+    const twoStage = computeTwoStagePlayerRates(zeroHistory, establishedHistorical, positionPrior)
+
+    expect(twoStage.xgPer90).toBeCloseTo(singleStage.xgPer90, 12)
+    expect(twoStage.xaPer90).toBeCloseTo(singleStage.xaPer90, 12)
+    expect(twoStage.savesPer90).toBeCloseTo(singleStage.savesPer90, 12)
+    expect(twoStage.cbiPer90).toBeCloseTo(singleStage.cbiPer90, 12)
+    expect(twoStage.recoveriesPer90).toBeCloseTo(singleStage.recoveriesPer90, 12)
+  })
+
+  it('a player with a full season of current-season minutes converges on his current-season rate, historical contributing negligibly', () => {
+    // A full season of current-season minutes (38 nineties) at a rate far
+    // from both the position prior AND the historical rate above.
+    const fullCurrentSeason = {
+      minutesPlayed: 3420,
+      totalXg: 38, // raw rate 1.0 per 90 -- far from historical's ~0.475 and the prior's 0.2
+      totalXa: 0,
+      totalSaves: 0,
+      totalCbi: 0,
+      totalRecoveries: 0,
+    }
+    const twoStage = computeTwoStagePlayerRates(fullCurrentSeason, establishedHistorical, positionPrior)
+    // With 38 nineties observed against SHRINKAGE_K = 3 phantom nineties,
+    // the personal prior (however far off) can only pull the estimate a
+    // small way off the raw 1.0 rate.
+    expect(twoStage.xgPer90).toBeGreaterThan(0.9)
+    expect(twoStage.xgPer90).toBeLessThan(1.0)
+  })
+
+  it('a player with two current-season matches sits close to his historical rate, not his current-season rate', () => {
+    // 2 matches, 180 minutes (2 nineties), at a rate wildly different from
+    // the established historical rate -- with only 2 nineties against
+    // SHRINKAGE_K = 3 phantom nineties, the personal prior (dominated by
+    // the historical rate) should still dominate the blend.
+    const twoCurrentMatches = {
+      minutesPlayed: 180,
+      totalXg: 4, // raw rate 2.0 per 90 -- far above the historical ~0.475
+      totalXa: 0,
+      totalSaves: 0,
+      totalCbi: 0,
+      totalRecoveries: 0,
+    }
+    const twoStage = computeTwoStagePlayerRates(twoCurrentMatches, establishedHistorical, positionPrior)
+    const personalPrior = computePlayerRates(establishedHistorical, positionPrior)
+    const rawCurrentRate = 4 / 2 // totalXg / nineties
+
+    const distanceToHistoricalEnd = Math.abs(twoStage.xgPer90 - personalPrior.xgPer90)
+    const distanceToCurrentEnd = Math.abs(twoStage.xgPer90 - rawCurrentRate)
+    expect(distanceToHistoricalEnd).toBeLessThan(distanceToCurrentEnd)
+  })
+
+  it('a player with no rows in either season returns the position prior exactly', () => {
+    const twoStage = computeTwoStagePlayerRates(zeroHistory, zeroHistory, positionPrior)
+    expect(twoStage.xgPer90).toBeCloseTo(positionPrior.xgPer90, 12)
+    expect(twoStage.xaPer90).toBeCloseTo(positionPrior.xaPer90, 12)
+    expect(twoStage.savesPer90).toBeCloseTo(positionPrior.savesPer90, 12)
+    expect(twoStage.cbiPer90).toBeCloseTo(positionPrior.cbiPer90, 12)
+    expect(twoStage.recoveriesPer90).toBeCloseTo(positionPrior.recoveriesPer90, 12)
+  })
+})
+
 describe('every returned rate is finite', () => {
   it.each([
     [{ minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 }, zeroPrior],
@@ -160,5 +247,27 @@ describe('every returned rate is finite', () => {
     expect(Number.isFinite(rates.savesPer90)).toBe(true)
     expect(Number.isFinite(rates.cbiPer90)).toBe(true)
     expect(Number.isFinite(rates.recoveriesPer90)).toBe(true)
+  })
+})
+
+// ============================================================================
+// Ticket #113 — no fixed weighting literal, and no I/O. Grepping the actual
+// source rather than re-deriving the logic here, same technique
+// project-points.test.ts already uses for its own source invariants.
+// ============================================================================
+
+describe('rates.ts source invariants (ticket #113)', () => {
+  const source = readFileSync(fileURLToPath(new URL('./rates.ts', import.meta.url)), 'utf8')
+
+  it('contains no fixed weighting literal -- no "0.7", "0.3" or "weight"', () => {
+    expect(source).not.toMatch(/0\.7/)
+    expect(source).not.toMatch(/0\.3\b/)
+    expect(source).not.toMatch(/weight/i)
+  })
+
+  it('stays pure -- no supabase, fetch or process.env', () => {
+    expect(source).not.toMatch(/supabase/i)
+    expect(source).not.toMatch(/\bfetch\(/)
+    expect(source).not.toMatch(/process\.env/)
   })
 })

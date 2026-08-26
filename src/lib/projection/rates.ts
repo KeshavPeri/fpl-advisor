@@ -10,6 +10,27 @@
  * formula is generic in the underlying count, not specific to attacking
  * stats.
  *
+ * TWO-STAGE SHRINKAGE (ticket #113). `player_match_stats` now carries rows
+ * from more than one season, and a player who has actually played this
+ * season should not be judged purely on a position average while last
+ * season's evidence sits unused. The fix is not a fixed percentage split —
+ * "70% this season, 30% last" is wrong at both ends of a season, badly
+ * calibrated after two gameweeks and again in April. It is instead the
+ * SAME shrinkage formula applied twice, stated as its because: this
+ * season, shrunk toward (last season, shrunk toward the position average).
+ * `computeTwoStagePlayerRates` below does exactly that — two calls to
+ * `computePlayerRates`, no new parameter, no numeric literal beyond the
+ * existing `SHRINKAGE_K`. A player with zero current-season minutes
+ * collapses to exactly the single-stage historical-vs-position-prior rate
+ * (today's behaviour, unchanged); a player with no rows at either level
+ * collapses to the position prior, exactly as today.
+ *
+ * `computePlayerRates` itself is untouched on purpose: `expectedPoints.ts`
+ * calls it directly and is out of scope for this ticket, so its signature
+ * cannot change. `scripts/project-points.ts` gets the two-stage effect by
+ * feeding it a personal prior (the historical-stage-1 result) in place of
+ * the position prior — see that file's own header for the wiring.
+ *
  * Pure computation only: no I/O, no database, no fetch.
  *
  * The formula, stated once here rather than per-rate: shrink the observed
@@ -66,6 +87,38 @@ export function computePlayerRates(history: PlayerRateHistory, positionPrior: Pl
     cbiPer90: shrunkRate(history.totalCbi, ninetiesPlayed, positionPrior.cbiPer90),
     recoveriesPer90: shrunkRate(history.totalRecoveries, ninetiesPlayed, positionPrior.recoveriesPer90),
   }
+}
+
+/**
+ * Two-stage shrinkage (ticket #113): the player's own current-season rate,
+ * shrunk toward his personal prior — which is itself his historical rate,
+ * shrunk toward the position prior. Both stages reuse
+ * {@link computePlayerRates} unmodified (same `SHRINKAGE_K`, same formula),
+ * so this function contains no numeric literal of its own and no extra
+ * blending knob — the composition IS the two-stage rule, stated once here:
+ *
+ *   personalPrior = computePlayerRates(historical, positionPrior)
+ *   twoStageRate  = computePlayerRates(currentSeason, personalPrior)
+ *
+ * A player with zero current-season minutes: `computePlayerRates` with
+ * zero minutes returns its prior argument exactly, so this collapses to
+ * `personalPrior` — i.e. today's single-stage historical-vs-position-prior
+ * rate, unchanged to the last decimal. A player with no rows at either
+ * level: both stages collapse in turn, leaving exactly `positionPrior`.
+ * A player with many current-season nineties: stage two's own shrinkage
+ * denominator grows past `SHRINKAGE_K`, so `personalPrior` (and therefore
+ * the historical season) contributes negligibly, converging on the
+ * player's own current-season rate — the same convergence behaviour
+ * `computePlayerRates` already has, just applied to the current-season
+ * observed side instead of the full history.
+ */
+export function computeTwoStagePlayerRates(
+  currentSeason: PlayerRateHistory,
+  historical: PlayerRateHistory,
+  positionPrior: PlayerRates,
+): PlayerRates {
+  const personalPrior = computePlayerRates(historical, positionPrior)
+  return computePlayerRates(currentSeason, personalPrior)
 }
 
 /** One match's worth of the raw stats {@link positionPriorRates} aggregates over. */

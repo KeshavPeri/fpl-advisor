@@ -13,6 +13,16 @@
  * gracefully toward the position's typical rate instead of swinging to 0 or
  * 1 on a handful of matches.
  *
+ * TWO-STAGE SHRINKAGE (ticket #113). `estimateTwoStageDefconHitRate` below
+ * applies the identical shrinkage twice rather than once: the player's own
+ * current-season hit rate, shrunk toward his personal prior, which is
+ * itself his historical hit rate shrunk toward the position prior. Same
+ * `k = 5`, same formula, no new parameter — see `rates.ts`'s header for the
+ * one-line rule this mirrors ("this season, shrunk toward (last season,
+ * shrunk toward the position average)"). Composition of
+ * `estimateDefconHitRate` with itself is the whole implementation; there is
+ * nothing else to tune.
+ *
  * The threshold check itself is never reimplemented here. `cbitCount` and
  * `cbirtCount` alone cannot tell you "hit" or "miss" without also knowing
  * the position-specific threshold value — and this module is not allowed to
@@ -109,6 +119,30 @@ export function estimateDefconHitRate(
 
   const estimate = (hits + SHRINKAGE_K * positionPrior) / (n + SHRINKAGE_K)
   return clamp01(estimate)
+}
+
+/**
+ * Two-stage shrinkage (ticket #113) for the defensive-contribution hit
+ * rate — the defcon sibling of `rates.ts`'s `computeTwoStagePlayerRates`.
+ *
+ *   personalPrior = estimateDefconHitRate(position, historicalMatches, positionPrior)
+ *   twoStageRate  = estimateDefconHitRate(position, currentSeasonMatches, personalPrior)
+ *
+ * Goalkeepers still always return 0 — `estimateDefconHitRate` already
+ * short-circuits on `GOALKEEPER` at both stages, so this composes that
+ * behaviour rather than repeating it. A player with no qualifying
+ * current-season matches collapses to exactly `personalPrior` (today's
+ * single-stage historical-vs-position-prior estimate); a player with no
+ * qualifying matches at either level collapses to exactly `positionPrior`.
+ */
+export function estimateTwoStageDefconHitRate(
+  position: Position,
+  currentSeasonMatches: readonly DefensiveContributionMatch[],
+  historicalMatches: readonly DefensiveContributionMatch[],
+  positionPrior: number,
+): number {
+  const personalPrior = estimateDefconHitRate(position, historicalMatches, positionPrior)
+  return estimateDefconHitRate(position, currentSeasonMatches, personalPrior)
 }
 
 /**

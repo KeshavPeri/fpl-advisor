@@ -19,6 +19,13 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.js'
+// Ticket #113: sortRecentFirst/splitBySeason/classifySeasonCoverage/CURRENT_SEASON
+// are plain pure functions with no Supabase call of their own, so (unlike the
+// rest of this file) they are imported and exercised directly rather than
+// only grepped. Safe to import: main() is guarded behind an isMainModule
+// check (see project-points.ts's own footer comment) so this import alone
+// never triggers a real run.
+import { CURRENT_SEASON, classifySeasonCoverage, sortRecentFirst, splitBySeason } from './project-points.ts'
 
 const sourcePath = fileURLToPath(new URL('./project-points.ts', import.meta.url))
 const source = readFileSync(sourcePath, 'utf8')
@@ -111,5 +118,169 @@ describe('project-points.ts — bonus allocation (source invariants, ticket #78)
 
   it('the likely-starters bonus mean is gated on pSixtyPlus >= 0.5, per the DoD', () => {
     expect(source).toMatch(/pSixtyPlus\s*>=\s*0\.5/)
+  })
+})
+
+// ============================================================================
+// Ticket #113 — two-stage shrinkage wiring. sortRecentFirst, splitBySeason
+// and classifySeasonCoverage are pulled out as pure, exported functions
+// specifically so this behaviour can be tested directly on constructed
+// rows, rather than only by grepping the source the way the rest of this
+// file has to (main()'s Supabase reads still can't run without a live
+// project).
+// ============================================================================
+
+interface FakeMatch {
+  season: string
+  gameweek: number
+  minutesPlayed: number
+}
+
+function fakeMatch(season: string, gameweek: number, minutesPlayed = 90): FakeMatch {
+  return { season, gameweek, minutesPlayed }
+}
+
+const LAST_SEASON = '2025-2026'
+
+describe('sortRecentFirst — ticket #113', () => {
+  it('CURRENT_SEASON is "2026-2027", the season the second scheduled-jobs ingest step targets', () => {
+    expect(CURRENT_SEASON).toBe('2026-2027')
+  })
+
+  it('a player with 2 current-season and 5 historical matches: the 2 current-season matches lead the result', () => {
+    const matches = [
+      fakeMatch(LAST_SEASON, 5),
+      fakeMatch(LAST_SEASON, 4),
+      fakeMatch(LAST_SEASON, 3),
+      fakeMatch(LAST_SEASON, 2),
+      fakeMatch(LAST_SEASON, 1),
+      fakeMatch(CURRENT_SEASON, 2),
+      fakeMatch(CURRENT_SEASON, 1),
+    ]
+    const sorted = sortRecentFirst(matches)
+    const leading = sorted.slice(0, 2)
+    expect(leading.every((m) => m.season === CURRENT_SEASON)).toBe(true)
+    // Most recent gameweek first, within the current-season group.
+    expect(leading.map((m) => m.gameweek)).toEqual([2, 1])
+    // The historical group behind it is still ordered most-recent-first.
+    expect(sorted.slice(2).map((m) => m.gameweek)).toEqual([5, 4, 3, 2, 1])
+  })
+
+  it('a player with only historical matches: unaffected, still most-recent-gameweek-first', () => {
+    const matches = [fakeMatch(LAST_SEASON, 1), fakeMatch(LAST_SEASON, 3), fakeMatch(LAST_SEASON, 2)]
+    const sorted = sortRecentFirst(matches)
+    expect(sorted.map((m) => m.gameweek)).toEqual([3, 2, 1])
+  })
+
+  it('a player with only current-season matches: still most-recent-gameweek-first', () => {
+    const matches = [fakeMatch(CURRENT_SEASON, 1), fakeMatch(CURRENT_SEASON, 2)]
+    const sorted = sortRecentFirst(matches)
+    expect(sorted.map((m) => m.gameweek)).toEqual([2, 1])
+  })
+
+  it('does not mutate the input array', () => {
+    const matches = [fakeMatch(LAST_SEASON, 1), fakeMatch(CURRENT_SEASON, 2)]
+    const original = [...matches]
+    sortRecentFirst(matches)
+    expect(matches).toEqual(original)
+  })
+})
+
+describe('splitBySeason — ticket #113', () => {
+  it('separates current-season rows from every other season', () => {
+    const matches = [
+      fakeMatch(CURRENT_SEASON, 2),
+      fakeMatch(LAST_SEASON, 5),
+      fakeMatch(CURRENT_SEASON, 1),
+      fakeMatch('2024-2025', 10), // an older season -- still "historical", not just last season
+    ]
+    const { current, historical } = splitBySeason(matches)
+    expect(current).toHaveLength(2)
+    expect(current.every((m) => m.season === CURRENT_SEASON)).toBe(true)
+    expect(historical).toHaveLength(2)
+    expect(historical.every((m) => m.season !== CURRENT_SEASON)).toBe(true)
+  })
+
+  it('an empty match list splits into two empty lists', () => {
+    expect(splitBySeason([])).toEqual({ current: [], historical: [] })
+  })
+})
+
+describe('classifySeasonCoverage — ticket #113 job_runs.details counters', () => {
+  it('current-season rows present -> "current", regardless of historical coverage', () => {
+    expect(classifySeasonCoverage(true, true)).toBe('current')
+    expect(classifySeasonCoverage(true, false)).toBe('current')
+  })
+
+  it('no current-season rows but historical rows present -> "historicalOnly"', () => {
+    expect(classifySeasonCoverage(false, true)).toBe('historicalOnly')
+  })
+
+  it('no rows at either level -> "neither"', () => {
+    expect(classifySeasonCoverage(false, false)).toBe('neither')
+  })
+
+  it('the three buckets, applied across a population of players, sum exactly to the total player count', () => {
+    // A small synthetic population standing in for playerRows: each entry
+    // is (hasCurrentSeasonRows, hasHistoricalRows).
+    const population: Array<[boolean, boolean]> = [
+      [true, true],
+      [true, false],
+      [true, true],
+      [false, true],
+      [false, true],
+      [false, false],
+      [false, false],
+      [false, false],
+    ]
+    let current = 0
+    let historicalOnly = 0
+    let neither = 0
+    for (const [hasCurrent, hasHistorical] of population) {
+      const coverage = classifySeasonCoverage(hasCurrent, hasHistorical)
+      if (coverage === 'current') current++
+      else if (coverage === 'historicalOnly') historicalOnly++
+      else neither++
+    }
+    expect(current + historicalOnly + neither).toBe(population.length)
+    expect(current).toBe(3)
+    expect(historicalOnly).toBe(2)
+    expect(neither).toBe(3)
+  })
+})
+
+describe('project-points.ts — season-split source invariants (ticket #113)', () => {
+  it('the workflow file runs core-insights ingest with CORE_INSIGHTS_SEASON set to both seasons', () => {
+    const workflowPath = fileURLToPath(new URL('../.github/workflows/scheduled-jobs.yml', import.meta.url))
+    const workflowSource = readFileSync(workflowPath, 'utf8')
+    expect(workflowSource).toMatch(/CORE_INSIGHTS_SEASON:\s*['"]?2025-2026['"]?/)
+    expect(workflowSource).toMatch(/CORE_INSIGHTS_SEASON:\s*['"]?2026-2027['"]?/)
+    // Literal string check per the DoD.
+    expect(workflowSource).toContain('2026-2027')
+  })
+
+  it('the player_match_stats data-fetch query selects the season column', () => {
+    expect(source).toMatch(/\.select\(\s*\n?\s*['"][^'"]*\bseason\b[^'"]*['"]/)
+  })
+
+  it('reports all four ticket #113 counters as separate named job_runs.details fields', () => {
+    expect(source).toMatch(/playersWithCurrentSeasonRows/)
+    expect(source).toMatch(/playersWithHistoricalOnlyRows/)
+    expect(source).toMatch(/playersWithNeitherSeasonRows/)
+    expect(source).toMatch(/currentSeasonRowsRead/)
+  })
+
+  it('imports the two-stage estimators from src/lib/projection rather than re-deriving a blend inline', () => {
+    expect(source).toMatch(/computeTwoStagePlayerRates/)
+    expect(source).toMatch(/estimateTwoStageDefconHitRate/)
+  })
+
+  it('the sort placing current-season matches first lives in this file, not in minutes.ts', () => {
+    const minutesSource = readFileSync(
+      fileURLToPath(new URL('../src/lib/projection/minutes.ts', import.meta.url)),
+      'utf8',
+    )
+    expect(minutesSource).not.toMatch(/CURRENT_SEASON/)
+    expect(source).toMatch(/function sortRecentFirst/)
   })
 })
