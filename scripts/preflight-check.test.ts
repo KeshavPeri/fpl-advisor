@@ -12,6 +12,7 @@ import {
   buildCannotEvaluateResult,
   checkConfiguration,
   checkJobFreshness,
+  checkLeagueBaselineGoals,
   checkMatchData,
   checkNextGameweek,
   checkNotifications,
@@ -682,5 +683,103 @@ describe('checkConfiguration', () => {
     // still appear (that is the whole point of the check).
     expect(serialized).toContain('SUPABASE_URL')
     expect(serialized).toContain('FPL_ENTRY_ID')
+  })
+})
+
+// ============================================================================
+// 11. League baseline goals — ticket #115.
+// ============================================================================
+
+describe('checkLeagueBaselineGoals', () => {
+  const base = { minFinishedFixturesForBaseline: 20, minPlausibleValue: 1.0, maxPlausibleValue: 2.5 }
+
+  it('fail: no successful "project-points" job_runs row can be found', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: null, finishedFixtureCount: 5 })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('no successful "project-points" job_runs row exists')
+  })
+
+  it('pass: source is "fallback" with fewer than 20 finished fixtures (correct pre-season state)', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'fallback', leagueBaselineGoals: null }, finishedFixtureCount: 5 })
+    expect(result.verdict).toBe('pass')
+    expect(result.reason).toContain('fallback')
+    expect(result.reason).toContain('5 finished fixture')
+  })
+
+  it('fail: source is "fallback" but 20 or more finished fixtures exist — reason names both numbers', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'fallback', leagueBaselineGoals: null }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('finished fixtures are not reaching the projection job')
+    expect(result.reason).toContain('34')
+    expect(result.reason).toContain('20')
+  })
+
+  it('boundary: exactly 19 finished fixtures on fallback still passes', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'fallback', leagueBaselineGoals: null }, finishedFixtureCount: 19 })
+    expect(result.verdict).toBe('pass')
+  })
+
+  it('boundary: exactly 20 finished fixtures on fallback fails', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'fallback', leagueBaselineGoals: null }, finishedFixtureCount: 20 })
+    expect(result.verdict).toBe('fail')
+  })
+
+  it('pass: source is "computed" with a value inside the plausible range, value quoted in the reason', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 1.47 }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('pass')
+    expect(result.reason).toContain('1.470')
+    expect(result.reason).toContain('34 finished fixture')
+  })
+
+  it('fail: computed value below 1.0, value quoted', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 0.6 }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('0.600')
+    expect(result.reason).toContain('outside the plausible range')
+  })
+
+  it('fail: computed value above 2.5, value quoted', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 3.1 }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('3.100')
+    expect(result.reason).toContain('outside the plausible range')
+  })
+
+  it('boundary: computed value exactly at 1.0 (the low bound) passes', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 1.0 }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('pass')
+  })
+
+  it('boundary: computed value just below 1.0 fails', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 0.99 }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('fail')
+  })
+
+  it('boundary: computed value exactly at 2.5 (the high bound) passes', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 2.5 }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('pass')
+  })
+
+  it('boundary: computed value just above 2.5 fails', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 2.51 }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('fail')
+  })
+
+  it('fail: source is "computed" but no leagueBaselineGoals value was recorded alongside it', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: null }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('no leagueBaselineGoals value was recorded')
+  })
+
+  it('fail: an unrecognised source string is treated as unevaluable, not silently passed', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'mystery', leagueBaselineGoals: 1.5 }, finishedFixtureCount: 34 })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('mystery')
+  })
+
+  it('states the finished-fixture count in the reason on a pass, not only on a failure', () => {
+    const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 1.5 }, finishedFixtureCount: 42 })
+    expect(result.verdict).toBe('pass')
+    expect(result.reason).toContain('42')
   })
 })

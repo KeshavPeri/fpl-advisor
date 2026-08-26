@@ -199,6 +199,28 @@ const SCHEDULED_TRIGGERS: readonly ScheduledTrigger[] = ['deadline_24h', 'deadli
 /** Mirrors src/lib/notification/schedule.ts's own DEADLINE_10H_WINDOW_HOURS — the instant at or inside which deadline_24h can no longer fire (that module: "at or inside 10h remaining... REGARDLESS of whether deadline_24h already fired or was missed entirely"). Duplicated, not imported: this file only reports what already happened, never decides a send. */
 const DEADLINE_10H_WINDOW_HOURS = 10
 
+/**
+ * Must match scripts/project-points.ts's own MIN_FINISHED_FIXTURES_FOR_BASELINE
+ * (ticket #115) — duplicated, not imported, same convention as MODEL_VERSION
+ * above. project-points.ts's own 20-fixture decision is never re-derived here
+ * (this file reads its recorded `leagueBaselineGoalsSource` verbatim); this
+ * constant exists only so the boundary on the finished-fixture count THIS
+ * file independently reads (job_runs.details does not carry that count — see
+ * check 11) lines up with the boundary project-points.ts itself used.
+ */
+const LEAGUE_BASELINE_MIN_FINISHED_FIXTURES = 20
+
+/**
+ * Plausible range for a genuine league-wide average-goals-per-team-per-match
+ * figure (ticket #115, check 11). A real Premier League season sits roughly
+ * 1.2-1.9; 1.0-2.5 is a deliberately generous envelope meant to catch
+ * arithmetic nonsense (a units slip, a sum where an average was meant, a
+ * corrupted read) rather than ordinary season-to-season variation. Tier 3,
+ * decided here — no calibration data exists to fit this more tightly yet.
+ */
+const LEAGUE_BASELINE_GOALS_MIN_PLAUSIBLE = 1.0
+const LEAGUE_BASELINE_GOALS_MAX_PLAUSIBLE = 2.5
+
 // ============================================================================
 // Env
 // ============================================================================
@@ -822,6 +844,118 @@ export function checkConfiguration(
   return { id: 'configuration', verdict, reason: `missing: ${missing.map((m) => m.name).join(', ')}.`, values }
 }
 
+// ----------------------------------------------------------------------------
+// 11. League baseline goals — ticket #115. Alarms when project-points.ts's
+//     own recorded `leagueBaselineGoalsSource` is stuck on the pre-season
+//     "fallback" placeholder after enough finished fixtures exist for the
+//     real, runtime-computed figure to have taken over. See
+//     docs/projection-model-backlog.md G5 and src/lib/projection/fixture.ts's
+//     own LEAGUE_BASELINE_GOALS_PER_TEAM comment — both read-only from this
+//     file, out of scope per the ticket.
+//
+//     Reads two independent things and never re-derives project-points.ts's
+//     own 20-fixture decision: (1) the most recent SUCCESSFUL "project-
+//     points" job_runs row's own recorded leagueBaselineGoalsSource and
+//     leagueBaselineGoals, verbatim; (2) a fresh, independent count of
+//     finished fixtures with both scores recorded — job_runs.details does
+//     not carry that count, so it is read directly from "fixtures", filtered
+//     in the database the same way project-points.ts's own read is filtered
+//     (finished = true, team_h_score and team_a_score both not null). The
+//     finished-fixture count is stated in the reason on every verdict, pass
+//     included — see checkLeagueBaselineGoals below.
+// ----------------------------------------------------------------------------
+
+export interface LeagueBaselineGoalsCheckInput {
+  /** The most recent successful "project-points" job_runs row's own recorded values, verbatim — null when no such row exists at all. */
+  jobRun: { source: string | null; leagueBaselineGoals: number | null } | null
+  /** An independent, DB-filtered count of "fixtures" rows with finished = true and both scores recorded. Not read from job_runs.details — project-points.ts does not store it there. */
+  finishedFixtureCount: number
+  minFinishedFixturesForBaseline: number
+  minPlausibleValue: number
+  maxPlausibleValue: number
+}
+
+export function checkLeagueBaselineGoals(input: LeagueBaselineGoalsCheckInput): CheckResult {
+  const { jobRun, finishedFixtureCount, minFinishedFixturesForBaseline, minPlausibleValue, maxPlausibleValue } = input
+  const values = {
+    finishedFixtureCount,
+    minFinishedFixturesForBaseline,
+    source: jobRun?.source ?? null,
+    leagueBaselineGoals: jobRun?.leagueBaselineGoals ?? null,
+  }
+
+  if (!jobRun) {
+    return {
+      id: 'league-baseline-goals',
+      verdict: 'fail',
+      reason:
+        `cannot evaluate — no successful "project-points" job_runs row exists to read leagueBaselineGoalsSource from ` +
+        `(${finishedFixtureCount} finished fixture(s) currently on record).`,
+      values,
+    }
+  }
+
+  if (jobRun.source === 'fallback') {
+    if (finishedFixtureCount >= minFinishedFixturesForBaseline) {
+      return {
+        id: 'league-baseline-goals',
+        verdict: 'fail',
+        reason:
+          `leagueBaselineGoalsSource is "fallback" but ${finishedFixtureCount} finished fixture(s) exist ` +
+          `(>= the ${minFinishedFixturesForBaseline}-fixture threshold) — finished fixtures are not reaching the projection job.`,
+        values,
+      }
+    }
+    return {
+      id: 'league-baseline-goals',
+      verdict: 'pass',
+      reason:
+        `leagueBaselineGoalsSource is "fallback" with ${finishedFixtureCount} finished fixture(s) ` +
+        `(< the ${minFinishedFixturesForBaseline}-fixture threshold) — correct pre-season state.`,
+      values,
+    }
+  }
+
+  if (jobRun.source === 'computed') {
+    const value = jobRun.leagueBaselineGoals
+    if (value === null) {
+      return {
+        id: 'league-baseline-goals',
+        verdict: 'fail',
+        reason:
+          `leagueBaselineGoalsSource is "computed" but no leagueBaselineGoals value was recorded alongside it ` +
+          `(${finishedFixtureCount} finished fixture(s) on record).`,
+        values,
+      }
+    }
+    if (value < minPlausibleValue || value > maxPlausibleValue) {
+      return {
+        id: 'league-baseline-goals',
+        verdict: 'fail',
+        reason:
+          `computed league baseline goals value ${value.toFixed(3)} is outside the plausible range ` +
+          `${minPlausibleValue}-${maxPlausibleValue} (${finishedFixtureCount} finished fixture(s) on record).`,
+        values,
+      }
+    }
+    return {
+      id: 'league-baseline-goals',
+      verdict: 'pass',
+      reason:
+        `leagueBaselineGoalsSource is "computed", value ${value.toFixed(3)} within the plausible range ` +
+        `${minPlausibleValue}-${maxPlausibleValue} (${finishedFixtureCount} finished fixture(s) on record).`,
+      values,
+    }
+  }
+
+  return {
+    id: 'league-baseline-goals',
+    verdict: 'fail',
+    reason: `leagueBaselineGoalsSource "${String(jobRun.source)}" is neither "fallback" nor "computed" (${finishedFixtureCount} finished fixture(s) on record).`,
+    values,
+  }
+}
+
 // ============================================================================
 // Report generation — pure formatting, not independently unit-tested (not a
 // DoD item; the assertion logic above is), kept out of main() for the same
@@ -841,6 +975,7 @@ const CHECK_ORDER: readonly string[] = [
   'job-freshness',
   'notifications',
   'configuration',
+  'league-baseline-goals',
 ]
 
 const CHECK_TITLES: Readonly<Record<string, string>> = {
@@ -854,6 +989,7 @@ const CHECK_TITLES: Readonly<Record<string, string>> = {
   'job-freshness': 'Job freshness',
   notifications: 'Notifications',
   configuration: 'Configuration',
+  'league-baseline-goals': 'League baseline goals',
 }
 
 function formatValues(values: JsonRecord): string {
@@ -1472,6 +1608,55 @@ async function main(): Promise<void> {
     // 10. Configuration — pure, no I/O, cannot fail to evaluate.
     // --------------------------------------------------------------------
     checks.push(checkConfiguration(process.env))
+
+    // --------------------------------------------------------------------
+    // 11. League baseline goals — ticket #115. Independent of the target
+    //    gameweek: reads the most recent SUCCESSFUL "project-points"
+    //    job_runs row (filtered by job_name and status in the database,
+    //    bounded to one row by order + limit(1), exempt from pagination
+    //    under this file's own single-row-lookup convention — see file
+    //    header) and, separately, a fresh DB-filtered count of finished
+    //    fixtures (a count-only head:true query, exempt from pagination for
+    //    the same reason checkMatchData's counts are).
+    // --------------------------------------------------------------------
+    const projectPointsJobRunRead = await safeMaybeSingle<{ details: JsonRecord | null }>('job_runs', () =>
+      supabase
+        .from('job_runs')
+        .select('details')
+        .eq('job_name', 'project-points')
+        .eq('status', 'success')
+        .order('started_at', { ascending: false })
+        .limit(1)
+        .maybeSingle<{ details: JsonRecord | null }>(),
+    )
+    const finishedFixturesCountRead = await safeCount('fixtures', () =>
+      supabase
+        .from('fixtures')
+        .select('*', { count: 'exact', head: true })
+        .eq('finished', true)
+        .not('team_h_score', 'is', null)
+        .not('team_a_score', 'is', null),
+    )
+
+    let leagueBaselineGoalsCheck: CheckResult
+    if (projectPointsJobRunRead.error) {
+      leagueBaselineGoalsCheck = buildCannotEvaluateResult('league-baseline-goals', projectPointsJobRunRead.error)
+    } else if (finishedFixturesCountRead.error) {
+      leagueBaselineGoalsCheck = buildCannotEvaluateResult('league-baseline-goals', finishedFixturesCountRead.error)
+    } else {
+      const details = projectPointsJobRunRead.row?.details ?? null
+      const source = typeof details?.leagueBaselineGoalsSource === 'string' ? details.leagueBaselineGoalsSource : null
+      const leagueBaselineGoalsValue = typeof details?.leagueBaselineGoals === 'number' ? details.leagueBaselineGoals : null
+      const jobRun = projectPointsJobRunRead.row ? { source, leagueBaselineGoals: leagueBaselineGoalsValue } : null
+      leagueBaselineGoalsCheck = checkLeagueBaselineGoals({
+        jobRun,
+        finishedFixtureCount: finishedFixturesCountRead.count,
+        minFinishedFixturesForBaseline: LEAGUE_BASELINE_MIN_FINISHED_FIXTURES,
+        minPlausibleValue: LEAGUE_BASELINE_GOALS_MIN_PLAUSIBLE,
+        maxPlausibleValue: LEAGUE_BASELINE_GOALS_MAX_PLAUSIBLE,
+      })
+    }
+    checks.push(leagueBaselineGoalsCheck)
 
     // --------------------------------------------------------------------
     // Report + job_runs.
