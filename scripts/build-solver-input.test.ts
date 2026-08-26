@@ -221,6 +221,69 @@ describe('buildSolverConfig', () => {
     const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 120 })
     expect(config.secs).toBe(120)
   })
+
+  // --------------------------------------------------------------------
+  // Ticket #114 — the dispatch-only chip probe's `chipProbe` param. The
+  // production path (`chipProbe` unset) must be byte-for-byte identical to
+  // the pre-#114 output; only an explicit `chipProbe: true` changes
+  // anything, and it changes ONLY chip_limits.
+  // --------------------------------------------------------------------
+
+  it('CHIP_PROBE unset: chipProbe omitted produces the exact pre-#114 config, full-object-equality', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300 })
+    expect(config).toEqual({
+      horizon: 3,
+      team_data: 'json',
+      preseason: false,
+      xmin_lb: 150,
+      keep_top_ev_percent: 25,
+      ev_per_price_cutoff: 10,
+      no_transfer_last_gws: 0,
+      datasource: 'fpladvisor',
+      chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
+      secs: 300,
+      solver: 'highs',
+      num_iterations: 3,
+      iteration_criteria: 'this_gw_transfer_in',
+      verbose: true,
+      print_result_table: true,
+      print_squads: true,
+      print_transfer_chip_summary: true,
+    })
+  })
+
+  it('CHIP_PROBE unset: chipProbe explicitly false produces the identical config too', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300, chipProbe: false })
+    expect(config.chip_limits).toEqual({ bb: 0, wc: 0, fh: 0, tc: 0 })
+  })
+
+  it('CHIP_PROBE set: chip_limits becomes { bb: 1, wc: 0, fh: 0, tc: 1 } and every other key is unchanged from the unset case, full-object-equality', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300, chipProbe: true })
+    expect(config).toEqual({
+      horizon: 3,
+      team_data: 'json',
+      preseason: false,
+      xmin_lb: 150,
+      keep_top_ev_percent: 25,
+      ev_per_price_cutoff: 10,
+      no_transfer_last_gws: 0,
+      datasource: 'fpladvisor',
+      chip_limits: { bb: 1, wc: 0, fh: 0, tc: 1 },
+      secs: 300,
+      solver: 'highs',
+      num_iterations: 3,
+      iteration_criteria: 'this_gw_transfer_in',
+      verbose: true,
+      print_result_table: true,
+      print_squads: true,
+      print_transfer_chip_summary: true,
+    })
+  })
+
+  it('preseason is false in BOTH the CHIP_PROBE-unset and CHIP_PROBE-set cases — must never regress to the shipped true, which wipes the squad', () => {
+    expect(buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' }).preseason).toBe(false)
+    expect(buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', chipProbe: true }).preseason).toBe(false)
+  })
 })
 
 // ============================================================================
