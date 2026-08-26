@@ -28,6 +28,10 @@ interface RecommendationRow {
   captain_player_id: number
   vice_captain_player_id: number
   solver_run_id: number | null
+  // NOT NULL in the schema (20260817090000_recommendations.sql). Added by
+  // ticket #107 solely so registerOverride can thread it into
+  // snapshot.recommended below — the confirm panel does not display it.
+  hit_cost: number
   gameweeks: { name: string } | { name: string }[] | null
 }
 
@@ -53,7 +57,7 @@ export async function fetchLatestRecommendation(): Promise<OverrideRecommendatio
     .from('recommendations')
     .select(
       'gameweek_id, plan_index, is_roll, transfer_in_player_id, transfer_out_player_id, ' +
-        'captain_player_id, vice_captain_player_id, solver_run_id, gameweeks(name)'
+        'captain_player_id, vice_captain_player_id, solver_run_id, hit_cost, gameweeks(name)'
     )
     .eq('plan_index', 0)
     .order('gameweek_id', { ascending: false })
@@ -77,6 +81,7 @@ export async function fetchLatestRecommendation(): Promise<OverrideRecommendatio
     captainPlayerId: row.captain_player_id,
     viceCaptainPlayerId: row.vice_captain_player_id,
     solverRunId: row.solver_run_id,
+    hitCost: row.hit_cost,
   }
 }
 
@@ -173,9 +178,16 @@ export async function fetchOverrideDecisions(
  * write this ticket exists for. Registers a DECISION; it never calls any
  * private, write-capable FPL endpoint of any kind (Tier 1 guard — see the
  * migration file and this ticket's own Context: the FPL API is never
- * authenticated by this app). `hit_cost` is always written as `null` in the
- * snapshot — see types.ts's `OverrideTarget` and the ticket's Notes on why
- * a hit is never hand-typed here.
+ * authenticated by this app). `hit_cost` (the top-level, DECIDED key) is
+ * always written as `null` in the snapshot — see types.ts's `OverrideTarget`
+ * and the ticket's Notes on why a hit is never hand-typed here.
+ *
+ * Ticket #107: alongside the seven decided keys — unchanged in name,
+ * position and value — the snapshot now also carries a `recommended` object
+ * (the same seven field names, `target.recommended`, threaded straight from
+ * the recommendation the confirm panel already compared the entry
+ * against). This is the only line that changed for #107; every decided key
+ * above is untouched.
  *
  * On a unique_violation (23505) — this exact (gameweek_id, plan_index,
  * 'override') already has a row, from an earlier registration or a race
@@ -199,6 +211,15 @@ export async function registerOverride(target: OverrideTarget): Promise<StoredOv
         vice_captain_player_id: target.viceCaptainPlayerId,
         hit_cost: null,
         solver_run_id: target.solverRunId,
+        recommended: {
+          is_roll: target.recommended.isRoll,
+          transfer_in_player_id: target.recommended.transferInPlayerId,
+          transfer_out_player_id: target.recommended.transferOutPlayerId,
+          captain_player_id: target.recommended.captainPlayerId,
+          vice_captain_player_id: target.recommended.viceCaptainPlayerId,
+          hit_cost: target.recommended.hitCost,
+          solver_run_id: target.recommended.solverRunId,
+        },
       },
     })
     .select('kind, decided_at, snapshot')

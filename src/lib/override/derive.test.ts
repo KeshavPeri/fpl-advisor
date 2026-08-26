@@ -33,6 +33,7 @@ const RECOMMENDATION: OverrideRecommendation = {
   captainPlayerId: 201,
   viceCaptainPlayerId: 202,
   solverRunId: 77,
+  hitCost: 0,
 }
 
 const NAMES = new Map<number, string>([
@@ -288,6 +289,58 @@ describe('buildOverrideTarget', () => {
 
   it('throws rather than silently building a target from an incomplete entry', () => {
     expect(() => buildOverrideTarget(RECOMMENDATION, incompleteEntry())).toThrow()
+  })
+
+  // Ticket #107. This is the ticket's most important test (its own DoD's
+  // words): a `toEqual` on the FULL object, not field-by-field assertions,
+  // so an accidental rename or nesting of any one of the seven decided keys
+  // fails the build exactly as loudly as a missing `recommended`.
+  it('writes the exact shape stored in `snapshot`: the seven decided keys unchanged in name, position and value, plus a `recommended` object carrying the same seven field names from the recommendation', () => {
+    const entry: OverrideEntry = {
+      captainPlayerId: 301,
+      viceCaptainPlayerId: 302,
+      transfer: { kind: 'transfer', outPlayerId: 401, inPlayerId: 402 },
+    }
+    const target = buildOverrideTarget(RECOMMENDATION, entry)
+    expect(target).toEqual({
+      gameweekId: 5,
+      planIndex: 0,
+      isRoll: false,
+      transferInPlayerId: 402,
+      transferOutPlayerId: 401,
+      captainPlayerId: 301,
+      viceCaptainPlayerId: 302,
+      hitCost: null,
+      solverRunId: 77,
+      recommended: {
+        isRoll: false,
+        transferInPlayerId: 101,
+        transferOutPlayerId: 102,
+        captainPlayerId: 201,
+        viceCaptainPlayerId: 202,
+        hitCost: 0,
+        solverRunId: 77,
+      },
+    })
+  })
+
+  it('the `recommended` object always mirrors the recommendation, never the entry — a roll entry overriding an actual recommended transfer still records what was recommended', () => {
+    const entry: OverrideEntry = {
+      captainPlayerId: 201,
+      viceCaptainPlayerId: 202,
+      transfer: { kind: 'roll' },
+    }
+    const target = buildOverrideTarget(RECOMMENDATION, entry)
+    expect(target.isRoll).toBe(true)
+    expect(target.recommended).toEqual({
+      isRoll: false,
+      transferInPlayerId: 101,
+      transferOutPlayerId: 102,
+      captainPlayerId: 201,
+      viceCaptainPlayerId: 202,
+      hitCost: 0,
+      solverRunId: 77,
+    })
   })
 })
 

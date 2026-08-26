@@ -10,24 +10,38 @@
  * are explicitly out of scope for this ticket's diff.
  *
  * ============================================================================
- * Why an override entry never carries a "recommended" side (see
- * decisions/ticket-103.md's HIGH-IMPACT entry for the full "because").
+ * Why an override entry carries a "recommended" side ONLY SOMETIMES (ticket
+ * #107 — see decisions/ticket-103.md's HIGH-IMPACT entry for the original
+ * "because", and decisions/ticket-107.md for how it was reversed at the
+ * write path).
  * ============================================================================
- * `recommendation_decisions.snapshot` stores exactly seven keys for BOTH
+ * `recommendation_decisions.snapshot` stores seven DECIDED keys for BOTH
  * `commit` and `override` rows — `is_roll`, `transfer_in_player_id`,
  * `transfer_out_player_id`, `captain_player_id`, `vice_captain_player_id`,
  * `hit_cost`, `solver_run_id` (the migration's own comment; confirmed in
- * `src/lib/commit/api.ts`'s `commitRecommendation` and
- * `src/lib/override/api.ts`'s `registerOverride`, which both write the same
- * seven keys). Every one of them describes what was DECIDED, never what the
- * solver had suggested — there is no `recommended_*` sibling anywhere in the
- * schema. `recommendations` and `solver_picks` are both upserted in place
- * per gameweek (no history), so a live join to either, after the fact, would
- * silently show today's recommendation mislabeled as the one an old override
- * was actually compared against — exactly what this ticket's own Notes
- * forbid. So `DecisionSourceRow` below carries only the decided (recorded)
- * fields, for both kinds, and `derive.ts` renders an explicit "not preserved"
- * note for an override's would-be comparison rather than fabricating one.
+ * `src/lib/commit/api.ts`'s `commitRecommendation`). Neither table
+ * (`recommendations`, `solver_picks`) that could otherwise supply "what was
+ * recommended" keeps any history — both are upserted in place per gameweek
+ * — so a live join to either, after the fact, would silently show today's
+ * recommendation mislabeled as the one an old decision was actually
+ * compared against. That is still true and still forbidden (Notes,
+ * ticket-103.md and ticket-107.md alike): this module NEVER reads
+ * `recommendations` or `solver_picks`, and never will.
+ *
+ * What changed at #107: `src/lib/override/api.ts`'s `registerOverride` now
+ * writes an EIGHTH top-level snapshot key, `recommended` — a nested object
+ * carrying the same seven field names, sourced from the recommendation the
+ * override's confirm panel already had in hand at write time (never from a
+ * later, live read). A `commit` row still carries no `recommended` — a
+ * commit IS the recommendation, so there is nothing to compare (Scope). An
+ * `override` row written BEFORE #107 also carries no `recommended` — that
+ * data was never captured and cannot be reconstructed or backfilled
+ * (out of scope by ticket-107.md, permanently: "that data does not exist
+ * and must not be invented"). So `DecisionSnapshot.recommended` below is
+ * `null` for a commit, `null` for a pre-#107 override, and a
+ * `RecommendedSnapshot` for every override registered from #107 onward —
+ * and `derive.ts` renders the honest "not preserved" gap note in exactly
+ * the first two cases, and a field-by-field comparison in the third.
  */
 
 export type DecisionKind = 'commit' | 'override'
@@ -46,6 +60,27 @@ export interface DecisionGameweek {
 }
 
 /**
+ * The recommended side of an override snapshot (ticket #107) — the same
+ * seven field names as `DecisionSnapshot` below, but every field is
+ * OPTIONAL. `snapshot` is a free-shaped `jsonb` column with no schema
+ * enforcement, so a stored `recommended` object is not guaranteed to carry
+ * every key (DoD: "a `recommended` object present but missing a key
+ * renders that field as not recorded rather than erroring or showing
+ * 'null'"). A missing key here means exactly that — not recorded — and
+ * derive.ts's comparison must render it that way, never by guessing a
+ * value or throwing.
+ */
+export interface RecommendedSnapshot {
+  isRoll?: boolean
+  transferInPlayerId?: number | null
+  transferOutPlayerId?: number | null
+  captainPlayerId?: number
+  viceCaptainPlayerId?: number
+  hitCost?: number
+  solverRunId?: number | null
+}
+
+/**
  * The frozen `snapshot` jsonb column, camelCased 1:1 — nothing renamed or
  * reshaped, so derive.ts's rendering can be checked directly against the
  * migration's own column comment. `hitCost` stays nullable here exactly as
@@ -53,6 +88,13 @@ export interface DecisionGameweek {
  * would eventually be wrong; the real figure arrives from the FPL API after
  * the deadline) and never itself zero on that path — derive.ts must render
  * that as "not recorded", never as "0".
+ *
+ * `recommended` (ticket #107) is `null` for a commit, `null` for an override
+ * registered before #107, and a `RecommendedSnapshot` for an override
+ * registered from #107 onward — see this file's header for the full
+ * "because". It is never itself `undefined`: api.ts normalizes a missing
+ * key in the raw jsonb to `null` before this type is ever populated, so
+ * every reader has exactly one "absent" value to check for, not two.
  */
 export interface DecisionSnapshot {
   isRoll: boolean
@@ -62,11 +104,13 @@ export interface DecisionSnapshot {
   viceCaptainPlayerId: number
   hitCost: number | null
   solverRunId: number | null
+  recommended: RecommendedSnapshot | null
 }
 
 /** One `recommendation_decisions` row, already resolved to a gameweek name
- *  by api.ts — nothing else joined in (see the file header: there is
- *  deliberately no "recommended" counterpart here). */
+ *  by api.ts — nothing else joined in beyond `snapshot.recommended`, which
+ *  is read from the SAME stored row, never from a live join (see the file
+ *  header). */
 export interface DecisionSourceRow {
   gameweekId: number
   gameweekName: string
@@ -104,6 +148,40 @@ export interface RecordedDecisionText {
   hitCostText: string
 }
 
+/** Whether one field of the recommended-vs-decided comparison (ticket #107)
+ *  differed, matched, or could not be determined at all because the
+ *  `recommended` object was missing that key. */
+export type DecisionComparisonStatus = 'differs' | 'matches' | 'not-recorded'
+
+/** One field of the comparison — captain, vice-captain or transfer, same
+ *  three fields `src/lib/override/derive.ts`'s own `OverrideComparison`
+ *  compares at write time (a local copy, not an import — see this file's
+ *  header on why a feature owns its own shape rather than crossing a
+ *  module boundary). `recommendedText` reads `FIELD_NOT_RECORDED_TEXT`
+ *  exactly when `status === 'not-recorded'`. */
+export interface DecisionComparisonField {
+  label: string
+  recommendedText: string
+  status: DecisionComparisonStatus
+}
+
+/** Fully-resolved recommended-vs-decided comparison for one override entry
+ *  — present only when that entry's `snapshot.recommended` is non-null
+ *  (ticket #107). `summaryText` is ready to render as-is: the honest "no
+ *  difference" note when nothing differed, or which field(s) differed and
+ *  what was recommended for each. */
+export interface DecisionComparisonView {
+  captain: DecisionComparisonField
+  viceCaptain: DecisionComparisonField
+  transfer: DecisionComparisonField
+  /** Every field whose status is 'differs', in captain/vice-captain/
+   *  transfer order. Empty when nothing differed (including when every
+   *  field's status is 'not-recorded' — there is nothing to name as
+   *  differing when nothing could be compared at all). */
+  differingFieldLabels: readonly string[]
+  summaryText: string
+}
+
 /** Fully-resolved display data for one row of the history — the screen does
  *  no further derivation. */
 export interface DecisionEntryView {
@@ -123,12 +201,23 @@ export interface DecisionEntryView {
   decidedAtLabel: string
   recorded: RecordedDecisionText
   /**
-   * Present only for `kind === 'override'` — the honest gap note (per
-   * decisions/ticket-103.md's ruling) stating that the original
-   * recommendation was not preserved and cannot be shown or compared. Null
-   * for a commit, which by definition matches whatever was recommended.
+   * Present only for `kind === 'override'` with no `recommended` side
+   * stored (decisions/ticket-103.md's original ruling, narrowed by
+   * ticket #107 to exactly this case) — the honest gap note stating that
+   * the original recommendation was not preserved and cannot be shown or
+   * compared. Null for a commit (which by definition matches whatever was
+   * recommended) and null for an override that DOES carry a `recommended`
+   * side — see `recommendationComparison` below, which is populated
+   * instead in that case. Exactly one of the two is ever non-null.
    */
   recommendationGapNote: string | null
+  /**
+   * Present only for `kind === 'override'` with a `recommended` side
+   * stored (ticket #107) — the field-by-field comparison. Null for a
+   * commit and null for an override with no `recommended` side, where
+   * `recommendationGapNote` above is populated instead.
+   */
+  recommendationComparison: DecisionComparisonView | null
 }
 
 /** The season's headline counts. Reconciles arithmetically by construction

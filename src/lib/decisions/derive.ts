@@ -9,18 +9,26 @@
  * matching src/lib/chips/derive.ts's own convention (`deriveChipState(source,
  * Date.now())`, called once, at the call site).
  *
- * See ./types.ts's own header for why an override entry never carries a
- * "recommended" side — the short version: `recommendation_decisions.snapshot`
- * only ever stores what was decided, for both kinds, and the tables that
- * could in principle supply "what was recommended" (`recommendations`,
- * `solver_picks`) are both upserted in place with no history, so reading them
- * here would silently show today's recommendation mislabeled as an old
- * decision's. decisions/ticket-103.md's ruling: render only what was
- * recorded, plus an explicit, honest note that the original recommendation
- * was not preserved — the same "say what's missing, don't fabricate" idiom
- * this file already needs for an unresolvable player id.
+ * See ./types.ts's own header for why an override entry carries a
+ * "recommended" side only sometimes (ticket #107) — the short version:
+ * `recommendation_decisions.snapshot` stores what was decided for both
+ * kinds, and this module NEVER reads `recommendations` or `solver_picks`
+ * live (both are upserted in place with no history, so a live join would
+ * silently show today's recommendation mislabeled as an old decision's —
+ * decisions/ticket-103.md's ruling, unchanged by #107). What #107 added is
+ * an eighth snapshot key, `recommended`, written at override-registration
+ * time from the recommendation the confirm panel already had in hand —
+ * present for every override from #107 onward, absent (null) for a commit
+ * and for every override registered before #107. This file renders a
+ * field-by-field comparison when `recommended` is present, and the
+ * original honest "not preserved" note when it is absent — the same "say
+ * what's missing, don't fabricate" idiom this file already needs for an
+ * unresolvable player id.
  */
 import type {
+  DecisionComparisonField,
+  DecisionComparisonStatus,
+  DecisionComparisonView,
   DecisionEntryView,
   DecisionGameweek,
   DecisionHistoryHeadline,
@@ -28,6 +36,7 @@ import type {
   DecisionHistoryView,
   DecisionSnapshot,
   DecisionSourceRow,
+  RecommendedSnapshot,
   RecordedDecisionText,
 } from './types.ts'
 import { formatSyncTimestamp } from '../format'
@@ -57,6 +66,20 @@ export const HIT_COST_NOT_RECORDED_TEXT = 'Hit cost not recorded'
 export const RECOMMENDATION_NOT_PRESERVED_NOTE =
   "What the model recommended at the time wasn't preserved, so it can't be shown or compared here — only what was recorded."
 
+/** What a comparison field renders when `recommended` is present but that
+ *  specific key is missing from it (ticket #107 DoD) — never "null", never
+ *  a guessed value, never a thrown error. Named so the test and the render
+ *  share one string. */
+export const FIELD_NOT_RECORDED_TEXT = 'Not recorded'
+
+/** Rendered in place of a per-field difference list when a `recommended`
+ *  side is present and every field matches what was decided — the override
+ *  screen refuses to let this happen going forward (it rejects an entry
+ *  identical to the recommendation), but a stored row is a fact and this
+ *  reader must not assume that refusal held for every row it reads. */
+export const NO_DIFFERENCE_FROM_RECOMMENDATION_MESSAGE =
+  'This matched the recommendation on every recorded field — nothing differed.'
+
 /** Invitation, not a mood — design-reference.md. Names what's missing (no
  *  decision recorded yet) and how one gets recorded (commit or override,
  *  from the verdict card), matching src/screens/HomeScreen.tsx's own
@@ -75,13 +98,21 @@ function playerLabel(id: number | null, names: ReadonlyMap<number, string>): str
  *  types.ts's header): `isRoll` always wins over whatever the transfer id
  *  columns happen to hold, so a roll never misreads a stray non-null id, and
  *  a roll's null ids (the DoD's "missing optional field" case) never reach
- *  playerLabel at all. */
+ *  playerLabel at all. Takes the three fields directly (not a whole
+ *  snapshot) so it renders equally for the decided side and the recommended
+ *  side (buildComparison below reuses it for the latter). */
+function transferTextFor(
+  isRoll: boolean,
+  outId: number | null,
+  inId: number | null,
+  names: ReadonlyMap<number, string>
+): string {
+  if (isRoll) return 'Rolled the transfer'
+  return `${playerLabel(outId, names)} out, ${playerLabel(inId, names)} in`
+}
+
 function transferText(snapshot: DecisionSnapshot, names: ReadonlyMap<number, string>): string {
-  if (snapshot.isRoll) return 'Rolled the transfer'
-  return `${playerLabel(snapshot.transferOutPlayerId, names)} out, ${playerLabel(
-    snapshot.transferInPlayerId,
-    names
-  )} in`
+  return transferTextFor(snapshot.isRoll, snapshot.transferOutPlayerId, snapshot.transferInPlayerId, names)
 }
 
 function hitCostText(hitCost: number | null): string {
@@ -113,7 +144,93 @@ const KIND_LABELS: Record<DecisionSourceRow['kind'], string> = {
   override: 'Registered override',
 }
 
+/** One player-id comparison field (captain or vice-captain) — 'not-recorded'
+ *  exactly when the key is missing from `recommended` (`typeof` guards
+ *  against both an absent key and a malformed non-number value; DoD: never
+ *  error, never show "null"). */
+function fieldFromPlayerId(
+  label: string,
+  recommendedId: number | null | undefined,
+  decidedId: number,
+  names: ReadonlyMap<number, string>
+): DecisionComparisonField {
+  if (typeof recommendedId !== 'number') {
+    return { label, recommendedText: FIELD_NOT_RECORDED_TEXT, status: 'not-recorded' }
+  }
+  const status: DecisionComparisonStatus = recommendedId === decidedId ? 'matches' : 'differs'
+  return { label, recommendedText: playerLabel(recommendedId, names), status }
+}
+
+/** The transfer comparison field — known only when ALL THREE of `isRoll`,
+ *  `transferInPlayerId` and `transferOutPlayerId` are present on
+ *  `recommended`; a partial transfer recommendation (e.g. `isRoll` known
+ *  but one player id missing) is treated as not-recorded rather than
+ *  guessed at, matching the DoD's "missing key" rule at the level of the
+ *  whole field, not a per-subkey best-effort. */
+function transferFieldComparison(
+  recommended: RecommendedSnapshot,
+  decided: DecisionSnapshot,
+  names: ReadonlyMap<number, string>
+): DecisionComparisonField {
+  const label = 'Transfer'
+  if (
+    typeof recommended.isRoll !== 'boolean' ||
+    recommended.transferInPlayerId === undefined ||
+    recommended.transferOutPlayerId === undefined
+  ) {
+    return { label, recommendedText: FIELD_NOT_RECORDED_TEXT, status: 'not-recorded' }
+  }
+  const recommendedText = transferTextFor(
+    recommended.isRoll,
+    recommended.transferOutPlayerId,
+    recommended.transferInPlayerId,
+    names
+  )
+  const differs =
+    recommended.isRoll !== decided.isRoll ||
+    recommended.transferOutPlayerId !== decided.transferOutPlayerId ||
+    recommended.transferInPlayerId !== decided.transferInPlayerId
+  return { label, recommendedText, status: differs ? 'differs' : 'matches' }
+}
+
+/**
+ * The field-by-field comparison for an override that carries a `recommended`
+ * side (ticket #107) — captain, vice-captain and transfer, the same three
+ * fields `src/lib/override/derive.ts`'s `compareToRecommendation` compares
+ * at write time. `summaryText` is ready to render: the honest "nothing
+ * differed" note when `differingFieldLabels` is empty, otherwise which
+ * field(s) differed and what was recommended for each.
+ */
+function buildComparison(
+  decided: DecisionSnapshot,
+  recommended: RecommendedSnapshot,
+  names: ReadonlyMap<number, string>
+): DecisionComparisonView {
+  const captain = fieldFromPlayerId('Captain', recommended.captainPlayerId, decided.captainPlayerId, names)
+  const viceCaptain = fieldFromPlayerId(
+    'Vice-captain',
+    recommended.viceCaptainPlayerId,
+    decided.viceCaptainPlayerId,
+    names
+  )
+  const transfer = transferFieldComparison(recommended, decided, names)
+
+  const differingFields = [captain, viceCaptain, transfer].filter((field) => field.status === 'differs')
+  const differingFieldLabels = differingFields.map((field) => field.label)
+
+  const summaryText =
+    differingFieldLabels.length === 0
+      ? NO_DIFFERENCE_FROM_RECOMMENDATION_MESSAGE
+      : `Differed from the recommendation — ${differingFields
+          .map((field) => `${field.label} (recommended ${field.recommendedText})`)
+          .join('; ')}.`
+
+  return { captain, viceCaptain, transfer, differingFieldLabels, summaryText }
+}
+
 function toEntryView(row: DecisionSourceRow, names: ReadonlyMap<number, string>): DecisionEntryView {
+  const recommended = row.kind === 'override' ? row.snapshot.recommended : null
+
   return {
     id: `${row.gameweekId}-${row.planIndex}-${row.kind}`,
     gameweekId: row.gameweekId,
@@ -124,10 +241,13 @@ function toEntryView(row: DecisionSourceRow, names: ReadonlyMap<number, string>)
     decidedAtLabel: formatSyncTimestamp(row.decidedAt),
     recorded: recordedText(row.snapshot, names),
     // A commit is, by definition, an acceptance of the recommendation as
-    // given — there is nothing to note a gap about. Only an override ever
-    // carries the honest "not preserved" note (decisions/ticket-103.md's
-    // ruling).
-    recommendationGapNote: row.kind === 'override' ? RECOMMENDATION_NOT_PRESERVED_NOTE : null,
+    // given — there is nothing to note a gap about, and nothing to compare
+    // (Scope, ticket #107). An override carries EITHER the honest
+    // "not preserved" note (recommended is null — decisions/ticket-103.md's
+    // original ruling, for every override before #107) OR the comparison
+    // below (recommended is present — ticket #107), never both.
+    recommendationGapNote: row.kind === 'override' && recommended === null ? RECOMMENDATION_NOT_PRESERVED_NOTE : null,
+    recommendationComparison: recommended !== null ? buildComparison(row.snapshot, recommended, names) : null,
   }
 }
 
