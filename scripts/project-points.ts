@@ -981,10 +981,10 @@ async function main(): Promise<void> {
       `(${horizonGameweeks.map((gw) => gw.id).join(', ')}) for ${playerRows.length} players ` +
       `(${rowsToUpsert.length} rows written). player_match_stats: ${matchStatsRows.length} Premier League row(s) read, ` +
       `${matchStatsRowsExcludedNonPremierLeague ?? 0} non-Premier-League row(s) excluded, ` +
-      `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded, ${currentSeasonRowsRead} of them ` +
-      `current-season (${CURRENT_SEASON}). Coverage: ${playersWithCurrentSeasonRows} player(s) with current-season rows, ` +
-      `${playersWithHistoricalOnlyRows} historical-only, ${playersWithNeitherSeasonRows} with neither. ` +
-      `Bonus: ${fixturesBonusAllocated} fixture(s) ` +
+      `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded; ${currentSeasonRowsRead} of the rows ` +
+      `read are current-season (${CURRENT_SEASON}). Coverage: ${playersWithCurrentSeasonRows} player(s) with ` +
+      `current-season rows, ${playersWithHistoricalOnlyRows} historical-only, ${playersWithNeitherSeasonRows} with ` +
+      `neither. Bonus: ${fixturesBonusAllocated} fixture(s) ` +
       `allocated, ${fixturesZeroExcess} zero-excess, ${playerFixturesBonusClamped} player-fixture(s) clamped, mean ` +
       `${meanProjectedBonusAmongLikelyStarters.toFixed(2)} among likely starters.`
     console.log(message)
