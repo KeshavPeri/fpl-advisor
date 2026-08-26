@@ -57,6 +57,27 @@
 // passes does (6) aggregate the (now bonus-corrected) per-fixture rows back
 // to one row per (player, gameweek) for the upsert, unchanged in shape from
 // before this ticket.
+//
+// TWO-STAGE SHRINKAGE (ticket #113). player_match_stats now carries rows
+// from more than one season (see the season column, populated per row at
+// ingest time). Every match read below is split, per player, into
+// CURRENT_SEASON rows and everything else ("historical"). The rate and
+// defcon estimators are then applied twice: first the player's historical
+// rate shrunk toward the position prior (his "personal prior"), then his
+// current-season rate shrunk toward that personal prior -- see
+// src/lib/projection/rates.ts's header for the one-line rule this
+// implements. computePlayerRates and estimateDefconHitRate (the
+// single-stage functions expectedPoints.ts calls directly) are unchanged
+// and out of scope for this ticket, so the per-fixture projection gets the
+// two-stage effect by construction rather than by editing that file: the
+// PlayerProjectionInput fed to projectPlayerFixture below carries the
+// CURRENT-SEASON history as its "rateHistory"/"defconMatches" and the
+// PERSONAL PRIOR (the historical-vs-position-prior result) as its
+// "ratePositionPrior"/"defconPositionPrior". expectedPoints.ts's own
+// single-stage shrink of (current season, personal prior) is then
+// mathematically identical to calling the two-stage functions directly --
+// which this file also does, for the components.playerLevel figures
+// surfaced in job_runs and player_projections, so the two never disagree.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
@@ -69,13 +90,16 @@ import {
   availabilityFactor,
   estimateMinutes,
   computePlayerRates,
+  computeTwoStagePlayerRates,
   positionPriorRates,
   positionPriorHitRate,
   estimateDefconHitRate,
+  estimateTwoStageDefconHitRate,
   LEAGUE_BASELINE_GOALS_PER_TEAM,
   projectPlayerFixture,
   allocateFixtureBonus,
   type PlayerRates,
+  type PlayerRateHistory,
   type RateHistoryMatch,
   type PlayerProjectionInput,
   type FixtureContext,
@@ -88,6 +112,18 @@ import type { DefensiveContributionMatch } from '../src/lib/projection/types.ts'
 const JOB_NAME = 'project-points'
 const PLAYER_PROJECTIONS_MIGRATION = 'supabase/migrations/20260815120000_player_projections.sql'
 const REFERENCE_SCHEMA_MIGRATION = 'supabase/migrations/20260811100000_reference_schema.sql'
+
+/**
+ * The season CORE_INSIGHTS_SEASON is set to for the "current" ingest step
+ * (ticket #113) -- player_match_stats rows carrying this value in their
+ * `season` column are this player's OBSERVED side of the two-stage shrink;
+ * every other season's rows are historical, his personal prior's input.
+ * Deliberately a literal, not read from an env var here: this job never
+ * runs the ingest itself, and the boundary between "this season" and
+ * "last season" is a modelling decision, not a deployment parameter --
+ * see docs/projection-model-backlog.md G6.
+ */
+export const CURRENT_SEASON = '2026-2027'
 
 /** How many gameweeks ahead this job projects — see ticket Notes: the solver's default horizon is 3, projecting 5 lets a later ticket raise its horizon without touching this job. */
 export const PROJECTION_HORIZON = 5
@@ -229,6 +265,7 @@ interface FinishedFixtureRow {
 
 interface MatchStatsRow {
   player_code: number | null
+  season: string
   gameweek: number
   minutes_played: number | null
   xg: number | null
@@ -239,6 +276,93 @@ interface MatchStatsRow {
   interceptions: number | null
   tackles: number | null
   recoveries: number | null
+}
+
+// ============================================================================
+// Ticket #113 — season-split pure helpers.
+//
+// Pulled out as small, independently-testable functions (this job's
+// Supabase reads can't be exercised without a live project — see
+// project-points.test.ts's own header) rather than left inline in the
+// per-player loop in main() below, which is where every one of them is
+// actually used.
+// ============================================================================
+
+/**
+ * Sorts match rows so every CURRENT_SEASON row sorts ahead of every other
+ * season's rows, and within each group, most recent gameweek first. This
+ * is the "recentMinutes prefers the current season" requirement — a sort
+ * change here, deliberately NOT in minutes.ts, which stays season-agnostic
+ * and just averages whatever array of minutes it is handed.
+ */
+export function sortRecentFirst<T extends { season: string; gameweek: number }>(
+  matches: readonly T[],
+  currentSeason: string = CURRENT_SEASON,
+): T[] {
+  return [...matches].sort((a, b) => {
+    const aCurrent = a.season === currentSeason
+    const bCurrent = b.season === currentSeason
+    if (aCurrent !== bCurrent) return aCurrent ? -1 : 1
+    return b.gameweek - a.gameweek
+  })
+}
+
+/**
+ * Splits a player's match rows into this season's rows (the observed side
+ * of stage 2) and every other season's rows (historical — the observed
+ * side of stage 1, whose result becomes the player's personal prior). See
+ * this file's header for how the two sets feed the two-stage shrink.
+ */
+export function splitBySeason<T extends { season: string }>(
+  matches: readonly T[],
+  currentSeason: string = CURRENT_SEASON,
+): { current: T[]; historical: T[] } {
+  const current: T[] = []
+  const historical: T[] = []
+  for (const m of matches) {
+    if (m.season === currentSeason) current.push(m)
+    else historical.push(m)
+  }
+  return { current, historical }
+}
+
+/** One of the three job_runs.details buckets a player falls into — always exactly one, so the three counters sum to the total player count by construction. */
+export type PlayerSeasonCoverage = 'current' | 'historicalOnly' | 'neither'
+
+/** Classifies one player's match coverage for the job_runs.details counters (ticket #113). */
+export function classifySeasonCoverage(hasCurrentSeasonRows: boolean, hasHistoricalRows: boolean): PlayerSeasonCoverage {
+  if (hasCurrentSeasonRows) return 'current'
+  if (hasHistoricalRows) return 'historicalOnly'
+  return 'neither'
+}
+
+/** Reduces one season's worth of a player's match rows into the totals `computePlayerRates`/`computeTwoStagePlayerRates` expect. */
+function aggregateRateHistory(matches: readonly MatchStatsRow[]): PlayerRateHistory {
+  return matches.reduce(
+    (totals, m) => ({
+      minutesPlayed: totals.minutesPlayed + (m.minutes_played ?? 0),
+      totalXg: totals.totalXg + (m.xg ?? 0),
+      totalXa: totals.totalXa + (m.xa ?? 0),
+      totalSaves: totals.totalSaves + (m.saves ?? 0),
+      // CBI = clearances + blocks + interceptions -- NOT tackles, same
+      // definition src/lib/scoring/bps.ts uses (ticket #78).
+      totalCbi: totals.totalCbi + (m.clearances ?? 0) + (m.blocks ?? 0) + (m.interceptions ?? 0),
+      totalRecoveries: totals.totalRecoveries + (m.recoveries ?? 0),
+    }),
+    { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
+  )
+}
+
+/** Maps one match row onto the defcon estimator's input shape. */
+function toDefconMatch(m: MatchStatsRow): DefensiveContributionMatch {
+  return {
+    minutesPlayed: m.minutes_played ?? 0,
+    clearances: m.clearances ?? 0,
+    blocks: m.blocks ?? 0,
+    interceptions: m.interceptions ?? 0,
+    tackles: m.tackles ?? 0,
+    recoveries: m.recoveries ?? 0,
+  }
 }
 
 // ============================================================================
@@ -411,7 +535,7 @@ async function main(): Promise<void> {
       supabase
         .from('player_match_stats')
         .select(
-          'player_code, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries',
+          'player_code, season, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries',
         )
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
         .range(from, to)
@@ -521,8 +645,14 @@ async function main(): Promise<void> {
     //    -- so it is allocated in pass 5b below, after every player has been
     //    staged. See the BONUS note in this file's header (ticket #78).
     // --------------------------------------------------------------------
-    let playersWithHistoricalMatches = 0
-    let playersWithNoHistoricalMatches = 0
+    // Ticket #113 counters -- exactly one of the first three increments per
+    // player, by construction of classifySeasonCoverage, so they sum to
+    // playerRows.length. currentSeasonRowsRead is a straight count of the
+    // player_match_stats rows read above whose season is CURRENT_SEASON.
+    let playersWithCurrentSeasonRows = 0
+    let playersWithHistoricalOnlyRows = 0
+    let playersWithNeitherSeasonRows = 0
+    const currentSeasonRowsRead = matchStatsRows.filter((row) => row.season === CURRENT_SEASON).length
 
     interface StagedFixture {
       playerId: number
@@ -553,48 +683,45 @@ async function main(): Promise<void> {
     for (const player of playerRows) {
       const position = player.element_type as Position
       const allMatches = player.code !== null ? (matchesByPlayerCode.get(player.code) ?? []) : []
+      const { current: currentMatches, historical: historicalMatches } = splitBySeason(allMatches)
 
-      if (allMatches.length > 0) {
-        playersWithHistoricalMatches++
-      } else {
-        playersWithNoHistoricalMatches++
-      }
+      const coverage = classifySeasonCoverage(currentMatches.length > 0, historicalMatches.length > 0)
+      if (coverage === 'current') playersWithCurrentSeasonRows++
+      else if (coverage === 'historicalOnly') playersWithHistoricalOnlyRows++
+      else playersWithNeitherSeasonRows++
 
-      const recentMatches = [...allMatches].sort((a, b) => b.gameweek - a.gameweek).slice(0, 5)
+      // Ticket #113: current-season matches lead the recent-minutes window,
+      // historical ones only fill in behind them -- a sort change here, not
+      // in minutes.ts (see this file's header).
+      const recentMatches = sortRecentFirst(allMatches).slice(0, 5)
       const recentMinutes = recentMatches.map((m) => m.minutes_played ?? 0)
 
-      const rateHistory = allMatches.reduce(
-        (totals, m) => ({
-          minutesPlayed: totals.minutesPlayed + (m.minutes_played ?? 0),
-          totalXg: totals.totalXg + (m.xg ?? 0),
-          totalXa: totals.totalXa + (m.xa ?? 0),
-          totalSaves: totals.totalSaves + (m.saves ?? 0),
-          // CBI = clearances + blocks + interceptions -- NOT tackles, same
-          // definition src/lib/scoring/bps.ts uses (ticket #78).
-          totalCbi: totals.totalCbi + (m.clearances ?? 0) + (m.blocks ?? 0) + (m.interceptions ?? 0),
-          totalRecoveries: totals.totalRecoveries + (m.recoveries ?? 0),
-        }),
-        { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
-      )
+      // Ticket #113: two-stage shrinkage. Stage 1 -- the player's own
+      // historical rate/defcon-hit-rate, shrunk toward the position prior --
+      // becomes his personal prior. Stage 2 -- his current-season rate,
+      // shrunk toward that personal prior -- is what actually feeds the
+      // projection. See this file's header for how `personalPrior` below
+      // (rather than the raw position prior) gets threaded into
+      // `projectionInput` so `projectPlayerFixture`'s own single-stage call
+      // to `computePlayerRates`/`estimateDefconHitRate` reproduces stage 2
+      // exactly, without expectedPoints.ts (out of scope) ever changing.
+      const currentRateHistory = aggregateRateHistory(currentMatches)
+      const historicalRateHistory = aggregateRateHistory(historicalMatches)
+      const currentDefconMatches: DefensiveContributionMatch[] = currentMatches.map(toDefconMatch)
+      const historicalDefconMatches: DefensiveContributionMatch[] = historicalMatches.map(toDefconMatch)
 
-      const defconMatches: DefensiveContributionMatch[] = allMatches.map((m) => ({
-        minutesPlayed: m.minutes_played ?? 0,
-        clearances: m.clearances ?? 0,
-        blocks: m.blocks ?? 0,
-        interceptions: m.interceptions ?? 0,
-        tackles: m.tackles ?? 0,
-        recoveries: m.recoveries ?? 0,
-      }))
+      const personalRatePrior = computePlayerRates(historicalRateHistory, ratePriorByPosition[position])
+      const personalDefconPrior = estimateDefconHitRate(position, historicalDefconMatches, defconPriorByPosition[position])
 
       const projectionInput: PlayerProjectionInput = {
         position,
         status: player.status,
         chanceOfPlayingNextRound: player.chance_of_playing_next_round,
         recentMinutes,
-        rateHistory,
-        ratePositionPrior: ratePriorByPosition[position],
-        defconMatches,
-        defconPositionPrior: defconPriorByPosition[position],
+        rateHistory: currentRateHistory,
+        ratePositionPrior: personalRatePrior,
+        defconMatches: currentDefconMatches,
+        defconPositionPrior: personalDefconPrior,
       }
 
       // Player-level model inputs (fixture-invariant), computed directly
@@ -602,8 +729,13 @@ async function main(): Promise<void> {
       // meaningful even for a player with zero fixtures this gameweek.
       const availability = availabilityFactor(player.status, player.chance_of_playing_next_round)
       const minutesEstimate = estimateMinutes(recentMinutes, availability)
-      const playerRates = computePlayerRates(rateHistory, ratePriorByPosition[position])
-      const defconHitRate = estimateDefconHitRate(position, defconMatches, defconPriorByPosition[position])
+      const playerRates = computeTwoStagePlayerRates(currentRateHistory, historicalRateHistory, ratePriorByPosition[position])
+      const defconHitRate = estimateTwoStageDefconHitRate(
+        position,
+        currentDefconMatches,
+        historicalDefconMatches,
+        defconPriorByPosition[position],
+      )
 
       for (const gw of horizonGameweeks) {
         const gwFixtures = fixturesByGw.get(gw.id) ?? []
@@ -810,8 +942,16 @@ async function main(): Promise<void> {
     const details: JsonRecord = {
       gameweeksProjected: horizonGameweeks.map((gw) => gw.id),
       rowsWritten: rowsToUpsert.length,
-      playersWithHistoricalMatches,
-      playersWithNoHistoricalMatches,
+      // Ticket #113 -- these three sum exactly to playerRows.length,
+      // by construction of classifySeasonCoverage (every player falls
+      // into exactly one bucket). currentSeasonRowsRead is a straight
+      // count of the player_match_stats rows read above whose season is
+      // CURRENT_SEASON, not a per-player count. See docs/projection-model-backlog.md
+      // G2 and G6.
+      playersWithCurrentSeasonRows,
+      playersWithHistoricalOnlyRows,
+      playersWithNeitherSeasonRows,
+      currentSeasonRowsRead,
       fixtureEloFallbackCount,
       leagueBaselineGoalsSource,
       leagueBaselineGoals,
@@ -841,7 +981,10 @@ async function main(): Promise<void> {
       `(${horizonGameweeks.map((gw) => gw.id).join(', ')}) for ${playerRows.length} players ` +
       `(${rowsToUpsert.length} rows written). player_match_stats: ${matchStatsRows.length} Premier League row(s) read, ` +
       `${matchStatsRowsExcludedNonPremierLeague ?? 0} non-Premier-League row(s) excluded, ` +
-      `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded. Bonus: ${fixturesBonusAllocated} fixture(s) ` +
+      `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded, ${currentSeasonRowsRead} of them ` +
+      `current-season (${CURRENT_SEASON}). Coverage: ${playersWithCurrentSeasonRows} player(s) with current-season rows, ` +
+      `${playersWithHistoricalOnlyRows} historical-only, ${playersWithNeitherSeasonRows} with neither. ` +
+      `Bonus: ${fixturesBonusAllocated} fixture(s) ` +
       `allocated, ${fixturesZeroExcess} zero-excess, ${playerFixturesBonusClamped} player-fixture(s) clamped, mean ` +
       `${meanProjectedBonusAmongLikelyStarters.toFixed(2)} among likely starters.`
     console.log(message)

@@ -40,10 +40,30 @@ jobs:
         run: npx tsx scripts/heartbeat.ts
 
       - name: Run FPL-Core-Insights ingest
+        # Defaults to CORE_INSIGHTS_SEASON's own DEFAULT_SEASON (2025-2026,
+        # last season) when the env var below is unset -- kept explicit here
+        # so the two ingest steps read the same at a glance.
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          CORE_INSIGHTS_SEASON: '2025-2026'
         run: npx tsx scripts/ingest-core-insights.ts
+
+      - name: Run FPL-Core-Insights ingest (current season)
+        # Ticket #113. Same job, same logic, second season -- last season
+        # remains the prior for src/lib/projection/rates.ts and
+        # defconRate.ts's two-stage shrinkage; this step is what lets a
+        # player's actual 2026/27 form reach the model at all. A season
+        # directory the source has not published yet is a normal,
+        # non-failing state for this job (see ingest-core-insights.ts's own
+        # header) -- this step is expected to log that plainly and exit 0
+        # for however long that remains true early in the season.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          CORE_INSIGHTS_SEASON: '2026-2027'
+        run: npx tsx scripts/ingest-core-insights.ts
+
       - name: Run FPL ingest
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
