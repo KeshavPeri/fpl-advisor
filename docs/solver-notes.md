@@ -155,3 +155,37 @@ without anyone deciding that on purpose.
 
 `decay_base` remains documented here for completeness (ticket #95's original audit scope), not
 changed — it is defensible as shipped and any change belongs in its own ticket, later, alone.
+
+## Dispatch-only chip probe (ticket #114)
+
+`chip_limits` has been `{ bb: 0, wc: 0, fh: 0, tc: 0 }` since ticket #41 — the solver has never
+been asked to consider playing a chip in a real run. Turning that on is a one-line config
+change (`scripts/build-solver-input.ts`'s `CHIP_PROBE` env var makes `buildSolverConfig` emit
+`{ bb: 1, wc: 0, fh: 0, tc: 1 }` instead). Reading back which chip the solver decided to play,
+and in which gameweek, is a separate, **unsolved** problem: none of the results-CSV columns
+documented above ("Shipped settings audit" table and "Required input columns" section) carry a
+chip decision. The chip choice appears only in `dev/solver.py`'s stdout, via
+`print_transfer_chip_summary` (already `true` in every config this app has ever built), which
+nobody has read with chips actually enabled.
+
+Enabling chips in the *live* `solver-run.yml` run without a way to read that stdout back would
+make the solver optimise assuming a chip is played, while the app kept presenting the resulting
+transfer/captain recommendation without ever saying a chip was involved — a confidently wrong
+recommendation, which product-brief.md §6a forbids ("no recommendation beats a wrong one").
+
+`.github/workflows/solver-chip-probe.yml` exists to remove that guess before feature-list item
+27 (chip strategy — product-brief.md §7, "Chip strategy for all eight chips") is written. It is
+`workflow_dispatch`-only, sets `CHIP_PROBE`, runs the solver with Bench Boost and Triple Captain
+enabled (Wildcard and Free Hit stay off — no full-squad solver support yet, see product-brief.md
+§7), and stops after the solve: no `solver_runs`/`solver_picks`/`recommendations` row, no
+Telegram send. It uploads the solver's raw stdout log, the results CSV, and the exact config
+JSON it was given, as artefacts.
+
+**Item 27 must be written from this probe's actual stdout output — not from the results-CSV
+column list above.** The columns documented in "Required input columns" are what the solver
+*reads*; they say nothing about what it *prints* when a chip is played. A future session
+building the chip-parsing logic should dispatch this workflow, read the uploaded
+`chip-probe-solver-log` artefact, and derive the stdout format from what is actually there —
+the same discipline this document's "Resolved: no bundled sample projections CSV exists"
+section above already establishes for this file: write down what was actually run, not a guess
+from reading the README.
