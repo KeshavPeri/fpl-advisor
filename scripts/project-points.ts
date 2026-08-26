@@ -380,7 +380,7 @@ function median(sortedValues: readonly number[]): number {
  * already treat as "no adjustment" rather than a division by zero.
  */
 export function medianNowCostByPosition(players: readonly PlayerCostRow[]): Record<Position, number> {
-  const costsByPosition: Record<Position, number[]> = { [GOALKEEPER]: [], [DEFENDER]: [], [MIDFIELDER]: [], [FORWARD]: [] }
+  const costsByPosition: Record<Position, number[]> = { 1: [], 2: [], 3: [], 4: [] }
   for (const player of players) {
     costsByPosition[player.element_type as Position].push(player.now_cost)
   }

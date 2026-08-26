@@ -347,10 +347,12 @@ describe('medianNowCostByPosition — ticket #119', () => {
     const match = source.match(/export function medianNowCostByPosition[\s\S]*?\n}\n/)
     expect(match).not.toBeNull()
     const body = match![0]
-    // GOALKEEPER/DEFENDER/MIDFIELDER/FORWARD are Position CONSTANTS, not
-    // numeric literals in source text -- the only characters that could
-    // match \d here would be an actual hardcoded number.
-    expect(body).not.toMatch(/\d/)
+    // The only digits allowed here are the 1-4 Position codes used as
+    // Record<Position, ...> initializer keys (same style as
+    // rateMatchesByPosition/defconMatchesByPosition above them in this
+    // file) -- a real price literal (players.now_cost values run from
+    // roughly 40 to 150+) would always be two or more digits.
+    expect(body).not.toMatch(/\b\d{2,}\b/)
   })
 })
 
