@@ -116,6 +116,19 @@
 // records a failed job_runs row (naming the match_id, via the thrown
 // error's own message) and exits non-zero. It does not default to "prem"
 // and does not store null and continue — see that module's header for why.
+//
+// team_goals_conceded (ticket #125): added to MATCH_STATS_REQUIRED_COLUMNS
+// and written on every row via the same toInt() treatment as every other
+// integer counting stat (goals_conceded, saves, etc.) — a blank/missing
+// source cell maps to null, never 0. This is the team-level figure clean
+// sheets must be read from; goals_conceded is a goalkeeper-only stat (74%
+// populated on goalkeeper rows, 1.1% on outfield rows) and must never be
+// substituted for it. supabase/README.md's row for the #54 migration
+// (20260818100000_player_match_stats_competition.sql) wrongly claimed that
+// migration already added this column — it did not; see
+// supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql
+// (the migration that actually adds it) and the corrected README rows, both
+// from ticket #125.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { parse } from 'csv-parse/sync'
@@ -284,6 +297,7 @@ const MATCH_STATS_REQUIRED_COLUMNS = [
   'saves',
   'goals_conceded',
   'goals_prevented',
+  'team_goals_conceded',
 ]
 
 function toInt(value: string | undefined): number | null {
@@ -503,10 +517,21 @@ interface MatchStatRow {
   saves: number | null
   goals_conceded: number | null
   goals_prevented: number | null
+  // Ticket #125: the team-level figure clean sheets must be read from --
+  // goals_conceded above is a goalkeeper-only stat (74% populated on
+  // goalkeeper rows, 1.1% on outfield rows) and must never be substituted
+  // for this one. Same toInt() treatment as every other integer counting
+  // stat in this row: an empty/missing cell maps to null, never 0 -- a row
+  // this job has genuinely never observed a value for is a different fact
+  // from "this team conceded zero goals in this match".
+  team_goals_conceded: number | null
   updated_at: string
 }
 
-function toMatchStatRow(
+// Exported (ticket #125) so its null-vs-zero handling for team_goals_conceded
+// is directly unit-testable — see ingest-core-insights.test.ts — the same
+// reasoning buildEloByCode/planTeamEloUpdates above are exported for.
+export function toMatchStatRow(
   record: Record<string, string>,
   season: string,
   gameweek: number,
@@ -545,6 +570,7 @@ function toMatchStatRow(
     saves: toInt(record.saves),
     goals_conceded: toInt(record.goals_conceded),
     goals_prevented: toNumeric(record.goals_prevented),
+    team_goals_conceded: toInt(record.team_goals_conceded),
     updated_at: new Date().toISOString(),
   }
 }
@@ -562,6 +588,15 @@ interface PlayerMatchStatsUpsertResult {
   // defensively, the same way missingPlayerCode is above, rather than
   // assumed equal to `written` by construction.
   withCompetition: number
+  // Rows written carrying a non-null team_goals_conceded (ticket #125).
+  // Unlike withCompetition above, this is NOT expected to equal `written`
+  // on every run: a source row with a genuinely blank cell writes null
+  // (see toMatchStatRow), so this count only reaches `written` once every
+  // row this job has ever seen has a real value for the column — the DoD's
+  // own "must equal rows written once a full re-ingest has run" is a
+  // statement about the source data being complete, not about this job's
+  // logic.
+  withTeamGoalsConceded: number
 }
 
 async function upsertPlayerMatchStats(
@@ -587,7 +622,8 @@ async function upsertPlayerMatchStats(
   }
   const missingPlayerCode = rows.filter((r) => r.player_code === null).length
   const withCompetition = rows.filter((r) => r.competition !== null && r.competition !== undefined && r.competition !== '').length
-  if (rows.length === 0) return { written: 0, missingPlayerCode: 0, withCompetition: 0 }
+  const withTeamGoalsConceded = rows.filter((r) => r.team_goals_conceded !== null).length
+  if (rows.length === 0) return { written: 0, missingPlayerCode: 0, withCompetition: 0, withTeamGoalsConceded: 0 }
 
   const { error } = await supabase.from('player_match_stats').upsert(rows, { onConflict: 'player_id,match_id' })
   if (error) {
@@ -596,7 +632,7 @@ async function upsertPlayerMatchStats(
     }
     throw new IngestError(`upsert into player_match_stats failed for ${url}: ${error.message}`)
   }
-  return { written: rows.length, missingPlayerCode, withCompetition }
+  return { written: rows.length, missingPlayerCode, withCompetition, withTeamGoalsConceded }
 }
 
 // ============================================================================
@@ -674,6 +710,7 @@ async function main(): Promise<void> {
           matchRowsWritten: 0,
           matchRowsWithoutPlayerCode: 0,
           matchRowsWithCompetition: 0,
+          matchRowsWithTeamGoalsConceded: 0,
         },
         startedAt,
       })
@@ -709,6 +746,7 @@ async function main(): Promise<void> {
     let matchRowsWritten = 0
     let matchRowsWithoutPlayerCode = 0
     let matchRowsWithCompetition = 0
+    let matchRowsWithTeamGoalsConceded = 0
     for (let gw = 1; gw <= MAX_GAMEWEEKS; gw++) {
       const url = gameweekUrl(season, gw)
       const resp = await fetchCsv(url)
@@ -733,6 +771,7 @@ async function main(): Promise<void> {
       matchRowsWritten += result.written
       matchRowsWithoutPlayerCode += result.missingPlayerCode
       matchRowsWithCompetition += result.withCompetition
+      matchRowsWithTeamGoalsConceded += result.withTeamGoalsConceded
     }
 
     const message =
@@ -744,7 +783,8 @@ async function main(): Promise<void> {
       `${eloResult.malformedElo} row(s) with a malformed elo cell skipped, ` +
       `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted ` +
       `(${matchRowsWithoutPlayerCode} without a matching player_code in players.csv, ` +
-      `${matchRowsWithCompetition} carrying a non-null competition)`
+      `${matchRowsWithCompetition} carrying a non-null competition, ` +
+      `${matchRowsWithTeamGoalsConceded} carrying a non-null team_goals_conceded)`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
@@ -762,6 +802,7 @@ async function main(): Promise<void> {
         matchRowsWritten,
         matchRowsWithoutPlayerCode,
         matchRowsWithCompetition,
+        matchRowsWithTeamGoalsConceded,
       },
       startedAt,
     })
