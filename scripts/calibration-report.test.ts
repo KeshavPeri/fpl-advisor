@@ -16,6 +16,10 @@
 // need a live project this Builder's session does not have — same technique
 // scripts/ingest-core-insights.test.ts's "source invariants" section and
 // scripts/project-points.test.ts already use.
+//
+// Ticket #127 (restore like-for-like: exclude bonus from the projected
+// side) appends its own tests at the bottom too, same reason and same
+// technique where main()'s I/O would otherwise be needed.
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -25,8 +29,12 @@ import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import {
   aggregateActualByPosition,
   aggregateProjectedByPosition,
+  checkExcludedBonusBound,
   componentsPer90,
+  EXCLUDED_BONUS_LOWER_BOUND,
+  EXCLUDED_BONUS_UPPER_BOUND,
   emptyComponentTotals,
+  excludeBonusFromProjection,
   ratio,
   reconstructActualMatchPoints,
   sumComponents,
@@ -478,5 +486,115 @@ describe('calibration-report.ts — Premier League filter (source invariants, ti
     // the newer tickets/drafts/ file that this ticket's own issue text
     // explicitly excludes.
     expect(source).not.toMatch(/team_goals_conceded/)
+  })
+})
+
+// ============================================================================
+// Ticket #127 — restore like-for-like: exclude bonus from the projected
+// side inside the report only. Nothing under src/ changes and
+// player_projections is never written to; this file only tests the report's
+// own pure adjustment functions plus source invariants for what main()
+// wires up.
+// ============================================================================
+
+describe('excludeBonusFromProjection — ticket #127', () => {
+  it('subtracts bonus from the projected total: a 5.79 projection with 0.22 bonus is compared as 5.57', () => {
+    const result = excludeBonusFromProjection(5.79, 0.22)
+    expect(result.comparedPoints).toBeCloseTo(5.57, 6)
+    expect(result.excludedBonus).toBe(0.22)
+  })
+
+  it('treats a projection whose components carry no bonusPoints key as zero bonus, compared unchanged', () => {
+    // Rows written before ticket #78 have no bonusPoints component at all —
+    // this must not drop the row or throw, and must not change its total.
+    const result = excludeBonusFromProjection(4.1, undefined)
+    expect(result.comparedPoints).toBe(4.1)
+    expect(result.excludedBonus).toBe(0)
+  })
+
+  it('subtracts a zero bonus without changing the total, for a row that explicitly projects no bonus', () => {
+    const result = excludeBonusFromProjection(3.0, 0)
+    expect(result.comparedPoints).toBe(3.0)
+    expect(result.excludedBonus).toBe(0)
+  })
+})
+
+describe('checkExcludedBonusBound — ticket #127, the headline bound (0.05–1.00)', () => {
+  it(`passes exactly AT the lower bound, ${EXCLUDED_BONUS_LOWER_BOUND}`, () => {
+    const result = checkExcludedBonusBound([EXCLUDED_BONUS_LOWER_BOUND])
+    expect(result.meanExcludedBonusPerAppearance).toBeCloseTo(EXCLUDED_BONUS_LOWER_BOUND, 6)
+    expect(result.withinBound).toBe(true)
+  })
+
+  it(`passes exactly AT the upper bound, ${EXCLUDED_BONUS_UPPER_BOUND}`, () => {
+    const result = checkExcludedBonusBound([EXCLUDED_BONUS_UPPER_BOUND])
+    expect(result.meanExcludedBonusPerAppearance).toBeCloseTo(EXCLUDED_BONUS_UPPER_BOUND, 6)
+    expect(result.withinBound).toBe(true)
+  })
+
+  it('fails just BELOW the lower bound rather than silently passing', () => {
+    const result = checkExcludedBonusBound([EXCLUDED_BONUS_LOWER_BOUND - 0.01])
+    expect(result.withinBound).toBe(false)
+  })
+
+  it('fails just ABOVE the upper bound rather than silently passing', () => {
+    const result = checkExcludedBonusBound([EXCLUDED_BONUS_UPPER_BOUND + 0.01])
+    expect(result.withinBound).toBe(false)
+  })
+
+  it('computes the mean over multiple rows, not just the first', () => {
+    // (0.05 + 0.15 + 0.40) / 3 = 0.2 — inside bound.
+    const result = checkExcludedBonusBound([0.05, 0.15, 0.4])
+    expect(result.meanExcludedBonusPerAppearance).toBeCloseTo(0.2, 6)
+    expect(result.withinBound).toBe(true)
+    expect(result.rowCount).toBe(3)
+  })
+
+  it('reports a null mean (not NaN or zero) and fails the bound when there are no rows at all', () => {
+    const result = checkExcludedBonusBound([])
+    expect(result.meanExcludedBonusPerAppearance).toBeNull()
+    expect(result.withinBound).toBe(false)
+    expect(result.rowCount).toBe(0)
+  })
+})
+
+describe('calibration-report.ts — bonus exclusion restored to like-for-like (source invariants, ticket #127)', () => {
+  it('does not contain the obsolete "hardcodes bonusPoints to 0" claim any more', () => {
+    expect(source).not.toMatch(/hardcodes bonusPoints to 0/)
+  })
+
+  it('states that the projected side models bonus but the comparison excludes it', () => {
+    expect(source).toMatch(/excludes it|excludes projected bonus|report excludes it/)
+  })
+
+  it('states that the actual side has no bonus column, verified', () => {
+    expect(source).toMatch(/no `bonus` column/)
+    expect(source).toMatch(/verified directly from the source CSV header on 28 Aug 2026/)
+  })
+
+  it('prints the excluded bonus alongside the projected total in the by-position table', () => {
+    expect(source).toMatch(/Excluded bonus pts\/90/)
+  })
+
+  it('prints the excluded bonus alongside the projected total in the Top-N table', () => {
+    expect(source).toMatch(/Excluded bonus/)
+    expect(source).toMatch(/meanExcludedBonus/)
+  })
+
+  it('never writes (upsert, insert or update) to player_projections — report-side only, per the ticket', () => {
+    // The one .insert( call in this file targets job_runs (recordJobRun),
+    // never player_projections — checked directly rather than assuming.
+    expect(source).not.toMatch(/\.upsert\(/)
+    expect(source).not.toMatch(/\.update\(/)
+    const insertCalls = source.match(/\.from\(\s*['"][a-z_]+['"]\s*\)\s*\n?\s*\.insert\(/g) ?? []
+    for (const call of insertCalls) {
+      expect(call).toMatch(/job_runs/)
+    }
+    expect(source).not.toMatch(/\.from\(\s*['"]player_projections['"]\s*\)\s*\n?\s*\.insert\(/)
+  })
+
+  it('imports and uses the bound constants rather than hardcoded 0.05/1.00 literals at the call site', () => {
+    expect(source).toMatch(/EXCLUDED_BONUS_LOWER_BOUND\s*=\s*0\.05/)
+    expect(source).toMatch(/EXCLUDED_BONUS_UPPER_BOUND\s*=\s*1(\.0+)?/)
   })
 })
