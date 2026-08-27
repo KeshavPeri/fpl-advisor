@@ -360,3 +360,63 @@ describe('MATCH_STATS_REQUIRED_COLUMNS / row mapping — source invariants (tick
     expect(source).toMatch(/matchRowsWithTeamGoalsConceded/)
   })
 })
+
+// ============================================================================
+// supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql
+// and supabase/README.md — grep-checkable DoD items against the real shipped
+// files (ticket #125).
+// ============================================================================
+
+describe('supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql', () => {
+  const migrationPath = fileURLToPath(
+    new URL('../supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql', import.meta.url),
+  )
+  const migrationSource = readFileSync(migrationPath, 'utf8')
+
+  it('adds team_goals_conceded as a nullable integer column with no default', () => {
+    expect(migrationSource).toMatch(/ADD COLUMN IF NOT EXISTS team_goals_conceded integer;/)
+    // No "NOT NULL" and no "DEFAULT" on that same statement — nullable,
+    // undefaulted, deliberately (see the file's own header).
+    const columnLine = migrationSource.match(/ALTER TABLE public\.player_match_stats ADD COLUMN IF NOT EXISTS team_goals_conceded integer;/)
+    expect(columnLine).not.toBeNull()
+  })
+
+  it('is idempotent: ADD COLUMN IF NOT EXISTS', () => {
+    expect(migrationSource).toMatch(/ADD COLUMN IF NOT EXISTS/)
+  })
+
+  it('carries a COMMENT ON COLUMN naming this the clean-sheet source and goals_conceded as goalkeeper-only', () => {
+    expect(migrationSource).toMatch(/COMMENT ON COLUMN public\.player_match_stats\.team_goals_conceded IS/)
+    expect(migrationSource).toMatch(/goalkeeper-only/i)
+  })
+
+  it('issues no GRANT statement — table-level grants from the #12 migration already cover this column', () => {
+    // Strip comment lines (-- ...) so mentioning "GRANT" in prose (e.g.
+    // "table-level grants already cover this") doesn't false-positive; what
+    // this actually guards is an executable GRANT statement.
+    const codeOnly = migrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
+})
+
+describe('supabase/README.md (ticket #125)', () => {
+  const readmePath = fileURLToPath(new URL('../supabase/README.md', import.meta.url))
+  const readmeSource = readFileSync(readmePath, 'utf8')
+
+  it('the 20260818100000 row no longer claims to add team_goals_conceded, and states it was added later by this ticket', () => {
+    const rowMatch = readmeSource.match(/\| `20260818100000_player_match_stats_competition\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).not.toMatch(/Adds `competition`.*and `team_goals_conceded`/)
+    expect(rowMatch![0]).toMatch(/does not add `team_goals_conceded`/i)
+  })
+
+  it('lists the new migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260828090000_player_match_stats_team_goals_conceded\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260828090000_player_match_stats_team_goals_conceded\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
+  })
+})

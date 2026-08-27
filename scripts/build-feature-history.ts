@@ -39,23 +39,37 @@
 // non-Premier-League competition, or a not-yet-stamped null) is excluded
 // from every total and counted, never assumed Premier League.
 //
-// TEAM_GOALS_CONCEDED — A SCHEMA GAP FLAGGED, NOT WORKED AROUND. This
-// ticket's brief specifies reading player_match_stats.team_goals_conceded
-// (goals_conceded is a goalkeeper-only stat, ~1% populated for outfield
-// rows — using it would reproduce the #54 bias this repo already fixed once
-// for clean sheets). As of this ticket, no migration in this repository
-// actually adds that column to player_match_stats, and
-// scripts/ingest-core-insights.ts's MATCH_STATS_REQUIRED_COLUMNS does not
-// populate it — confirmed by reading both files directly. supabase/README.md's
-// row for the #54 migration (20260818100000_player_match_stats_competition.sql)
-// currently describes it as already added; the migration file itself does
-// not do so. This job is written to the spec regardless — selecting
-// team_goals_conceded from player_match_stats — because substituting a
-// different column would silently reintroduce the exact bias #54 exists to
-// prevent. If the live database does not yet have this column, the read
-// below fails LOUDLY with a message naming the gap (see isMissingColumn),
-// rather than silently defaulting the totals to zero. See this ticket's
-// Builder report for the full flag raised to the orchestrator.
+// TEAM_GOALS_CONCEDED — SCHEMA GAP CLOSED BY TICKET #125. Ticket #121's brief
+// specified reading player_match_stats.team_goals_conceded — the pre-existing
+// per-player conceded-goals column is a goalkeeper-only stat, ~1% populated
+// for outfield rows, and using it would reproduce the #54 bias this repo
+// already fixed once for clean sheets — but at that time no migration in
+// this repository actually added the team_goals_conceded column, and
+// scripts/ingest-core-insights.ts did not populate it — supabase/README.md's
+// row for the #54 migration
+// (20260818100000_player_match_stats_competition.sql) wrongly described it
+// as already added; the migration file itself never did. Ticket #125 fixed
+// both: supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql
+// adds the column (nullable, no default) and scripts/ingest-core-insights.ts
+// now writes it on every row. This job's read below was already written to
+// the correct spec — selecting team_goals_conceded, never the goalkeeper-only
+// per-player column — and needed no change; the isMissingColumn guard stays
+// as defence for a live database the #125 migration has not yet been
+// applied to, which fails LOUDLY with a message naming the gap, rather than
+// silently defaulting the totals to zero.
+//
+// DENSE ROWS (ticket #125). Ticket #121 emitted a row only for a
+// (player, gameweek) pair where that player had a contributing match that
+// gameweek — sparse output that pushed "what was the state as of a
+// gameweek this player didn't play" onto every consumer. This job now
+// emits one row per (player, gameweek) for EVERY gameweek from that
+// player's first contributing match through the last gameweek present
+// anywhere in the season's data (every row read for the season, contributing
+// or not — see lastGameweekInData below), whether or not the player had a
+// contributing match that gameweek. A gameweek with no contributing match
+// carries the running totals unchanged from the gameweek before it — see
+// buildFeatureHistory's own comment for how the loop guarantees this and
+// still guarantees the strictly-before rule at every row, dense or not.
 //
 // Reads exactly two environment variables — SUPABASE_URL and
 // SUPABASE_SECRET_KEY — same convention as every other scripts/*.ts job.
@@ -288,35 +302,52 @@ export interface BuildFeatureHistoryResult {
   // holds by construction for ANY input, not just well-formed ones.
   nonPremierLeagueRowsExcluded: number
   playersCovered: number
+  // Distinct gameweeks with at least one CONTRIBUTING match — a reporting
+  // count, not the number of rows written. Ticket #125 made row output
+  // dense (see buildFeatureHistory below); this field keeps its #121
+  // meaning ("how many gameweeks actually had Premier League action")
+  // rather than being redefined to match the (much larger) dense row count,
+  // which playersCovered * (span of gameweeks) already implies.
   gameweeksCovered: number
+  // The last gameweek number seen anywhere in `rows` (contributing or not)
+  // — the upper bound every player's dense row range is built out to. 0 when
+  // `rows` is empty. Ticket #125.
+  lastGameweekInData: number
 }
 
 /**
- * Builds one feature_history row per (player, gameweek) for every gameweek
- * in which that player has at least one contributing (Premier League,
- * player_code-resolved) match — the same per-player-per-gameweek density
- * player_match_stats itself has. A gameweek where a player's only match was
- * excluded (a cup tie, say) gets no row of its own; that is correct, not a
- * gap — the STRICTLY BEFORE rule only needs a row wherever there is a
- * meaningful "as of this gameweek" moment to ask about, and this job's sole
- * consumer-to-be will read the most recent row at or before whatever
- * gameweek it cares about (a later ticket's concern, not this one's).
+ * Builds one feature_history row per (player, gameweek) for EVERY gameweek
+ * from that player's first contributing (Premier League,
+ * player_code-resolved) match through `lastGameweekInData` — the highest
+ * gameweek number present anywhere in this season's input, whether or not
+ * that particular row is itself a contributing one. This is DENSE output
+ * (ticket #125): a gameweek where a player had no contributing match still
+ * gets a row, carrying the running totals unchanged from the gameweek
+ * before it. A backtest asking "what was knowable before gameweek 12" must
+ * get an answer for a player who was injured or rotated that week, not a
+ * gap it has to carry forward itself.
  *
- * THE STRICTLY-BEFORE RULE, verified by construction: rows are processed in
- * ascending gameweek order, and for each of a player's distinct gameweeks a
- * row is emitted using the running totals accumulated so far — BEFORE that
- * gameweek's own match(es) are folded in. Every match up to and including a
- * double-gameweek's second fixture is folded in only once the loop reaches
- * the NEXT distinct gameweek, so a double gameweek is handled correctly
- * without special-casing it.
+ * THE STRICTLY-BEFORE RULE, verified by construction and unaffected by
+ * density: for each gameweek in a player's dense range, the loop below
+ * folds in every one of that player's contributing matches with
+ * `gameweek < gameweekId` — never `<=` — before emitting that gameweek's
+ * row. A gameweek with no contributing match simply folds in nothing new,
+ * so its row is byte-for-byte the same totals as the gameweek before it
+ * (the "carries the totals unchanged" requirement). A double gameweek's
+ * second fixture is folded in only once the loop reaches the NEXT distinct
+ * gameweek, exactly as under #121's sparse output — density does not change
+ * how or when a match is folded in, only how many rows get written between
+ * matches.
  */
 export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: string, computedAt: string): BuildFeatureHistoryResult {
   let rowsContributingToTotals = 0
   let nonPremierLeagueRowsExcluded = 0
   const matchesByPlayerCode = new Map<number, SourceMatchRow[]>()
   const gameweeksSeen = new Set<number>()
+  let lastGameweekInData = 0
 
   for (const row of rows) {
+    if (row.gameweek > lastGameweekInData) lastGameweekInData = row.gameweek
     if (isContributingRow(row)) {
       rowsContributingToTotals++
       gameweeksSeen.add(row.gameweek)
@@ -331,16 +362,19 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
   const outputRows: FeatureHistoryRow[] = []
   for (const [playerCode, matches] of matchesByPlayerCode) {
     const sorted = [...matches].sort((a, b) => a.gameweek - b.gameweek)
-    const distinctGameweeks = [...new Set(sorted.map((m) => m.gameweek))].sort((a, b) => a - b)
+    const firstGameweek = sorted[0].gameweek
 
     let runningTotals: FeatureTotals = ZERO_TOTALS
     let matchIndex = 0
 
-    for (const gameweekId of distinctGameweeks) {
-      // Fold in every match strictly before this gameweek that has not
-      // already been folded in. Matches AT this gameweek (there may be more
-      // than one, in a double gameweek) are deliberately left for the next
-      // iteration of this outer loop — see the "STRICTLY-BEFORE" note above.
+    // Every integer gameweek from this player's first contributing match
+    // through the last gameweek present anywhere in the season's data —
+    // dense by construction, since nothing here skips a gameweek number.
+    for (let gameweekId = firstGameweek; gameweekId <= lastGameweekInData; gameweekId++) {
+      // Fold in every contributing match strictly before this gameweek that
+      // has not already been folded in. A gameweek with no match here folds
+      // in nothing, leaving runningTotals — and therefore this row —
+      // identical to the previous gameweek's row.
       while (matchIndex < sorted.length && sorted[matchIndex].gameweek < gameweekId) {
         runningTotals = addMatch(runningTotals, sorted[matchIndex])
         matchIndex++
@@ -362,6 +396,7 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
     nonPremierLeagueRowsExcluded,
     playersCovered: matchesByPlayerCode.size,
     gameweeksCovered: gameweeksSeen.size,
+    lastGameweekInData,
   }
 }
 
@@ -411,10 +446,11 @@ async function main(): Promise<void> {
       }
       if (isMissingColumn(sourceError, 'team_goals_conceded')) {
         throw new FeatureHistoryError(
-          'player_match_stats.team_goals_conceded does not exist in this database. This job requires it ' +
-            '(goals_conceded is a goalkeeper-only stat and must not be substituted — see this file\'s header). ' +
-            'No migration in this repository currently adds that column and scripts/ingest-core-insights.ts ' +
-            'does not populate it. Add and backfill it in a separate ticket before running this job.',
+          'player_match_stats.team_goals_conceded does not exist in this database yet. This job requires it ' +
+            '(the pre-existing per-player conceded-goals column is a goalkeeper-only stat and must never be ' +
+            'substituted — see this file\'s header). Apply ' +
+            'supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql (ticket #125) ' +
+            'before running this job.',
           'player_match_stats',
         )
       }
@@ -465,12 +501,13 @@ async function main(): Promise<void> {
       rowsWritten: result.rows.length,
       playersCovered: result.playersCovered,
       gameweeksCovered: result.gameweeksCovered,
+      lastGameweekInData: result.lastGameweekInData,
     }
     const message =
       `${JOB_NAME}: season ${season} — ${result.sourceRowsRead} source row(s) read ` +
       `(${result.rowsContributingToTotals} Premier League row(s) contributing to totals, ` +
-      `${result.nonPremierLeagueRowsExcluded} row(s) excluded), ${result.rows.length} feature_history row(s) ` +
-      `written across ${result.playersCovered} player(s) and ${result.gameweeksCovered} gameweek(s).`
+      `${result.nonPremierLeagueRowsExcluded} row(s) excluded), ${result.rows.length} dense feature_history row(s) ` +
+      `written across ${result.playersCovered} player(s), through gameweek ${result.lastGameweekInData}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {

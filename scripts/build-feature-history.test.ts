@@ -133,8 +133,13 @@ describe('buildFeatureHistory — non-Premier-League exclusion', () => {
     const gw3 = premMatch(300, 3)
     const result = buildFeatureHistory([gw1, gw2Cup, gw3], SEASON, COMPUTED_AT)
 
-    // The cup gameweek gets no row of its own — no contributing match landed there.
-    expect(result.rows.find((r) => r.gameweek_id === 2)).toBeUndefined()
+    // Ticket #125: rows are dense, so gameweek 2 now DOES get a row — but it
+    // must carry gameweek 1's totals forward unchanged, never the cup
+    // match's stats (every overridden field above is 99, so any leakage
+    // would be obvious).
+    const row2 = result.rows.find((r) => r.gameweek_id === 2)
+    expect(row2).toMatchObject(sumMatches([gw1])) // NOT gw1 + the cup match
+    expect(row2!.prior_matches).toBe(1)
 
     const row3 = result.rows.find((r) => r.gameweek_id === 3)
     expect(row3).toMatchObject(sumMatches([gw1])) // NOT gw1 + the cup match
@@ -182,12 +187,20 @@ describe('buildFeatureHistory — counter reconciliation', () => {
 
 // ============================================================================
 // Second arithmetic reconciliation, on real (constructed) output: for any
-// player, the totals in his final gameweek's row plus that gameweek's own
-// match equal his full-season totals.
+// player, the totals in the row AT his final match's own gameweek, plus that
+// gameweek's own match, equal his full-season totals.
+//
+// Ticket #125: under dense rows, a player's LAST row is no longer
+// necessarily the row for his last match's own gameweek — it can be a later,
+// carried-forward row if other players (or excluded matches) extend the
+// season's data past his final appearance. So this reconciliation is now
+// keyed on the row AT the final match's own gameweek_id, not on
+// `playerRows`'s max gameweek_id — the two coincide only when a player's
+// last match is also the last gameweek anywhere in the season's data.
 // ============================================================================
 
 describe('buildFeatureHistory — full-season reconciliation', () => {
-  it('final gameweek row + that gameweek’s own match equals the full-season total, for every player in a constructed season', () => {
+  it('the row at a player’s final match’s own gameweek, plus that match’s own stats, equals his full-season total', () => {
     const playerAMatches = [1, 2, 3, 4, 5].map((gw) => premMatch(400, gw))
     const playerBMatches = [1, 3, 4].map((gw) => premMatch(401, gw)) // gaps are fine — rows follow actual appearances
     const playerBCup = cupMatch(401, 2) // interleaved noise — must not affect the reconciliation
@@ -200,13 +213,14 @@ describe('buildFeatureHistory — full-season reconciliation', () => {
       [401, playerBMatches],
     ] as const) {
       const playerRows = result.rows.filter((r) => r.player_code === playerCode)
-      const lastRow = playerRows.reduce((latest, r) => (r.gameweek_id > latest.gameweek_id ? r : latest))
       const finalMatch = matches.reduce((latest, m) => (m.gameweek > latest.gameweek ? m : latest))
+      const rowAtFinalMatch = playerRows.find((r) => r.gameweek_id === finalMatch.gameweek)!
 
       const fullSeasonTotals = sumMatches(matches)
       const reconstructed = sumMatches([...matches.filter((m) => m.gameweek < finalMatch.gameweek), finalMatch])
-      // Sanity: reconstructing from lastRow's prior_* fields plus the final
-      // match's own stats must equal the independently-computed full-season sum.
+      // Sanity: reconstructing from rowAtFinalMatch's prior_* fields plus the
+      // final match's own stats must equal the independently-computed
+      // full-season sum.
       for (const key of Object.keys(ZERO_TOTALS) as Array<keyof typeof ZERO_TOTALS>) {
         const finalMatchContribution =
           key === 'prior_matches'
@@ -230,10 +244,17 @@ describe('buildFeatureHistory — full-season reconciliation', () => {
                             : key === 'prior_recoveries'
                               ? (finalMatch.recoveries ?? 0)
                               : (finalMatch.team_goals_conceded ?? 0)
-        expect(lastRow[key] + finalMatchContribution).toBeCloseTo(fullSeasonTotals[key], 10)
+        expect(rowAtFinalMatch[key] + finalMatchContribution).toBeCloseTo(fullSeasonTotals[key], 10)
         expect(reconstructed[key]).toBeCloseTo(fullSeasonTotals[key], 10)
       }
     }
+
+    // Dense-specific: player 401's final match is gameweek 4, but the
+    // season's data (via player 400) runs through gameweek 5 — so player
+    // 401 also gets a gameweek 5 row, carrying gameweek 4's totals forward
+    // unchanged (his full-season total, since gameweek 4 was his last match).
+    const player401Row5 = result.rows.find((r) => r.player_code === 401 && r.gameweek_id === 5)
+    expect(player401Row5).toMatchObject(sumMatches(playerBMatches))
   })
 })
 
@@ -242,12 +263,19 @@ describe('buildFeatureHistory — full-season reconciliation', () => {
 // ============================================================================
 
 describe('buildFeatureHistory — coverage counters', () => {
-  it('playersCovered and gameweeksCovered count distinct contributing players/gameweeks', () => {
+  it('playersCovered and gameweeksCovered count distinct CONTRIBUTING players/gameweeks — not the (larger) dense row count', () => {
     const rows: SourceMatchRow[] = [premMatch(1, 1), premMatch(1, 2), premMatch(2, 1), cupMatch(3, 5)]
     const result = buildFeatureHistory(rows, SEASON, COMPUTED_AT)
     expect(result.playersCovered).toBe(2) // players 1 and 2 — player 3's only row is a cup match
-    expect(result.gameweeksCovered).toBe(2) // gameweeks 1 and 2
-    expect(result.rows).toHaveLength(3) // (1,1) (1,2) (2,1)
+    expect(result.gameweeksCovered).toBe(2) // gameweeks 1 and 2 — distinct CONTRIBUTING gameweeks only
+    // Ticket #125: dense output. lastGameweekInData is 5 (the cup match at
+    // gw5 is still real data, even though it doesn't contribute to totals).
+    // Player 1 (first contributing match gw1) gets rows 1-5 (5 rows); player
+    // 2 (first contributing match gw1) also gets rows 1-5 (5 rows); player 3
+    // has no contributing match at all, so gets zero rows.
+    expect(result.lastGameweekInData).toBe(5)
+    expect(result.rows).toHaveLength(10) // 5 (player 1) + 5 (player 2) + 0 (player 3)
+    expect(result.rows.filter((r) => r.player_code === 3)).toHaveLength(0)
   })
 
   it('handles a double gameweek: both matches count toward the next gameweek’s prior totals', () => {
@@ -262,6 +290,84 @@ describe('buildFeatureHistory — coverage counters', () => {
     const row6 = result.rows.find((r) => r.gameweek_id === 6)
     expect(row6!.prior_matches).toBe(2) // both gw5 matches
     expect(row6!.prior_minutes).toBe(180)
+  })
+})
+
+// ============================================================================
+// Dense rows (ticket #125). The #121 "strictly-before rule" describe block
+// above is left byte-for-byte unmodified per this ticket's DoD — it already
+// passes unchanged under dense generation because its fixtures have no gaps.
+// These new tests exercise the actual density behaviour: gaps get filled,
+// the fill carries the previous gameweek's totals forward unchanged, and the
+// strictly-before rule still holds at the filled boundary.
+// ============================================================================
+
+describe('buildFeatureHistory — dense rows (ticket #125)', () => {
+  it('a player who plays gameweeks 1, 2 and 5 gets rows for every gameweek 1-5, with gameweeks 3 and 4 carrying the gameweek-2-inclusive totals unchanged', () => {
+    const gw1 = premMatch(600, 1)
+    const gw2 = premMatch(600, 2)
+    const gw5 = premMatch(600, 5)
+    const result = buildFeatureHistory([gw1, gw2, gw5], SEASON, COMPUTED_AT)
+
+    const gameweekIds = result.rows.map((r) => r.gameweek_id).sort((a, b) => a - b)
+    expect(gameweekIds).toEqual([1, 2, 3, 4, 5])
+
+    const row2 = result.rows.find((r) => r.gameweek_id === 2)!
+    const row3 = result.rows.find((r) => r.gameweek_id === 3)!
+    const row4 = result.rows.find((r) => r.gameweek_id === 4)!
+    const row5 = result.rows.find((r) => r.gameweek_id === 5)!
+
+    // Gameweek 2's row is the strictly-before total through gameweek 1 only
+    // — gameweek 2's own match is not folded in yet.
+    expect(row2).toMatchObject(sumMatches([gw1]))
+    expect(row2.prior_matches).toBe(1)
+
+    // Gameweek 3 is the first row where gameweek 2's match HAS been folded
+    // in (2 < 3) — both gameweek 1 and gameweek 2 now count.
+    expect(row3).toMatchObject(sumMatches([gw1, gw2]))
+    expect(row3.prior_matches).toBe(2)
+
+    // Gameweek 4 has no contributing match of its own, so it carries
+    // gameweek 3's totals forward unchanged — same totals, only the
+    // gameweek_id differs. This is the DoD's literal "gameweek 3 and 4 rows
+    // carry the gameweek 2 totals unchanged": both rows already reflect
+    // gameweek 2's contribution, and nothing since has changed it.
+    expect(row4).toEqual({ ...row3, gameweek_id: 4 })
+
+    // The strictly-before rule still holds at the filled boundary: gameweek
+    // 5's row is gameweeks 1-2 only, never gameweek 5's own match — it is
+    // identical to gameweek 4's row, since gameweek 5's match is excluded
+    // from its own row by the strictly-before rule.
+    expect(row5).toEqual({ ...row3, gameweek_id: 5 })
+    expect(row5.prior_matches).toBe(2)
+  })
+
+  it('a player’s row count for a season equals the number of gameweeks from his first match through the last gameweek present in the data, inclusive', () => {
+    const matches = [1, 2, 5].map((gw) => premMatch(700, gw))
+    const laterPlayer = premMatch(999, 9) // a different player's match extends the season's last gameweek to 9
+    const result = buildFeatureHistory([...matches, laterPlayer], SEASON, COMPUTED_AT)
+
+    expect(result.lastGameweekInData).toBe(9)
+    const playerRows = result.rows.filter((r) => r.player_code === 700)
+    expect(playerRows).toHaveLength(9 - 1 + 1) // gameweeks 1 through 9 inclusive
+    expect(new Set(playerRows.map((r) => r.gameweek_id)).size).toBe(playerRows.length) // no duplicate gameweek_id
+  })
+
+  it('a player’s dense rows extend through the last gameweek present in the data even past his own final match, via a later NON-contributing row', () => {
+    const gw1 = premMatch(800, 1)
+    const gw3 = premMatch(800, 3) // player 800's last contributing match
+    const laterCup = cupMatch(801, 6) // non-contributing, but still real data at gameweek 6
+    const result = buildFeatureHistory([gw1, gw3, laterCup], SEASON, COMPUTED_AT)
+
+    expect(result.lastGameweekInData).toBe(6)
+    const player800Rows = result.rows.filter((r) => r.player_code === 800)
+    const gameweekIds = player800Rows.map((r) => r.gameweek_id).sort((a, b) => a - b)
+    expect(gameweekIds).toEqual([1, 2, 3, 4, 5, 6])
+
+    // Gameweeks 4, 5 and 6 all carry gameweek 3's match forward unchanged —
+    // nothing contributed to player 800's totals after it.
+    const row6 = player800Rows.find((r) => r.gameweek_id === 6)!
+    expect(row6).toMatchObject(sumMatches([gw1, gw3]))
   })
 })
 
@@ -321,6 +427,17 @@ describe('build-feature-history.ts — source invariants', () => {
 
   it('does not import from src/lib/projection', () => {
     expect(jobSource).not.toMatch(/from\s*['"][^'"]*src\/lib\/projection[^'"]*['"]/)
+  })
+
+  // Ticket #125's own DoD line: prior_team_goals_conceded must be populated
+  // from the newly ingested team_goals_conceded column and never from the
+  // pre-existing goalkeeper-only goals_conceded column. Grep-checkable: every
+  // appearance of the substring "goals_conceded" in this file is part of the
+  // longer string "team_goals_conceded" — there is no bare occurrence a stray
+  // `row.goals_conceded` reference could hide behind.
+  it('the string "goals_conceded" appears only as part of "team_goals_conceded"', () => {
+    const bareOccurrences = jobSource.match(/(?<!team_)goals_conceded/g) ?? []
+    expect(bareOccurrences).toEqual([])
   })
 })
 
@@ -386,10 +503,16 @@ const readmePath = fileURLToPath(new URL('../supabase/README.md', import.meta.ur
 const readmeSource = readFileSync(readmePath, 'utf8')
 
 describe('supabase/README.md', () => {
-  it('lists the new migration, marked not yet applied', () => {
+  // The feature_history migration's own applied status is not this ticket's
+  // (#125's) concern — it was marked applied by the workflow that actually
+  // ran it against the live database, after ticket #121 shipped this
+  // assertion against a not-yet-applied row. Only the row's continued
+  // presence is asserted here now; ticket #125's own README changes (a
+  // corrected #54 row and a new not-yet-applied row for its own migration)
+  // are asserted in ingest-core-insights.test.ts, which owns both.
+  it('lists the feature_history migration', () => {
     expect(readmeSource).toMatch(/20260827090000_feature_history\.sql/)
     const rowMatch = readmeSource.match(/\| `20260827090000_feature_history\.sql` \|.*\|\s*$/m)
     expect(rowMatch).not.toBeNull()
-    expect(rowMatch![0]).toMatch(/not yet applied/i)
   })
 })
