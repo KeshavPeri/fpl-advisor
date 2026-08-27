@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   BuildInputError,
+  DECAY_BASE,
   EV_PER_PRICE_CUTOFF,
   HIT_COST,
   ITERATION_CRITERION,
@@ -141,7 +142,7 @@ describe('buildSolverConfig', () => {
     expect(config.ev_per_price_cutoff).toBe(EV_PER_PRICE_CUTOFF)
   })
 
-  it('is the ONLY thing that changed by this ticket: every other key in the built config matches the pre-#108 baseline exactly, so an accidental edit to xmin_lb, horizon, decay_base-style settings, or chip_limits fails this test', () => {
+  it('full-object equality: the built config matches the known-good baseline exactly (horizon/xmin_lb/decay_base/chip_limits/etc.), so an accidental edit to any other setting fails this test', () => {
     const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300 })
     expect(config).toEqual({
       horizon: 3,
@@ -151,6 +152,7 @@ describe('buildSolverConfig', () => {
       keep_top_ev_percent: 25,
       ev_per_price_cutoff: 10,
       no_transfer_last_gws: 0,
+      decay_base: 0.9,
       datasource: 'fpladvisor',
       chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
       secs: 300,
@@ -174,6 +176,18 @@ describe('buildSolverConfig', () => {
     const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
     expect(config.no_transfer_last_gws).toBe(0)
     expect(config.no_transfer_last_gws).toBe(NO_TRANSFER_LAST_GWS)
+  })
+
+  // --------------------------------------------------------------------
+  // Ticket #120 — stop inheriting decay_base (shipped default 0.9, unchanged
+  // here) from the solver. See DECAY_BASE's own comment in
+  // build-solver-input.ts for the discount mechanics and the because.
+  // --------------------------------------------------------------------
+
+  it('sets decay_base to 0.9, matching the shipped default but no longer inheriting it silently', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
+    expect(config.decay_base).toBe(0.9)
+    expect(config.decay_base).toBe(DECAY_BASE)
   })
 
   it('sets num_iterations to 3 — ticket #47, so the solve produces Plan A/B/C — and iteration_criteria explicitly rather than the shipped default', () => {
@@ -239,6 +253,7 @@ describe('buildSolverConfig', () => {
       keep_top_ev_percent: 25,
       ev_per_price_cutoff: 10,
       no_transfer_last_gws: 0,
+      decay_base: 0.9,
       datasource: 'fpladvisor',
       chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
       secs: 300,
@@ -267,6 +282,7 @@ describe('buildSolverConfig', () => {
       keep_top_ev_percent: 25,
       ev_per_price_cutoff: 10,
       no_transfer_last_gws: 0,
+      decay_base: 0.9,
       datasource: 'fpladvisor',
       chip_limits: { bb: 1, wc: 0, fh: 0, tc: 1 },
       secs: 300,

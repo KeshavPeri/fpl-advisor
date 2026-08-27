@@ -187,6 +187,25 @@ export const EV_PER_PRICE_CUTOFF = 10
  */
 export const NO_TRANSFER_LAST_GWS = 0
 
+/**
+ * Ticket #120. `buildSolverConfig` never used to set this explicitly, so it silently inherited
+ * the shipped `data/user_settings.json`'s `decay_base: 0.9` at the pinned commit
+ * (45131c5a41d7caadb5cb626c012bfa9111dca7a2) — the last scalar setting ticket #95's audit table
+ * left in the inherited column (#108 already moved `no_transfer_last_gws` out of it).
+ *
+ * dev/solver.py discounts each future gameweek in the objective by `decay_base^n`, where `n` is
+ * how many gameweeks out from the first horizon gameweek: gameweek 2 of the horizon is worth
+ * `0.9^1 = 0.9` of gameweek 1, gameweek 3 is worth `0.9^2 = 0.81`, and so on. Across this app's
+ * 5-gameweek horizon the last gameweek (`n = 4`) carries `0.9^4 ≈ 0.656` — about 66% of the
+ * weight of the first.
+ *
+ * Reviewed and kept at 0.9, unchanged from what has been running: this ticket makes the value
+ * explicit so it is chosen rather than silently inherited, not because 0.9 is wrong. Whether 0.9
+ * is the right discount is a measurement question for the backtest, not this ticket — see
+ * docs/solver-notes.md.
+ */
+export const DECAY_BASE = 0.9
+
 // ============================================================================
 // Env
 // ============================================================================
@@ -416,6 +435,7 @@ export interface SolverConfig {
   keep_top_ev_percent: number
   ev_per_price_cutoff: number
   no_transfer_last_gws: number
+  decay_base: number
   datasource: string
   chip_limits: ChipLimits
   secs: number
@@ -461,6 +481,12 @@ export interface SolverConfig {
  * forward every night and has no "end of season" for that shipped setting to protect. See
  * NO_TRANSFER_LAST_GWS's own comment above for the full because.
  *
+ * `decay_base: DECAY_BASE` (0.9) — ticket #120. Set EXPLICITLY (never left to the shipped
+ * data/user_settings.json default, which also happens to be 0.9) so it is no longer silently
+ * inherited — the last scalar setting ticket #95's audit left in the inherited column. This is
+ * bookkeeping, not a behaviour change: the value is unchanged from what has been running. See
+ * DECAY_BASE's own comment above for the discount mechanics.
+ *
  * `chip_limits` — ticket #114 (dispatch-only chip probe, feature-list item 27's diagnostic
  * precursor). Defaults to `{ bb: 0, wc: 0, fh: 0, tc: 0 }`, exactly as before this ticket, UNLESS
  * `params.chipProbe` is `true`, in which case it is `{ bb: 1, wc: 0, fh: 0, tc: 1 }` — Bench Boost
@@ -497,6 +523,7 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
     keep_top_ev_percent: KEEP_TOP_EV_PERCENT,
     ev_per_price_cutoff: EV_PER_PRICE_CUTOFF,
     no_transfer_last_gws: NO_TRANSFER_LAST_GWS,
+    decay_base: DECAY_BASE,
     datasource: params.datasource,
     chip_limits: params.chipProbe ? { bb: 1, wc: 0, fh: 0, tc: 1 } : { bb: 0, wc: 0, fh: 0, tc: 0 },
     secs: params.secs ?? SOLVER_TIME_LIMIT_SECS,
