@@ -20,6 +20,15 @@ name: Solver run
 # crosses the date line, same as scheduled-jobs.yml's own comment warns
 # about. Do not "fix" this cron to look like a Singapore-evening time
 # without re-deriving the UTC value.
+#
+# Ticket #126 (feature-list item 27) adds a SECOND solve here, chip-enabled,
+# after the normal one — identical in every respect except chip_limits (see
+# scripts/build-solver-input.ts's CHIP_PROBE mechanism, established by
+# #114). Its own steps are grouped together below, after "Generate
+# recommendations", so the original build→solve→store→recommend chain reads
+# exactly as it did before this ticket. Nothing the chip solve produces
+# reaches recommendations, solver_picks, the verdict card or the Telegram
+# message — see scripts/store-chip-advisory.ts's own file header.
 
 on:
   workflow_dispatch: {}
@@ -29,23 +38,46 @@ on:
 # The projections CSV this run consumes and the team.json/config this run
 # writes all live under solver/data/ — named here once so every step and the
 # artifact-upload steps at the bottom agree on the same paths.
+#
+# CHIP_SOLVER_CONFIG_PATH / CHIP_SOLVER_LOG_PATH (ticket #126) are the
+# chip-enabled solve's own config and log paths — deliberately separate from
+# SOLVER_CONFIG_PATH/SOLVER_LOG_PATH so the normal run's own files are never
+# overwritten before scripts/store-chip-advisory.ts re-reads the normal log
+# for its chip-free baseline. TEAM_JSON_PATH and PROJECTIONS_CSV_PATH are
+# deliberately NOT duplicated — the chip build step reuses both, byte-for-
+# byte the same inputs as the normal solve (this ticket's own scope: "the
+# same projections CSV, the same team.json"). The two solves' results CSVs
+# DO land in the same SOLVER_RESULTS_DIR and can overwrite each other on
+# disk — harmless, since neither this workflow's "Store chip advisory" step
+# nor scripts/store-chip-advisory.ts ever reads a results CSV (the chip
+# decision and every score it needs come from the solve's own stdout log,
+# not the CSV — see scripts/lib/solver-output.ts). The only visible effect
+# is that the pre-existing "Upload results CSV artifacts" step below now
+# uploads whichever solve finished last; see that step's own comment.
 env:
   PROJECTIONS_CSV_PATH: solver/data/fpladvisor.csv
   TEAM_JSON_PATH: solver/data/team.json
   SOLVER_CONFIG_PATH: solver/data/solver-config.json
   SOLVER_LOG_PATH: solver/solve.log
   SOLVER_RESULTS_DIR: solver/data/results
+  CHIP_SOLVER_CONFIG_PATH: solver/data/solver-config-chip.json
+  CHIP_SOLVER_LOG_PATH: solver/solve-chip.log
 
 jobs:
   solve:
     runs-on: ubuntu-latest
-    # Generous headroom over the solver's own time limit (secs: 300, set in
-    # scripts/build-solver-input.ts's SOLVER_TIME_LIMIT_SECS) so a slow solve
-    # returns its best incumbent instead of being killed mid-write by the job
-    # timeout itself. Checkout + npm ci + uv sync + CSV emit + store are all
-    # low single-digit minutes; 20 covers the 5-minute solve plus all of that
-    # with room to spare.
-    timeout-minutes: 20
+    # Generous headroom over BOTH solves' own time limits (secs: 300 each,
+    # set in scripts/build-solver-input.ts's SOLVER_TIME_LIMIT_SECS) so a
+    # slow solve returns its best incumbent instead of being killed
+    # mid-write by the job timeout itself. Checkout + npm ci + uv sync + CSV
+    # emit + store are all low single-digit minutes; the ORIGINAL 20 covered
+    # one 5-minute solve plus all of that with room to spare. Ticket #126
+    # adds a second solve of up to the same 5 minutes (the probe's own three
+    # iterations took 126s/103s/117s — see this ticket's DoD), so the budget
+    # is raised to 35: up to ~10 minutes for two solves, plus the same
+    # single-digit-minute overhead, plus real headroom rather than a bare
+    # minimum.
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -192,6 +224,65 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: npx tsx scripts/generate-recommendations.ts
 
+      # ======================================================================
+      # Chip advisory (ticket #126, feature-list item 27) — a second,
+      # chip-enabled solve, run purely to compute the difference against the
+      # normal solve above. Nothing here feeds recommendations, solver_picks,
+      # the verdict card or the Telegram message; see
+      # scripts/store-chip-advisory.ts's own file header. Gated on
+      # steps.store.outcome == 'success' — the chip-free baseline this
+      # advisory is compared against does not exist until that step's own
+      # solver_runs row has been written.
+      # ======================================================================
+
+      - name: Build solver input (chip advisory)
+        id: build-chip-input
+        # CHIP_PROBE is the only difference from "Build solver input" above —
+        # see scripts/build-solver-input.ts's own comment on CHIP_PROBE and
+        # buildSolverConfig's chip_limits. TEAM_JSON_PATH and
+        # PROJECTIONS_CSV_PATH are left at their workflow-level defaults
+        # (reused, byte-for-byte the same inputs); only SOLVER_CONFIG_PATH is
+        # overridden so this build writes the chip-enabled config to its own
+        # file rather than overwriting the normal run's.
+        if: steps.store.outcome == 'success'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SOLVER_CONFIG_PATH: ${{ env.CHIP_SOLVER_CONFIG_PATH }}
+          SOLVER_SECS: '300'
+          CHIP_PROBE: '1'
+        run: npx tsx scripts/build-solver-input.ts
+
+      - name: Run solver (chip advisory)
+        id: solve-chip
+        if: steps.build-chip-input.outputs.squad_found == 'true'
+        working-directory: solver
+        # Same exit-code-swallowing reasoning as "Run solver" above — the
+        # process's own exit code cannot distinguish a genuine crash/
+        # infeasible solve from a time-limit-reached-but-usable one. Writes
+        # its own log file (solve-chip.log, i.e. CHIP_SOLVER_LOG_PATH
+        # relative to this working-directory) so the normal run's own
+        # solve.log — which "Store chip advisory" still needs to re-read for
+        # its chip-free baseline — is never touched.
+        run: |
+          set +e
+          uv run python run/solve.py --config data/solver-config-chip.json > solve-chip.log 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Store chip advisory
+        id: store-chip-advisory
+        if: steps.build-chip-input.outputs.squad_found == 'true'
+        # Reads BOTH SOLVER_LOG_PATH (the normal run's log, still on disk
+        # from "Run solver" above) and CHIP_SOLVER_LOG_PATH — never a results
+        # CSV, see scripts/store-chip-advisory.ts's own header — parses both
+        # with scripts/lib/solver-output.ts, and stores the difference keyed
+        # to the normal run's own solver_runs row.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/store-chip-advisory.ts
+
       - name: Send Telegram notification
         # Ticket #55 (feature-list item 14), unconditional as of ticket #83.
         # Runs REGARDLESS of whether "Build solver input", "Store solver
@@ -255,10 +346,37 @@ jobs:
           retention-days: 14
 
       - name: Upload results CSV artifacts
+        # Ticket #126 note: the chip-enabled solve above writes its own
+        # results CSV(s) into this SAME directory with the SAME filename
+        # prefix (both solves share `datasource` by design — see this
+        # workflow's env block comment), so after both solves have run this
+        # artifact holds whichever one finished last. Harmless: neither
+        # scripts/store-solver-output.ts (which already ran, before the chip
+        # solve started) nor scripts/store-chip-advisory.ts (which never
+        # reads a results CSV at all) depends on this artifact's contents —
+        # it exists purely for human debugging.
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: solver-run-results-csv
           path: ${{ env.SOLVER_RESULTS_DIR }}/*.csv
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload chip solver log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solver-run-chip-log
+          path: ${{ env.CHIP_SOLVER_LOG_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload chip solver config JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solver-run-chip-config
+          path: ${{ env.CHIP_SOLVER_CONFIG_PATH }}
           if-no-files-found: warn
           retention-days: 14
