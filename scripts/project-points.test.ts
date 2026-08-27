@@ -26,6 +26,12 @@ import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.js'
 // check (see project-points.ts's own footer comment) so this import alone
 // never triggers a real run.
 import { CURRENT_SEASON, classifySeasonCoverage, sortRecentFirst, splitBySeason } from './project-points.ts'
+// Ticket #119: same reasoning -- effectiveRatePositionPrior and
+// medianNowCostByPosition are plain pure functions, imported and exercised
+// directly.
+import { effectiveRatePositionPrior, medianNowCostByPosition } from './project-points.ts'
+import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
+import { computeTwoStagePlayerRates } from '../src/lib/projection/rates.ts'
 
 const sourcePath = fileURLToPath(new URL('./project-points.ts', import.meta.url))
 const source = readFileSync(sourcePath, 'utf8')
@@ -282,5 +288,194 @@ describe('project-points.ts — season-split source invariants (ticket #113)', (
     )
     expect(minutesSource).not.toMatch(/CURRENT_SEASON/)
     expect(source).toMatch(/function sortRecentFirst/)
+  })
+})
+
+// ============================================================================
+// Ticket #119 — price as a weak prior for players with no Premier League
+// history at either level. medianNowCostByPosition and
+// effectiveRatePositionPrior are pulled out as pure, exported functions
+// (same technique as the #113 helpers above) specifically so the "any
+// player with real minutes is completely unaffected" guarantee — the
+// ticket's most important test — is provable on constructed inputs, without
+// a live Supabase project.
+// ============================================================================
+
+const zeroPrior = { xgPer90: 0, xaPer90: 0, savesPer90: 0, cbiPer90: 0, recoveriesPer90: 0 }
+const samplePrior = { xgPer90: 0.3, xaPer90: 0.15, savesPer90: 2, cbiPer90: 5, recoveriesPer90: 6 }
+
+describe('medianNowCostByPosition — ticket #119', () => {
+  it('computes the median now_cost per position independently', () => {
+    const players = [
+      { element_type: FORWARD, now_cost: 140 },
+      { element_type: FORWARD, now_cost: 60 },
+      { element_type: FORWARD, now_cost: 100 }, // FORWARD median: 100 (middle of 60,100,140)
+      { element_type: GOALKEEPER, now_cost: 40 },
+      { element_type: GOALKEEPER, now_cost: 50 }, // GOALKEEPER median: 45 (even count, average of two middle)
+    ]
+    const medians = medianNowCostByPosition(players)
+    expect(medians[FORWARD]).toBe(100)
+    expect(medians[GOALKEEPER]).toBe(45)
+  })
+
+  it('a position with no players returns a median of 0, not NaN or undefined', () => {
+    const medians = medianNowCostByPosition([{ element_type: FORWARD, now_cost: 100 }])
+    expect(medians[GOALKEEPER]).toBe(0)
+    expect(medians[DEFENDER]).toBe(0)
+    expect(medians[MIDFIELDER]).toBe(0)
+  })
+
+  it('an entirely empty player list returns 0 for every position', () => {
+    const medians = medianNowCostByPosition([])
+    expect(medians[GOALKEEPER]).toBe(0)
+    expect(medians[DEFENDER]).toBe(0)
+    expect(medians[MIDFIELDER]).toBe(0)
+    expect(medians[FORWARD]).toBe(0)
+  })
+
+  it('does not mutate the input array or its order', () => {
+    const players = [
+      { element_type: MIDFIELDER, now_cost: 100 },
+      { element_type: MIDFIELDER, now_cost: 50 },
+    ]
+    const original = [...players]
+    medianNowCostByPosition(players)
+    expect(players).toEqual(original)
+  })
+
+  it('source: computes the median from the data passed in -- no numeric price literal anywhere in the function body', () => {
+    const match = source.match(/export function medianNowCostByPosition[\s\S]*?\n}\n/)
+    expect(match).not.toBeNull()
+    const body = match![0]
+    // The only digits allowed here are the 1-4 Position codes used as
+    // Record<Position, ...> initializer keys (same style as
+    // rateMatchesByPosition/defconMatchesByPosition above them in this
+    // file) -- a real price literal (players.now_cost values run from
+    // roughly 40 to 150+) would always be two or more digits.
+    expect(body).not.toMatch(/\b\d{2,}\b/)
+  })
+})
+
+describe('effectiveRatePositionPrior — ticket #119', () => {
+  it('a player with current-season rows (coverage "current") is completely unaffected by price, regardless of how extreme the price is', () => {
+    const withoutAdjustment = samplePrior
+    const forCheapPlayer = effectiveRatePositionPrior('current', samplePrior, 40, 100)
+    const forExpensivePlayer = effectiveRatePositionPrior('current', samplePrior, 150, 100)
+    expect(forCheapPlayer).toEqual(withoutAdjustment)
+    expect(forExpensivePlayer).toEqual(withoutAdjustment)
+  })
+
+  it('a player with only historical rows (coverage "historicalOnly") is completely unaffected by price', () => {
+    const forCheapPlayer = effectiveRatePositionPrior('historicalOnly', samplePrior, 40, 100)
+    const forExpensivePlayer = effectiveRatePositionPrior('historicalOnly', samplePrior, 150, 100)
+    expect(forCheapPlayer).toEqual(samplePrior)
+    expect(forExpensivePlayer).toEqual(samplePrior)
+  })
+
+  it('a player with no rows at any level (coverage "neither") IS price-adjusted', () => {
+    const adjusted = effectiveRatePositionPrior('neither', samplePrior, 150, 100)
+    expect(adjusted.xgPer90).not.toBe(samplePrior.xgPer90)
+    expect(adjusted.xgPer90).toBeCloseTo(samplePrior.xgPer90 * 1.5, 10)
+  })
+
+  it('zero prior with any coverage stays exactly zero -- no hidden floor introduced by the price adjustment', () => {
+    expect(effectiveRatePositionPrior('current', zeroPrior, 150, 100)).toEqual(zeroPrior)
+    expect(effectiveRatePositionPrior('neither', zeroPrior, 150, 100)).toEqual(zeroPrior)
+  })
+})
+
+describe('project-points.ts — full-pipeline equivalence proof for the "unaffected by minutes" DoD item (ticket #119)', () => {
+  // This is the ticket's most important test: a player with ANY minutes at
+  // either level must project identically, to the last decimal, to how they
+  // projected before this ticket -- i.e. as if effectiveRatePositionPrior did
+  // not exist and the plain position prior were always used.
+  const positionPrior = { xgPer90: 0.25, xaPer90: 0.12, savesPer90: 0, cbiPer90: 4, recoveriesPer90: 5 }
+
+  const currentSeasonOnly = { minutesPlayed: 450, totalXg: 3, totalXa: 1, totalSaves: 0, totalCbi: 20, totalRecoveries: 25 }
+  const historicalOnly = { minutesPlayed: 3000, totalXg: 15, totalXa: 8, totalSaves: 0, totalCbi: 90, totalRecoveries: 110 }
+  const zeroHistory = { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 }
+
+  it('current-season-only player: identical with or without the price-prior wiring', () => {
+    const priorWithPriceWiring = effectiveRatePositionPrior('current', positionPrior, 150, 100) // extreme price -- would matter a lot if wrongly applied
+    const withPriceWiring = computeTwoStagePlayerRates(currentSeasonOnly, zeroHistory, priorWithPriceWiring)
+    const withoutPriceWiring = computeTwoStagePlayerRates(currentSeasonOnly, zeroHistory, positionPrior)
+    expect(withPriceWiring).toEqual(withoutPriceWiring)
+  })
+
+  it('historical-only player: identical with or without the price-prior wiring', () => {
+    const priorWithPriceWiring = effectiveRatePositionPrior('historicalOnly', positionPrior, 40, 100) // extreme price the other way
+    const withPriceWiring = computeTwoStagePlayerRates(zeroHistory, historicalOnly, priorWithPriceWiring)
+    const withoutPriceWiring = computeTwoStagePlayerRates(zeroHistory, historicalOnly, positionPrior)
+    expect(withPriceWiring).toEqual(withoutPriceWiring)
+  })
+
+  it('player with rows at both levels: identical with or without the price-prior wiring', () => {
+    const priorWithPriceWiring = effectiveRatePositionPrior('current', positionPrior, 150, 100)
+    const withPriceWiring = computeTwoStagePlayerRates(currentSeasonOnly, historicalOnly, priorWithPriceWiring)
+    const withoutPriceWiring = computeTwoStagePlayerRates(currentSeasonOnly, historicalOnly, positionPrior)
+    expect(withPriceWiring).toEqual(withoutPriceWiring)
+  })
+
+  it('a player with no rows at either level DOES change -- proving the test above is meaningful, not a tautology', () => {
+    const priorWithPriceWiring = effectiveRatePositionPrior('neither', positionPrior, 150, 100)
+    const withPriceWiring = computeTwoStagePlayerRates(zeroHistory, zeroHistory, priorWithPriceWiring)
+    const withoutPriceWiring = computeTwoStagePlayerRates(zeroHistory, zeroHistory, positionPrior)
+    expect(withPriceWiring.xgPer90).not.toBeCloseTo(withoutPriceWiring.xgPer90, 6)
+  })
+})
+
+describe('project-points.ts — price-prior source invariants (ticket #119)', () => {
+  it('selects now_cost from the players table', () => {
+    expect(source).toMatch(/\.select\(\s*['"][^'"]*\bnow_cost\b[^'"]*['"]/)
+  })
+
+  it('imports priceAdjustedPositionPrior and priceAdjustmentScale from src/lib/projection rather than re-deriving the scale inline', () => {
+    expect(source).toMatch(/priceAdjustedPositionPrior/)
+    expect(source).toMatch(/priceAdjustmentScale/)
+  })
+
+  it('reports all three ticket #119 counters as separate named job_runs.details fields', () => {
+    expect(source).toMatch(/playersPriceAdjustedPrior/)
+    expect(source).toMatch(/playersPriceAdjustedScaledUp/)
+    expect(source).toMatch(/playersPriceAdjustedScaledDown/)
+  })
+
+  it('never substitutes the price-adjusted prior for computePlayerRates\'s historical stage-1 call except via effectiveRatePositionPrior -- no direct ratePriorByPosition reference remains inside the per-player loop', () => {
+    // Guards against a regression where a future edit re-introduces
+    // `ratePriorByPosition[position]` directly into the two rate-computation
+    // call sites instead of going through `effectivePrior`.
+    expect(source).toMatch(/computePlayerRates\(historicalRateHistory,\s*effectivePrior\)/)
+    expect(source).toMatch(/computeTwoStagePlayerRates\(currentRateHistory,\s*historicalRateHistory,\s*effectivePrior\)/)
+  })
+
+  it('the price-adjusted counter equals the "neither" counter exactly -- asserted arithmetically over a synthetic population', () => {
+    // Mirrors the #113 "buckets sum to the total" test above, but for the
+    // #119 counters: main() increments playersPriceAdjustedPrior precisely
+    // when effectiveRatePositionPrior takes its price-adjusting branch.
+    // effectiveRatePositionPrior returns the ORIGINAL positionPrior object
+    // (by reference) for 'current'/'historicalOnly', and a freshly
+    // constructed object (from priceAdjustedPositionPrior) for 'neither' --
+    // even when the price exactly equals the median and every numeric value
+    // comes out equal. Reference identity is therefore an exact,
+    // independent proxy for "did this player get counted", used here to
+    // prove the two counters cannot drift apart.
+    const population: Array<[boolean, boolean]> = [
+      [true, true],
+      [true, false],
+      [false, true],
+      [false, false],
+      [false, false],
+      [false, false],
+    ]
+    let playersWithNeitherSeasonRows = 0
+    let playersPriceAdjustedPrior = 0
+    for (const [hasCurrent, hasHistorical] of population) {
+      const coverage = classifySeasonCoverage(hasCurrent, hasHistorical)
+      if (coverage === 'neither') playersWithNeitherSeasonRows++
+      const adjusted = effectiveRatePositionPrior(coverage, samplePrior, 100, 100) // price == median, on purpose
+      if (adjusted !== samplePrior) playersPriceAdjustedPrior++
+    }
+    expect(playersPriceAdjustedPrior).toBe(playersWithNeitherSeasonRows)
+    expect(playersPriceAdjustedPrior).toBe(3)
   })
 })

@@ -41,10 +41,46 @@
  * the ticket — smaller than defconRate.ts's k = 5 because these rates are
  * lower-variance counting stats (xG/xA/saves accumulate roughly linearly
  * per 90) than a binary per-match threshold hit.
+ *
+ * PRICE AS A WEAK PRIOR (ticket #119). Neither shrinkage stage above helps a
+ * player with zero qualifying rows at BOTH levels (docs/projection-model-backlog.md
+ * G2) — a summer signing from outside the Premier League, or a promoted
+ * club's player who has not yet played a Premier League minute. With zero
+ * minutes at every level, both stages collapse to exactly the position
+ * prior, by construction of `shrunkRate` — there is nothing for shrinkage to
+ * work with. `priceAdjustedPositionPrior` below gives that population one
+ * weak signal that already exists in the database and is otherwise unused:
+ * `players.now_cost` is FPL's own analysts pricing a player by expected
+ * returns. One-sentence explanation (required by product-brief.md §6d): a
+ * player we know nothing about is assumed to be as good as his price says,
+ * relative to others in his position.
+ *
+ * It touches ONLY xgPer90 and xaPer90 — price signals attacking expectation,
+ * not clearances or saves, which are functions of team shape and fixture
+ * rather than transfer fee (see the ticket's Notes). It is applied to the
+ * POSITION PRIOR itself, before that prior ever enters stage one above —
+ * never inside `computePlayerRates`/`computeTwoStagePlayerRates`, and it
+ * must never be applied to a player with any real minutes at either level.
+ * The caller (`scripts/project-points.ts`) enforces that: see its
+ * `effectiveRatePositionPrior`, which only substitutes the price-adjusted
+ * prior in for a player whose two-stage coverage classifies as "neither".
+ *
+ * The scale is clamped to [PRICE_PRIOR_MIN_SCALE, PRICE_PRIOR_MAX_SCALE]
+ * deliberately: the price signal is real but weak — right about ordering
+ * more often than magnitude. An unclamped ratio would hand a £15m striker
+ * several times the position prior on no evidence at all, manufacturing the
+ * false confidence product-brief.md §8 forbids. This is a stated
+ * under-correction, not a calibration — no backtest yet shows the clamped
+ * scale is closer to reality than the flat prior it replaces (see
+ * docs/projection-model-backlog.md G2).
  */
 
 /** Shrinkage strength: "phantom prior nineties" the prior is worth against observed data. Pre-answered in the ticket. */
 export const SHRINKAGE_K = 3
+
+/** Weak-prior price-scaling clamp bounds (ticket #119) — see the header note above for why these are a deliberate under-correction rather than a fitted calibration. */
+export const PRICE_PRIOR_MIN_SCALE = 0.6
+export const PRICE_PRIOR_MAX_SCALE = 1.8
 
 export interface PlayerRates {
   xgPer90: number
@@ -164,5 +200,40 @@ export function positionPriorRates(matches: readonly RateHistoryMatch[]): Player
     savesPer90: totalSaves / ninetiesPlayed,
     cbiPer90: totalCbi / ninetiesPlayed,
     recoveriesPer90: totalRecoveries / ninetiesPlayed,
+  }
+}
+
+/**
+ * The clamped price-relative-to-position-median scale factor (ticket #119):
+ * `nowCost / positionMedianCost`, clamped to
+ * `[PRICE_PRIOR_MIN_SCALE, PRICE_PRIOR_MAX_SCALE]`. A non-positive median —
+ * an empty position, or a genuine data problem — returns exactly 1 (no
+ * adjustment) rather than dividing by zero or by a negative number.
+ */
+export function priceAdjustmentScale(nowCost: number, positionMedianCost: number): number {
+  if (positionMedianCost <= 0) return 1
+  const rawScale = nowCost / positionMedianCost
+  return Math.min(PRICE_PRIOR_MAX_SCALE, Math.max(PRICE_PRIOR_MIN_SCALE, rawScale))
+}
+
+/**
+ * Adjusts a position prior's xG/xA rates by a player's price relative to the
+ * median price for his position (ticket #119) — see this file's header for
+ * the full "because" and why it is xG/xA only. `savesPer90`, `cbiPer90` and
+ * `recoveriesPer90` pass through completely unchanged; price says nothing
+ * about them. Only meant to be called for a player with zero minutes at
+ * every level — see `scripts/project-points.ts`'s `effectiveRatePositionPrior`
+ * for where that condition is enforced.
+ */
+export function priceAdjustedPositionPrior(
+  positionPrior: PlayerRates,
+  nowCost: number,
+  positionMedianCost: number,
+): PlayerRates {
+  const scale = priceAdjustmentScale(nowCost, positionMedianCost)
+  return {
+    ...positionPrior,
+    xgPer90: positionPrior.xgPer90 * scale,
+    xaPer90: positionPrior.xaPer90 * scale,
   }
 }

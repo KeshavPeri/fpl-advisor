@@ -78,6 +78,17 @@
 // mathematically identical to calling the two-stage functions directly --
 // which this file also does, for the components.playerLevel figures
 // surfaced in job_runs and player_projections, so the two never disagree.
+//
+// PRICE AS A WEAK PRIOR (ticket #119). A player with zero qualifying rows at
+// BOTH levels ("neither" coverage, ticket #113) has nothing for either
+// shrinkage stage to work with -- both stages collapse to exactly the
+// position prior, by construction. `effectiveRatePositionPrior` below
+// substitutes in a price-adjusted position prior for exactly that
+// population -- see src/lib/projection/rates.ts's header for the full
+// "because" -- and passes the plain position prior through unchanged for
+// every other player. The median players.now_cost per position is computed
+// from the live `players` table read in section 2 (no numeric literal for
+// any price anywhere in this file); see `medianNowCostByPosition`.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
@@ -95,6 +106,8 @@ import {
   positionPriorHitRate,
   estimateDefconHitRate,
   estimateTwoStageDefconHitRate,
+  priceAdjustedPositionPrior,
+  priceAdjustmentScale,
   LEAGUE_BASELINE_GOALS_PER_TEAM,
   projectPlayerFixture,
   allocateFixtureBonus,
@@ -247,6 +260,8 @@ interface PlayerRow {
   element_type: number
   status: string
   chance_of_playing_next_round: number | null
+  /** Tenths of a million, same convention as everywhere else in this codebase. Ticket #119: the weak price prior for players with no Premier League history at any level. */
+  now_cost: number
 }
 
 interface FixtureRow {
@@ -334,6 +349,67 @@ export function classifySeasonCoverage(hasCurrentSeasonRows: boolean, hasHistori
   if (hasCurrentSeasonRows) return 'current'
   if (hasHistoricalRows) return 'historicalOnly'
   return 'neither'
+}
+
+// ============================================================================
+// Ticket #119 — price as a weak prior, pulled out the same way as the #113
+// helpers above: small, independently-testable pure functions rather than
+// inline logic in the per-player loop in main() below.
+// ============================================================================
+
+/** One row's worth of what `medianNowCostByPosition` needs — a subset of `PlayerRow`. */
+interface PlayerCostRow {
+  element_type: number
+  now_cost: number
+}
+
+/** The median of a sorted numeric array. An empty array returns 0 (see `medianNowCostByPosition`'s own doc for why that is the right fallback, not a special case to fear). */
+function median(sortedValues: readonly number[]): number {
+  if (sortedValues.length === 0) return 0
+  const mid = Math.floor(sortedValues.length / 2)
+  return sortedValues.length % 2 === 0 ? (sortedValues[mid - 1] + sortedValues[mid]) / 2 : sortedValues[mid]
+}
+
+/**
+ * Median `players.now_cost` per position, computed from the live `players`
+ * table (ticket #119) — never a hardcoded price literal. Median, not mean:
+ * a handful of expensive players would drag a mean upward, making ordinary
+ * players look cheap and scaling most unknown players down (see the
+ * ticket's Notes). A position with zero players in the input returns 0,
+ * which `priceAdjustmentScale`/`priceAdjustedPositionPrior` (rates.ts) both
+ * already treat as "no adjustment" rather than a division by zero.
+ */
+export function medianNowCostByPosition(players: readonly PlayerCostRow[]): Record<Position, number> {
+  const costsByPosition: Record<Position, number[]> = { 1: [], 2: [], 3: [], 4: [] }
+  for (const player of players) {
+    costsByPosition[player.element_type as Position].push(player.now_cost)
+  }
+  const result = {} as Record<Position, number>
+  for (const position of POSITIONS) {
+    result[position] = median([...costsByPosition[position]].sort((a, b) => a - b))
+  }
+  return result
+}
+
+/**
+ * The position prior actually fed into stage one for one player (ticket
+ * #119): the plain position prior, unchanged, for any player with real
+ * minutes at either level — and ONLY for a player whose two-stage coverage
+ * classifies as "neither" (zero minutes at every level), that same prior's
+ * xG/xA rates weakly adjusted by his price relative to the position's
+ * median (`priceAdjustedPositionPrior`, rates.ts). Pulled out as its own
+ * pure, exported function specifically so the "a player with any minutes is
+ * completely unaffected" guarantee is provable on constructed inputs,
+ * without a live Supabase project — see project-points.test.ts.
+ */
+export function effectiveRatePositionPrior(
+  coverage: PlayerSeasonCoverage,
+  positionPrior: PlayerRates,
+  nowCost: number,
+  positionMedianCost: number,
+): PlayerRates {
+  if (coverage !== 'neither') return positionPrior
+  return priceAdjustedPositionPrior(positionPrior, nowCost, positionMedianCost)
 }
 
 /** Reduces one season's worth of a player's match rows into the totals `computePlayerRates`/`computeTwoStagePlayerRates` expect. */
@@ -435,7 +511,7 @@ async function main(): Promise<void> {
     } = await fetchAllPages<PlayerRow>((from, to) =>
       supabase
         .from('players')
-        .select('id, code, team_id, element_type, status, chance_of_playing_next_round')
+        .select('id, code, team_id, element_type, status, chance_of_playing_next_round, now_cost')
         .range(from, to)
         .returns<PlayerRow[]>(),
     )
@@ -636,6 +712,12 @@ async function main(): Promise<void> {
       POSITIONS.map((position) => [position, positionPriorHitRate(position, defconMatchesByPosition[position])]),
     ) as Record<Position, number>
 
+    // Ticket #119 -- median players.now_cost per position, from the same
+    // playerRows already fetched in section 2. Computed once, outside the
+    // per-player loop below, since it depends on the whole population, not
+    // on any one player.
+    const medianCostByPosition = medianNowCostByPosition(playerRows)
+
     // --------------------------------------------------------------------
     // 5. Per player: build the pure model's input and stage a
     //    per-(player, gameweek, fixture) FixtureProjection for every fixture
@@ -653,6 +735,16 @@ async function main(): Promise<void> {
     let playersWithHistoricalOnlyRows = 0
     let playersWithNeitherSeasonRows = 0
     const currentSeasonRowsRead = matchStatsRows.filter((row) => row.season === CURRENT_SEASON).length
+
+    // Ticket #119 -- players receiving the price-adjusted prior always equals
+    // playersWithNeitherSeasonRows exactly, by construction of
+    // effectiveRatePositionPrior (it only ever fires on 'neither' coverage).
+    // Of those, scaled-up/scaled-down are mutually exclusive and exclude the
+    // (rare) case of a player priced at exactly the position median, whose
+    // scale is exactly 1 -- neither up nor down.
+    let playersPriceAdjustedPrior = 0
+    let playersPriceAdjustedScaledUp = 0
+    let playersPriceAdjustedScaledDown = 0
 
     interface StagedFixture {
       playerId: number
@@ -690,6 +782,24 @@ async function main(): Promise<void> {
       else if (coverage === 'historicalOnly') playersWithHistoricalOnlyRows++
       else playersWithNeitherSeasonRows++
 
+      // Ticket #119: for a player with zero minutes at every level ONLY,
+      // substitute a price-adjusted position prior in place of the plain one
+      // -- see effectiveRatePositionPrior's own doc. For every other player
+      // this returns ratePriorByPosition[position] completely unchanged, so
+      // their projection is untouched by this ticket, to the last decimal.
+      const effectivePrior = effectiveRatePositionPrior(
+        coverage,
+        ratePriorByPosition[position],
+        player.now_cost,
+        medianCostByPosition[position],
+      )
+      if (coverage === 'neither') {
+        playersPriceAdjustedPrior++
+        const scale = priceAdjustmentScale(player.now_cost, medianCostByPosition[position])
+        if (scale > 1) playersPriceAdjustedScaledUp++
+        else if (scale < 1) playersPriceAdjustedScaledDown++
+      }
+
       // Ticket #113: current-season matches lead the recent-minutes window,
       // historical ones only fill in behind them -- a sort change here, not
       // in minutes.ts (see this file's header).
@@ -710,7 +820,7 @@ async function main(): Promise<void> {
       const currentDefconMatches: DefensiveContributionMatch[] = currentMatches.map(toDefconMatch)
       const historicalDefconMatches: DefensiveContributionMatch[] = historicalMatches.map(toDefconMatch)
 
-      const personalRatePrior = computePlayerRates(historicalRateHistory, ratePriorByPosition[position])
+      const personalRatePrior = computePlayerRates(historicalRateHistory, effectivePrior)
       const personalDefconPrior = estimateDefconHitRate(position, historicalDefconMatches, defconPriorByPosition[position])
 
       const projectionInput: PlayerProjectionInput = {
@@ -729,7 +839,7 @@ async function main(): Promise<void> {
       // meaningful even for a player with zero fixtures this gameweek.
       const availability = availabilityFactor(player.status, player.chance_of_playing_next_round)
       const minutesEstimate = estimateMinutes(recentMinutes, availability)
-      const playerRates = computeTwoStagePlayerRates(currentRateHistory, historicalRateHistory, ratePriorByPosition[position])
+      const playerRates = computeTwoStagePlayerRates(currentRateHistory, historicalRateHistory, effectivePrior)
       const defconHitRate = estimateTwoStageDefconHitRate(
         position,
         currentDefconMatches,
@@ -952,6 +1062,15 @@ async function main(): Promise<void> {
       playersWithHistoricalOnlyRows,
       playersWithNeitherSeasonRows,
       currentSeasonRowsRead,
+      // Ticket #119 -- playersPriceAdjustedPrior equals playersWithNeitherSeasonRows
+      // exactly, by construction of effectiveRatePositionPrior (it only ever
+      // substitutes for 'neither' coverage). Of those, scaled-up + scaled-down
+      // can be less than the total when a player is priced at exactly the
+      // position median (scale exactly 1 -- neither up nor down). See
+      // docs/projection-model-backlog.md G2.
+      playersPriceAdjustedPrior,
+      playersPriceAdjustedScaledUp,
+      playersPriceAdjustedScaledDown,
       fixtureEloFallbackCount,
       leagueBaselineGoalsSource,
       leagueBaselineGoals,
@@ -984,7 +1103,8 @@ async function main(): Promise<void> {
       `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded; ${currentSeasonRowsRead} of the rows ` +
       `read are current-season (${CURRENT_SEASON}). Coverage: ${playersWithCurrentSeasonRows} player(s) with ` +
       `current-season rows, ${playersWithHistoricalOnlyRows} historical-only, ${playersWithNeitherSeasonRows} with ` +
-      `neither. Bonus: ${fixturesBonusAllocated} fixture(s) ` +
+      `neither (${playersPriceAdjustedPrior} price-adjusted: ${playersPriceAdjustedScaledUp} scaled up, ` +
+      `${playersPriceAdjustedScaledDown} scaled down). Bonus: ${fixturesBonusAllocated} fixture(s) ` +
       `allocated, ${fixturesZeroExcess} zero-excess, ${playerFixturesBonusClamped} player-fixture(s) clamped, mean ` +
       `${meanProjectedBonusAmongLikelyStarters.toFixed(2)} among likely starters.`
     console.log(message)

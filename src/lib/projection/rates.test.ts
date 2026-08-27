@@ -1,7 +1,16 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { SHRINKAGE_K, computePlayerRates, computeTwoStagePlayerRates, positionPriorRates } from './rates.ts'
+import {
+  PRICE_PRIOR_MAX_SCALE,
+  PRICE_PRIOR_MIN_SCALE,
+  SHRINKAGE_K,
+  computePlayerRates,
+  computeTwoStagePlayerRates,
+  positionPriorRates,
+  priceAdjustedPositionPrior,
+  priceAdjustmentScale,
+} from './rates.ts'
 
 const zeroPrior = { xgPer90: 0, xaPer90: 0, savesPer90: 0, cbiPer90: 0, recoveriesPer90: 0 }
 
@@ -269,5 +278,72 @@ describe('rates.ts source invariants (ticket #113)', () => {
     expect(source).not.toMatch(/supabase/i)
     expect(source).not.toMatch(/\bfetch\(/)
     expect(source).not.toMatch(/process\.env/)
+  })
+})
+
+// ============================================================================
+// Ticket #119 -- price as a weak prior for players with no Premier League
+// history at either level. priceAdjustmentScale / priceAdjustedPositionPrior
+// only ever touch the POSITION PRIOR itself, before it enters
+// computePlayerRates/computeTwoStagePlayerRates -- these tests exercise the
+// two new functions directly, on constructed inputs, exactly the way
+// rates.ts's other pure functions are tested above.
+// ============================================================================
+
+describe('priceAdjustmentScale / priceAdjustedPositionPrior -- ticket #119', () => {
+  const prior = { xgPer90: 0.3, xaPer90: 0.15, savesPer90: 2, cbiPer90: 5, recoveriesPer90: 6 }
+
+  it('clamp bounds are 0.6 and 1.8, pre-answered in the ticket', () => {
+    expect(PRICE_PRIOR_MIN_SCALE).toBe(0.6)
+    expect(PRICE_PRIOR_MAX_SCALE).toBe(1.8)
+  })
+
+  it('a no-history player priced at exactly the position median receives the unadjusted position prior', () => {
+    const adjusted = priceAdjustedPositionPrior(prior, 80, 80)
+    expect(adjusted.xgPer90).toBeCloseTo(prior.xgPer90, 12)
+    expect(adjusted.xaPer90).toBeCloseTo(prior.xaPer90, 12)
+    expect(priceAdjustmentScale(80, 80)).toBeCloseTo(1, 12)
+  })
+
+  it('a no-history player priced at twice the position median receives 1.8x the prior xG and xA -- the clamp, not 2.0x', () => {
+    const adjusted = priceAdjustedPositionPrior(prior, 160, 80)
+    expect(priceAdjustmentScale(160, 80)).toBeCloseTo(1.8, 12)
+    expect(adjusted.xgPer90).toBeCloseTo(prior.xgPer90 * 1.8, 12)
+    expect(adjusted.xaPer90).toBeCloseTo(prior.xaPer90 * 1.8, 12)
+  })
+
+  it('a no-history player priced at half the position median receives 0.6x the prior xG and xA -- the lower clamp', () => {
+    const adjusted = priceAdjustedPositionPrior(prior, 40, 80)
+    expect(priceAdjustmentScale(40, 80)).toBeCloseTo(0.6, 12)
+    expect(adjusted.xgPer90).toBeCloseTo(prior.xgPer90 * 0.6, 12)
+    expect(adjusted.xaPer90).toBeCloseTo(prior.xaPer90 * 0.6, 12)
+  })
+
+  it('savesPer90, cbiPer90 and recoveriesPer90 are unchanged by the adjustment in every case', () => {
+    for (const nowCost of [40, 80, 160, 1000]) {
+      const adjusted = priceAdjustedPositionPrior(prior, nowCost, 80)
+      expect(adjusted.savesPer90).toBe(prior.savesPer90)
+      expect(adjusted.cbiPer90).toBe(prior.cbiPer90)
+      expect(adjusted.recoveriesPer90).toBe(prior.recoveriesPer90)
+    }
+  })
+
+  it('a position median of zero returns the unadjusted prior rather than dividing by zero', () => {
+    const adjusted = priceAdjustedPositionPrior(prior, 80, 0)
+    expect(adjusted).toEqual(prior)
+    expect(priceAdjustmentScale(80, 0)).toBe(1)
+    expect(Number.isFinite(priceAdjustmentScale(80, 0))).toBe(true)
+  })
+
+  it('a negative position median (defensive case -- should never occur) also returns the unadjusted prior, not a division by a negative number', () => {
+    const adjusted = priceAdjustedPositionPrior(prior, 80, -5)
+    expect(adjusted).toEqual(prior)
+  })
+
+  it('a mid-priced player between the median and the clamp is scaled proportionally, not clamped', () => {
+    // 100 / 80 = 1.25 -- inside [0.6, 1.8], so no clamping should occur.
+    const adjusted = priceAdjustedPositionPrior(prior, 100, 80)
+    expect(priceAdjustmentScale(100, 80)).toBeCloseTo(1.25, 12)
+    expect(adjusted.xgPer90).toBeCloseTo(prior.xgPer90 * 1.25, 12)
   })
 })
