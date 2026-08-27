@@ -85,8 +85,11 @@
 //
 // ============================================================================
 // Pure. No I/O — see scripts/lib/competition.ts and scripts/lib/lockdown.ts
-// for the same shape. `supabase`, `fetch` and `process.env` appear nowhere
-// in this file (ticket #126's own DoD, grep-checkable).
+// for the same shape. No database client, no network call and no
+// environment-variable read appear anywhere below (ticket #126's own DoD,
+// grep-checkable — this header deliberately never spells out the literal
+// identifiers it is careful to avoid, the same discipline
+// scripts/build-solver-input.ts's own file header uses).
 
 export interface ChipPlay {
   /** e.g. "TC", "BB" — verbatim from the log, never normalized or narrowed to a union (see file header on WC/FH). */
