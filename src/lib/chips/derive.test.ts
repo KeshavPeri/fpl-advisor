@@ -6,11 +6,13 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  CHIP_ADVISORY_HORIZON_NOTE,
   CHIP_DISPLAY_NAMES,
   FIRST_CHIP_SET_LAST_GAMEWEEK,
+  SOLVER_CHIP_DISPLAY_NAMES,
   deriveChipState,
 } from './derive.ts'
-import type { ChipSourceData, GameweekDeadline } from './types.ts'
+import type { ChipAdvisoryRow, ChipSourceData, GameweekDeadline } from './types.ts'
 
 /** A full, evenly-spaced season of gameweek deadlines, GW1..GW38, one week
  *  apart, so "current gameweek" and "gameweeks remaining" arithmetic has
@@ -40,6 +42,7 @@ function sourceData(overrides: Partial<ChipSourceData> = {}): ChipSourceData {
   return {
     chipsUsed: [],
     gameweeks,
+    chipAdvisories: [],
     ...overrides,
   }
 }
@@ -306,5 +309,58 @@ describe('deriveChipState — expiryWarning chip-count escalation: more unused c
   it('the escalation never promotes none to noted — 9 gameweeks remaining with all four chips unused stays none', () => {
     const state = deriveChipState(sourceData({ chipsUsed: [] }), nowForGameweeksRemaining(9))
     expect(state.expiryWarning).toEqual({ band: 'none' })
+  })
+})
+
+// ============================================================================
+// Chip advisory — ticket #126 (feature-list item 27). deriveChipState never
+// reads a clock for this part; every case below is independent of nowMs.
+// ============================================================================
+
+describe('deriveChipState — chip advisory (ticket #126)', () => {
+  it('is empty, with a null note, when no chip_advisories rows are given', () => {
+    const state = deriveChipState(sourceData({ chipAdvisories: [] }), GW19_DEADLINE_MS - 1)
+    expect(state.chipAdvisories).toEqual([])
+    expect(state.chipAdvisoryNote).toBeNull()
+  })
+
+  it('resolves a known chip code to its display name, rounds the delta to a whole number, and formats the gameweek label', () => {
+    const chipAdvisories: ChipAdvisoryRow[] = [
+      { chipCode: 'TC', chipGameweekId: 2, delta: 6.48, solutionIndex: 0 },
+      { chipCode: 'BB', chipGameweekId: 4, delta: 6.48, solutionIndex: 0 },
+    ]
+    const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
+
+    expect(state.chipAdvisories).toEqual([
+      { chipCode: 'TC', displayName: 'Triple Captain', gameweekLabel: 'Gameweek 2', deltaWhole: 6, solutionIndex: 0 },
+      { chipCode: 'BB', displayName: 'Bench Boost', gameweekLabel: 'Gameweek 4', deltaWhole: 6, solutionIndex: 0 },
+    ])
+  })
+
+  it('rounds a delta like 6.5 up and 6.49 down — Math.round, not truncation', () => {
+    const chipAdvisories: ChipAdvisoryRow[] = [
+      { chipCode: 'TC', chipGameweekId: 2, delta: 6.5, solutionIndex: 0 },
+      { chipCode: 'BB', chipGameweekId: 4, delta: 6.49, solutionIndex: 1 },
+    ]
+    const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.chipAdvisories[0].deltaWhole).toBe(7)
+    expect(state.chipAdvisories[1].deltaWhole).toBe(6)
+  })
+
+  it('renders an unrecognised chip code as an explicit unknown-chip label rather than dropping it', () => {
+    const chipAdvisories: ChipAdvisoryRow[] = [{ chipCode: 'WC', chipGameweekId: 3, delta: 4, solutionIndex: 0 }]
+    const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.chipAdvisories[0].displayName).toBe('Unknown chip (WC)')
+  })
+
+  it('carries the fixed five-gameweek limitation sentence on the derived view whenever there is at least one advisory', () => {
+    const chipAdvisories: ChipAdvisoryRow[] = [{ chipCode: 'TC', chipGameweekId: 2, delta: 6, solutionIndex: 0 }]
+    const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.chipAdvisoryNote).toBe(CHIP_ADVISORY_HORIZON_NOTE)
+    expect(state.chipAdvisoryNote).toMatch(/five gameweeks/)
+  })
+
+  it('SOLVER_CHIP_DISPLAY_NAMES maps exactly the two chip codes ever observed', () => {
+    expect(SOLVER_CHIP_DISPLAY_NAMES).toEqual({ TC: 'Triple Captain', BB: 'Bench Boost' })
   })
 })

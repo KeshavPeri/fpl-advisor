@@ -17,6 +17,8 @@
 
 import { formatDeadlineInstant } from '../deadlineCountdown'
 import type {
+  ChipAdvisoryRow,
+  ChipAdvisoryView,
   ChipExpiryBand,
   ChipExpiryWarning,
   ChipSetTimeRemaining,
@@ -142,6 +144,51 @@ function buildSlots(
  * 'final' below is also the correct answer if it were ever called at 0 or
  * negative — the tightest band, never a crash.
  */
+/**
+ * Ticket #126 (item 27). Solver chip-code -> display name — DELIBERATELY a
+ * separate constant from CHIP_DISPLAY_NAMES above: that map is keyed by
+ * FPL's OWN chip identifiers ('wildcard', 'bboost', '3xc', ...), read from
+ * squads.chips_used; this one is keyed by the SOLVER's own two-letter codes
+ * ('TC', 'BB'), read from scripts/lib/solver-output.ts's parse of
+ * dev/solver.py's stdout — two different vocabularies for the same four
+ * chips, never conflated. Only TC/BB have ever been observed (see that
+ * module's own header) — item 28 (Wildcard/Free Hit) is out of scope here.
+ */
+export const SOLVER_CHIP_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  TC: 'Triple Captain',
+  BB: 'Bench Boost',
+}
+
+/**
+ * The fixed sentence design-reference.md's DoD requires: "a plain sentence
+ * stating that the solver sees only five gameweeks and therefore always
+ * favours playing a chip early." One constant, never composed per-row —
+ * see ChipsScreen.tsx, which renders it once beneath the advisory list, not
+ * once per chip.
+ */
+export const CHIP_ADVISORY_HORIZON_NOTE =
+  'The solver only sees five gameweeks ahead, so it always favours playing a chip now rather than saving it for a later one it cannot see.'
+
+/**
+ * Resolves each stored advisory row for display. `delta` is already a
+ * database-computed figure (see the chip_advisories migration's GENERATED
+ * column) — this only rounds it to a whole number, per design-reference.md's
+ * "no decimal projected-points values" rule, and attaches a display name.
+ * An unrecognised chip_code (should never happen — see
+ * SOLVER_CHIP_DISPLAY_NAMES's own comment) renders as an explicit
+ * "Unknown chip (…)" label rather than being dropped, matching this
+ * module's own usedChips convention above.
+ */
+function deriveChipAdvisories(rows: readonly ChipAdvisoryRow[]): ChipAdvisoryView[] {
+  return rows.map((row) => ({
+    chipCode: row.chipCode,
+    displayName: SOLVER_CHIP_DISPLAY_NAMES[row.chipCode] ?? `Unknown chip (${row.chipCode})`,
+    gameweekLabel: `Gameweek ${row.chipGameweekId}`,
+    deltaWhole: Math.round(row.delta),
+    solutionIndex: row.solutionIndex,
+  }))
+}
+
 function bandForGameweeksRemaining(gameweeksRemaining: number): ChipExpiryBand {
   if (gameweeksRemaining > 8) return 'none'
   if (gameweeksRemaining >= 5) return 'noted'
@@ -291,11 +338,15 @@ export function deriveChipState(data: ChipSourceData, nowMs: number): DerivedChi
     isAvailable: expired,
   }
 
+  const chipAdvisories = deriveChipAdvisories(data.chipAdvisories)
+
   return {
     hasUsedAnyChip: usedChips.length > 0,
     usedChips,
     firstSet,
     secondSet,
     expiryWarning: deriveExpiryWarning(firstSet),
+    chipAdvisories,
+    chipAdvisoryNote: chipAdvisories.length > 0 ? CHIP_ADVISORY_HORIZON_NOTE : null,
   }
 }
