@@ -43,6 +43,14 @@ describe('buildSquadAdvisoryRow — one row per run, always solution_index 0', (
       chip_free_objective: 273.2,
       solver_run_id: 42,
     })
+
+    // The ticket's own DoD, in its own words: "the delta equals the rebuild
+    // objective minus the baseline objective of the same run." chip_advisories.delta
+    // is a database GENERATED column (chip_enabled_objective - chip_free_objective,
+    // see that migration's header) — this row supplies exactly those two inputs,
+    // never a pre-computed delta of its own, so this arithmetic is what the
+    // database will actually compute from the row this function returns.
+    expect(row.chip_enabled_objective - row.chip_free_objective).toBeCloseTo(320.5 - 273.2, 10)
   })
 
   it('builds an FH row the same way, with chip_code "FH" — never both WC and FH in one row', () => {
