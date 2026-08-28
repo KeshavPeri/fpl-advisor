@@ -188,6 +188,48 @@
 // 'failure' and the process exits non-zero.
 //
 // ============================================================================
+// RANKING SKILL — ticket #147 (feature-list item 32, next slice after #133/
+// #140). A different question from everything above: not "how close are the
+// model's numbers" but "does it put the right players at the top" — the
+// only thing a recommendation actually depends on (the captain IS the
+// squad's top-projected player; a transfer IS a claim one player will
+// outscore another). Computed entirely from the SAME `measured: MeasuredRow[]`
+// population #133/#140 already build — no new Supabase read, no change to
+// the measured-population rule or its reconciliation.
+//
+//  - Spearman rank correlation between projected and actual points, per
+//    gameweek and pooled across the season (mirroring how `overall` pools
+//    every measured row for MAE above) — tied values share the AVERAGE of
+//    the ranks they would occupy (the standard tie-correction; many rows
+//    project identically at the position prior, so ties are common, not an
+//    edge case). Implemented as the Pearson correlation of the two rank
+//    sequences, which is exactly the tie-corrected Spearman's rho.
+//
+//  - Top-10 / top-20 overlap: within one set of same-gameweek rows, which
+//    rows rank in the top N by PROJECTED points, which rank in the top N by
+//    ACTUAL points, and how many rows are in both sets. Selecting the top N
+//    by value uses a stable sort (ties broken by original row order) — a
+//    different, explicit tie rule from Spearman's average-rank rule, because
+//    "top 10" must select exactly 10 rows, not a fractional rank.
+//
+//  - Per-gameweek figures use the SAME MIN_BUCKET_SAMPLE_SIZE (50) threshold
+//    #140's buckets already use — a gameweek under that is reported "too
+//    small to read", never as a correlation (ticket text). Per-position
+//    figures pool the whole season for Spearman (like the existing
+//    by-position MAE table) and sum top-N overlaps across every gameweek for
+//    that position (no 50-row gate there: a per-gameweek goalkeeper
+//    population is often under 50 by construction — roughly one starting
+//    keeper per club — so gating at 50 would silently zero out goalkeepers
+//    entirely rather than reporting an honestly smaller sample size).
+//
+//  - Sanity bounds (ticket text, pre-answered): a Spearman correlation
+//    outside [-0.2, 0.9], or a top-10 overlap fraction above 9/10, fails the
+//    report — checked on the season aggregate and on each position,
+//    mirroring checkSanityBounds' own overall-plus-by-position shape. The
+//    upper bound matters more: a suspiciously good correlation is the shape
+//    a lookahead leak takes.
+//
+// ============================================================================
 // Wiring.
 // ============================================================================
 // Reads exactly SUPABASE_URL and SUPABASE_SECRET_KEY. Season is
@@ -274,6 +316,17 @@ const NEUTRAL_FIXTURE_DIFFICULTY = 3
 export const MAE_LOWER_BOUND = 1.0
 export const MAE_UPPER_BOUND = 3.5
 export const CLEAN_SHEET_RATE_UPPER_BOUND = 0.6
+
+/**
+ * Ranking-skill sanity bounds (ticket #147, ticket text verbatim). Outside
+ * these, the HARNESS is wrong, not the model — see checkRankingSanityBounds().
+ * The upper bound matters more than the lower one: a suspiciously good
+ * correlation is the shape a lookahead leak takes.
+ */
+export const SPEARMAN_LOWER_BOUND = -0.2
+export const SPEARMAN_UPPER_BOUND = 0.9
+/** "a top-10 overlap above 9 of 10" — expressed as the fraction 9/10 so it applies regardless of the exact denominator an aggregate figure carries. */
+export const TOP10_OVERLAP_UPPER_BOUND_FRACTION = 0.9
 
 /** A clean sheet requires 60+ minutes, same gate pointValues.ts's appearance-points split uses. */
 const CLEAN_SHEET_QUALIFYING_MINUTES = 60
@@ -1151,6 +1204,260 @@ export function formatExclusionPercentage(count: number, rowsRead: number): stri
 }
 
 // ============================================================================
+// RANKING SKILL — ticket #147. Pure, over the already-built measured
+// population (the SAME `MeasuredRow[]` #133/#140 build), no I/O. See file
+// header, "RANKING SKILL".
+// ============================================================================
+
+/** The two comparable values one measured row contributes to a ranking — projected and actual points, paired by construction (one row IS one player-gameweek on both sides). */
+export interface RankingPair {
+  projected: number
+  actual: number
+}
+
+export function toRankingPair(row: Pick<MeasuredRow, 'projectedPoints' | 'actualPoints'>): RankingPair {
+  return { projected: row.projectedPoints, actual: row.actualPoints }
+}
+
+/**
+ * 1-based ranks, descending (rank 1 = the highest value), with the STANDARD
+ * average-rank tie correction: values tied for positions i..j (0-based, so
+ * ranks i+1..j+1) all receive the mean of those ranks. This is the tie rule
+ * Spearman's rho is defined against (ticket text: "average ranks is
+ * standard") — ties are common here, not an edge case, since many rows
+ * project identically at the position prior.
+ */
+export function rankDescending(values: readonly number[]): number[] {
+  const n = values.length
+  const order = values.map((_, i) => i).sort((a, b) => values[b] - values[a])
+  const ranks = new Array<number>(n)
+  let i = 0
+  while (i < n) {
+    let j = i
+    while (j + 1 < n && values[order[j + 1]] === values[order[i]]) j++
+    // Positions i..j (0-based) occupy ranks i+1..j+1 (1-based) — their average is the tied rank every one of them receives.
+    const averageRank = (i + 1 + (j + 1)) / 2
+    for (let k = i; k <= j; k++) ranks[order[k]] = averageRank
+    i = j + 1
+  }
+  return ranks
+}
+
+/** Pearson correlation of two equal-length numeric sequences. Null (never NaN) when either side has zero variance — a correlation is undefined, not zero, when one side is constant. */
+function pearsonCorrelation(a: readonly number[], b: readonly number[]): number | null {
+  const n = a.length
+  const meanA = a.reduce((sum, x) => sum + x, 0) / n
+  const meanB = b.reduce((sum, x) => sum + x, 0) / n
+  let covariance = 0
+  let varianceA = 0
+  let varianceB = 0
+  for (let i = 0; i < n; i++) {
+    const deviationA = a[i] - meanA
+    const deviationB = b[i] - meanB
+    covariance += deviationA * deviationB
+    varianceA += deviationA * deviationA
+    varianceB += deviationB * deviationB
+  }
+  if (varianceA === 0 || varianceB === 0) return null
+  return covariance / Math.sqrt(varianceA * varianceB)
+}
+
+/**
+ * Spearman rank correlation between projected and actual points, over
+ * whatever set of pairs is passed in (a single gameweek, a position pooled
+ * across the season, or the whole season) — implemented as the Pearson
+ * correlation of the two rank sequences (rankDescending's average-rank tie
+ * correction), which IS the tie-corrected Spearman's rho, not an
+ * approximation of it. Null with fewer than 2 pairs, or when either side's
+ * ranks carry no variance at all (every value tied) — undefined, not 0.
+ */
+export function spearmanCorrelation(pairs: readonly RankingPair[]): number | null {
+  if (pairs.length < 2) return null
+  const projectedRanks = rankDescending(pairs.map((p) => p.projected))
+  const actualRanks = rankDescending(pairs.map((p) => p.actual))
+  return pearsonCorrelation(projectedRanks, actualRanks)
+}
+
+/** One top-N overlap figure: how many of the N pairs selected by projected value are ALSO among the N pairs selected by actual value, and the N actually used (== min(requested N, population) — never claims a top-10 out of a population of 4). */
+export interface TopNOverlap {
+  overlap: number
+  n: number
+}
+
+/**
+ * Selects the top `topN` pairs by projected value and the top `topN` pairs
+ * by actual value — from the SAME set of pairs, so "overlap" means the same
+ * row ranks highly on both sides, no player identity needed — and counts how
+ * many rows are in both sets. Selection uses a stable sort (Array.prototype.sort
+ * is stable per the ES2019 spec, and Node's V8 engine implements it), so ties
+ * at the selection boundary are broken by original row order — a DIFFERENT,
+ * explicit tie rule from spearmanCorrelation's average-rank rule, because a
+ * top-N selection must choose exactly N rows, not award a fractional slot to
+ * every tied row (ticket text: "decide the tie rule explicitly").
+ */
+export function topNOverlap(pairs: readonly RankingPair[], topN: number): TopNOverlap {
+  const n = Math.min(topN, pairs.length)
+  if (n <= 0) return { overlap: 0, n: 0 }
+  const indices = pairs.map((_, i) => i)
+  const byProjected = [...indices].sort((a, b) => pairs[b].projected - pairs[a].projected).slice(0, n)
+  const byActual = new Set([...indices].sort((a, b) => pairs[b].actual - pairs[a].actual).slice(0, n))
+  const overlap = byProjected.filter((idx) => byActual.has(idx)).length
+  return { overlap, n }
+}
+
+export interface GameweekRankingSummary {
+  gameweekId: number
+  n: number
+  /** Ticket text: a gameweek under MIN_BUCKET_SAMPLE_SIZE is "too small to read", never a correlation — spearman/top10/top20 are all null when this is true. */
+  tooSmallToRead: boolean
+  spearman: number | null
+  top10: TopNOverlap | null
+  top20: TopNOverlap | null
+}
+
+/** Per-gameweek Spearman + top-10/20 overlap, gated by the same MIN_BUCKET_SAMPLE_SIZE #140's buckets already use. */
+export function summarizeRankingByGameweek(rows: readonly MeasuredRow[]): Map<number, GameweekRankingSummary> {
+  const gameweekIds = [...new Set(rows.map((r) => r.gameweekId))].sort((a, b) => a - b)
+  const result = new Map<number, GameweekRankingSummary>()
+  for (const gameweekId of gameweekIds) {
+    const gameweekRows = rows.filter((r) => r.gameweekId === gameweekId)
+    const n = gameweekRows.length
+    const tooSmallToRead = n < MIN_BUCKET_SAMPLE_SIZE
+    const pairs = gameweekRows.map(toRankingPair)
+    result.set(gameweekId, {
+      gameweekId,
+      n,
+      tooSmallToRead,
+      spearman: tooSmallToRead ? null : spearmanCorrelation(pairs),
+      top10: tooSmallToRead ? null : topNOverlap(pairs, 10),
+      top20: tooSmallToRead ? null : topNOverlap(pairs, 20),
+    })
+  }
+  return result
+}
+
+export interface SeasonRankingSummary {
+  n: number
+  /** Pooled across every measured row, regardless of gameweek — mirrors how `overall` pools every row for MAE. */
+  spearman: number | null
+  /** Sum of each non-too-small gameweek's overlap and N — a season overlap RATE, not a single top-10 selection over 8,000+ pooled rows (which "top 10 of the season" would not sensibly mean). */
+  top10: TopNOverlap
+  top20: TopNOverlap
+}
+
+export function summarizeSeasonRanking(rows: readonly MeasuredRow[], byGameweek: ReadonlyMap<number, GameweekRankingSummary>): SeasonRankingSummary {
+  const spearman = spearmanCorrelation(rows.map(toRankingPair))
+  let overlap10 = 0
+  let n10 = 0
+  let overlap20 = 0
+  let n20 = 0
+  for (const summary of byGameweek.values()) {
+    if (summary.tooSmallToRead || summary.top10 === null || summary.top20 === null) continue
+    overlap10 += summary.top10.overlap
+    n10 += summary.top10.n
+    overlap20 += summary.top20.overlap
+    n20 += summary.top20.n
+  }
+  return { n: rows.length, spearman, top10: { overlap: overlap10, n: n10 }, top20: { overlap: overlap20, n: n20 } }
+}
+
+export interface PositionRankingSummary {
+  position: Position
+  n: number
+  /** Pooled across the whole season for this position — mirrors summarizeByPosition's season-level MAE, not a per-gameweek figure. */
+  spearman: number | null
+  /**
+   * Summed across every gameweek this position appears in — NOT gated by
+   * MIN_BUCKET_SAMPLE_SIZE (unlike the by-gameweek table above). A
+   * per-gameweek goalkeeper population is often under 50 by construction —
+   * roughly one starting keeper per club, ~20 at most — so a 50-row gate
+   * would silently zero out goalkeepers' top-N figures entirely rather than
+   * reporting an honestly smaller sample size. topNOverlap already caps N at
+   * the population size, so a thin gameweek just contributes a smaller N,
+   * never a wrong one.
+   */
+  top10: TopNOverlap
+  top20: TopNOverlap
+}
+
+export function summarizeRankingByPosition(rows: readonly MeasuredRow[]): Record<Position, PositionRankingSummary> {
+  const result = {} as Record<Position, PositionRankingSummary>
+  for (const position of POSITIONS) {
+    const positionRows = rows.filter((r) => r.position === position)
+    const spearman = spearmanCorrelation(positionRows.map(toRankingPair))
+
+    const gameweekIds = [...new Set(positionRows.map((r) => r.gameweekId))]
+    let overlap10 = 0
+    let n10 = 0
+    let overlap20 = 0
+    let n20 = 0
+    for (const gameweekId of gameweekIds) {
+      const pairs = positionRows.filter((r) => r.gameweekId === gameweekId).map(toRankingPair)
+      const t10 = topNOverlap(pairs, 10)
+      const t20 = topNOverlap(pairs, 20)
+      overlap10 += t10.overlap
+      n10 += t10.n
+      overlap20 += t20.overlap
+      n20 += t20.n
+    }
+
+    result[position] = {
+      position,
+      n: positionRows.length,
+      spearman,
+      top10: { overlap: overlap10, n: n10 },
+      top20: { overlap: overlap20, n: n20 },
+    }
+  }
+  return result
+}
+
+export interface RankingSanityCheckResult {
+  ok: boolean
+  failures: string[]
+}
+
+/**
+ * The report FAILS, naming the figure, rather than printing a number nobody
+ * checked (ticket text) — mirrors checkSanityBounds' own shape exactly
+ * (overall, then each position). Checked here: the season aggregate and each
+ * position's Spearman correlation and top-10 overlap fraction. The upper
+ * bound matters more than the lower one: a suspiciously good correlation is
+ * the shape a lookahead leak takes.
+ */
+export function checkRankingSanityBounds(
+  seasonSpearman: number | null,
+  seasonTop10: TopNOverlap,
+  byPosition: Record<Position, PositionRankingSummary>,
+): RankingSanityCheckResult {
+  const failures: string[] = []
+
+  const checkSpearman = (label: string, value: number | null): void => {
+    if (value !== null && (value < SPEARMAN_LOWER_BOUND || value > SPEARMAN_UPPER_BOUND)) {
+      failures.push(
+        `${label} Spearman rank correlation ${value.toFixed(3)} is outside the sane bound [${SPEARMAN_LOWER_BOUND}, ${SPEARMAN_UPPER_BOUND}]`,
+      )
+    }
+  }
+  const checkTop10 = (label: string, top10: TopNOverlap): void => {
+    if (top10.n > 0 && top10.overlap / top10.n > TOP10_OVERLAP_UPPER_BOUND_FRACTION) {
+      failures.push(
+        `${label} top-10 overlap ${top10.overlap} of ${top10.n} (${((top10.overlap / top10.n) * 100).toFixed(1)}%) exceeds the sane bound of 9 of 10 (90%)`,
+      )
+    }
+  }
+
+  checkSpearman('season', seasonSpearman)
+  checkTop10('season', seasonTop10)
+  for (const position of POSITIONS) {
+    checkSpearman(POSITION_NAMES[position], byPosition[position].spearman)
+    checkTop10(POSITION_NAMES[position], byPosition[position].top10)
+  }
+
+  return { ok: failures.length === 0, failures }
+}
+
+// ============================================================================
 // Report generation.
 // ============================================================================
 
@@ -1177,6 +1484,11 @@ interface ReportData {
   multiFixtureDiagnostic: MultiFixtureDiagnostic
   defconBuckets: BucketSummary[]
   overallBuckets: BucketSummary[]
+  /** Ticket #147. */
+  rankingSeason: SeasonRankingSummary
+  rankingByPosition: Record<Position, PositionRankingSummary>
+  rankingByGameweek: Map<number, GameweekRankingSummary>
+  rankingSanity: RankingSanityCheckResult
 }
 
 function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): string {
@@ -1201,6 +1513,36 @@ function buildGameweekTable(byGameweek: Map<number, ErrorSummary>, multiFixtureB
 function buildBucketTable(buckets: readonly BucketSummary[]): string {
   const header = '| prior_matches | n | Mean signed error |\n|---|---|---|'
   const rows = buckets.map((b) => `| ${b.label} | ${b.n} | ${b.tooSmallToRead ? 'too small to read' : fmt(b.meanSignedError)} |`)
+  return [header, ...rows].join('\n')
+}
+
+// Ticket #147 — ranking-skill formatting.
+
+function fmtSpearman(value: number | null): string {
+  return value === null ? 'n/a' : value.toFixed(3)
+}
+
+function fmtTopN(topN: TopNOverlap | null): string {
+  if (topN === null || topN.n === 0) return 'n/a'
+  return `${topN.overlap} of ${topN.n} (${((topN.overlap / topN.n) * 100).toFixed(1)}%)`
+}
+
+function buildRankingPositionTable(byPosition: Record<Position, PositionRankingSummary>): string {
+  const header = '| Position | n | Spearman | Top-10 overlap | Top-20 overlap |\n|---|---|---|---|---|'
+  const rows = POSITIONS.map((position) => {
+    const s = byPosition[position]
+    return `| ${POSITION_NAMES[position]} | ${s.n} | ${fmtSpearman(s.spearman)} | ${fmtTopN(s.top10)} | ${fmtTopN(s.top20)} |`
+  })
+  return [header, ...rows].join('\n')
+}
+
+function buildRankingGameweekTable(byGameweek: Map<number, GameweekRankingSummary>): string {
+  const header = '| Gameweek | n | Spearman | Top-10 overlap | Top-20 overlap |\n|---|---|---|---|---|'
+  const rows = [...byGameweek.entries()].map(([gameweekId, s]) =>
+    s.tooSmallToRead
+      ? `| ${gameweekId} | ${s.n} | too small to read | too small to read | too small to read |`
+      : `| ${gameweekId} | ${s.n} | ${fmtSpearman(s.spearman)} | ${fmtTopN(s.top10)} | ${fmtTopN(s.top20)} |`,
+  )
   return [header, ...rows].join('\n')
 }
 
@@ -1325,11 +1667,62 @@ function generateReportMarkdown(data: ReportData): string {
   )
 
   sections.push(
+    '## Ranking skill (ticket #147)\n\n' +
+      'The metrics above measure how close the model\'s numbers are; this measures whether it puts ' +
+      'the right players at the top — the only thing a recommendation actually depends on (the ' +
+      'captain IS the squad\'s top-projected player; a transfer IS a claim one player will outscore ' +
+      'another). Same measured population as above, no new Supabase read. **Spearman rank ' +
+      'correlation** ranks projected and actual points among the same set of rows (tied values share ' +
+      'the average rank they would occupy) and reports how well the two orderings agree — 1 is ' +
+      'perfect agreement, −1 is perfect reversal, 0 is no relationship. **Top-N overlap** is closer to ' +
+      'what the app actually does: of the players ranked in the model\'s top 10 (or top 20) that ' +
+      'gameweek, how many were also in the actual top 10 (or top 20). See ' +
+      '`docs/projection-model-backlog.md` for what this section does and does not settle — no ' +
+      'conclusion about whether the ranking is good is drawn here.',
+  )
+
+  sections.push(
+    (data.rankingSanity.ok ? '### Ranking sanity check: PASSED\n\n' : '### Ranking sanity check: FAILED\n\n') +
+      (data.rankingSanity.ok
+        ? 'The season aggregate and every position\'s Spearman correlation and top-10 overlap are within their sane bounds.'
+        : `**${data.rankingSanity.failures.length} bound(s) failed — this means the HARNESS is wrong, not necessarily the model ` +
+          `(a suspiciously good correlation is the shape a lookahead leak takes):**\n\n` +
+          data.rankingSanity.failures.map((f) => `- ${f}`).join('\n')),
+  )
+
+  sections.push(
+    '### Season aggregate\n\n' +
+      `- Spearman rank correlation: **${fmtSpearman(data.rankingSeason.spearman)}** (n=${data.rankingSeason.n})\n` +
+      `- Top-10 overlap: **${fmtTopN(data.rankingSeason.top10)}**\n` +
+      `- Top-20 overlap: **${fmtTopN(data.rankingSeason.top20)}**\n\n` +
+      'Top-10/20 figures are summed across every gameweek with at least ' +
+      `${MIN_BUCKET_SAMPLE_SIZE} measured rows (the same threshold the by-gameweek table below applies) — ` +
+      'a season-wide overlap RATE, not a single top-10 selected from the whole season pooled together.',
+  )
+
+  sections.push(
+    '### By position\n\n' +
+      'A captain is chosen across positions, but a transfer is usually within one — Spearman is ' +
+      'pooled across the whole season for that position (like the by-position table above); top-N ' +
+      'overlap is summed across every gameweek that position appears in, uncapped by the 50-row ' +
+      'gameweek gate (a per-gameweek goalkeeper population is often under 50 by construction).\n\n' +
+      buildRankingPositionTable(data.rankingByPosition),
+  )
+
+  sections.push(
+    '### By gameweek\n\n' +
+      `A gameweek with fewer than ${MIN_BUCKET_SAMPLE_SIZE} measured rows is reported "too small to ` +
+      'read" rather than as a correlation nobody could trust.\n\n' +
+      buildRankingGameweekTable(data.rankingByGameweek),
+  )
+
+  sections.push(
     '## Provenance\n\n' +
       `- players rows fetched: ${data.playersRowCount}\n` +
       `- feature_history rows fetched (season=${data.season}): ${data.featureHistoryRowsRead}\n` +
       `- player_match_stats rows fetched (season=${data.season}, competition=${PREMIER_LEAGUE_COMPETITION}): ${data.matchStatsRowCount}\n` +
-      `- sanity bounds: mean absolute error in [${MAE_LOWER_BOUND}, ${MAE_UPPER_BOUND}]; derived clean-sheet rate ≤ ${(CLEAN_SHEET_RATE_UPPER_BOUND * 100).toFixed(0)}% per position\n`,
+      `- sanity bounds: mean absolute error in [${MAE_LOWER_BOUND}, ${MAE_UPPER_BOUND}]; derived clean-sheet rate ≤ ${(CLEAN_SHEET_RATE_UPPER_BOUND * 100).toFixed(0)}% per position\n` +
+      `- ranking sanity bounds (#147): Spearman rank correlation in [${SPEARMAN_LOWER_BOUND}, ${SPEARMAN_UPPER_BOUND}]; top-10 overlap ≤ ${(TOP10_OVERLAP_UPPER_BOUND_FRACTION * 100).toFixed(0)}%\n`,
   )
 
   return sections.join('\n\n') + '\n'
@@ -1586,6 +1979,13 @@ async function main(): Promise<void> {
     const defconBuckets = bucketByPriorMatches(measured, defconSignedError)
     const overallBuckets = bucketByPriorMatches(measured, (r) => r.signedError)
 
+    // Ticket #147 — ranking skill. Computed entirely from `measured`, the
+    // same population above; no new Supabase read.
+    const rankingByGameweek = summarizeRankingByGameweek(measured)
+    const rankingSeason = summarizeSeasonRanking(measured, rankingByGameweek)
+    const rankingByPosition = summarizeRankingByPosition(measured)
+    const rankingSanity = checkRankingSanityBounds(rankingSeason.spearman, rankingSeason.top10, rankingByPosition)
+
     const reportData: ReportData = {
       generatedAt: new Date(),
       season,
@@ -1604,6 +2004,10 @@ async function main(): Promise<void> {
       multiFixtureDiagnostic,
       defconBuckets,
       overallBuckets,
+      rankingSeason,
+      rankingByPosition,
+      rankingByGameweek,
+      rankingSanity,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
     await mkdir(dirname(reportPath), { recursive: true })
@@ -1628,11 +2032,18 @@ async function main(): Promise<void> {
       multiFixtureDiagnostic,
       defconBuckets,
       overallBuckets,
+      rankingSeason,
+      rankingByPosition: Object.fromEntries(POSITIONS.map((p) => [POSITION_NAMES[p], rankingByPosition[p]])),
+      rankingSanity,
       reportPath,
     }
 
-    if (!sanity.ok) {
-      const message = `${JOB_NAME}: sanity bounds FAILED for season=${season}: ${sanity.failures.join('; ')}. Report written to ${reportPath} for diagnosis.`
+    // Ticket #147: the ranking-skill bounds fail the job exactly like the
+    // existing sanity bounds above — added to the existing check, neither
+    // bound's own logic touched.
+    if (!sanity.ok || !rankingSanity.ok) {
+      const combinedFailures = [...sanity.failures, ...rankingSanity.failures]
+      const message = `${JOB_NAME}: sanity bounds FAILED for season=${season}: ${combinedFailures.join('; ')}. Report written to ${reportPath} for diagnosis.`
       console.error(message)
       await recordJobRun(supabase, { status: 'failure', message, details, startedAt })
       process.exit(1)
@@ -1642,7 +2053,9 @@ async function main(): Promise<void> {
     const message =
       `${JOB_NAME}: season ${season} — ${measured.length} player-gameweek row(s) measured ` +
       `(of ${featureHistoryRows.length} feature_history row(s) read). Mean absolute error ${fmt(overall.meanAbsoluteError)}, ` +
-      `mean signed error ${fmt(overall.meanSignedError)} — ${describeSignedError(overall.meanSignedError)}. Report written to ${reportPath}.`
+      `mean signed error ${fmt(overall.meanSignedError)} — ${describeSignedError(overall.meanSignedError)}. ` +
+      `Ranking skill: Spearman ${fmtSpearman(rankingSeason.spearman)}, top-10 overlap ${fmtTopN(rankingSeason.top10)}. ` +
+      `Report written to ${reportPath}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {
