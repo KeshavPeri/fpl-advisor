@@ -22,6 +22,7 @@ import {
   NO_TRANSFER_LAST_GWS,
   XMIN_LB,
   analyzeProjectionsCsv,
+  buildRebuildSolverConfig,
   buildSolverConfig,
   buildTeamJson,
   buildWideningJobRunDetails,
@@ -299,6 +300,131 @@ describe('buildSolverConfig', () => {
   it('preseason is false in BOTH the CHIP_PROBE-unset and CHIP_PROBE-set cases — must never regress to the shipped true, which wipes the squad', () => {
     expect(buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' }).preseason).toBe(false)
     expect(buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', chipProbe: true }).preseason).toBe(false)
+  })
+
+  // --------------------------------------------------------------------
+  // Ticket #134 — the production config can never carry preseason: true.
+  // This is the ticket's own DoD item: "A named test asserts that no code
+  // path can produce preseason: true together with a config destined for
+  // the production solve. Whatever form that takes... it must be provable
+  // from the tests, not from reading carefully."
+  //
+  // Two proofs, deliberately not one: a runtime proof (every parameter
+  // shape buildSolverConfig actually accepts still returns preseason:
+  // false) and a compile-time proof (buildSolverConfig's own parameter
+  // type has no field that could route a call to a rebuild variant at
+  // all — see the @ts-expect-error test below, checked by `tsc -b`, i.e.
+  // `npm run build`, not just by vitest).
+  // --------------------------------------------------------------------
+
+  it('buildSolverConfig returns preseason: false for every parameter shape it accepts — the production path never wobbles', () => {
+    expect(buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' }).preseason).toBe(false)
+    expect(buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', chipProbe: true }).preseason).toBe(false)
+    expect(buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', chipProbe: false }).preseason).toBe(false)
+    expect(buildSolverConfig({ horizon: 5, datasource: 'x', secs: 60, chipProbe: true }).preseason).toBe(false)
+  })
+
+  it(
+    "buildSolverConfig's own parameter type has no `variant` field — passing one is a TypeScript compile error, " +
+      "not a runtime possibility that could be missed by a test fixture that forgets to try it",
+    () => {
+      // @ts-expect-error — buildSolverConfig's params type is exactly
+      // `{ horizon; datasource; secs?; chipProbe? }`. There is no `variant`
+      // field to set. If this line ever stops being a type error — e.g.
+      // because a future edit widens buildSolverConfig's own signature to
+      // accept a rebuild variant, reopening the exact path ticket #134
+      // closes — this @ts-expect-error directive itself becomes an "unused
+      // @ts-expect-error" error, so `tsc -b` (npm run build) fails either
+      // way the drift could happen. This is a type-level assertion, not a
+      // runtime one — it proves nothing to vitest at run time, and needs
+      // none of the network/filesystem infrastructure the rest of this
+      // file avoids.
+      buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'wc' })
+    },
+  )
+})
+
+// ============================================================================
+// buildRebuildSolverConfig — ticket #134 (feature-list item 28). The ONLY
+// function in this file that can return preseason: true, and the ONLY place
+// chip_limits.wc or chip_limits.fh can become 1.
+// ============================================================================
+
+describe('buildRebuildSolverConfig', () => {
+  it('wc variant: full-object equality — preseason true, chip_limits { bb:0, wc:1, fh:0, tc:0 }, every other key matches buildSolverConfig\'s own output for the same params', () => {
+    const config = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300, variant: 'wc' })
+    expect(config).toEqual({
+      horizon: 3,
+      team_data: 'json',
+      preseason: true,
+      xmin_lb: 150,
+      keep_top_ev_percent: 25,
+      ev_per_price_cutoff: 10,
+      no_transfer_last_gws: 0,
+      decay_base: 0.9,
+      datasource: 'fpladvisor',
+      chip_limits: { bb: 0, wc: 1, fh: 0, tc: 0 },
+      secs: 300,
+      solver: 'highs',
+      num_iterations: 3,
+      iteration_criteria: 'this_gw_transfer_in',
+      verbose: true,
+      print_result_table: true,
+      print_squads: true,
+      print_transfer_chip_summary: true,
+    })
+  })
+
+  it('fh variant: full-object equality — preseason true, chip_limits { bb:0, wc:0, fh:1, tc:0 }, every other key matches buildSolverConfig\'s own output for the same params', () => {
+    const config = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300, variant: 'fh' })
+    expect(config).toEqual({
+      horizon: 3,
+      team_data: 'json',
+      preseason: true,
+      xmin_lb: 150,
+      keep_top_ev_percent: 25,
+      ev_per_price_cutoff: 10,
+      no_transfer_last_gws: 0,
+      decay_base: 0.9,
+      datasource: 'fpladvisor',
+      chip_limits: { bb: 0, wc: 0, fh: 1, tc: 0 },
+      secs: 300,
+      solver: 'highs',
+      num_iterations: 3,
+      iteration_criteria: 'this_gw_transfer_in',
+      verbose: true,
+      print_result_table: true,
+      print_squads: true,
+      print_transfer_chip_summary: true,
+    })
+  })
+
+  it('never sets both wc and fh — each variant produces exactly one of them at 1, the other pinned to 0', () => {
+    const wc = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'wc' })
+    const fh = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'fh' })
+    expect(wc.chip_limits.wc).toBe(1)
+    expect(wc.chip_limits.fh).toBe(0)
+    expect(fh.chip_limits.wc).toBe(0)
+    expect(fh.chip_limits.fh).toBe(1)
+  })
+
+  it('every non-chip_limits, non-preseason key is IDENTICAL between the two variants — they differ only in which chip is on', () => {
+    const wc = buildRebuildSolverConfig({ horizon: 4, datasource: 'x', secs: 120, variant: 'wc' })
+    const fh = buildRebuildSolverConfig({ horizon: 4, datasource: 'x', secs: 120, variant: 'fh' })
+    const { chip_limits: wcLimits, ...wcRest } = wc
+    const { chip_limits: fhLimits, ...fhRest } = fh
+    expect(wcRest).toEqual(fhRest)
+    expect(wcLimits).not.toEqual(fhLimits)
+  })
+
+  it('reuses buildSolverConfig\'s own horizon validation — throws above 5, same as the production path', () => {
+    expect(() => buildRebuildSolverConfig({ horizon: 6, datasource: 'fpladvisor', variant: 'wc' })).toThrow(BuildInputError)
+    expect(() => buildRebuildSolverConfig({ horizon: 6, datasource: 'fpladvisor', variant: 'wc' })).toThrow(/exceeds 5/)
+  })
+
+  it('preseason: true is reachable ONLY through this function — buildSolverConfig itself never returns it (see the describe block above)', () => {
+    expect(buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'wc' }).preseason).toBe(true)
+    expect(buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'fh' }).preseason).toBe(true)
   })
 })
 

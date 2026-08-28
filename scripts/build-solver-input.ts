@@ -66,6 +66,15 @@
 // instead of all zeros. Unset (the live solver-run.yml never sets it) leaves every output
 // byte-for-byte identical to before this ticket. See buildSolverConfig's own comment on
 // chip_limits and .github/workflows/solver-chip-probe.yml, the only workflow that sets it.
+//
+// REBUILD_VARIANT (ticket #134, feature-list item 28) — value-gated ('wc' or 'fh', nothing
+// else accepted), read the same way CHIP_PROBE is read above but kept a SEPARATE env var and a
+// SEPARATE function (buildRebuildSolverConfig, not a new parameter on buildSolverConfig) on
+// purpose: see that function's own comment for why "preseason: true can never reach the
+// production config" has to be provable from buildSolverConfig's own signature, not from
+// reading this file carefully. Unset (every workflow except
+// .github/workflows/squad-rebuild-probe.yml) leaves main()'s call site choosing
+// buildSolverConfig exactly as before this ticket — see main() step 5 below.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { parse } from 'csv-parse/sync'
@@ -238,6 +247,8 @@ interface PathEnv {
   solverConfigPath: string
   solverSecs: number
   chipProbe: boolean
+  /** Ticket #134. null when REBUILD_VARIANT is unset — every workflow except squad-rebuild-probe.yml. */
+  rebuildVariant: RebuildVariant | null
 }
 
 /**
@@ -251,6 +262,23 @@ interface PathEnv {
  * and `buildSolverConfig`'s output is byte-for-byte identical to before this ticket — see
  * `chip_limits` on `buildSolverConfig` below for the one line that reads this flag.
  */
+/**
+ * Ticket #134. `REBUILD_VARIANT` unset -> `null` (every workflow except squad-rebuild-probe.yml,
+ * unaffected). Set to anything OTHER than exactly 'wc' or 'fh' throws immediately, matching
+ * this codebase's "copy label names, don't type them" discipline (CLAUDE.md's own wording for
+ * the identical typo risk on GitHub labels) — a silently-ignored typo here would make the
+ * workflow's own `variant` input pick a different config than the one it displayed to the human
+ * who dispatched it. Thrown before readSupabaseEnv/Supabase client creation, matching this file's
+ * existing "no network call on a bad env" posture (see readSupabaseEnv above) — there is
+ * nothing to record in job_runs yet at this point, the same as a missing SUPABASE_URL today.
+ */
+function readRebuildVariantEnv(): RebuildVariant | null {
+  const raw = process.env.REBUILD_VARIANT
+  if (raw === undefined || raw === '') return null
+  if (raw === 'wc' || raw === 'fh') return raw
+  throw new Error(`${JOB_NAME}/build-solver-input: REBUILD_VARIANT must be exactly "wc" or "fh" if set (got: ${JSON.stringify(raw)}).`)
+}
+
 function readPathEnv(): PathEnv {
   const rawSecs = process.env.SOLVER_SECS
   const parsedSecs = rawSecs ? Number(rawSecs) : NaN
@@ -260,6 +288,7 @@ function readPathEnv(): PathEnv {
     solverConfigPath: process.env.SOLVER_CONFIG_PATH ?? DEFAULT_SOLVER_CONFIG_PATH,
     solverSecs: Number.isFinite(parsedSecs) && parsedSecs > 0 ? parsedSecs : SOLVER_TIME_LIMIT_SECS,
     chipProbe: Boolean(process.env.CHIP_PROBE),
+    rebuildVariant: readRebuildVariantEnv(),
   }
 }
 
@@ -537,6 +566,77 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
   }
 }
 
+// ============================================================================
+// Rebuild config — ticket #134 (feature-list item 28, wildcard/free-hit
+// advisory). A SEPARATE, distinctly-named function from buildSolverConfig
+// above — never a parameter added to that one — so that "preseason: true can
+// never reach the production config" is provable from buildSolverConfig's
+// own unchanged signature and its unconditional `preseason: false` literal,
+// not from reading this file carefully (see
+// scripts/build-solver-input.test.ts's own "preseason isolation" tests,
+// including a @ts-expect-error line that fails `tsc -b` if buildSolverConfig
+// ever grows a parameter that could reach this path).
+//
+// Only .github/workflows/squad-rebuild-probe.yml's own "Build solver input
+// (rebuild)" step ever sets REBUILD_VARIANT, which is the only thing that
+// makes main() call this function instead of buildSolverConfig — see
+// readRebuildVariantEnv above and main() step 5 below. It is never wired
+// into solver-run.yml or solver-chip-probe.yml.
+// ============================================================================
+
+export type RebuildVariant = 'wc' | 'fh'
+
+/**
+ * bb and tc are pinned to the literal 0 — this ticket is Wildcard/Free Hit
+ * only, #114/#126 own bb/tc. wc and fh are individually 0|1, but the ONLY
+ * way to set either to 1 is `buildRebuildSolverConfig`'s own required
+ * `variant: RebuildVariant` parameter, a single required 'wc'|'fh' union —
+ * not two independent optional booleans — so "both together" is not even a
+ * representable value of this type, let alone a value this function can
+ * produce. See the ticket's own Notes: "Never wc: 1 and fh: 1 together."
+ */
+export type RebuildChipLimits = { bb: 0; wc: 0 | 1; fh: 0 | 1; tc: 0 }
+
+export interface RebuildSolverConfig extends Omit<SolverConfig, 'preseason' | 'chip_limits'> {
+  preseason: true
+  chip_limits: RebuildChipLimits
+}
+
+/**
+ * Builds the settings-override config for the full-squad-rebuild probe. Calls buildSolverConfig
+ * itself for every key OTHER than preseason/chip_limits (horizon validation included — a horizon
+ * above 5 throws here too, via that same call), then overrides exactly those two keys. This is
+ * what makes "every other key is identical to buildSolverConfig's own output for the same
+ * {horizon, datasource, secs}" true by construction, not by two independently-maintained key
+ * lists that could drift — see the ticket's own DoD: "every other key is identical. Full-object
+ * equality test for each variant."
+ *
+ * preseason: true replaces the WHOLE squad with an empty one (dev/solver.py behaviour — see
+ * buildSolverConfig's own comment above). That is the entire point of a full-squad rebuild probe,
+ * and it is safe here ONLY because this probe's own solve output never reaches
+ * solver_picks/recommendations/notifications — see scripts/store-squad-advisory.ts's file header,
+ * docs/solver-notes.md, and .github/workflows/squad-rebuild-probe.yml's own safety-case comment.
+ */
+export function buildRebuildSolverConfig(params: {
+  horizon: number
+  datasource: string
+  secs?: number
+  variant: RebuildVariant
+}): RebuildSolverConfig {
+  const { variant, ...rest } = params
+  const base = buildSolverConfig(rest)
+  return {
+    ...base,
+    preseason: true,
+    chip_limits: {
+      bb: 0,
+      wc: variant === 'wc' ? 1 : 0,
+      fh: variant === 'fh' ? 1 : 0,
+      tc: 0,
+    },
+  }
+}
+
 export interface WideningJobRunDetails {
   /** Row count of the projections CSV this job read — the pool the two percentile filters below are computed against. */
   projectionsPlayerCount: number
@@ -689,6 +789,20 @@ async function main(): Promise<void> {
 
   try {
     // --------------------------------------------------------------------
+    // 0. Ticket #134: CHIP_PROBE and REBUILD_VARIANT are never meant to be
+    //    set together — no workflow this app ships sets both — but silently
+    //    ignoring chipProbe when rebuildVariant is set (see the branch in
+    //    step 5 below) would hide that mistake rather than surface it.
+    // --------------------------------------------------------------------
+    if (paths.chipProbe && paths.rebuildVariant) {
+      throw new BuildInputError(
+        'both CHIP_PROBE and REBUILD_VARIANT are set — these are mutually exclusive probe modes ' +
+          '(the Bench Boost/Triple Captain chip probe vs. the wildcard/free-hit squad-rebuild probe). Unset one.',
+        'config',
+      )
+    }
+
+    // --------------------------------------------------------------------
     // 1. Target gameweek — same anchor as scripts/emit-projections-csv.ts.
     // --------------------------------------------------------------------
     const { data: gwRows, error: gwError } = await supabase
@@ -834,12 +948,25 @@ async function main(): Promise<void> {
     }
 
     const datasource = deriveDatasource(paths.projectionsCsvPath)
-    const solverConfig = buildSolverConfig({
-      horizon: horizonGwIds.length,
-      datasource,
-      secs: paths.solverSecs,
-      chipProbe: paths.chipProbe,
-    })
+    // Ticket #134: paths.rebuildVariant is null for every workflow except
+    // squad-rebuild-probe.yml (see readRebuildVariantEnv above), so this
+    // branch leaves solver-run.yml and solver-chip-probe.yml calling
+    // buildSolverConfig exactly as before this ticket — the only function
+    // that can ever return preseason: true is buildRebuildSolverConfig, and
+    // the only env var that can route a call to it is REBUILD_VARIANT.
+    const solverConfig = paths.rebuildVariant
+      ? buildRebuildSolverConfig({
+          horizon: horizonGwIds.length,
+          datasource,
+          secs: paths.solverSecs,
+          variant: paths.rebuildVariant,
+        })
+      : buildSolverConfig({
+          horizon: horizonGwIds.length,
+          datasource,
+          secs: paths.solverSecs,
+          chipProbe: paths.chipProbe,
+        })
 
     // --------------------------------------------------------------------
     // 6. Write both files. No file inside the solver checkout other than
