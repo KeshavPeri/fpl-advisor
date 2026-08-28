@@ -18,14 +18,23 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import { buildFeatureHistory, DEFAULT_SEASON, ZERO_TOTALS, type SourceMatchRow } from './build-feature-history.ts'
+import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
 
 const SEASON = '2025-2026'
 const COMPUTED_AT = '2026-08-27T09:00:00.000Z'
 
-/** A fully-specified contributing (Premier League, player_code-resolved) match row, with every stat distinguishable so a test can tell which matches were folded in. */
+/**
+ * A fully-specified contributing (Premier League, player_code-resolved) match
+ * row, with every stat distinguishable so a test can tell which matches were
+ * folded in. element_type defaults to null (unresolved position) — the
+ * pre-#146 describe blocks below never set a position and must keep behaving
+ * exactly as before regardless of the (now-computed-but-unasserted) defcon
+ * fields; only the ticket #146 section below sets element_type explicitly.
+ */
 function premMatch(playerCode: number, gameweek: number, overrides: Partial<SourceMatchRow> = {}): SourceMatchRow {
   return {
     player_code: playerCode,
+    element_type: null,
     competition: PREMIER_LEAGUE_COMPETITION,
     gameweek,
     minutes_played: 90,
@@ -372,6 +381,209 @@ describe('buildFeatureHistory — dense rows (ticket #125)', () => {
 })
 
 // ============================================================================
+// element_type + defcon counters (ticket #146). A match row with a real
+// defensive-action profile, position-tagged, so a test can put a player
+// exactly on either side of a threshold. All-zero defaults (unlike premMatch
+// above) so a test only has to specify the stats it actually cares about.
+// ============================================================================
+
+function defconMatch(
+  playerCode: number,
+  gameweek: number,
+  elementType: number | null,
+  overrides: Partial<SourceMatchRow> = {},
+): SourceMatchRow {
+  return {
+    player_code: playerCode,
+    element_type: elementType,
+    competition: PREMIER_LEAGUE_COMPETITION,
+    gameweek,
+    minutes_played: 90,
+    xg: 0,
+    xa: 0,
+    saves: 0,
+    clearances: 0,
+    blocks: 0,
+    interceptions: 0,
+    tackles: 0,
+    recoveries: 0,
+    team_goals_conceded: 0,
+    ...overrides,
+  }
+}
+
+describe('buildFeatureHistory — element_type (ticket #146)', () => {
+  // DoD: "A named test asserts a player who is absent from the current
+  // players table still receives a position — that is the entire point of
+  // the column." buildFeatureHistory never reads (or even has a way to read)
+  // any players table — element_type comes only from SourceMatchRow, which is
+  // itself populated from player_match_stats.element_type, never a join. A
+  // player who has left the league (absent from public.players) still has
+  // player_match_stats rows carrying his element_type from the SEASON HE WAS
+  // INGESTED IN, so this is provable with no live players table at all.
+  it('a player entirely absent from any players table still receives a position, because none is ever consulted', () => {
+    const matches = [
+      defconMatch(900, 1, DEFENDER),
+      defconMatch(900, 2, DEFENDER),
+    ]
+    const result = buildFeatureHistory(matches, SEASON, COMPUTED_AT)
+    for (const row of result.rows) {
+      expect(row.element_type).toBe(DEFENDER)
+    }
+    // The pure function's own signature is the proof: nothing about a
+    // "players" table appears anywhere in SourceMatchRow or its inputs.
+    expect(Object.keys(matches[0])).not.toContain('players')
+  })
+
+  it('is null when the player’s position could not be resolved at ingest time — never defaulted to a guess', () => {
+    const result = buildFeatureHistory([defconMatch(901, 1, null), defconMatch(901, 2, null)], SEASON, COMPUTED_AT)
+    for (const row of result.rows) {
+      expect(row.element_type).toBeNull()
+    }
+    expect(result.rowsWithElementType).toBe(0)
+  })
+
+  it('rowsWithElementType counts rows with a resolved position, distinct per player', () => {
+    const result = buildFeatureHistory(
+      [defconMatch(902, 1, MIDFIELDER), defconMatch(902, 2, MIDFIELDER), defconMatch(903, 1, null)],
+      SEASON,
+      COMPUTED_AT,
+    )
+    // lastGameweekInData is 2 (player 902's own second match), so BOTH
+    // players get dense rows through gameweek 2 (ticket #125 density) —
+    // player 902: gameweeks 1-2 (2 rows, element_type MIDFIELDER throughout).
+    // player 903: gameweeks 1-2 (2 rows too — his single gw1 match's dense
+    // range extends to lastGameweekInData like every other player's), element_type null throughout.
+    expect(result.rows).toHaveLength(4)
+    expect(result.rowsWithElementType).toBe(2)
+    expect(result.rows.filter((r) => r.player_code === 903)).toHaveLength(2)
+  })
+})
+
+describe('buildFeatureHistory — prior_defcon_qualifying_matches (ticket #146)', () => {
+  // DoD: "counts only matches with 60+ minutes, strictly before the row's
+  // gameweek. Named test with a mix of full and cameo appearances."
+  it('counts only 60+ minute matches, excluding cameo appearances, strictly before the row’s gameweek', () => {
+    const gw1Full = defconMatch(910, 1, DEFENDER, { minutes_played: 90 })
+    const gw2Cameo = defconMatch(910, 2, DEFENDER, { minutes_played: 45 }) // below the 60-minute qualifying line
+    const gw3Full = defconMatch(910, 3, DEFENDER, { minutes_played: 90 })
+    const gw4BoundaryLow = defconMatch(910, 4, DEFENDER, { minutes_played: 59 }) // one minute short
+    const gw5BoundaryHigh = defconMatch(910, 5, DEFENDER, { minutes_played: 60 }) // exactly qualifying
+    // A different player's match at gameweek 6 extends lastGameweekInData to
+    // 6, so player 910 gets a row AT gameweek 6 whose strictly-before window
+    // includes all five of his own matches (gw5's own included) — same
+    // "later player" technique as the #125 dense-rows tests above.
+    const laterPlayer = defconMatch(998, 6, DEFENDER)
+    const result = buildFeatureHistory(
+      [gw1Full, gw2Cameo, gw3Full, gw4BoundaryLow, gw5BoundaryHigh, laterPlayer],
+      SEASON,
+      COMPUTED_AT,
+    )
+
+    const row6 = result.rows.find((r) => r.gameweek_id === 6 && r.player_code === 910)!
+    // Qualifying: gw1 (90), gw3 (90), gw5 (60). NOT gw2 (45) or gw4 (59).
+    expect(row6.prior_defcon_qualifying_matches).toBe(3)
+  })
+
+  // DoD: "A row for a gameweek with no prior qualifying match records 0, not
+  // null." — the player's very first row, before any match has been folded in.
+  it('is 0, not null, on a gameweek with no prior qualifying match', () => {
+    const result = buildFeatureHistory([defconMatch(911, 1, DEFENDER, { minutes_played: 90 })], SEASON, COMPUTED_AT)
+    const row1 = result.rows.find((r) => r.gameweek_id === 1)!
+    expect(row1.prior_defcon_qualifying_matches).toBe(0)
+    expect(row1.prior_defcon_qualifying_matches).not.toBeNull()
+    expect(row1.prior_defcon_hits).toBe(0)
+    expect(row1.prior_defcon_hits).not.toBeNull()
+  })
+
+  // DoD: "The strictly-before rule holds for the new counters: the gameweek
+  // 3 row counts gameweeks 1 and 2 only." Mirrors the #121 totals test above,
+  // for the counters specifically.
+  it('the gameweek 3 row counts gameweeks 1 and 2 only, never gameweek 3’s own match', () => {
+    const gw1 = defconMatch(912, 1, DEFENDER, { minutes_played: 90 })
+    const gw2 = defconMatch(912, 2, DEFENDER, { minutes_played: 90 })
+    const gw3 = defconMatch(912, 3, DEFENDER, { minutes_played: 90 })
+    const result = buildFeatureHistory([gw1, gw2, gw3], SEASON, COMPUTED_AT)
+    const row3 = result.rows.find((r) => r.gameweek_id === 3)!
+    expect(row3.prior_defcon_qualifying_matches).toBe(2)
+  })
+})
+
+describe('buildFeatureHistory — prior_defcon_hits (ticket #146)', () => {
+  // DoD: "uses the position's own threshold — 10 CBIT for defenders, 12
+  // CBIRT for midfielders and forwards ... Named test per position."
+  it('a defender reaches the threshold at 10 CBIT (clearances+blocks+interceptions+tackles) — recoveries do not count', () => {
+    const hit = defconMatch(920, 1, DEFENDER, { clearances: 4, blocks: 2, interceptions: 2, tackles: 2, recoveries: 99 }) // CBIT = 10, recoveries ignored for DEF
+    const miss = defconMatch(920, 2, DEFENDER, { clearances: 4, blocks: 2, interceptions: 2, tackles: 1 }) // CBIT = 9
+    const result = buildFeatureHistory([hit, miss, defconMatch(920, 3, DEFENDER)], SEASON, COMPUTED_AT)
+    const row3 = result.rows.find((r) => r.gameweek_id === 3)!
+    expect(row3.prior_defcon_qualifying_matches).toBe(2)
+    expect(row3.prior_defcon_hits).toBe(1) // only gw1 (10 CBIT) hits; gw2 (9 CBIT) misses
+  })
+
+  it('a midfielder reaches the threshold at 12 CBIRT (CBIT + recoveries)', () => {
+    const hit = defconMatch(921, 1, MIDFIELDER, { clearances: 2, blocks: 2, interceptions: 2, tackles: 2, recoveries: 4 }) // CBIRT = 12
+    const miss = defconMatch(921, 2, MIDFIELDER, { clearances: 2, blocks: 2, interceptions: 2, tackles: 2, recoveries: 3 }) // CBIRT = 11
+    const result = buildFeatureHistory([hit, miss, defconMatch(921, 3, MIDFIELDER)], SEASON, COMPUTED_AT)
+    const row3 = result.rows.find((r) => r.gameweek_id === 3)!
+    expect(row3.prior_defcon_hits).toBe(1)
+  })
+
+  it('a forward reaches the threshold at 12 CBIRT, the same as a midfielder', () => {
+    const hit = defconMatch(922, 1, FORWARD, { clearances: 3, blocks: 3, interceptions: 3, tackles: 3, recoveries: 0 }) // CBIRT = 12
+    const result = buildFeatureHistory([hit, defconMatch(922, 2, FORWARD)], SEASON, COMPUTED_AT)
+    const row2 = result.rows.find((r) => r.gameweek_id === 2)!
+    expect(row2.prior_defcon_hits).toBe(1)
+  })
+
+  // DoD: "the goalkeeper case is handled explicitly rather than falling
+  // through." A goalkeeper never earns defensive-contribution points,
+  // regardless of how high his defensive-action stats are — but his matches
+  // still count toward prior_defcon_qualifying_matches (a position-independent
+  // measurement of minutes played), only prior_defcon_hits stays at 0.
+  it('a goalkeeper’s prior_defcon_hits stays 0 no matter how high his defensive-action stats are, while qualifying matches still count', () => {
+    const huge = defconMatch(923, 1, GOALKEEPER, { clearances: 20, blocks: 20, interceptions: 20, tackles: 20, recoveries: 20 })
+    const result = buildFeatureHistory([huge, defconMatch(923, 2, GOALKEEPER)], SEASON, COMPUTED_AT)
+    const row2 = result.rows.find((r) => r.gameweek_id === 2)!
+    expect(row2.prior_defcon_qualifying_matches).toBe(1)
+    expect(row2.prior_defcon_hits).toBe(0)
+  })
+
+  // DoD's own central case: "A player with 30 clearances across 10 matches
+  // who never reached a threshold records 0 hits." Exactly the case
+  // cumulative totals cannot express — 3 clearances/match, 10 matches, never
+  // close to the 10-CBIT defender threshold in any single match.
+  it('30 clearances spread evenly across 10 matches (3 per match) never reaches the defender threshold — 0 hits, not a fraction of a hit', () => {
+    const matches = Array.from({ length: 10 }, (_, i) => defconMatch(924, i + 1, DEFENDER, { clearances: 3 }))
+    // A different player's match at gameweek 11 extends lastGameweekInData to
+    // 11 (same "later player" technique the #125 dense-rows tests above use)
+    // so player 924 gets a row AT gameweek 11 — the first row whose
+    // strictly-before window includes all 10 of his matches, gw10's own
+    // included. Without this, the highest row for player 924 would be
+    // gameweek 10, which (correctly, by the strictly-before rule) excludes
+    // gameweek 10's own match and would only show 9 matches / 27 clearances.
+    const laterPlayer = defconMatch(999, 11, DEFENDER)
+    const result = buildFeatureHistory([...matches, laterPlayer], SEASON, COMPUTED_AT)
+    const row11 = result.rows.find((r) => r.gameweek_id === 11 && r.player_code === 924)!
+    expect(row11.prior_defcon_qualifying_matches).toBe(10)
+    expect(row11.prior_defcon_hits).toBe(0)
+    // Sanity: the totals still show the full 30 — this is the exact
+    // totals-vs-counters divergence the ticket exists to make visible.
+    expect(row11.prior_clearances).toBe(30)
+  })
+
+  it('rowsWithDefconCounters equals rows.length — the two counters are always real numbers, never null', () => {
+    const result = buildFeatureHistory(
+      [defconMatch(925, 1, DEFENDER), defconMatch(925, 2, null), defconMatch(926, 5, MIDFIELDER)],
+      SEASON,
+      COMPUTED_AT,
+    )
+    expect(result.rowsWithDefconCounters).toBe(result.rows.length)
+    expect(result.rows.length).toBeGreaterThan(0)
+  })
+})
+
+// ============================================================================
 // Season env var — documented default, matching ingest-core-insights.ts's
 // FEATURE_HISTORY_SEASON / CORE_INSIGHTS_SEASON convention.
 // ============================================================================
@@ -425,8 +637,45 @@ describe('build-feature-history.ts — source invariants', () => {
     expect(jobSource).toMatch(/onConflict:\s*['"]season,gameweek_id,player_code['"]/)
   })
 
-  it('does not import from src/lib/projection', () => {
-    expect(jobSource).not.toMatch(/from\s*['"][^'"]*src\/lib\/projection[^'"]*['"]/)
+  // Ticket #121's original invariant ("does not import from src/lib/projection")
+  // is deliberately narrowed, not deleted, by ticket #146: the file now
+  // imports isQualifyingMatch from src/lib/projection/defconRate.ts — the one
+  // deliberate, narrow exception its own header documents — but must still
+  // never import the RATE math (estimateDefconHitRate, the shrinkage k, or
+  // the position prior) that ticket exists to leave untouched.
+  it('imports isQualifyingMatch from src/lib/projection/defconRate.ts, but never the rate-estimation exports', () => {
+    expect(jobSource).toMatch(/import\s*\{\s*isQualifyingMatch\s*\}\s*from\s*['"]\.\.\/src\/lib\/projection\/defconRate\.ts['"]/)
+    expect(jobSource).not.toMatch(/estimateDefconHitRate/)
+    expect(jobSource).not.toMatch(/estimateTwoStageDefconHitRate/)
+    expect(jobSource).not.toMatch(/positionPriorHitRate/)
+    expect(jobSource).not.toMatch(/SHRINKAGE_K/)
+  })
+
+  it('imports defensiveContributionPoints from src/lib/scoring/defensiveContribution.ts rather than reimplementing the threshold', () => {
+    expect(jobSource).toMatch(
+      /import\s*\{\s*defensiveContributionPoints\s*\}\s*from\s*['"]\.\.\/src\/lib\/scoring\/defensiveContribution\.ts['"]/,
+    )
+  })
+
+  // DoD: "no local 60, 10 or 12 threshold literal appears in the job." Scoped
+  // to CODE only (comments stripped, same technique
+  // ingest-core-insights.test.ts's "references identity columns only inside
+  // TEAMS_REQUIRED_COLUMNS/comments" check uses) — the header prose above
+  // legitimately spells out "10 CBIT" / "12 CBIRT" / "60-minute" in English to
+  // explain what the imported functions do, which is not the same as this
+  // file's own executable logic holding a threshold value. Word-boundary
+  // matched so it doesn't false-positive on "2026", "#121", a migration
+  // timestamp, or UPSERT_BATCH_SIZE (500).
+  it('contains no local 60/10/12 defensive-contribution threshold literal in its own code — both thresholds come only from defensiveContributionPoints', () => {
+    const codeOnly = jobSource
+      .replace(/\/\*[\s\S]*?\*\//g, '') // strip /** ... */ block comments (incl. JSDoc) first
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .map((line) => line.replace(/\s\/\/.*$/, ''))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\b60\b/)
+    expect(codeOnly).not.toMatch(/\b10\b/)
+    expect(codeOnly).not.toMatch(/\b12\b/)
   })
 
   // Ticket #125's own DoD line: prior_team_goals_conceded must be populated
@@ -438,6 +687,17 @@ describe('build-feature-history.ts — source invariants', () => {
   it('the string "goals_conceded" appears only as part of "team_goals_conceded"', () => {
     const bareOccurrences = jobSource.match(/(?<!team_)goals_conceded/g) ?? []
     expect(bareOccurrences).toEqual([])
+  })
+
+  // Ticket #146's own DoD line: job_runs.details must carry named counts of
+  // rows with a non-null element_type and rows with non-null defcon counters.
+  it('reports rowsWithElementType and rowsWithDefconCounters as named job_runs.details fields', () => {
+    expect(jobSource).toMatch(/rowsWithElementType/)
+    expect(jobSource).toMatch(/rowsWithDefconCounters/)
+  })
+
+  it('selects element_type off player_match_stats', () => {
+    expect(jobSource).toMatch(/\.select\(\s*\n?\s*'player_code,\s*element_type,/)
   })
 })
 
@@ -496,6 +756,62 @@ describe('supabase/migrations/20260827090000_feature_history.sql', () => {
 })
 
 // ============================================================================
+// supabase/migrations/20260829090000_feature_history_position_and_defcon.sql
+// — the feature_history-side columns (ticket #146). The player_match_stats
+// side (element_type) is asserted in ingest-core-insights.test.ts, which owns
+// that job; this file owns feature_history.
+// ============================================================================
+
+const positionDefconMigrationPath = fileURLToPath(
+  new URL('../supabase/migrations/20260829090000_feature_history_position_and_defcon.sql', import.meta.url),
+)
+const positionDefconMigrationSource = readFileSync(positionDefconMigrationPath, 'utf8')
+
+describe('supabase/migrations/20260829090000_feature_history_position_and_defcon.sql — feature_history side', () => {
+  it('adds all three columns to feature_history as nullable, with no default', () => {
+    expect(positionDefconMigrationSource).toMatch(/ALTER TABLE public\.feature_history ADD COLUMN IF NOT EXISTS element_type smallint;/)
+    expect(positionDefconMigrationSource).toMatch(
+      /ALTER TABLE public\.feature_history ADD COLUMN IF NOT EXISTS prior_defcon_qualifying_matches integer;/,
+    )
+    expect(positionDefconMigrationSource).toMatch(
+      /ALTER TABLE public\.feature_history ADD COLUMN IF NOT EXISTS prior_defcon_hits integer;/,
+    )
+    // None of the three ADD COLUMN statements carry NOT NULL or DEFAULT —
+    // nullable, undefaulted, deliberately (see the file's own header).
+    for (const column of ['element_type smallint', 'prior_defcon_qualifying_matches integer', 'prior_defcon_hits integer']) {
+      const statementLine = positionDefconMigrationSource
+        .split('\n')
+        .find((line) => line.includes(`ADD COLUMN IF NOT EXISTS ${column}`))
+      expect(statementLine).toBeDefined()
+      expect(statementLine).not.toMatch(/NOT NULL/)
+      expect(statementLine).not.toMatch(/DEFAULT/)
+    }
+  })
+
+  it('is idempotent: every column addition uses ADD COLUMN IF NOT EXISTS', () => {
+    const addColumnStatements = positionDefconMigrationSource.match(/ALTER TABLE public\.\w+ ADD COLUMN[^;]*;/g) ?? []
+    expect(addColumnStatements.length).toBeGreaterThanOrEqual(3)
+    for (const statement of addColumnStatements) {
+      expect(statement).toMatch(/ADD COLUMN IF NOT EXISTS/)
+    }
+  })
+
+  it('carries a COMMENT ON COLUMN for all three feature_history columns', () => {
+    expect(positionDefconMigrationSource).toMatch(/COMMENT ON COLUMN public\.feature_history\.element_type IS/)
+    expect(positionDefconMigrationSource).toMatch(/COMMENT ON COLUMN public\.feature_history\.prior_defcon_qualifying_matches IS/)
+    expect(positionDefconMigrationSource).toMatch(/COMMENT ON COLUMN public\.feature_history\.prior_defcon_hits IS/)
+  })
+
+  it('issues no GRANT statement — table-level grants on both tables already cover new columns (see file header)', () => {
+    const codeOnly = positionDefconMigrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
+})
+
+// ============================================================================
 // supabase/README.md carries the new migration row, marked not yet applied.
 // ============================================================================
 
@@ -514,5 +830,13 @@ describe('supabase/README.md', () => {
     expect(readmeSource).toMatch(/20260827090000_feature_history\.sql/)
     const rowMatch = readmeSource.match(/\| `20260827090000_feature_history\.sql` \|.*\|\s*$/m)
     expect(rowMatch).not.toBeNull()
+  })
+
+  // Ticket #146's own new migration row.
+  it('lists the new position/defcon migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260829090000_feature_history_position_and_defcon\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260829090000_feature_history_position_and_defcon\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
   })
 })
