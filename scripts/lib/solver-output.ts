@@ -74,43 +74,31 @@
 // #72.
 //
 // ============================================================================
-// WHAT IS INFERRED, NOT VERIFIED.
+// WHAT WAS INFERRED, NOT VERIFIED — and what ticket #66 corrected.
 // ============================================================================
-// The ticket quotes exactly one real fragment: the `Results` table above.
-// Everything about how the per-gameweek `CHIP TC` / `CHIP BB` lines are laid
-// out — their surrounding "gameweek block" — is NOT quoted anywhere in the
-// ticket text, so it cannot be verified here the way the Results table can.
-// Two structural choices below follow from close reading of the ticket's own
-// wording, not from a captured log:
+// #126 had only the `Results` table as a real fragment; the per-gameweek
+// body layout below it was inferred, not captured. Ticket #66 supplied the
+// real captured logs (both a chip-free and a chip-enabled solve, 28 August
+// 2026) and corrected two of #126's guesses:
 //
-//   1. The ticket says "a CHIP TC / CHIP BB line inside each gameweek
-//      block" (singular set of gameweek blocks) and "a Transfer Overview
-//      section" (singular), not "one per iteration" — and in the one real
-//      example given, all three solutions/iterations report the IDENTICAL
-//      chip decision (TC2, BB4 for every row). This module therefore treats
-//      the per-gameweek CHIP lines as ONE flat reading for the whole log
-//      (gameweek headers `GW <n>` followed by `CHIP <code>` lines), not one
-//      per iteration, and cross-checks it against EVERY solution's own
-//      Results-table chip reading. If a future real log shows genuinely
-//      different chip timings across iterations with their own separate
-//      gameweek blocks, this will need revisiting — but it will revisit
-//      LOUDLY: a real per-solution divergence that this flat model cannot
-//      represent shows up as a cross-check failure, never a silent wrong
-//      answer, because a divergent Results row will not match the one flat
-//      reading and this module throws.
+//   1. The body is NOT one flat reading for the whole log — it is wrapped in
+//      numbered `Solution N` blocks (1-based), one per Results-table `iter`
+//      row (0-based, `iter = N-1` — see mapSolutionNumberToIterIndex below).
+//      #126's flat model (no `Solution` header, one reading checked against
+//      every row) happened to look correct on the one example #126 had,
+//      where a reader that found NOTHING AT ALL was indistinguishable from a
+//      reader working correctly on a chip-free log — both report "(none)".
+//      That flat shape is kept working purely so #132's own tests (written
+//      against the flat model) still pass unmodified; a real log always has
+//      `Solution` headers and always takes the per-solution path.
 //
-//   2. The gameweek header format (`GW <n>` on its own line) and the CHIP
-//      line format (`CHIP TC` / `CHIP BB` on their own line) are the
-//      simplest literal reading of "a CHIP TC / CHIP BB line inside each
-//      gameweek block" — a gameweek marker line, then a chip marker line.
+//   2. The real gameweek header is `** GW <n>:` (with the leading `**` and
+//      trailing `:`), indented inside its solution block — not the bare
+//      `GW <n>` #126 guessed. GW_HEADER_RE below matches both shapes: the
+//      real one, and the bare one #132's existing tests still use.
 //
-// The ticket's own definition of done accepts this limit explicitly ("What a
-// substitute cannot catch: the parser is tested against one captured log,
-// not against every shape the solver can print") and defers real-world
-// confirmation to the human post-merge check (dispatch Solver run, confirm a
-// chip advisory actually appears). If that check shows a different real
-// shape, update GW_HEADER_RE / CHIP_LINE_RE below — the Results-table parser
-// and the cross-check contract (throw, never guess) do not need to change.
+// The CHIP line itself (`CHIP TC` / `CHIP BB`, indented) was the one guess
+// that held up unchanged.
 //
 // ============================================================================
 // Chip token shape — pinned, not guessed.
@@ -171,9 +159,24 @@ export class SolverOutputParseError extends Error {
 
 const POOL_SIZE_RE = /Filtered player pool from \d+ to (\d+) players/
 const CHIP_TOKEN_RE = /^([A-Z]{2})(\d+)$/
-/** A bare gameweek header line, e.g. "GW 2" or "GW2" — nothing else on the line, so this never matches a Transfer Overview line like "GW2: (TC) Muharemović -> Thiaw" (see file header). */
-const GW_HEADER_RE = /^GW\s*(\d+)$/i
-/** A bare per-gameweek chip line, e.g. "CHIP TC" — see file header for the format's provenance. */
+/**
+ * A body solution header, e.g. "Solution 1" — captured verbatim in the real chip-enabled log
+ * (ticket #66). Body solution numbering is 1-based; the Results table's own "iter" column is
+ * 0-based for the SAME solution — see mapSolutionNumberToIterIndex below, the one named place
+ * that mapping lives.
+ */
+const SOLUTION_HEADER_RE = /^Solution\s+(\d+)$/i
+/**
+ * A gameweek header line inside a solution block. Matches BOTH the bare "GW 2" / "GW2" shape
+ * (ticket #126/#132's original, best-effort construction — kept so those existing tests still
+ * pass unmodified) and the real captured shape "** GW 2:" (ticket #66, verified from the real
+ * log, indented four spaces inside its solution block — leading whitespace is stripped by the
+ * caller's `.trim()` before this regex ever sees the line). Anchored end-to-end so it never
+ * matches a Transfer Overview line like "GW2: (TC) Muharemović -> Thiaw", which has real content
+ * after the colon.
+ */
+const GW_HEADER_RE = /^\*{0,2}\s*GW\s*(\d+)\s*:?\s*\*{0,2}$/i
+/** A per-gameweek chip line, e.g. "CHIP TC" — indented in the real log, tolerated the same way as GW_HEADER_RE (leading whitespace stripped by the caller's `.trim()`). */
 const CHIP_LINE_RE = /^CHIP\s+([A-Z]{2})$/i
 
 /** The literal placeholder the solver prints for an empty cell — in sell, buy AND chip alike (ticket #132, defect 1). Never blank. */
@@ -317,18 +320,55 @@ function parseResultsTable(lines: readonly string[]): SolverSolution[] {
 }
 
 // ============================================================================
-// Per-gameweek CHIP lines — the cross-check reading. See file header,
-// "WHAT IS INFERRED, NOT VERIFIED", point 1: one flat reading for the whole
-// log, not one per iteration.
+// Per-gameweek CHIP lines — the cross-check reading.
 // ============================================================================
+// TICKET #66 — the body is read per `Solution N` block, not as one flat
+// reading for the whole log. The real captured log (both solve-2.log and
+// solve-chip.log) wraps every gameweek/CHIP line inside a numbered
+// `Solution N` block; #132's flat model (no `Solution` header at all) was a
+// best-effort construction that never matched what the solver actually
+// prints. That flat shape is kept working below ONLY because #132's own
+// tests use it and must keep passing unmodified — a log with no `Solution`
+// header anywhere still gets one reading applied to every Results-table row,
+// exactly as before. A real log always has `Solution` headers, so it always
+// takes the per-solution path.
 
-function parseGameweekChipLines(lines: readonly string[]): ChipPlay[] {
-  const chips: ChipPlay[] = []
+/**
+ * `Solution N` in the body is `iter N-1` in the Results table — verified
+ * against the transfers in the real captured log (ticket #66's own
+ * Context): `Solution 1` buys the same player `iter 0` names, `Solution 2`
+ * matches `iter 1`, `Solution 3` (a roll) matches `iter 2`. This is the one
+ * named place that mapping lives.
+ */
+function mapSolutionNumberToIterIndex(solutionNumber: number): number {
+  return solutionNumber - 1
+}
+
+type GameweekChipReading =
+  /** No `Solution N` header anywhere in the body — #132's original flat shape. One reading, checked against every solution. */
+  | { readonly perSolution: false; readonly chips: readonly ChipPlay[] }
+  /** At least one `Solution N` header found — ticket #66's real shape. Keyed by the MAPPED (0-based, `iter`-space) solution index. */
+  | { readonly perSolution: true; readonly chipsByIterIndex: ReadonlyMap<number, readonly ChipPlay[]> }
+
+function parseGameweekChipLines(lines: readonly string[]): GameweekChipReading {
+  const flatChips: ChipPlay[] = []
+  const chipsBySolutionNumber = new Map<number, ChipPlay[]>()
+  let currentSolutionNumber: number | null = null
   let currentGameweekId: number | null = null
+  let sawSolutionHeader = false
 
   for (const rawLine of lines) {
-    const line = rawLine.trim()
+    const line = rawLine.trim() // tolerates leading whitespace on Solution / ** GW n: / CHIP XX lines (ticket #66)
     if (line === 'Results') break // everything from here on is the compact table, not a gameweek block
+
+    const solutionMatch = SOLUTION_HEADER_RE.exec(line)
+    if (solutionMatch) {
+      sawSolutionHeader = true
+      currentSolutionNumber = Number(solutionMatch[1])
+      currentGameweekId = null // a new solution block starts with no gameweek header seen yet
+      if (!chipsBySolutionNumber.has(currentSolutionNumber)) chipsBySolutionNumber.set(currentSolutionNumber, [])
+      continue
+    }
 
     const gwMatch = GW_HEADER_RE.exec(line)
     if (gwMatch) {
@@ -338,11 +378,19 @@ function parseGameweekChipLines(lines: readonly string[]): ChipPlay[] {
 
     const chipMatch = CHIP_LINE_RE.exec(line)
     if (chipMatch && currentGameweekId !== null) {
-      chips.push({ chipCode: chipMatch[1].toUpperCase(), gameweekId: currentGameweekId })
+      const chip: ChipPlay = { chipCode: chipMatch[1].toUpperCase(), gameweekId: currentGameweekId }
+      flatChips.push(chip)
+      if (currentSolutionNumber !== null) chipsBySolutionNumber.get(currentSolutionNumber)!.push(chip)
     }
   }
 
-  return chips
+  if (!sawSolutionHeader) return { perSolution: false, chips: flatChips }
+
+  const chipsByIterIndex = new Map<number, readonly ChipPlay[]>()
+  for (const [solutionNumber, chips] of chipsBySolutionNumber) {
+    chipsByIterIndex.set(mapSolutionNumberToIterIndex(solutionNumber), chips)
+  }
+  return { perSolution: true, chipsByIterIndex }
 }
 
 // ============================================================================
@@ -364,8 +412,11 @@ function sameChips(a: readonly ChipPlay[], b: readonly ChipPlay[]): boolean {
   return aKeys.every((key, i) => key === bKeys[i])
 }
 
-function crossCheckChips(solutions: readonly SolverSolution[], gameweekReading: readonly ChipPlay[]): void {
+function crossCheckChips(solutions: readonly SolverSolution[], reading: GameweekChipReading): void {
   for (const solution of solutions) {
+    const gameweekReading = reading.perSolution
+      ? (reading.chipsByIterIndex.get(solution.solutionIndex) ?? [])
+      : reading.chips
     if (!sameChips(solution.chips, gameweekReading)) {
       throw new SolverOutputParseError(
         `solution ${solution.solutionIndex}: the Results table and the per-gameweek CHIP lines disagree on which chip(s) ` +

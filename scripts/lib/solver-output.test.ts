@@ -383,3 +383,720 @@ describe('solver-output.ts — source invariants (ticket #132, defect 1)', () =>
     expect(source).not.toMatch(/\.(slice|substring|substr|charAt|charCodeAt)\(/)
   })
 })
+
+
+// ============================================================================
+// TICKET #66 — the full captured logs, verbatim, both halves together (body
+// solution blocks AND the Results table). #132's fixtures above were
+// Results-table extracts only; the defect this ticket fixes lives in the
+// relationship between the body and the table, so only a whole-log fixture
+// can catch it. Both logs below are quoted character-for-character from the
+// two solves captured the same production run, 28 August 2026 (the console
+// noise before "Filtered player pool..." — the HiGHS solve trace — carries
+// no Solution/GW/CHIP/Results text and is omitted; everything from
+// "Filtered player pool..." to the end of the log is verbatim).
+// ============================================================================
+
+const FULL_CHIP_FREE_LOG = `Filtered player pool from 616 to 311 players
+This solver is free for personal, educational, or non-commercial use under the Apache License 2.0. Commercial entities must obtain a Commercial License before accessing, viewing, or using the code for any commercial purposes. Unauthorized access or use by commercial entities without a valid commercial license is strictly prohibited. To obtain a commercial license, please contact us at info@fploptimized.com.
+Version: 1 - 45131c5
+Using FT values of {'2': 2, '3': 1.6, '4': 1.3, '5': 1.1}
+
+
+Solution 1
+    ** GW 2:
+    ITB=0.0->0.5, FT=1, PT=0, NT=1
+    Buy 368 - Szoboszlai
+    Sell 366 - Wirtz
+
+    Lineup:
+    	Kinsky (3.32)
+    	Calafiori (3.29), Muharemović (3.86), Maguire (6.97, V)
+    	Groß (3.33), Mbeumo (6.08), Szoboszlai (6.33), B.Fernandes (7.12, C)
+    	Calvert-Lewin (4.1), João Pedro (5.05), Haaland (5.68)
+    Bench:
+    	Verbruggen (2.88), Ajer (2.66), O'Shea (2.34), I.Sangaré (2.3)
+    Lineup xPts: 62.24
+
+
+    ** GW 3:
+    ITB=0.5->0.1, FT=1, PT=0, NT=1
+    Buy 388 - Guéhi
+    Sell 8 - Calafiori
+
+    Lineup:
+    	Verbruggen (3.72)
+    	Muharemović (2.93), Ajer (3.57), Maguire (4.44), Guéhi (9.95, C)
+    	Groß (4.06), Mbeumo (4.5), B.Fernandes (5.31), Szoboszlai (6.68)
+    	Calvert-Lewin (3.41), Haaland (7.08, V)
+    Bench:
+    	Kinsky (3.04), João Pedro (2.83), O'Shea (2.77), I.Sangaré (2.7)
+    Lineup xPts: 65.57
+
+
+    ** GW 4:
+    ITB=0.1->0.1, FT=1, PT=0, NT=1
+    Buy 445 - Thiaw
+    Sell 334 - Muharemović
+
+    Lineup:
+    	Verbruggen (3.71)
+    	Maguire (4.09), Thiaw (4.15), Guéhi (5.36)
+    	Groß (4.06), Mbeumo (4.22), B.Fernandes (4.99), Szoboszlai (6.41, V)
+    	Calvert-Lewin (4.12), Haaland (4.71), João Pedro (6.55, C)
+    Bench:
+    	Kinsky (3.47), O'Shea (2.69), Ajer (2.38), I.Sangaré (2.3)
+    Lineup xPts: 58.92
+
+
+    ** GW 5:
+    ITB=0.1->0.1, FT=1, PT=0, NT=1
+    Buy 593 - Dedić
+    Sell 87 - Ajer
+
+    Lineup:
+    	Kinsky (3.15)
+    	Maguire (4.35), Dedić (6.54), Thiaw (7.5, V), Guéhi (9.29, C)
+    	Mbeumo (4.43), Szoboszlai (4.96), B.Fernandes (5.22)
+    	João Pedro (4.09), Calvert-Lewin (4.32), Haaland (6.81)
+    Bench:
+    	Verbruggen (2.69), Groß (3.01), I.Sangaré (2.89), O'Shea (2.7)
+    Lineup xPts: 69.94
+
+
+    ** GW 6:
+    ITB=0.1->0.1, FT=1, PT=0, NT=1
+    Buy 569 - Gonzalo
+    Sell 346 - Calvert-Lewin
+
+    Lineup:
+    	Verbruggen (3.32)
+    	Dedić (4.49), Thiaw (5.33), Guéhi (5.43), Maguire (5.88, V)
+    	Szoboszlai (5.18), Mbeumo (5.46), B.Fernandes (6.41, C)
+    	Haaland (4.77), João Pedro (4.82), Gonzalo (5.42)
+    Bench:
+    	Kinsky (2.88), Groß (3.75), O'Shea (3.27), I.Sangaré (2.45)
+    Lineup xPts: 62.91
+
+Total xPts over the horizon: 319.58
+
+
+
+Solution 2
+    ** GW 2:
+    ITB=0.0->1.5, FT=1, PT=0, NT=1
+    Buy 68 - Tavernier
+    Sell 366 - Wirtz
+
+    Lineup:
+    	Kinsky (3.32)
+    	Calafiori (3.29), Muharemović (3.86), Maguire (6.97, V)
+    	Groß (3.33), Tavernier (5.49), Mbeumo (6.08), B.Fernandes (7.12, C)
+    	Calvert-Lewin (4.1), João Pedro (5.05), Haaland (5.68)
+    Bench:
+    	Verbruggen (2.88), Ajer (2.66), O'Shea (2.34), I.Sangaré (2.3)
+    Lineup xPts: 61.4
+
+
+    ** GW 3:
+    ITB=1.5->0.5, FT=1, PT=0, NT=1
+    Buy 388 - Guéhi
+    Sell 334 - Muharemović
+
+    Lineup:
+    	Verbruggen (3.72)
+    	Ajer (3.57), Maguire (4.44), Calafiori (4.6), Guéhi (9.95, C)
+    	Groß (4.06), Tavernier (4.31), Mbeumo (4.5), B.Fernandes (5.31)
+    	Calvert-Lewin (3.41), Haaland (7.08, V)
+    Bench:
+    	Kinsky (3.04), João Pedro (2.83), O'Shea (2.77), I.Sangaré (2.7)
+    Lineup xPts: 64.88
+
+
+    ** GW 4:
+    ITB=0.5->0.0, FT=1, PT=0, NT=1
+    Buy 445 - Thiaw
+    Sell 87 - Ajer
+
+    Lineup:
+    	Verbruggen (3.71)
+    	Maguire (4.09), Thiaw (4.15), Calafiori (4.42), Guéhi (5.36, V)
+    	Mbeumo (4.22), B.Fernandes (4.99), Tavernier (5.22)
+    	Calvert-Lewin (4.12), Haaland (4.71), João Pedro (6.55, C)
+    Bench:
+    	Kinsky (3.47), Groß (4.06), O'Shea (2.69), I.Sangaré (2.3)
+    Lineup xPts: 58.09
+
+
+    ** GW 5:
+    ITB=0.0->0.6, FT=1, PT=0, NT=1
+    Buy 447 - Botman
+    Sell 8 - Calafiori
+
+    Lineup:
+    	Kinsky (3.15)
+    	Maguire (4.35), Botman (7.27), Thiaw (7.5, V), Guéhi (9.29, C)
+    	Mbeumo (4.43), Tavernier (4.7), B.Fernandes (5.22)
+    	João Pedro (4.09), Calvert-Lewin (4.32), Haaland (6.81)
+    Bench:
+    	Verbruggen (2.69), Groß (3.01), I.Sangaré (2.89), O'Shea (2.7)
+    Lineup xPts: 70.41
+
+
+    ** GW 6:
+    ITB=0.6->0.1, FT=1, PT=0, NT=1
+    Buy 237 - Ndiaye
+    Sell 124 - Groß
+
+    Lineup:
+    	Verbruggen (3.32)
+    	Botman (5.2), Thiaw (5.33), Guéhi (5.43), Maguire (5.88, V)
+    	Tavernier (4.31), Mbeumo (5.46), Ndiaye (5.67), B.Fernandes (6.41, C)
+    	Haaland (4.77), João Pedro (4.82)
+    Bench:
+    	Kinsky (2.88), O'Shea (3.27), Calvert-Lewin (2.52), I.Sangaré (2.45)
+    Lineup xPts: 63.01
+
+Total xPts over the horizon: 317.78
+
+
+
+Solution 3
+    ** GW 2:
+    ITB=0.0->0.0, FT=1, PT=0, NT=0
+
+    Lineup:
+    	Kinsky (3.32)
+    	Calafiori (3.29), Muharemović (3.86), Maguire (6.97, V)
+    	Groß (3.33), Wirtz (3.75), Mbeumo (6.08), B.Fernandes (7.12, C)
+    	Calvert-Lewin (4.1), João Pedro (5.05), Haaland (5.68)
+    Bench:
+    	Verbruggen (2.88), Ajer (2.66), O'Shea (2.34), I.Sangaré (2.3)
+    Lineup xPts: 59.66
+
+
+    ** GW 3:
+    ITB=0.0->3.0, FT=2, PT=0, NT=2
+    Buy 388 - Guéhi
+    Buy 368 - Szoboszlai
+    Sell 426 - B.Fernandes
+    Sell 304 - O'Shea
+
+    Lineup:
+    	Verbruggen (3.72)
+    	Ajer (3.57), Maguire (4.44), Calafiori (4.6), Guéhi (9.95, C)
+    	Wirtz (3.94), Groß (4.06), Mbeumo (4.5), Szoboszlai (6.68)
+    	Calvert-Lewin (3.41), Haaland (7.08, V)
+    Bench:
+    	Kinsky (3.04), Muharemović (2.93), João Pedro (2.83), I.Sangaré (2.7)
+    Lineup xPts: 65.88
+
+
+    ** GW 4:
+    ITB=3.0->1.0, FT=1, PT=0, NT=1
+    Buy 154 - Palmer
+    Sell 366 - Wirtz
+
+    Lineup:
+    	Verbruggen (3.71)
+    	Maguire (4.09), Calafiori (4.42), Guéhi (5.36)
+    	Groß (4.06), Mbeumo (4.22), Szoboszlai (6.41), Palmer (7.53, C)
+    	Calvert-Lewin (4.12), Haaland (4.71), João Pedro (6.55, V)
+    Bench:
+    	Kinsky (3.47), Muharemović (3.87), Ajer (2.38), I.Sangaré (2.3)
+    Lineup xPts: 62.72
+
+
+    ** GW 5:
+    ITB=1.0->0.5, FT=1, PT=0, NT=1
+    Buy 445 - Thiaw
+    Sell 87 - Ajer
+
+    Lineup:
+    	Kinsky (3.15)
+    	Muharemović (4.17), Maguire (4.35), Thiaw (7.5, V), Guéhi (9.29, C)
+    	Mbeumo (4.43), Palmer (4.48), Szoboszlai (4.96)
+    	João Pedro (4.09), Calvert-Lewin (4.32), Haaland (6.81)
+    Bench:
+    	Verbruggen (2.69), Calafiori (3.8), Groß (3.01), I.Sangaré (2.89)
+    Lineup xPts: 66.83
+
+
+    ** GW 6:
+    ITB=0.5->0.5, FT=1, PT=0, NT=1
+    Buy 569 - Gonzalo
+    Sell 346 - Calvert-Lewin
+
+    Lineup:
+    	Verbruggen (3.32)
+    	Calafiori (4.79), Thiaw (5.33), Guéhi (5.43), Maguire (5.88, C)
+    	Szoboszlai (5.18), Palmer (5.29), Mbeumo (5.46, V)
+    	Haaland (4.77), João Pedro (4.82), Gonzalo (5.42)
+    Bench:
+    	Kinsky (2.88), Groß (3.75), I.Sangaré (2.45), Muharemović (2.02)
+    Lineup xPts: 61.56
+
+Total xPts over the horizon: 316.65
+
+
+
+
+Transfer Overview
+
+Solution 1
+	GW2: Wirtz -> Szoboszlai
+	GW3: Calafiori -> Guéhi
+	GW4: Muharemović -> Thiaw
+	GW5: Ajer -> Dedić
+	GW6: Calvert-Lewin -> Gonzalo
+
+Solution 2
+	GW2: Wirtz -> Tavernier
+	GW3: Muharemović -> Guéhi
+	GW4: Ajer -> Thiaw
+	GW5: Calafiori -> Botman
+	GW6: Groß -> Ndiaye
+
+Solution 3
+	GW2: Roll
+	GW3: O'Shea, B.Fernandes -> Guéhi, Szoboszlai
+	GW4: Wirtz -> Palmer
+	GW5: Ajer -> Thiaw
+	GW6: Calvert-Lewin -> Gonzalo
+
+
+Results
+  iter  sell    buy         chip      score
+     0  Wirtz   Szoboszlai  -        269.85
+     1  Wirtz   Tavernier   -        268.32
+     2  -       -           -        268.24
+`
+
+const FULL_CHIP_ENABLED_LOG = `Filtered player pool from 616 to 311 players
+This solver is free for personal, educational, or non-commercial use under the Apache License 2.0. Commercial entities must obtain a Commercial License before accessing, viewing, or using the code for any commercial purposes. Unauthorized access or use by commercial entities without a valid commercial license is strictly prohibited. To obtain a commercial license, please contact us at info@fploptimized.com.
+Version: 1 - 45131c5
+Using FT values of {'2': 2, '3': 1.6, '4': 1.3, '5': 1.1}
+
+
+Solution 1
+    ** GW 2:
+    CHIP BB
+    ITB=0.0->0.5, FT=1, PT=0, NT=1
+    Buy 368 - Szoboszlai
+    Sell 366 - Wirtz
+
+    Lineup:
+    	Verbruggen (2.88), Kinsky (3.32)
+    	O'Shea (2.34), Ajer (2.66), Calafiori (3.29), Muharemović (3.86), Maguire (6.97, V)
+    	I.Sangaré (2.3), Groß (3.33), Mbeumo (6.08), Szoboszlai (6.33), B.Fernandes (7.12, C)
+    	Calvert-Lewin (4.1), João Pedro (5.05), Haaland (5.68)
+    Bench:
+
+    Lineup xPts: 72.41
+
+
+    ** GW 3:
+    CHIP TC
+    ITB=0.5->0.1, FT=1, PT=0, NT=1
+    Buy 388 - Guéhi
+    Sell 8 - Calafiori
+
+    Lineup:
+    	Verbruggen (3.72)
+    	Muharemović (2.93), Ajer (3.57), Maguire (4.44), Guéhi (9.95, C)
+    	Groß (4.06), Mbeumo (4.5), B.Fernandes (5.31), Szoboszlai (6.68)
+    	Calvert-Lewin (3.41), Haaland (7.08, V)
+    Bench:
+    	Kinsky (3.04), João Pedro (2.83), O'Shea (2.77), I.Sangaré (2.7)
+    Lineup xPts: 75.52
+
+
+    ** GW 4:
+    ITB=0.1->0.1, FT=1, PT=0, NT=1
+    Buy 445 - Thiaw
+    Sell 334 - Muharemović
+
+    Lineup:
+    	Verbruggen (3.71)
+    	Maguire (4.09), Thiaw (4.15), Guéhi (5.36)
+    	Groß (4.06), Mbeumo (4.22), B.Fernandes (4.99), Szoboszlai (6.41, V)
+    	Calvert-Lewin (4.12), Haaland (4.71), João Pedro (6.55, C)
+    Bench:
+    	Kinsky (3.47), O'Shea (2.69), Ajer (2.38), I.Sangaré (2.3)
+    Lineup xPts: 58.92
+
+
+    ** GW 5:
+    ITB=0.1->0.1, FT=1, PT=0, NT=1
+    Buy 593 - Dedić
+    Sell 87 - Ajer
+
+    Lineup:
+    	Kinsky (3.15)
+    	Maguire (4.35), Dedić (6.54), Thiaw (7.5, V), Guéhi (9.29, C)
+    	Mbeumo (4.43), Szoboszlai (4.96), B.Fernandes (5.22)
+    	João Pedro (4.09), Calvert-Lewin (4.32), Haaland (6.81)
+    Bench:
+    	Verbruggen (2.69), Groß (3.01), I.Sangaré (2.89), O'Shea (2.7)
+    Lineup xPts: 69.94
+
+
+    ** GW 6:
+    ITB=0.1->0.1, FT=1, PT=0, NT=1
+    Buy 569 - Gonzalo
+    Sell 346 - Calvert-Lewin
+
+    Lineup:
+    	Verbruggen (3.32)
+    	Dedić (4.49), Thiaw (5.33), Guéhi (5.43), Maguire (5.88, V)
+    	Szoboszlai (5.18), Mbeumo (5.46), B.Fernandes (6.41, C)
+    	Haaland (4.77), João Pedro (4.82), Gonzalo (5.42)
+    Bench:
+    	Kinsky (2.88), Groß (3.75), O'Shea (3.27), I.Sangaré (2.45)
+    Lineup xPts: 62.91
+
+Total xPts over the horizon: 339.70
+
+
+
+Solution 2
+    ** GW 2:
+    CHIP BB
+    ITB=0.0->1.5, FT=1, PT=0, NT=1
+    Buy 68 - Tavernier
+    Sell 366 - Wirtz
+
+    Lineup:
+    	Verbruggen (2.88), Kinsky (3.32)
+    	O'Shea (2.34), Ajer (2.66), Calafiori (3.29), Muharemović (3.86), Maguire (6.97, V)
+    	I.Sangaré (2.3), Groß (3.33), Tavernier (5.49), Mbeumo (6.08), B.Fernandes (7.12, C)
+    	Calvert-Lewin (4.1), João Pedro (5.05), Haaland (5.68)
+    Bench:
+
+    Lineup xPts: 71.57
+
+
+    ** GW 3:
+    CHIP TC
+    ITB=1.5->0.5, FT=1, PT=0, NT=1
+    Buy 388 - Guéhi
+    Sell 334 - Muharemović
+
+    Lineup:
+    	Verbruggen (3.72)
+    	Ajer (3.57), Maguire (4.44), Calafiori (4.6), Guéhi (9.95, C)
+    	Groß (4.06), Tavernier (4.31), Mbeumo (4.5), B.Fernandes (5.31)
+    	Calvert-Lewin (3.41), Haaland (7.08, V)
+    Bench:
+    	Kinsky (3.04), João Pedro (2.83), O'Shea (2.77), I.Sangaré (2.7)
+    Lineup xPts: 74.83
+
+
+    ** GW 4:
+    ITB=0.5->0.0, FT=1, PT=0, NT=1
+    Buy 445 - Thiaw
+    Sell 87 - Ajer
+
+    Lineup:
+    	Verbruggen (3.71)
+    	Maguire (4.09), Thiaw (4.15), Calafiori (4.42), Guéhi (5.36, V)
+    	Mbeumo (4.22), B.Fernandes (4.99), Tavernier (5.22)
+    	Calvert-Lewin (4.12), Haaland (4.71), João Pedro (6.55, C)
+    Bench:
+    	Kinsky (3.47), Groß (4.06), O'Shea (2.69), I.Sangaré (2.3)
+    Lineup xPts: 58.09
+
+
+    ** GW 5:
+    ITB=0.0->0.6, FT=1, PT=0, NT=1
+    Buy 447 - Botman
+    Sell 8 - Calafiori
+
+    Lineup:
+    	Kinsky (3.15)
+    	Maguire (4.35), Botman (7.27), Thiaw (7.5, V), Guéhi (9.29, C)
+    	Mbeumo (4.43), Tavernier (4.7), B.Fernandes (5.22)
+    	João Pedro (4.09), Calvert-Lewin (4.32), Haaland (6.81)
+    Bench:
+    	Verbruggen (2.69), Groß (3.01), I.Sangaré (2.89), O'Shea (2.7)
+    Lineup xPts: 70.41
+
+
+    ** GW 6:
+    ITB=0.6->0.1, FT=1, PT=0, NT=1
+    Buy 237 - Ndiaye
+    Sell 124 - Groß
+
+    Lineup:
+    	Verbruggen (3.32)
+    	Botman (5.2), Thiaw (5.33), Guéhi (5.43), Maguire (5.88, V)
+    	Tavernier (4.31), Mbeumo (5.46), Ndiaye (5.67), B.Fernandes (6.41, C)
+    	Haaland (4.77), João Pedro (4.82)
+    Bench:
+    	Kinsky (2.88), O'Shea (3.27), Calvert-Lewin (2.52), I.Sangaré (2.45)
+    Lineup xPts: 63.01
+
+Total xPts over the horizon: 337.90
+
+
+
+Solution 3
+    ** GW 2:
+    CHIP BB
+    ITB=0.0->0.0, FT=1, PT=0, NT=0
+
+    Lineup:
+    	Verbruggen (2.88), Kinsky (3.32)
+    	O'Shea (2.34), Ajer (2.66), Calafiori (3.29), Muharemović (3.86), Maguire (6.97, V)
+    	I.Sangaré (2.3), Groß (3.33), Wirtz (3.75), Mbeumo (6.08), B.Fernandes (7.12, C)
+    	Calvert-Lewin (4.1), João Pedro (5.05), Haaland (5.68)
+    Bench:
+
+    Lineup xPts: 69.83
+
+
+    ** GW 3:
+    CHIP TC
+    ITB=0.0->3.0, FT=2, PT=0, NT=2
+    Buy 388 - Guéhi
+    Buy 368 - Szoboszlai
+    Sell 426 - B.Fernandes
+    Sell 304 - O'Shea
+
+    Lineup:
+    	Verbruggen (3.72)
+    	Ajer (3.57), Maguire (4.44), Calafiori (4.6), Guéhi (9.95, C)
+    	Wirtz (3.94), Groß (4.06), Mbeumo (4.5), Szoboszlai (6.68)
+    	Calvert-Lewin (3.41), Haaland (7.08, V)
+    Bench:
+    	Kinsky (3.04), Muharemović (2.93), João Pedro (2.83), I.Sangaré (2.7)
+    Lineup xPts: 75.82
+
+
+    ** GW 4:
+    ITB=3.0->1.0, FT=1, PT=0, NT=1
+    Buy 154 - Palmer
+    Sell 366 - Wirtz
+
+    Lineup:
+    	Verbruggen (3.71)
+    	Maguire (4.09), Calafiori (4.42), Guéhi (5.36)
+    	Groß (4.06), Mbeumo (4.22), Szoboszlai (6.41), Palmer (7.53, C)
+    	Calvert-Lewin (4.12), Haaland (4.71), João Pedro (6.55, V)
+    Bench:
+    	Kinsky (3.47), Muharemović (3.87), Ajer (2.38), I.Sangaré (2.3)
+    Lineup xPts: 62.72
+
+
+    ** GW 5:
+    ITB=1.0->0.5, FT=1, PT=0, NT=1
+    Buy 445 - Thiaw
+    Sell 87 - Ajer
+
+    Lineup:
+    	Kinsky (3.15)
+    	Muharemović (4.17), Maguire (4.35), Thiaw (7.5, V), Guéhi (9.29, C)
+    	Mbeumo (4.43), Palmer (4.48), Szoboszlai (4.96)
+    	João Pedro (4.09), Calvert-Lewin (4.32), Haaland (6.81)
+    Bench:
+    	Verbruggen (2.69), Calafiori (3.8), Groß (3.01), I.Sangaré (2.89)
+    Lineup xPts: 66.83
+
+
+    ** GW 6:
+    ITB=0.5->0.5, FT=1, PT=0, NT=1
+    Buy 569 - Gonzalo
+    Sell 346 - Calvert-Lewin
+
+    Lineup:
+    	Verbruggen (3.32)
+    	Calafiori (4.79), Thiaw (5.33), Guéhi (5.43), Maguire (5.88, C)
+    	Szoboszlai (5.18), Palmer (5.29), Mbeumo (5.46, V)
+    	Haaland (4.77), João Pedro (4.82), Gonzalo (5.42)
+    Bench:
+    	Kinsky (2.88), Groß (3.75), I.Sangaré (2.45), Muharemović (2.02)
+    Lineup xPts: 61.56
+
+Total xPts over the horizon: 336.77
+
+
+
+
+Transfer Overview
+
+Solution 1
+	GW2: (BB) Wirtz -> Szoboszlai
+	GW3: (TC) Calafiori -> Guéhi
+	GW4: Muharemović -> Thiaw
+	GW5: Ajer -> Dedić
+	GW6: Calvert-Lewin -> Gonzalo
+
+Solution 2
+	GW2: (BB) Wirtz -> Tavernier
+	GW3: (TC) Muharemović -> Guéhi
+	GW4: Ajer -> Thiaw
+	GW5: Calafiori -> Botman
+	GW6: Groß -> Ndiaye
+
+Solution 3
+	GW2: (BB) Roll
+	GW3: (TC) O'Shea, B.Fernandes -> Guéhi, Szoboszlai
+	GW4: Wirtz -> Palmer
+	GW5: Ajer -> Thiaw
+	GW6: Calvert-Lewin -> Gonzalo
+
+
+Results
+  iter  sell    buy         chip        score
+     0  Wirtz   Szoboszlai  BB2, TC3   288.18
+     1  Wirtz   Tavernier   BB2, TC3   286.65
+     2  -       -           BB2, TC3   286.58
+`
+
+describe('parseSolverOutput — the full captured chip-enabled log, body and Results table together (ticket #66)', () => {
+  it('passes the cross-check: all three solutions agree on BB in gameweek 2 and TC in gameweek 3 (the test that was missing)', () => {
+    const result = parseSolverOutput(FULL_CHIP_ENABLED_LOG)
+    expect(result.solutions).toHaveLength(3)
+    for (const solution of result.solutions) {
+      expect(solution.chips).toEqual([
+        { chipCode: 'BB', gameweekId: 2 },
+        { chipCode: 'TC', gameweekId: 3 },
+      ])
+    }
+    expect(result.solutions.map((s) => s.score)).toEqual([288.18, 286.65, 286.58])
+  })
+
+  it('reads the buy/sell columns matching the body\'s own transfers, confirming the same solution was compared on both sides', () => {
+    const result = parseSolverOutput(FULL_CHIP_ENABLED_LOG)
+    expect(result.solutions[0].playerBought).toBe('Szoboszlai')
+    expect(result.solutions[1].playerBought).toBe('Tavernier')
+    expect(result.solutions[2].playerBought).toBeNull() // Solution 3 is a roll
+  })
+})
+
+describe('parseSolverOutput — the full captured chip-free log still cross-checks as agreement (ticket #66)', () => {
+  it('passes with no chips anywhere, using the real Solution-block body (not the flat #132 fixture)', () => {
+    const result = parseSolverOutput(FULL_CHIP_FREE_LOG)
+    expect(result.solutions).toHaveLength(3)
+    for (const solution of result.solutions) {
+      expect(solution.chips).toEqual([])
+    }
+    expect(result.solutions.map((s) => s.score)).toEqual([269.85, 268.32, 268.24])
+  })
+})
+
+// ============================================================================
+// TICKET #66 — "Solution N" maps to "iter N-1", asserted directly.
+// ============================================================================
+
+describe('parseSolverOutput — "Solution N" in the body maps to "iter N-1" in the Results table (ticket #66)', () => {
+  it('checks a Solution 1 block that differs from Solution 3 against iter 0 and iter 2 respectively, and agrees', () => {
+    const log = `Solution 1
+    ** GW 2:
+    CHIP BB
+
+Solution 2
+    ** GW 2:
+    CHIP TC
+
+Solution 3
+    ** GW 2:
+    CHIP TC
+
+Results
+  iter  sell  buy  chip  score
+     0  A     B    BB2   10.00
+     1  A     B    TC2   9.00
+     2  A     B    TC2   8.00
+`
+    // Solution 1 (BB2) differs from Solution 3 (TC2). Under the correct
+    // mapping, Solution 1 -> iter 0 (BB2) and Solution 3 -> iter 2 (TC2) —
+    // both agree, so the whole log agrees and the cross-check does not throw.
+    expect(() => parseSolverOutput(log)).not.toThrow()
+    const result = parseSolverOutput(log)
+    expect(result.solutions[0].chips).toEqual([{ chipCode: 'BB', gameweekId: 2 }])
+    expect(result.solutions[2].chips).toEqual([{ chipCode: 'TC', gameweekId: 2 }])
+  })
+
+  it('rejects a fixture that a naive same-number (Solution N vs iter N, no shift) mapping would wrongly accept', () => {
+    // Solution 1 reads TC2, Solution 2 reads BB2, Solution 3 reads no chip.
+    // The Results table is deliberately shifted by one: iter 0 says "-",
+    // iter 1 says "TC2", iter 2 says "BB2". A NAIVE same-number mapping
+    // (Solution N checked against iter N, not iter N-1) would compare
+    // Solution 1 (TC2) to iter 1 (TC2) — match — and Solution 2 (BB2) to
+    // iter 2 (BB2) — match — finding no disagreement at all. The CORRECT
+    // mapping (Solution N -> iter N-1) compares Solution 1 (TC2) to iter 0
+    // ("-"/none) instead, which is a genuine disagreement, so the correct
+    // implementation must throw here even though the naive one would not.
+    const log = `Solution 1
+    ** GW 2:
+    CHIP TC
+
+Solution 2
+    ** GW 2:
+    CHIP BB
+
+Solution 3
+    ** GW 2:
+
+Results
+  iter  sell  buy  chip  score
+     0  A     B    -     10.00
+     1  A     B    TC2   9.00
+     2  A     B    BB2   8.00
+`
+    expect(() => parseSolverOutput(log)).toThrow(SolverOutputParseError)
+    expect(() => parseSolverOutput(log)).toThrow(/disagree/)
+    try {
+      parseSolverOutput(log)
+      expect.unreachable('parseSolverOutput should have thrown')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      expect(message).toContain('solution 0')
+    }
+  })
+})
+
+// ============================================================================
+// TICKET #66 — leading whitespace on Solution / ** GW n: / CHIP XX lines.
+// ============================================================================
+
+describe('parseSolverOutput — leading whitespace on Solution, "** GW n:" and "CHIP XX" lines (ticket #66)', () => {
+  it('tolerates indentation on all three line kinds, matching the real captured log\'s four-space indent', () => {
+    const log = `    Solution 1
+        ** GW 2:
+        CHIP BB
+
+Results
+  iter  sell  buy  chip  score
+     0  A     B    BB2   10.00
+`
+    const result = parseSolverOutput(log)
+    expect(result.solutions[0].chips).toEqual([{ chipCode: 'BB', gameweekId: 2 }])
+  })
+})
+
+// ============================================================================
+// TICKET #66 — a chip is attributed to the gameweek of the header it sits
+// under, not to whichever gameweek happened to be seen first.
+// ============================================================================
+
+describe('parseSolverOutput — a chip is attributed to the "** GW n:" header it sits under (ticket #66)', () => {
+  it('attributes two chips in one solution to their own, different gameweeks', () => {
+    const log = `Solution 1
+    ** GW 2:
+    CHIP BB
+    ** GW 4:
+    CHIP TC
+
+Results
+  iter  sell  buy  chip        score
+     0  A     B    BB2, TC4   10.00
+`
+    const result = parseSolverOutput(log)
+    expect(result.solutions[0].chips).toEqual([
+      { chipCode: 'BB', gameweekId: 2 },
+      { chipCode: 'TC', gameweekId: 4 },
+    ])
+  })
+})
