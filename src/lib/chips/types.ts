@@ -43,18 +43,43 @@ export interface ChipAdvisoryRow {
 }
 
 /**
- * One chip advisory resolved for display — ticket #126. States a number and
- * its limitation; never a "play this chip" instruction (product-brief.md
- * §6a — see CHIP_ADVISORY_HORIZON_NOTE in derive.ts).
+ * One chip decision within a collapsed chip-timing plan — ticket #141. Never
+ * carries its own points figure: the delta belongs to the whole plan (see
+ * ChipAdvisoryView below), not to an individual chip — there is no
+ * measurement of either chip alone, so a per-decision number would be
+ * invented, not read. See derive.ts's module header for the full because.
  */
-export interface ChipAdvisoryView {
+export interface ChipAdvisoryDecision {
   chipCode: string
   /** e.g. "Triple Captain" — SOLVER_CHIP_DISPLAY_NAMES[chipCode] in derive.ts, or an explicit unknown-chip label. */
   displayName: string
+  chipGameweekId: number
   gameweekLabel: string
+}
+
+/**
+ * One DISTINCT chip-timing plan the solver's stored solutions propose —
+ * ticket #141, collapsing ticket #126's flat one-row-per-(chip,solution)
+ * storage into one entry per distinct set of chip decisions. States a
+ * number and its limitation; never a "play this chip" instruction
+ * (product-brief.md §6a — see CHIP_ADVISORY_HORIZON_NOTE in derive.ts).
+ *
+ * `decisions` is the whole set of chips this plan plays together, in
+ * gameweek order. `deltaWhole` is the SINGLE points figure this whole set
+ * was measured against (chip-enabled solve vs chip-free solve) — stated
+ * once per plan, never once per chip. `solutionCount` /
+ * `totalSolutionCount` say how many of the solver's stored solutions chose
+ * exactly this plan, out of how many named a chip at all, so the reader
+ * can see solver agreement without being shown the same plan more than
+ * once — see derive.ts's deriveChipAdvisories for exactly how these are
+ * computed.
+ */
+export interface ChipAdvisoryView {
+  decisions: readonly ChipAdvisoryDecision[]
   /** Math.round(delta) — design-reference.md forbids decimal points on a projected-points figure; see derive.ts. */
   deltaWhole: number
-  solutionIndex: number
+  solutionCount: number
+  totalSolutionCount: number
 }
 
 /**
@@ -192,7 +217,7 @@ export interface DerivedChipState {
   secondSet: SecondChipSetView
   /** Ticket #97: how urgent it is to play the first set's unused chips before they're lost. Always 'none' once the first set has expired or has nothing left unused, or while the second set is active — see deriveExpiryWarning's own comment in derive.ts. */
   expiryWarning: ChipExpiryWarning
-  /** Ticket #126: the latest chip-enabled solve's advisory, if any chip was played in it. Empty when none was. */
+  /** Ticket #126/#141: the latest chip-enabled solve's advisory, collapsed to one entry per distinct chip-timing plan its stored solutions propose. Empty when no chip was played in any of them. */
   chipAdvisories: readonly ChipAdvisoryView[]
   /** CHIP_ADVISORY_HORIZON_NOTE when `chipAdvisories` is non-empty, null otherwise — present on the derived view itself so it is directly assertable without rendering the screen. */
   chipAdvisoryNote: string | null

@@ -316,36 +316,121 @@ describe('deriveChipState — expiryWarning chip-count escalation: more unused c
 })
 
 // ============================================================================
-// Chip advisory — ticket #126 (feature-list item 27). deriveChipState never
-// reads a clock for this part; every case below is independent of nowMs.
+// Chip advisory — ticket #126 (feature-list item 27), collapsed for display
+// by ticket #141. deriveChipState never reads a clock for this part; every
+// case below is independent of nowMs.
+//
+// Storage (unchanged by #141): one ChipAdvisoryRow per (chip played,
+// solution), for the solver's latest run — already filtered to that run by
+// api.ts. deriveChipAdvisories collapses these into one ChipAdvisoryView per
+// DISTINCT plan (a solution's own whole set of chip decisions): identical
+// solutions collapse to one plan; solutions that genuinely disagree produce
+// distinct plans, each carrying its own solutionCount/totalSolutionCount.
 // ============================================================================
 
-describe('deriveChipState — chip advisory (ticket #126)', () => {
+describe('deriveChipState — chip advisory (ticket #126, collapsed by #141)', () => {
   it('is empty, with a null note, when no chip_advisories rows are given', () => {
     const state = deriveChipState(sourceData({ chipAdvisories: [] }), GW19_DEADLINE_MS - 1)
     expect(state.chipAdvisories).toEqual([])
     expect(state.chipAdvisoryNote).toBeNull()
   })
 
-  it('resolves a known chip code to its display name, rounds the delta to a whole number, and formats the gameweek label', () => {
+  it('three solutions naming the same chips in the same gameweeks render as ONE advisory listing those chips once', () => {
+    // The exact real-world case the ticket exists for: three solutions
+    // (0, 1, 2) all choose Bench Boost in gameweek 2 and Triple Captain in
+    // gameweek 3, at the same +18 delta — six stored rows, one true plan.
     const chipAdvisories: ChipAdvisoryRow[] = [
-      { chipCode: 'TC', chipGameweekId: 2, delta: 6.48, solutionIndex: 0 },
-      { chipCode: 'BB', chipGameweekId: 4, delta: 6.48, solutionIndex: 0 },
+      { chipCode: 'BB', chipGameweekId: 2, delta: 18, solutionIndex: 0 },
+      { chipCode: 'TC', chipGameweekId: 3, delta: 18, solutionIndex: 0 },
+      { chipCode: 'BB', chipGameweekId: 2, delta: 18, solutionIndex: 1 },
+      { chipCode: 'TC', chipGameweekId: 3, delta: 18, solutionIndex: 1 },
+      { chipCode: 'BB', chipGameweekId: 2, delta: 18, solutionIndex: 2 },
+      { chipCode: 'TC', chipGameweekId: 3, delta: 18, solutionIndex: 2 },
     ]
     const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
 
+    expect(state.chipAdvisories).toHaveLength(1)
+    const [plan] = state.chipAdvisories
+    expect(plan.decisions).toEqual([
+      { chipCode: 'BB', displayName: 'Bench Boost', chipGameweekId: 2, gameweekLabel: 'Gameweek 2' },
+      { chipCode: 'TC', displayName: 'Triple Captain', chipGameweekId: 3, gameweekLabel: 'Gameweek 3' },
+    ])
+    expect(plan.deltaWhole).toBe(18)
+    expect(plan.solutionCount).toBe(3)
+    expect(plan.totalSolutionCount).toBe(3)
+  })
+
+  it('solutions naming different chips or different gameweeks render as distinct advisories, each stating how many of the solutions chose it', () => {
+    // Solutions 0 and 1 agree on Triple Captain in gameweek 2; solution 2
+    // instead plays Bench Boost in gameweek 5 — two genuinely different
+    // plans, not one collapsed one.
+    const chipAdvisories: ChipAdvisoryRow[] = [
+      { chipCode: 'TC', chipGameweekId: 2, delta: 12, solutionIndex: 0 },
+      { chipCode: 'TC', chipGameweekId: 2, delta: 12, solutionIndex: 1 },
+      { chipCode: 'BB', chipGameweekId: 5, delta: 9, solutionIndex: 2 },
+    ]
+    const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
+
+    expect(state.chipAdvisories).toHaveLength(2)
+
+    const [first, second] = state.chipAdvisories
+    expect(first.decisions).toEqual([
+      { chipCode: 'TC', displayName: 'Triple Captain', chipGameweekId: 2, gameweekLabel: 'Gameweek 2' },
+    ])
+    expect(first.deltaWhole).toBe(12)
+    expect(first.solutionCount).toBe(2)
+    expect(first.totalSolutionCount).toBe(3)
+
+    expect(second.decisions).toEqual([
+      { chipCode: 'BB', displayName: 'Bench Boost', chipGameweekId: 5, gameweekLabel: 'Gameweek 5' },
+    ])
+    expect(second.deltaWhole).toBe(9)
+    expect(second.solutionCount).toBe(1)
+    expect(second.totalSolutionCount).toBe(3)
+  })
+
+  it('a two-chip advisory produces exactly one points figure, never one per chip', () => {
+    const chipAdvisories: ChipAdvisoryRow[] = [
+      { chipCode: 'BB', chipGameweekId: 2, delta: 18, solutionIndex: 0 },
+      { chipCode: 'TC', chipGameweekId: 3, delta: 18, solutionIndex: 0 },
+    ]
+    const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
+
+    expect(state.chipAdvisories).toHaveLength(1)
+    const [plan] = state.chipAdvisories
+    expect(plan.decisions).toHaveLength(2)
+    // Exactly one points figure exists on the plan itself...
+    expect(typeof plan.deltaWhole).toBe('number')
+    // ...and no per-chip figure exists anywhere for a reader to sum.
+    for (const decision of plan.decisions) {
+      expect(decision).not.toHaveProperty('deltaWhole')
+      expect(decision).not.toHaveProperty('delta')
+    }
+  })
+
+  it('a single-chip advisory renders correctly — one chip, one gameweek, one delta', () => {
+    const chipAdvisories: ChipAdvisoryRow[] = [{ chipCode: 'TC', chipGameweekId: 2, delta: 18, solutionIndex: 0 }]
+    const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
+
     expect(state.chipAdvisories).toEqual([
-      { chipCode: 'TC', displayName: 'Triple Captain', gameweekLabel: 'Gameweek 2', deltaWhole: 6, solutionIndex: 0 },
-      { chipCode: 'BB', displayName: 'Bench Boost', gameweekLabel: 'Gameweek 4', deltaWhole: 6, solutionIndex: 0 },
+      {
+        decisions: [{ chipCode: 'TC', displayName: 'Triple Captain', chipGameweekId: 2, gameweekLabel: 'Gameweek 2' }],
+        deltaWhole: 18,
+        solutionCount: 1,
+        totalSolutionCount: 1,
+      },
     ])
   })
 
   it('rounds a delta like 6.5 up and 6.49 down — Math.round, not truncation', () => {
+    // Different chips in different gameweeks, so each stays its own plan —
+    // isolates the rounding behaviour from the collapsing behaviour above.
     const chipAdvisories: ChipAdvisoryRow[] = [
       { chipCode: 'TC', chipGameweekId: 2, delta: 6.5, solutionIndex: 0 },
       { chipCode: 'BB', chipGameweekId: 4, delta: 6.49, solutionIndex: 1 },
     ]
     const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.chipAdvisories).toHaveLength(2)
     expect(state.chipAdvisories[0].deltaWhole).toBe(7)
     expect(state.chipAdvisories[1].deltaWhole).toBe(6)
   })
@@ -353,7 +438,7 @@ describe('deriveChipState — chip advisory (ticket #126)', () => {
   it('renders an unrecognised chip code as an explicit unknown-chip label rather than dropping it', () => {
     const chipAdvisories: ChipAdvisoryRow[] = [{ chipCode: 'WC', chipGameweekId: 3, delta: 4, solutionIndex: 0 }]
     const state = deriveChipState(sourceData({ chipAdvisories }), GW19_DEADLINE_MS - 1)
-    expect(state.chipAdvisories[0].displayName).toBe('Unknown chip (WC)')
+    expect(state.chipAdvisories[0].decisions[0].displayName).toBe('Unknown chip (WC)')
   })
 
   it('carries the fixed five-gameweek limitation sentence on the derived view whenever there is at least one advisory', () => {

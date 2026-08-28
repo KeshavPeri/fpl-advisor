@@ -4,7 +4,7 @@ import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { fetchChipSourceData } from '../lib/chips/api.ts'
 import { deriveChipState } from '../lib/chips/derive.ts'
-import type { ChipExpiryWarning, ChipSetTimeRemaining, ChipSetView, DerivedChipState, UsedChipView } from '../lib/chips/types.ts'
+import type { ChipAdvisoryView, ChipExpiryWarning, ChipSetTimeRemaining, ChipSetView, DerivedChipState, UsedChipView } from '../lib/chips/types.ts'
 import { toErrorMessage } from '../lib/format'
 import './ChipsScreen.css'
 
@@ -148,21 +148,9 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
       {state.chipAdvisories.length > 0 && (
         <Surface className="chips-advisory">
           <p className="chips-advisory__label">Chip advisory</p>
-          <ul className="chips-advisory__list">
-            {state.chipAdvisories.map((advisory) => (
-              <li key={`${advisory.chipCode}-${advisory.solutionIndex}`} className="chips-advisory__row">
-                <span className="chips-advisory__name">{advisory.displayName}</span>
-                <span className="chips-advisory__meta">
-                  {advisory.gameweekLabel} ·{' '}
-                  <span className="num">
-                    {advisory.deltaWhole > 0 ? '+' : ''}
-                    {advisory.deltaWhole}
-                  </span>{' '}
-                  pts
-                </span>
-              </li>
-            ))}
-          </ul>
+          {state.chipAdvisories.map((plan) => (
+            <ChipAdvisoryPlan key={plan.decisions.map((d) => `${d.chipCode}@${d.chipGameweekId}`).join('|')} plan={plan} showSolutionCount={state.chipAdvisories.length > 1} />
+          ))}
           {state.chipAdvisoryNote && <p className="chips-advisory__note">{state.chipAdvisoryNote}</p>}
         </Surface>
       )}
@@ -199,6 +187,45 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
         </Surface>
       )}
     </>
+  )
+}
+
+/**
+ * One distinct chip-timing plan within the chip advisory — ticket #141.
+ * Renders the plan's own chip decisions once each (no delta on a decision
+ * row — see ChipAdvisoryDecision's own doc comment) and states the
+ * points figure exactly once, for the plan as a whole. `showSolutionCount`
+ * is only ever true when ChipsScreen.tsx found more than one distinct
+ * plan — the only case where "N of M solutions" is informative, since a
+ * single plan by construction means every solution that named a chip
+ * agreed on it (see deriveChipAdvisories's own comment in derive.ts).
+ */
+function ChipAdvisoryPlan({ plan, showSolutionCount }: { plan: ChipAdvisoryView; showSolutionCount: boolean }) {
+  return (
+    <div className="chips-advisory__plan">
+      <ul className="chips-advisory__list">
+        {plan.decisions.map((decision) => (
+          <li key={`${decision.chipCode}-${decision.chipGameweekId}`} className="chips-advisory__row">
+            <span className="chips-advisory__name">{decision.displayName}</span>
+            <span className="chips-advisory__meta">{decision.gameweekLabel}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="chips-advisory__delta">
+        <span className="num">
+          {plan.deltaWhole > 0 ? '+' : ''}
+          {plan.deltaWhole}
+        </span>{' '}
+        pts across the horizon
+        {showSolutionCount && (
+          <>
+            {' '}
+            · <span className="num">{plan.solutionCount}</span> of{' '}
+            <span className="num">{plan.totalSolutionCount}</span> solutions
+          </>
+        )}
+      </p>
+    </div>
   )
 }
 

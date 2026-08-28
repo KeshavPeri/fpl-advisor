@@ -17,6 +17,7 @@
 
 import { formatDeadlineInstant } from '../deadlineCountdown'
 import type {
+  ChipAdvisoryDecision,
   ChipAdvisoryRow,
   ChipAdvisoryView,
   ChipExpiryBand,
@@ -172,23 +173,84 @@ export const CHIP_ADVISORY_HORIZON_NOTE =
   'The solver only sees five gameweeks ahead, so it always favours playing a chip now rather than saving it for a later one it cannot see.'
 
 /**
- * Resolves each stored advisory row for display. `delta` is already a
- * database-computed figure (see the chip_advisories migration's GENERATED
- * column) — this only rounds it to a whole number, per design-reference.md's
- * "no decimal projected-points values" rule, and attaches a display name.
- * An unrecognised chip_code (should never happen — see
- * SOLVER_CHIP_DISPLAY_NAMES's own comment) renders as an explicit
- * "Unknown chip (…)" label rather than being dropped, matching this
- * module's own usedChips convention above.
+ * Ticket #141. Collapses `rows` — one row per (chip played, solution) from
+ * the solver's stored solutions, already filtered by api.ts to the latest
+ * solver run — into one entry per DISTINCT plan those solutions propose,
+ * fixing the two display defects the ticket exists for:
+ *
+ * 1. **Six rows where there should be two.** When every solution names the
+ *    same chip(s) in the same gameweek(s), that is one decision shown three
+ *    times over, not three decisions. Grouping by solution first, then by
+ *    each solution's own *set* of (chipCode, chipGameweekId) pairs, means
+ *    identical solutions collapse to a single plan; solutions that
+ *    genuinely disagree produce genuinely distinct plans.
+ * 2. **The delta belongs to the pair, not each chip.** `chip_advisories`
+ *    replicates one solution's objective delta onto every chip row within
+ *    that solution (see ChipAdvisoryRow's own doc comment) — so this reads
+ *    that shared value ONCE per distinct plan (from its first solution)
+ *    and attaches it to the plan as a whole via ChipAdvisoryView.deltaWhole,
+ *    never to an individual ChipAdvisoryDecision. There is no measurement
+ *    of either chip alone; printing one against each would invent two
+ *    numbers from one.
+ *
+ * `solutionCount` / `totalSolutionCount` are computed against the number of
+ * DISTINCT solutionIndex values actually present in `rows` — the only count
+ * this data can honestly give (a solution that played no chip at all leaves
+ * no row here to count). When only one plan results, every solution that
+ * named a chip agreed, so `solutionCount === totalSolutionCount` always
+ * holds for it; the count only becomes informative once solutions disagree,
+ * which is exactly when the screen renders it (see ChipsScreen.tsx).
+ *
+ * Decisions within a plan are sorted by gameweek, then chip code, so
+ * grouping is independent of whatever order the database returned rows in.
  */
 function deriveChipAdvisories(rows: readonly ChipAdvisoryRow[]): ChipAdvisoryView[] {
-  return rows.map((row) => ({
-    chipCode: row.chipCode,
-    displayName: SOLVER_CHIP_DISPLAY_NAMES[row.chipCode] ?? `Unknown chip (${row.chipCode})`,
-    gameweekLabel: `Gameweek ${row.chipGameweekId}`,
-    deltaWhole: Math.round(row.delta),
-    solutionIndex: row.solutionIndex,
-  }))
+  if (rows.length === 0) return []
+
+  const bySolution = new Map<number, ChipAdvisoryRow[]>()
+  for (const row of rows) {
+    const existing = bySolution.get(row.solutionIndex)
+    if (existing) existing.push(row)
+    else bySolution.set(row.solutionIndex, [row])
+  }
+  const totalSolutionCount = bySolution.size
+
+  interface PlanAccumulator {
+    decisions: readonly ChipAdvisoryRow[]
+    delta: number
+    solutionCount: number
+  }
+  const plans = new Map<string, PlanAccumulator>()
+
+  for (const solutionRows of bySolution.values()) {
+    const sortedDecisions = [...solutionRows].sort((a, b) =>
+      a.chipGameweekId !== b.chipGameweekId
+        ? a.chipGameweekId - b.chipGameweekId
+        : a.chipCode.localeCompare(b.chipCode)
+    )
+    const key = sortedDecisions.map((row) => `${row.chipCode}@${row.chipGameweekId}`).join('|')
+    const existingPlan = plans.get(key)
+    if (existingPlan) {
+      existingPlan.solutionCount += 1
+    } else {
+      plans.set(key, { decisions: sortedDecisions, delta: sortedDecisions[0].delta, solutionCount: 1 })
+    }
+  }
+
+  return Array.from(plans.values()).map((plan) => {
+    const decisions: ChipAdvisoryDecision[] = plan.decisions.map((row) => ({
+      chipCode: row.chipCode,
+      displayName: SOLVER_CHIP_DISPLAY_NAMES[row.chipCode] ?? `Unknown chip (${row.chipCode})`,
+      chipGameweekId: row.chipGameweekId,
+      gameweekLabel: `Gameweek ${row.chipGameweekId}`,
+    }))
+    return {
+      decisions,
+      deltaWhole: Math.round(plan.delta),
+      solutionCount: plan.solutionCount,
+      totalSolutionCount,
+    }
+  })
 }
 
 /**
