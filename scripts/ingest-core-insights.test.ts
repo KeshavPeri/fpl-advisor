@@ -19,7 +19,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { buildEloByCode, planTeamEloUpdates, TEAMS_REQUIRED_COLUMNS, type TeamIdentityRow } from './ingest-core-insights.js'
+import { buildEloByCode, planTeamEloUpdates, TEAMS_REQUIRED_COLUMNS, toMatchStatRow, type TeamIdentityRow } from './ingest-core-insights.js'
 
 // ============================================================================
 // TEAMS_REQUIRED_COLUMNS — the schema-change guard the DoD says must survive.
@@ -266,5 +266,157 @@ describe('competition (ticket #54) — source invariants', () => {
 
   it('reports rows written and rows now carrying a non-null competition as named job_runs.details fields', () => {
     expect(source).toMatch(/matchRowsWithCompetition/)
+  })
+})
+
+// ============================================================================
+// team_goals_conceded (ticket #125) — toMatchStatRow exercised directly, the
+// same technique buildEloByCode/planTeamEloUpdates above use to prove
+// behaviour without a live Supabase project.
+// ============================================================================
+
+/** A well-formed source CSV row with every MATCH_STATS_REQUIRED_COLUMNS column present, so a single test only has to override the cell(s) it cares about. */
+function matchStatsRecord(overrides: Partial<Record<string, string>> = {}): Record<string, string> {
+  return {
+    player_id: '10',
+    match_id: '25-26-prem-arsenal-vs-chelsea',
+    minutes_played: '90',
+    goals: '0',
+    assists: '0',
+    xg: '0.1',
+    xa: '0.05',
+    xgot: '0.2',
+    shots_on_target: '1',
+    tackles: '2',
+    tackles_won: '1',
+    interceptions: '1',
+    recoveries: '3',
+    blocks: '1',
+    clearances: '4',
+    headed_clearances: '1',
+    saves: '0',
+    goals_conceded: '1',
+    goals_prevented: '0.3',
+    team_goals_conceded: '2',
+    ...overrides,
+  }
+}
+
+describe('toMatchStatRow — team_goals_conceded (ticket #125)', () => {
+  it('reads team_goals_conceded from the CSV row and writes it', () => {
+    const row = toMatchStatRow(matchStatsRecord({ team_goals_conceded: '3' }), '2025-2026', 1, new Map())
+    expect(row?.team_goals_conceded).toBe(3)
+  })
+
+  // DoD: "goals_conceded is still ingested and still written, unchanged."
+  it('still ingests and writes goals_conceded unchanged, alongside the new team_goals_conceded', () => {
+    const row = toMatchStatRow(matchStatsRecord({ goals_conceded: '1', team_goals_conceded: '3' }), '2025-2026', 1, new Map())
+    expect(row?.goals_conceded).toBe(1)
+    expect(row?.team_goals_conceded).toBe(3)
+    // The two must never be conflated — different stats, different cells.
+    expect(row?.goals_conceded).not.toBe(row?.team_goals_conceded)
+  })
+
+  // DoD: "A source row with a blank/missing team_goals_conceded cell writes
+  // null, not 0." — the most important test in the ingest half.
+  it('writes null, not 0, for a blank team_goals_conceded cell', () => {
+    const row = toMatchStatRow(matchStatsRecord({ team_goals_conceded: '' }), '2025-2026', 1, new Map())
+    expect(row?.team_goals_conceded).toBeNull()
+    expect(row?.team_goals_conceded).not.toBe(0)
+  })
+
+  it('writes null, not 0, when the team_goals_conceded column is absent from the row object entirely', () => {
+    const record = matchStatsRecord()
+    delete record.team_goals_conceded
+    const row = toMatchStatRow(record, '2025-2026', 1, new Map())
+    expect(row?.team_goals_conceded).toBeNull()
+    expect(row?.team_goals_conceded).not.toBe(0)
+  })
+
+  it('writes a real zero (not null) when the source cell genuinely reads 0 — a team that conceded nothing', () => {
+    const row = toMatchStatRow(matchStatsRecord({ team_goals_conceded: '0' }), '2025-2026', 1, new Map())
+    expect(row?.team_goals_conceded).toBe(0)
+    expect(row?.team_goals_conceded).not.toBeNull()
+  })
+})
+
+describe('MATCH_STATS_REQUIRED_COLUMNS / row mapping — source invariants (ticket #125)', () => {
+  const sourcePath = fileURLToPath(new URL('./ingest-core-insights.ts', import.meta.url))
+  const source = readFileSync(sourcePath, 'utf8')
+
+  it('team_goals_conceded appears in the required-columns list', () => {
+    const listBody = source.slice(
+      source.indexOf('const MATCH_STATS_REQUIRED_COLUMNS'),
+      source.indexOf(']', source.indexOf('const MATCH_STATS_REQUIRED_COLUMNS')),
+    )
+    expect(listBody).toMatch(/'team_goals_conceded'/)
+  })
+
+  it('team_goals_conceded appears in the row mapping, read via toInt like every other integer counting stat', () => {
+    expect(source).toMatch(/team_goals_conceded:\s*toInt\(record\.team_goals_conceded\)/)
+  })
+
+  it('reports a named non-null-team_goals_conceded count in job_runs.details', () => {
+    expect(source).toMatch(/matchRowsWithTeamGoalsConceded/)
+  })
+})
+
+// ============================================================================
+// supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql
+// and supabase/README.md — grep-checkable DoD items against the real shipped
+// files (ticket #125).
+// ============================================================================
+
+describe('supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql', () => {
+  const migrationPath = fileURLToPath(
+    new URL('../supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql', import.meta.url),
+  )
+  const migrationSource = readFileSync(migrationPath, 'utf8')
+
+  it('adds team_goals_conceded as a nullable integer column with no default', () => {
+    expect(migrationSource).toMatch(/ADD COLUMN IF NOT EXISTS team_goals_conceded integer;/)
+    // No "NOT NULL" and no "DEFAULT" on that same statement — nullable,
+    // undefaulted, deliberately (see the file's own header).
+    const columnLine = migrationSource.match(/ALTER TABLE public\.player_match_stats ADD COLUMN IF NOT EXISTS team_goals_conceded integer;/)
+    expect(columnLine).not.toBeNull()
+  })
+
+  it('is idempotent: ADD COLUMN IF NOT EXISTS', () => {
+    expect(migrationSource).toMatch(/ADD COLUMN IF NOT EXISTS/)
+  })
+
+  it('carries a COMMENT ON COLUMN naming this the clean-sheet source and goals_conceded as goalkeeper-only', () => {
+    expect(migrationSource).toMatch(/COMMENT ON COLUMN public\.player_match_stats\.team_goals_conceded IS/)
+    expect(migrationSource).toMatch(/goalkeeper-only/i)
+  })
+
+  it('issues no GRANT statement — table-level grants from the #12 migration already cover this column', () => {
+    // Strip comment lines (-- ...) so mentioning "GRANT" in prose (e.g.
+    // "table-level grants already cover this") doesn't false-positive; what
+    // this actually guards is an executable GRANT statement.
+    const codeOnly = migrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
+})
+
+describe('supabase/README.md (ticket #125)', () => {
+  const readmePath = fileURLToPath(new URL('../supabase/README.md', import.meta.url))
+  const readmeSource = readFileSync(readmePath, 'utf8')
+
+  it('the 20260818100000 row no longer claims to add team_goals_conceded, and states it was added later by this ticket', () => {
+    const rowMatch = readmeSource.match(/\| `20260818100000_player_match_stats_competition\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).not.toMatch(/Adds `competition`.*and `team_goals_conceded`/)
+    expect(rowMatch![0]).toMatch(/does not add `team_goals_conceded`/i)
+  })
+
+  it('lists the new migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260828090000_player_match_stats_team_goals_conceded\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260828090000_player_match_stats_team_goals_conceded\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
   })
 })
