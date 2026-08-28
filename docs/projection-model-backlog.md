@@ -386,3 +386,62 @@ the two players were not rated on the same instrument.
 **Consequence for the interface, and it is a real requirement:** the captain choice needs its own
 confidence signal. A 0.20-point coin-flip is currently presented as a decision, which is exactly
 what `product-brief.md` §8 forbids for the transfer decision and never extended to captaincy.
+
+---
+
+## G9 — Backtest harness (item 32, first slice), 28 Aug 2026 — what it measures, what it does not
+
+Ticket #133. Every entry above compared distributions with full-season hindsight, or reasoned
+from a single worked example (G7/G8's "do not act from argument alone" — this is the "measure it"
+half of that precedent). `scripts/run-backtest.ts` is the first thing in this project that
+measures a **per-player, per-gameweek, point-in-time projection** against what actually happened,
+using `feature_history`'s strictly-before guarantee (ticket #121/#125) so nothing on the projected
+side could not actually have been known before that gameweek.
+
+**What this slice measures.** For every `feature_history` row with `prior_matches > 0` whose
+player featured that gameweek (and whose actual reconstruction has a known
+`team_goals_conceded`), it projects one points figure from `src/lib/projection/`'s own combiner
+and compares it against the actual points reconstructed from `player_match_stats` via
+`src/lib/scoring/`. Mean absolute error and mean signed error, overall, by position and by
+gameweek. Bonus is absent from both sides (the actual side has no bonus column, verified — #127
+— and the projected side's `bonusPoints` is hardcoded to 0 here, never allocated). Two sanity
+bounds (overall MAE in [1.0, 3.5]; no position's derived clean-sheet rate above 60%) fail the
+report, naming the figure, rather than printing a number nobody checked.
+
+**What this slice deliberately does not measure.** No transfers, no captaincy, no solver, no
+season league position — replaying a manager's actual decisions across a season is item 32's
+remaining, much larger, work. This slice establishes the measurement substrate only: can the
+*projection* be trusted, gameweek by gameweek, with no hindsight. Whether the *recommendation*
+built on top of that projection would have been good is still open.
+
+**Three approximations this slice's method carries, all Tier 2, all because `feature_history`
+stores cumulative totals rather than a per-match history:**
+
+1. **Minutes and defensive-contribution hit rate are estimated from one averaged "typical match"**
+   (average minutes per prior match; average CBIT/CBIRT per prior match), fed unmodified into
+   `minutes.ts`'s `estimateMinutes()` and `defconRate.ts`'s `estimateDefconHitRate()` — the same
+   functions the live pipeline uses, given a single representative match instead of a true
+   last-five-match window or true per-match hit/miss history. This answers "did the *average*
+   match cross the threshold", not the real match-to-match distribution — a genuine source of
+   error this backtest's own sanity bounds partly exist to catch.
+2. **Every row is projected against a neutral fixture** (`fplDifficulty = 3`, which
+   `fixture.ts`'s own difficulty table resolves to `expectedScore = 0.5` — every multiplier
+   exactly 1.0) because `feature_history` carries no opponent, no elo, no FDR at all. Real
+   fixture swings (G8, above) are entirely absent from this slice's projections.
+3. **Availability is assumed 1.0 (fully available) for every row** — `feature_history` carries no
+   historical `players.status`/`chance_of_playing` for a past season, and today's status says
+   nothing about a gameweek two seasons ago.
+
+**Two known data gaps, carried forward, not solved here (ticket text: "count both, report both,
+fix neither").** `player_match_stats.team_goals_conceded` is ~98% populated for 2025-2026 (the
+~2% gap excludes that row from the measured population, counted under `actualDataIncomplete` —
+see the report's own population section); 2,520 `player_match_stats` rows for 2025-2026 have an
+unresolvable `player_code` and were already excluded when `feature_history` itself was built
+(ticket #121/#125) — this backtest inherits that exclusion rather than re-deriving it.
+
+**The recommendation-level backtest remains open.** Once this slice's own numbers are read (a
+live run against the real 18,243 `feature_history` / ~15,000 `player_match_stats` rows — not
+possible from the Builder session that shipped this ticket, since a new `workflow_dispatch`
+workflow cannot run until its file is on the default branch), the natural next question is
+whether the *projection* errors measured here are small enough, and unbiased enough by position,
+to trust replaying transfers and captaincy on top of them — item 32's remaining work.

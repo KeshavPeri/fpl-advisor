@@ -1,0 +1,1331 @@
+// Backtest harness — ticket #133 (feature-list item 32, first slice).
+//
+// ============================================================================
+// WHAT THIS IS, AND WHY IT IS NOT scripts/calibration-report.ts.
+// ============================================================================
+// calibration-report.ts compares two DISTRIBUTIONS with full-season hindsight
+// on both sides — its own caveats say plainly that this is invalid for
+// judging any one prediction. A backtest asks a different question: for each
+// gameweek of a past season, using ONLY what was knowable strictly before
+// that gameweek, what would the model have projected — and what actually
+// happened? public.feature_history (ticket #121, densified by #125) makes
+// this possible: every row already carries the CUMULATIVE totals of a
+// player's Premier League matches strictly before its gameweek_id, nothing
+// from the gameweek itself and nothing later. This job's entire job is to
+// not reach past that boundary — see "THE JOIN" below.
+//
+// ============================================================================
+// SCOPE OF THIS FIRST SLICE — measures the PROJECTION, not the recommendation.
+// ============================================================================
+// No transfers, no captaincy, no solver, no season league position — that is
+// item 32's remaining work. This slice reads feature_history, produces one
+// projected-points figure per (player, gameweek) row from the existing pure
+// modules under src/lib/projection/, reconstructs that gameweek's actual
+// points from player_match_stats via src/lib/scoring/, and reports the
+// signed error. Read-only: the only Supabase write anywhere in this file is
+// its own job_runs row.
+//
+// ============================================================================
+// THE JOIN. Never player_match_stats for features.
+// ============================================================================
+// feature_history is keyed on player_code, never the FPL element id — 453 of
+// 458 element ids changed between the 2025-2026 and 2026-2027 seasons (see
+// the #12/#22 migrations). This job selects no player_id from either table
+// and resolves position via players.code = feature_history.player_code /
+// player_match_stats.player_code exclusively. Actuals are filtered to
+// competition = PREMIER_LEAGUE_COMPETITION (ticket #54) — cup and European
+// rows score no FPL points and carry 34% higher xG per 90.
+//
+// RATE INPUTS COME FROM feature_history's prior_* TOTALS AND NOTHING ELSE.
+// This job never reads player_match_stats to build a rate — that table is
+// read here for exactly one purpose: reconstructing the TARGET gameweek's
+// actual points. If a future edit finds itself computing a rate from
+// player_match_stats, the lookahead has already happened (ticket text).
+//
+// ============================================================================
+// HOW A PROJECTION IS BUILT FROM CUMULATIVE TOTALS (Tier 2 — logged
+// HIGH-IMPACT; see the Builder report for the full "because").
+// ============================================================================
+// feature_history stores season-to-date CUMULATIVE totals, not a per-match
+// history and not a last-five-match window — so the live pipeline's exact
+// inputs (scripts/project-points.ts's recent-minutes list, per-match defcon
+// hit/miss history, real fixture elo) do not exist here. This job builds the
+// closest honest equivalent from what IS available, using every function
+// unmodified:
+//
+//  - Rates (xG/xA/saves/CBI/recoveries per 90): rates.ts's own formula is
+//    generic in the underlying count, so a player's PlayerRateHistory is
+//    built directly from prior_minutes/prior_xg/prior_xa/prior_saves/
+//    prior_clearances+blocks+interceptions/prior_recoveries — an exact,
+//    non-approximated mapping. The POSITION prior each row shrinks toward is
+//    computed by rates.ts's own positionPriorRates(), fed every OTHER
+//    player's prior_* totals for that SAME gameweek and position — itself
+//    entirely knowable before that gameweek, so the prior carries no
+//    lookahead either.
+//
+//  - Minutes and defensive-contribution hit rate need PER-MATCH data
+//    (minutes.ts's last-five list; defconRate.ts's per-match threshold
+//    check) that a cumulative total cannot reconstruct exactly. This job
+//    approximates a player's "typical match" — average minutes per prior
+//    match, average CBIT/CBIRT per prior match — and feeds that single
+//    averaged match into estimateMinutes()/estimateDefconHitRate()
+//    unmodified. This is a real approximation (it answers "did the AVERAGE
+//    match cross the threshold", not the true match-to-match distribution)
+//    and is deliberately not hidden: see docs/projection-model-backlog.md's
+//    new section for the "because" and the sanity bounds this file checks
+//    partly guard against exactly this kind of harness error.
+//
+//  - Fixture difficulty does not exist in feature_history at all (no
+//    opponent, no elo, no FDR). Every row is projected against a NEUTRAL
+//    fixture — fplDifficulty = 3, teamElo/opponentElo = null — which
+//    fixture.ts's own DIFFICULTY_EXPECTED_SCORE table resolves to exactly
+//    expectedScore = 0.5, the same value real elo gives two evenly-matched
+//    teams. At that value attackingMultiplier/defensiveMultiplier are both
+//    exactly 1.0 and expectedGoalsConceded is exactly leagueBaselineGoals —
+//    i.e. an honest "average fixture", not a hand-derived shortcut.
+//
+//  - Availability: feature_history carries no players.status/
+//    chance_of_playing history for a past season, and reading TODAY's
+//    players table for a historical gameweek would itself be a form of
+//    lookahead (today's fitness says nothing about a gameweek two seasons
+//    ago). Every row is projected as fully available (status 'a') — a row
+//    with prior_matches > 0 already carries positive evidence the player was
+//    selectable, which is the best signal this table can offer.
+//
+//  - Multi-fixture gameweeks: feature_history is one row per (player,
+//    gameweek), not per fixture, so this job always projects exactly one
+//    fixture per gameweek. A genuine double gameweek would under-project
+//    against an actual side that (correctly) sums both matches — a known,
+//    documented first-slice gap, not a bug to chase here.
+//
+// ============================================================================
+// THE MEASURED POPULATION (ticket text, verbatim rule).
+// ============================================================================
+// A feature_history row enters the headline MAE/MSE only if ALL of:
+//   1. prior_matches > 0        — otherwise there is no point-in-time signal
+//                                  at all (named test: "no prior matches").
+//   2. the player actually featured that gameweek (minutes_played > 0 in at
+//      least one matching player_match_stats row) — a player who did not
+//      feature is a correct zero on both sides that would flatter the error
+//      by diluting it with an easy case (named test: "did not feature").
+//   3. that gameweek's actual reconstruction is not missing
+//      team_goals_conceded (~2% of rows, ticket #125's known gap, carried
+//      forward here rather than solved) — without it the clean-sheet/
+//      goals-conceded reconstruction is a guess, not a measurement.
+// Every row read falls into EXACTLY one of: measured, or one of the four
+// named exclusion reasons below — a strict partition, asserted in
+// assertReconciles() and covered by a named test.
+//
+// ============================================================================
+// team_goals_conceded, NOT the per-player goals_conceded column.
+// ============================================================================
+// player_match_stats.goals_conceded is a goalkeeper-only stat, ~1% populated
+// for outfield rows (see build-feature-history.ts's own header) — using it
+// for clean-sheet reconstruction on outfield players would silently default
+// nearly every one of them to "0 conceded" and inflate the derived
+// clean-sheet rate toward 100%, which is exactly the failure mode
+// CLEAN_SHEET_RATE_UPPER_BOUND below exists to catch. This job reads
+// team_goals_conceded (added by ticket #125's migration, ~98% populated for
+// 2025-2026 — the other known gap carried forward, not solved here) for
+// every position, matching feature_history's own prior_team_goals_conceded
+// column and build-feature-history.ts's stated correction.
+//
+// ============================================================================
+// BONUS — excluded from both sides, without extra bookkeeping.
+// ============================================================================
+// The actual side has no bonus column to read (verified, ticket #127 — no
+// `bonus` column in the FPL-Core-Insights source, and it can never have one).
+// The projected side here calls src/lib/projection/expectedPoints.ts's
+// projectPlayerFixture() directly (never scripts/project-points.ts's SEPARATE
+// bonus-allocation pass), whose own components.bonusPoints is hardcoded to
+// exactly 0 — so bonus is absent from both sides by construction, with no
+// subtract-back-out step needed (unlike calibration-report.ts, which compares
+// against project-points.ts's bonus-carrying stored output and must undo it).
+//
+// ============================================================================
+// SANITY BOUNDS — the report FAILS, naming the figure, rather than printing
+// a number nobody checked.
+// ============================================================================
+// Mean absolute error outside [MAE_LOWER_BOUND, MAE_UPPER_BOUND] points per
+// player-gameweek, or any position's derived clean-sheet rate above
+// CLEAN_SHEET_RATE_UPPER_BOUND, means the HARNESS is wrong, not the model —
+// see checkSanityBounds(). The report file is still written (useful for
+// diagnosing which figure failed) but the job_runs row records status
+// 'failure' and the process exits non-zero.
+//
+// ============================================================================
+// Wiring.
+// ============================================================================
+// Reads exactly SUPABASE_URL and SUPABASE_SECRET_KEY. Season is
+// BACKTEST_SEASON, trimmed, falling back to DEFAULT_SEASON when unset or
+// blank — matching scripts/build-feature-history.ts's FEATURE_HISTORY_SEASON
+// convention exactly (a job-specific env var name, same trim-and-default
+// behaviour, not a shared variable). Writes to no table but job_runs (one
+// row, never upserted). Writes one file, to BACKTEST_REPORT_PATH. Issues no
+// Supabase insert/update/upsert/delete anywhere except that one job_runs
+// insert. NOT wired into any scheduled workflow — workflow_dispatch only,
+// run by hand, deliberately (this reads a whole season).
+
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
+import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
+import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
+import type { DefensiveActionStats, Position } from '../src/lib/scoring/types.ts'
+import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../src/lib/scoring/types.ts'
+import { defensiveContributionPoints } from '../src/lib/scoring/defensiveContribution.ts'
+import { goalkeeperSavePoints } from '../src/lib/scoring/goalkeeperSaves.ts'
+import { totalMatchPoints, type MatchPointComponents } from '../src/lib/scoring/totalMatchPoints.ts'
+import {
+  APPEARANCE_POINTS_60_PLUS,
+  APPEARANCE_POINTS_UNDER_60,
+  ASSIST_POINTS,
+  GOALS_CONCEDED_DIVISOR,
+  GOALS_CONCEDED_POINTS_PER_UNIT,
+  cleanSheetPoints,
+  goalPoints,
+  goalsConcededPointsApply,
+  savePointsApply,
+} from '../src/lib/projection/pointValues.ts'
+import { positionPriorRates, type PlayerRateHistory, type PlayerRates, type RateHistoryMatch } from '../src/lib/projection/rates.ts'
+import { positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
+import type { DefensiveContributionMatch } from '../src/lib/projection/types.ts'
+import { LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
+import {
+  projectPlayerGameweek,
+  type FixtureContext,
+  type FixtureProjectionComponents,
+  type GameweekProjection,
+  type PlayerProjectionInput,
+} from '../src/lib/projection/expectedPoints.ts'
+
+const JOB_NAME = 'run-backtest'
+const FEATURE_HISTORY_MIGRATION = 'supabase/migrations/20260827090000_feature_history.sql'
+const PLAYER_MATCH_STATS_MIGRATION = 'supabase/migrations/20260811170000_player_match_stats.sql'
+const TEAM_GOALS_CONCEDED_MIGRATION = 'supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql'
+
+/**
+ * Season this job backtests, read from BACKTEST_SEASON — trimmed, falling
+ * back to this default when unset or blank. Matches
+ * scripts/build-feature-history.ts's FEATURE_HISTORY_SEASON convention
+ * exactly (job-specific env var, same trim-and-default rule), not a shared
+ * variable — this job can be pointed at a different season than that job's
+ * own default without the two fighting over one env var.
+ */
+export const DEFAULT_SEASON = '2025-2026'
+
+const DEFAULT_REPORT_PATH = './out/backtest-report.md'
+
+/**
+ * Assumed availability for every projected row (Tier 3 — see file header).
+ * No historical daily fitness signal exists in feature_history for a past
+ * season, and today's players.status says nothing about a gameweek in an
+ * earlier season, so this is the deliberate, documented substitute.
+ */
+const ASSUMED_AVAILABILITY_STATUS = 'a'
+
+/**
+ * The neutral FPL difficulty rating (1 = easiest, 5 = hardest) fed to
+ * fixture.ts when no real fixture exists to project against. fixture.ts's
+ * own DIFFICULTY_EXPECTED_SCORE table resolves 3 to exactly 0.5 — the same
+ * expectedScore two elo-even teams produce — so every multiplier derived
+ * from it below is exactly 1.0 (no adjustment). Tier 3.
+ */
+const NEUTRAL_FIXTURE_DIFFICULTY = 3
+
+/**
+ * Sanity bounds (ticket text, pre-answered — not fitted here). Outside these,
+ * the HARNESS is wrong, not the model — see checkSanityBounds().
+ */
+export const MAE_LOWER_BOUND = 1.0
+export const MAE_UPPER_BOUND = 3.5
+export const CLEAN_SHEET_RATE_UPPER_BOUND = 0.6
+
+/** A clean sheet requires 60+ minutes, same gate pointValues.ts's appearance-points split uses. */
+const CLEAN_SHEET_QUALIFYING_MINUTES = 60
+
+const POSITIONS: readonly Position[] = [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD]
+const POSITION_NAMES: Readonly<Record<Position, string>> = {
+  1: 'Goalkeeper',
+  2: 'Defender',
+  3: 'Midfielder',
+  4: 'Forward',
+}
+
+// ============================================================================
+// Env — identical contract to every other scripts/*.ts job.
+// ============================================================================
+
+interface SupabaseEnv {
+  url: string
+  secretKey: string
+}
+
+function readSupabaseEnv(): SupabaseEnv | null {
+  const url = process.env.SUPABASE_URL
+  const secretKey = process.env.SUPABASE_SECRET_KEY
+  const missing: string[] = []
+  if (!url) missing.push('SUPABASE_URL')
+  if (!secretKey) missing.push('SUPABASE_SECRET_KEY')
+
+  if (missing.length > 0) {
+    console.error(
+      `${JOB_NAME}: required environment variables are not set. ` +
+        'Both SUPABASE_URL and SUPABASE_SECRET_KEY must be set ' +
+        `(missing: ${missing.join(', ')}). Making no network call.`,
+    )
+    return null
+  }
+
+  return { url: url as string, secretKey: secretKey as string }
+}
+
+function readSeason(): string {
+  return (process.env.BACKTEST_SEASON ?? '').trim() || DEFAULT_SEASON
+}
+
+function readReportPath(): string {
+  return process.env.BACKTEST_REPORT_PATH ?? DEFAULT_REPORT_PATH
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+export class BacktestError extends Error {
+  context: string
+  constructor(message: string, context: string) {
+    super(message)
+    this.name = 'BacktestError'
+    this.context = context
+  }
+}
+
+export class BacktestSanityError extends Error {
+  failures: string[]
+  constructor(failures: string[]) {
+    super(`sanity bounds failed: ${failures.join('; ')}`)
+    this.name = 'BacktestSanityError'
+    this.failures = failures
+  }
+}
+
+interface PostgrestLikeError {
+  code?: string
+  message?: string
+}
+
+function isMissingTable(error: PostgrestLikeError, tableName: string): boolean {
+  if (error.code === 'PGRST205' || error.code === '42P01') return true
+  const message = error.message ?? ''
+  return new RegExp(tableName).test(message) && /schema cache|does not exist|relation.*does not exist/i.test(message)
+}
+
+// Same pattern as build-feature-history.ts's own guard: a missing
+// team_goals_conceded column (the #125 migration not yet applied) fails
+// loudly with a message naming the gap, rather than silently defaulting
+// every clean-sheet reconstruction to "conceded nothing".
+function isMissingColumn(error: PostgrestLikeError, columnName: string): boolean {
+  if (error.code === '42703') return true
+  const message = error.message ?? ''
+  return new RegExp(columnName).test(message) && /does not exist/i.test(message)
+}
+
+// ============================================================================
+// job_runs
+// ============================================================================
+
+type JsonRecord = Record<string, unknown>
+
+interface JobRunInput {
+  status: 'success' | 'failure' | 'skipped'
+  message: string
+  details: JsonRecord | null
+  startedAt: Date
+}
+
+async function recordJobRun(supabase: SupabaseClient, input: JobRunInput): Promise<void> {
+  const finishedAt = new Date()
+  const { error } = await supabase.from('job_runs').insert({
+    job_name: JOB_NAME,
+    status: input.status,
+    message: input.message,
+    details: input.details,
+    started_at: input.startedAt.toISOString(),
+    finished_at: finishedAt.toISOString(),
+  })
+  if (error) {
+    if (isMissingTable(error, 'job_runs')) {
+      console.error(`${JOB_NAME}: table "job_runs" does not exist. Apply its migration before running this script.`)
+    }
+    throw new Error(`failed to record job_runs row: ${error.message}`)
+  }
+}
+
+// ============================================================================
+// Pure computation — projection side. No I/O below this point in either
+// section; every case is testable on constructed rows with no live database.
+// ============================================================================
+
+/** The prior_* fields this job reads off feature_history — only what it needs. */
+export interface FeatureHistoryPriorFields {
+  prior_matches: number
+  prior_minutes: number
+  prior_xg: number
+  prior_xa: number
+  prior_saves: number
+  prior_clearances: number
+  prior_blocks: number
+  prior_interceptions: number
+  prior_tackles: number
+  prior_recoveries: number
+}
+
+export interface FeatureHistoryRow extends FeatureHistoryPriorFields {
+  gameweek_id: number
+  player_code: number
+}
+
+/** Exact, non-approximated mapping — rates.ts's shrinkage formula is generic in the underlying count. */
+export function buildPlayerRateHistory(row: FeatureHistoryPriorFields): PlayerRateHistory {
+  return {
+    minutesPlayed: row.prior_minutes,
+    totalXg: row.prior_xg,
+    totalXa: row.prior_xa,
+    totalSaves: row.prior_saves,
+    totalCbi: row.prior_clearances + row.prior_blocks + row.prior_interceptions,
+    totalRecoveries: row.prior_recoveries,
+  }
+}
+
+/** Same mapping, shaped for positionPriorRates() — one entry per player, summed exactly like buildPlayerRateHistory's own totals. */
+export function buildRateHistoryMatch(row: FeatureHistoryPriorFields): RateHistoryMatch {
+  return {
+    minutesPlayed: row.prior_minutes,
+    xg: row.prior_xg,
+    xa: row.prior_xa,
+    saves: row.prior_saves,
+    cbi: row.prior_clearances + row.prior_blocks + row.prior_interceptions,
+    recoveries: row.prior_recoveries,
+  }
+}
+
+/** A player's average minutes per prior match — 0 with no prior matches (never divides by zero). */
+export function averageMinutesPerMatch(row: Pick<FeatureHistoryPriorFields, 'prior_matches' | 'prior_minutes'>): number {
+  return row.prior_matches > 0 ? row.prior_minutes / row.prior_matches : 0
+}
+
+/**
+ * The single-averaged-match approximation this file's header documents —
+ * feature_history has no last-five-match list, so this feeds minutes.ts's
+ * estimateMinutes() one "typical match" (average minutes per prior match)
+ * rather than a true recent-form window. Empty for a player with no prior
+ * matches — minutes.ts's own no-history baseline applies unmodified.
+ */
+export function buildRecentMinutes(row: Pick<FeatureHistoryPriorFields, 'prior_matches' | 'prior_minutes'>): number[] {
+  return row.prior_matches > 0 ? [averageMinutesPerMatch(row)] : []
+}
+
+/**
+ * The same single-averaged-match approximation, for defconRate.ts's
+ * estimateDefconHitRate() — average clearances/blocks/interceptions/tackles/
+ * recoveries per prior match, checked once against the position's threshold
+ * rather than per real match. Empty for a player with no prior matches.
+ */
+export function buildDefconMatches(row: FeatureHistoryPriorFields): DefensiveContributionMatch[] {
+  if (row.prior_matches <= 0) return []
+  const n = row.prior_matches
+  return [
+    {
+      minutesPlayed: averageMinutesPerMatch(row),
+      clearances: row.prior_clearances / n,
+      blocks: row.prior_blocks / n,
+      interceptions: row.prior_interceptions / n,
+      tackles: row.prior_tackles / n,
+      recoveries: row.prior_recoveries / n,
+    },
+  ]
+}
+
+export interface PositionPrior {
+  rate: PlayerRates
+  defconHitRate: number
+}
+
+function positionPriorKey(gameweekId: number, position: Position): string {
+  return `${gameweekId}:${position}`
+}
+
+/**
+ * Position priors, one per (gameweek, position), built ONLY from that same
+ * gameweek's feature_history rows (every player's prior_* totals — already
+ * strictly-before that gameweek by feature_history's own construction, so
+ * the prior itself carries no lookahead). A row with prior_matches = 0
+ * contributes nothing (its totals are all zero, so positionPriorRates'/
+ * positionPriorHitRate's own empty-input handling applies unchanged) — see
+ * this file's tests for the case that matters: a gameweek/position pair
+ * where every contributing player is excluded still resolves to a defined,
+ * non-throwing prior via those functions' own neutral defaults.
+ */
+export function computePositionPriors(
+  rows: readonly FeatureHistoryRow[],
+  positionOf: (playerCode: number) => Position | undefined,
+): Map<string, PositionPrior> {
+  const rateMatchesByKey = new Map<string, RateHistoryMatch[]>()
+  const defconMatchesByKey = new Map<string, DefensiveContributionMatch[]>()
+  const positionsByKey = new Map<string, Position>()
+
+  for (const row of rows) {
+    if (row.prior_matches <= 0) continue
+    const position = positionOf(row.player_code)
+    if (position === undefined) continue
+    const key = positionPriorKey(row.gameweek_id, position)
+    positionsByKey.set(key, position)
+
+    const rateList = rateMatchesByKey.get(key) ?? []
+    rateList.push(buildRateHistoryMatch(row))
+    rateMatchesByKey.set(key, rateList)
+
+    const defconList = defconMatchesByKey.get(key) ?? []
+    defconList.push(...buildDefconMatches(row))
+    defconMatchesByKey.set(key, defconList)
+  }
+
+  const result = new Map<string, PositionPrior>()
+  for (const [key, position] of positionsByKey) {
+    result.set(key, {
+      rate: positionPriorRates(rateMatchesByKey.get(key) ?? []),
+      defconHitRate: positionPriorHitRate(position, defconMatchesByKey.get(key) ?? []),
+    })
+  }
+  return result
+}
+
+/** Fallback prior for a (gameweek, position) key with no contributing rows — should not occur for a row with prior_matches > 0 (it would have contributed to its own key), kept as a defensive, non-throwing default rather than an assumption the map is always populated. */
+export function fallbackPositionPrior(position: Position): PositionPrior {
+  return { rate: positionPriorRates([]), defconHitRate: positionPriorHitRate(position, []) }
+}
+
+/** Neutral fixture — see file header. At fplDifficulty 3, every fixture.ts multiplier this produces is exactly 1.0. */
+function buildNeutralFixtureContext(gameweekId: number): FixtureContext {
+  return {
+    fixtureId: gameweekId,
+    isHome: true,
+    teamElo: null,
+    opponentElo: null,
+    fplDifficulty: NEUTRAL_FIXTURE_DIFFICULTY,
+    leagueBaselineGoals: LEAGUE_BASELINE_GOALS_PER_TEAM,
+  }
+}
+
+/**
+ * Projects one feature_history row via src/lib/projection/expectedPoints.ts's
+ * own combiner, imported and never reimplemented. Every input is built ONLY
+ * from this row's prior_* totals (rate history, recent-minutes/defcon
+ * approximations) and a position prior computed from the SAME gameweek's
+ * data (computePositionPriors) — nothing here reads any later gameweek.
+ */
+export function projectRow(row: FeatureHistoryRow, position: Position, prior: PositionPrior): GameweekProjection {
+  const input: PlayerProjectionInput = {
+    position,
+    status: ASSUMED_AVAILABILITY_STATUS,
+    chanceOfPlayingNextRound: null,
+    recentMinutes: buildRecentMinutes(row),
+    rateHistory: buildPlayerRateHistory(row),
+    ratePositionPrior: prior.rate,
+    defconMatches: buildDefconMatches(row),
+    defconPositionPrior: prior.defconHitRate,
+  }
+  return projectPlayerGameweek(input, [buildNeutralFixtureContext(row.gameweek_id)])
+}
+
+/** The 7 point components this job compares — bonus is deliberately absent (see file header); projectPlayerFixture's own bonusPoints is always exactly 0. */
+export interface ComponentTotals {
+  appearancePoints: number
+  goalPoints: number
+  assistPoints: number
+  cleanSheetPoints: number
+  goalsConcededPoints: number
+  savePoints: number
+  defensiveContributionPoints: number
+}
+
+export function emptyComponentTotals(): ComponentTotals {
+  return {
+    appearancePoints: 0,
+    goalPoints: 0,
+    assistPoints: 0,
+    cleanSheetPoints: 0,
+    goalsConcededPoints: 0,
+    savePoints: 0,
+    defensiveContributionPoints: 0,
+  }
+}
+
+function addComponentTotals(a: ComponentTotals, b: ComponentTotals): ComponentTotals {
+  return {
+    appearancePoints: a.appearancePoints + b.appearancePoints,
+    goalPoints: a.goalPoints + b.goalPoints,
+    assistPoints: a.assistPoints + b.assistPoints,
+    cleanSheetPoints: a.cleanSheetPoints + b.cleanSheetPoints,
+    goalsConcededPoints: a.goalsConcededPoints + b.goalsConcededPoints,
+    savePoints: a.savePoints + b.savePoints,
+    defensiveContributionPoints: a.defensiveContributionPoints + b.defensiveContributionPoints,
+  }
+}
+
+export function sumComponentTotals(list: readonly ComponentTotals[]): ComponentTotals {
+  return list.reduce(addComponentTotals, emptyComponentTotals())
+}
+
+/** Picks the 7 comparable components out of expectedPoints.ts's own component shape, dropping bonusPoints (always 0 — see file header). */
+export function pickProjectedComponents(components: FixtureProjectionComponents): ComponentTotals {
+  return {
+    appearancePoints: components.appearancePoints,
+    goalPoints: components.goalPoints,
+    assistPoints: components.assistPoints,
+    cleanSheetPoints: components.cleanSheetPoints,
+    goalsConcededPoints: components.goalsConcededPoints,
+    savePoints: components.savePoints,
+    defensiveContributionPoints: components.defensiveContributionPoints,
+  }
+}
+
+// ============================================================================
+// Pure computation — actual side. Reconstructs one match's real FPL points
+// from src/lib/scoring/'s own functions, never reimplemented. Mirrors
+// scripts/calibration-report.ts's reconstructActualMatchPoints in shape, with
+// one deliberate difference: goals conceded/clean sheet are read from
+// team_goals_conceded (the team-level figure), never the per-player
+// goals_conceded column — see file header.
+// ============================================================================
+
+export interface ActualMatchStatsInput {
+  minutesPlayed: number | null
+  goals: number | null
+  assists: number | null
+  teamGoalsConceded: number | null
+  saves: number | null
+  clearances: number | null
+  blocks: number | null
+  interceptions: number | null
+  tackles: number | null
+  recoveries: number | null
+}
+
+export interface ReconstructedMatch {
+  minutes: number
+  totalPoints: number
+  components: ComponentTotals
+}
+
+export function reconstructActualMatchPoints(position: Position, stats: ActualMatchStatsInput): ReconstructedMatch {
+  const minutes = stats.minutesPlayed ?? 0
+  const goals = stats.goals ?? 0
+  const assists = stats.assists ?? 0
+  const teamGoalsConceded = stats.teamGoalsConceded ?? 0
+  const saves = stats.saves ?? 0
+
+  const defconStats: DefensiveActionStats = {
+    clearances: stats.clearances ?? 0,
+    blocks: stats.blocks ?? 0,
+    interceptions: stats.interceptions ?? 0,
+    tackles: stats.tackles ?? 0,
+    recoveries: stats.recoveries ?? 0,
+  }
+
+  const appearancePoints = minutes === 0 ? 0 : minutes < 60 ? APPEARANCE_POINTS_UNDER_60 : APPEARANCE_POINTS_60_PLUS
+  const isCleanSheet = minutes >= CLEAN_SHEET_QUALIFYING_MINUTES && teamGoalsConceded === 0
+
+  const components: ComponentTotals = {
+    appearancePoints,
+    goalPoints: goals * goalPoints(position),
+    assistPoints: assists * ASSIST_POINTS,
+    cleanSheetPoints: isCleanSheet ? cleanSheetPoints(position) : 0,
+    goalsConcededPoints: goalsConcededPointsApply(position)
+      ? Math.floor(teamGoalsConceded / GOALS_CONCEDED_DIVISOR) * GOALS_CONCEDED_POINTS_PER_UNIT
+      : 0,
+    savePoints: savePointsApply(position) ? goalkeeperSavePoints(saves) : 0,
+    defensiveContributionPoints: defensiveContributionPoints(position, defconStats),
+  }
+
+  const fullComponents: MatchPointComponents = {
+    ...components,
+    penaltySavePoints: 0,
+    penaltyMissPoints: 0,
+    yellowCardPoints: 0,
+    redCardPoints: 0,
+    ownGoalPoints: 0,
+    // Bonus deliberately excluded from both sides — see file header. Never
+    // set to anything but 0 here.
+    bonusPoints: 0,
+  }
+
+  return { minutes, totalPoints: totalMatchPoints(fullComponents), components }
+}
+
+export interface ActualGameweekOutcome {
+  /** True if any matching row has minutes_played > 0 — the "did the player feature" gate. */
+  featured: boolean
+  /** False if any matching row is missing team_goals_conceded — the "actual data incomplete" gate. Vacuously true for zero rows. */
+  teamGoalsConcededKnown: boolean
+  totalPoints: number
+  components: ComponentTotals
+  minutes: number
+  matchesFound: number
+}
+
+/**
+ * Aggregates every player_match_stats row found for one (player, gameweek)
+ * into one outcome. Each row is reconstructed independently and SUMMED
+ * (never averaged or merged first) — the correct behaviour for a genuine
+ * double gameweek, where FPL scores each match separately. Zero rows is the
+ * "no data found at all" case: featured = false, an empty ComponentTotals,
+ * teamGoalsConcededKnown = true (vacuous — nothing to be missing).
+ */
+export function aggregateActualForGameweek(position: Position, rows: readonly ActualMatchStatsInput[]): ActualGameweekOutcome {
+  const featured = rows.some((r) => (r.minutesPlayed ?? 0) > 0)
+  const teamGoalsConcededKnown = rows.every((r) => r.teamGoalsConceded !== null && r.teamGoalsConceded !== undefined)
+  const reconstructed = rows.map((r) => reconstructActualMatchPoints(position, r))
+  return {
+    featured,
+    teamGoalsConcededKnown,
+    totalPoints: reconstructed.reduce((sum, r) => sum + r.totalPoints, 0),
+    components: sumComponentTotals(reconstructed.map((r) => r.components)),
+    minutes: reconstructed.reduce((sum, r) => sum + r.minutes, 0),
+    matchesFound: rows.length,
+  }
+}
+
+/** The four named exclusion reasons — see classifyRow. */
+export type ExclusionReason = 'noPriorMatches' | 'didNotFeature' | 'actualDataIncomplete' | 'unresolvedPlayerCode'
+
+export type RowClassification =
+  | { kind: 'excluded'; reason: ExclusionReason }
+  | { kind: 'measured'; position: Position; outcome: ActualGameweekOutcome }
+
+/**
+ * Classifies one feature_history row into the measured population or exactly
+ * one named exclusion reason — the single source of truth main() and this
+ * file's tests both use, so the exclusion rule proven by test is the exact
+ * rule the job runs. See this file's header, "THE MEASURED POPULATION".
+ */
+export function classifyRow(
+  row: FeatureHistoryRow,
+  position: Position | undefined,
+  actualRows: readonly ActualMatchStatsInput[],
+): RowClassification {
+  if (position === undefined) return { kind: 'excluded', reason: 'unresolvedPlayerCode' }
+  if (row.prior_matches <= 0) return { kind: 'excluded', reason: 'noPriorMatches' }
+
+  const outcome = aggregateActualForGameweek(position, actualRows)
+  if (!outcome.featured) return { kind: 'excluded', reason: 'didNotFeature' }
+  if (!outcome.teamGoalsConcededKnown) return { kind: 'excluded', reason: 'actualDataIncomplete' }
+
+  return { kind: 'measured', position, outcome }
+}
+
+// ============================================================================
+// Pure computation — error, aggregation, sanity bounds, reconciliation.
+// ============================================================================
+
+export interface MeasuredRow {
+  gameweekId: number
+  position: Position
+  projectedPoints: number
+  actualPoints: number
+  /** projected - actual. Positive = the model over-projected; negative = under-projected. */
+  signedError: number
+  absError: number
+  projectedComponents: ComponentTotals
+  actualComponents: ComponentTotals
+  actualMinutes: number
+}
+
+export function buildMeasuredRow(
+  gameweekId: number,
+  position: Position,
+  projectedPoints: number,
+  projectedComponents: ComponentTotals,
+  actual: ActualGameweekOutcome,
+): MeasuredRow {
+  const signedError = projectedPoints - actual.totalPoints
+  return {
+    gameweekId,
+    position,
+    projectedPoints,
+    actualPoints: actual.totalPoints,
+    signedError,
+    absError: Math.abs(signedError),
+    projectedComponents,
+    actualComponents: actual.components,
+    actualMinutes: actual.minutes,
+  }
+}
+
+export interface ErrorSummary {
+  n: number
+  meanAbsoluteError: number | null
+  meanSignedError: number | null
+}
+
+export function summarizeErrors(rows: readonly MeasuredRow[]): ErrorSummary {
+  const n = rows.length
+  if (n === 0) return { n: 0, meanAbsoluteError: null, meanSignedError: null }
+  return {
+    n,
+    meanAbsoluteError: rows.reduce((sum, r) => sum + r.absError, 0) / n,
+    meanSignedError: rows.reduce((sum, r) => sum + r.signedError, 0) / n,
+  }
+}
+
+export function summarizeByPosition(rows: readonly MeasuredRow[]): Record<Position, ErrorSummary> {
+  const result = {} as Record<Position, ErrorSummary>
+  for (const position of POSITIONS) {
+    result[position] = summarizeErrors(rows.filter((r) => r.position === position))
+  }
+  return result
+}
+
+export function summarizeByGameweek(rows: readonly MeasuredRow[]): Map<number, ErrorSummary> {
+  const gameweekIds = [...new Set(rows.map((r) => r.gameweekId))].sort((a, b) => a - b)
+  const result = new Map<number, ErrorSummary>()
+  for (const gameweekId of gameweekIds) {
+    result.set(
+      gameweekId,
+      summarizeErrors(rows.filter((r) => r.gameweekId === gameweekId)),
+    )
+  }
+  return result
+}
+
+/**
+ * States the mean signed error in words — the most important sentence in the
+ * report, per the ticket ("this sign is easy to invert and impossible to
+ * spot once rendered"). signedError = projected - actual throughout this
+ * file, so a POSITIVE mean means the model projects MORE than what actually
+ * happened (over-projecting); NEGATIVE means it projects less
+ * (under-projecting).
+ */
+export function describeSignedError(meanSignedError: number | null): string {
+  if (meanSignedError === null) return 'no measured rows to describe'
+  if (meanSignedError > 0) {
+    return `the model is OVER-projecting by ${meanSignedError.toFixed(3)} points per player-gameweek on average`
+  }
+  if (meanSignedError < 0) {
+    return `the model is UNDER-projecting by ${Math.abs(meanSignedError).toFixed(3)} points per player-gameweek on average`
+  }
+  return 'the model is exactly calibrated on average (mean signed error is precisely 0)'
+}
+
+/** Fraction of qualifying (60+ actual minutes) rows, by position, whose ACTUAL reconstruction registered a clean sheet. Null with no qualifying rows for that position — "no data", not "0%". */
+export function derivedCleanSheetRate(rows: readonly MeasuredRow[], position: Position): number | null {
+  const qualifying = rows.filter((r) => r.position === position && r.actualMinutes >= CLEAN_SHEET_QUALIFYING_MINUTES)
+  if (qualifying.length === 0) return null
+  const hits = qualifying.filter((r) => r.actualComponents.cleanSheetPoints > 0).length
+  return hits / qualifying.length
+}
+
+export interface SanityCheckResult {
+  ok: boolean
+  failures: string[]
+}
+
+/**
+ * The report FAILS, naming the figure, rather than printing a number nobody
+ * checked (ticket text). Outside these bounds means the HARNESS is wrong,
+ * not the model.
+ */
+export function checkSanityBounds(overallMae: number | null, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): SanityCheckResult {
+  const failures: string[] = []
+
+  if (overallMae !== null && (overallMae < MAE_LOWER_BOUND || overallMae > MAE_UPPER_BOUND)) {
+    failures.push(
+      `overall mean absolute error ${overallMae.toFixed(3)} is outside the sane bound [${MAE_LOWER_BOUND}, ${MAE_UPPER_BOUND}] points per player-gameweek`,
+    )
+  }
+
+  for (const position of POSITIONS) {
+    const rate = cleanSheetRateByPosition[position]
+    if (rate !== null && rate !== undefined && rate > CLEAN_SHEET_RATE_UPPER_BOUND) {
+      failures.push(
+        `${POSITION_NAMES[position]} derived clean-sheet rate ${(rate * 100).toFixed(1)}% exceeds the sane bound ${(CLEAN_SHEET_RATE_UPPER_BOUND * 100).toFixed(0)}%`,
+      )
+    }
+  }
+
+  return { ok: failures.length === 0, failures }
+}
+
+/** The four named exclusion reasons — a strict partition of every feature_history row read, alongside measuredCount. See assertReconciles. */
+export interface ExclusionCounts {
+  noPriorMatches: number
+  didNotFeature: number
+  actualDataIncomplete: number
+  unresolvedPlayerCode: number
+}
+
+export function emptyExclusionCounts(): ExclusionCounts {
+  return { noPriorMatches: 0, didNotFeature: 0, actualDataIncomplete: 0, unresolvedPlayerCode: 0 }
+}
+
+/** Mutates counts in place, incrementing the named reason by 1 — the one place a classifyRow exclusion reason is turned into a count. */
+export function incrementExclusion(counts: ExclusionCounts, reason: ExclusionReason): void {
+  counts[reason]++
+}
+
+export function totalExcluded(counts: ExclusionCounts): number {
+  return counts.noPriorMatches + counts.didNotFeature + counts.actualDataIncomplete + counts.unresolvedPlayerCode
+}
+
+/** rows read = rows measured + rows excluded, by reason, exactly — throws naming both sides on any mismatch. */
+export function assertReconciles(rowsRead: number, measuredCount: number, counts: ExclusionCounts): void {
+  const excluded = totalExcluded(counts)
+  const total = measuredCount + excluded
+  if (total !== rowsRead) {
+    throw new BacktestError(
+      `reconciliation failed: ${rowsRead} feature_history row(s) read, but measured (${measuredCount}) + excluded (${excluded}) = ${total}. ` +
+        `Exclusion breakdown: ${JSON.stringify(counts)}.`,
+      'reconciliation',
+    )
+  }
+}
+
+// ============================================================================
+// Report generation.
+// ============================================================================
+
+function fmt(n: number | null, decimals = 3): string {
+  return n === null ? 'n/a' : n.toFixed(decimals)
+}
+
+interface ReportData {
+  generatedAt: Date
+  season: string
+  measured: MeasuredRow[]
+  overall: ErrorSummary
+  byPosition: Record<Position, ErrorSummary>
+  byGameweek: Map<number, ErrorSummary>
+  cleanSheetRateByPosition: Partial<Record<Position, number | null>>
+  sanity: SanityCheckResult
+  exclusions: ExclusionCounts
+  featureHistoryRowsRead: number
+  actualRowsMatched: number
+  playersRowCount: number
+  matchStatsRowCount: number
+}
+
+function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): string {
+  const header = '| Position | n | Mean absolute error | Mean signed error | Derived clean-sheet rate |\n|---|---|---|---|---|'
+  const rows = POSITIONS.map((position) => {
+    const s = byPosition[position]
+    const rate = cleanSheetRateByPosition[position] ?? null
+    return `| ${POSITION_NAMES[position]} | ${s.n} | ${fmt(s.meanAbsoluteError)} | ${fmt(s.meanSignedError)} | ${rate === null ? 'n/a' : `${(rate * 100).toFixed(1)}%`} |`
+  })
+  return [header, ...rows].join('\n')
+}
+
+function buildGameweekTable(byGameweek: Map<number, ErrorSummary>): string {
+  const header = '| Gameweek | n | Mean absolute error | Mean signed error |\n|---|---|---|---|'
+  const rows = [...byGameweek.entries()].map(
+    ([gw, s]) => `| ${gw} | ${s.n} | ${fmt(s.meanAbsoluteError)} | ${fmt(s.meanSignedError)} |`,
+  )
+  return [header, ...rows].join('\n')
+}
+
+function componentMean(rows: readonly MeasuredRow[], pick: (c: ComponentTotals) => number, source: 'projected' | 'actual'): number | null {
+  if (rows.length === 0) return null
+  const total = rows.reduce((sum, r) => sum + pick(source === 'projected' ? r.projectedComponents : r.actualComponents), 0)
+  return total / rows.length
+}
+
+function buildComponentTable(rows: readonly MeasuredRow[]): string {
+  const labels: Array<[keyof ComponentTotals, string]> = [
+    ['appearancePoints', 'Appearance'],
+    ['goalPoints', 'Goals'],
+    ['assistPoints', 'Assists'],
+    ['cleanSheetPoints', 'Clean sheets'],
+    ['goalsConcededPoints', 'Goals conceded'],
+    ['savePoints', 'Saves'],
+    ['defensiveContributionPoints', 'Defensive contribution'],
+  ]
+  const header = '| Component | Mean actual | Mean projected | Mean signed error |\n|---|---|---|---|'
+  const body = labels
+    .map(([key, label]) => {
+      const actual = componentMean(rows, (c) => c[key], 'actual')
+      const projected = componentMean(rows, (c) => c[key], 'projected')
+      const signed = actual === null || projected === null ? null : projected - actual
+      return `| ${label} | ${fmt(actual)} | ${fmt(projected)} | ${fmt(signed)} |`
+    })
+    .join('\n')
+  return [header, body].join('\n')
+}
+
+function generateReportMarkdown(data: ReportData): string {
+  const sections: string[] = []
+
+  sections.push(
+    '# Backtest report — point-in-time projection vs actual\n\n' +
+      `Generated: ${data.generatedAt.toISOString()} · Job: \`${JOB_NAME}\` · Season: \`${data.season}\`\n\n` +
+      'Measures the projection only — no transfers, captaincy, solver, or league position (item 32\'s remaining ' +
+      'work). Every projected figure below is built strictly from `feature_history` prior-gameweek totals — no ' +
+      'later gameweek, no live current-season data. See `scripts/run-backtest.ts`\'s file header for the full ' +
+      'method and its documented approximations, and `docs/projection-model-backlog.md` for what this slice does ' +
+      'and does not settle.',
+  )
+
+  sections.push(
+    (data.sanity.ok ? '## Sanity check: PASSED\n\n' : '## Sanity check: FAILED\n\n') +
+      (data.sanity.ok
+        ? 'Overall mean absolute error and every position\'s derived clean-sheet rate are within their sane bounds.'
+        : `**${data.sanity.failures.length} bound(s) failed — this means the HARNESS is wrong, not necessarily the model:**\n\n` +
+          data.sanity.failures.map((f) => `- ${f}`).join('\n')),
+  )
+
+  sections.push(
+    '## Headline\n\n' +
+      `Measured population: **${data.overall.n}** player-gameweek row(s). Mean absolute error: **${fmt(data.overall.meanAbsoluteError)}**. ` +
+      `Mean signed error: **${fmt(data.overall.meanSignedError)}** — ${describeSignedError(data.overall.meanSignedError)}.`,
+  )
+
+  sections.push(
+    '## The measured population, and what is excluded\n\n' +
+      `- \`feature_history\` rows read (season=${data.season}): ${data.featureHistoryRowsRead}\n` +
+      `- rows with a matching \`player_match_stats\` actual gameweek entry found: ${data.actualRowsMatched}\n` +
+      `- **rows measured (headline population)**: ${data.measured.length}\n` +
+      `- excluded — no prior matches (\`prior_matches = 0\`, no point-in-time signal): ${data.exclusions.noPriorMatches}\n` +
+      `- excluded — player did not feature this gameweek (a correct zero that would flatter the error): ${data.exclusions.didNotFeature}\n` +
+      `- excluded — actual data incomplete (\`team_goals_conceded\` null, ~2% known gap, ticket #125): ${data.exclusions.actualDataIncomplete}\n` +
+      `- excluded — unresolved \`player_code\` (no matching \`players\` row): ${data.exclusions.unresolvedPlayerCode}\n\n` +
+      `Reconciliation: ${data.measured.length} measured + ${totalExcluded(data.exclusions)} excluded = ` +
+      `${data.measured.length + totalExcluded(data.exclusions)}, against ${data.featureHistoryRowsRead} rows read.`,
+  )
+
+  sections.push('## By position\n\n' + buildPositionTable(data.byPosition, data.cleanSheetRateByPosition))
+
+  sections.push(
+    '## By gameweek\n\n' +
+      'A bad week is visible here rather than averaged away into the season figure above.\n\n' +
+      buildGameweekTable(data.byGameweek),
+  )
+
+  sections.push(
+    '## By component\n\n' +
+      'Mean actual vs mean projected per component, across the measured population — attributes a gap in the ' +
+      'headline to a specific term rather than leaving it only visible in aggregate. Bonus is absent from both ' +
+      'sides (see file header) rather than shown as an always-zero row.\n\n' +
+      buildComponentTable(data.measured),
+  )
+
+  sections.push(
+    '## Provenance\n\n' +
+      `- players rows fetched: ${data.playersRowCount}\n` +
+      `- feature_history rows fetched (season=${data.season}): ${data.featureHistoryRowsRead}\n` +
+      `- player_match_stats rows fetched (season=${data.season}, competition=${PREMIER_LEAGUE_COMPETITION}): ${data.matchStatsRowCount}\n` +
+      `- sanity bounds: mean absolute error in [${MAE_LOWER_BOUND}, ${MAE_UPPER_BOUND}]; derived clean-sheet rate ≤ ${(CLEAN_SHEET_RATE_UPPER_BOUND * 100).toFixed(0)}% per position\n`,
+  )
+
+  return sections.join('\n\n') + '\n'
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+interface PlayerRow {
+  code: number | null
+  element_type: number
+}
+
+interface ActualSourceRow {
+  player_code: number | null
+  gameweek: number
+  minutes_played: number | null
+  goals: number | null
+  assists: number | null
+  team_goals_conceded: number | null
+  saves: number | null
+  clearances: number | null
+  blocks: number | null
+  interceptions: number | null
+  tackles: number | null
+  recoveries: number | null
+}
+
+function toActualMatchStatsInput(row: ActualSourceRow): ActualMatchStatsInput {
+  return {
+    minutesPlayed: row.minutes_played,
+    goals: row.goals,
+    assists: row.assists,
+    teamGoalsConceded: row.team_goals_conceded,
+    saves: row.saves,
+    clearances: row.clearances,
+    blocks: row.blocks,
+    interceptions: row.interceptions,
+    tackles: row.tackles,
+    recoveries: row.recoveries,
+  }
+}
+
+async function main(): Promise<void> {
+  const startedAt = new Date()
+  const env = readSupabaseEnv()
+  if (!env) {
+    process.exit(1)
+    return
+  }
+  const season = readSeason()
+  const reportPath = readReportPath()
+  const supabase = createClient(env.url, env.secretKey)
+
+  try {
+    // --------------------------------------------------------------------
+    // 1. players — resolves position for both sides' joins, via .code only.
+    // --------------------------------------------------------------------
+    const {
+      rows: playerRows,
+      error: playersError,
+      pages: playersPagesFetched,
+    } = await fetchAllPages<PlayerRow>((from, to) =>
+      supabase.from('players').select('code, element_type').range(from, to).returns<PlayerRow[]>(),
+    )
+    if (playersError) {
+      throw new BacktestError(`players lookup failed: ${playersError.message}`, 'players')
+    }
+    const { count: playersExpectedCount, error: playersCountError } = await supabase
+      .from('players')
+      .select('*', { count: 'exact', head: true })
+    if (playersCountError) {
+      throw new BacktestError(`players count check failed: ${playersCountError.message}`, 'players')
+    }
+    assertRowCountMatches('players', playerRows.length, playersExpectedCount ?? 0)
+
+    const codeToPosition = new Map<number, Position>()
+    for (const player of playerRows) {
+      if (player.code !== null) codeToPosition.set(player.code, player.element_type as Position)
+    }
+
+    // --------------------------------------------------------------------
+    // 2. feature_history — 18,243+ rows for one season. Paginated,
+    //    count-verified against the identical season filter.
+    // --------------------------------------------------------------------
+    const {
+      rows: featureHistoryRows,
+      error: featureHistoryError,
+      pages: featureHistoryPagesFetched,
+    } = await fetchAllPages<FeatureHistoryRow>((from, to) =>
+      supabase
+        .from('feature_history')
+        .select(
+          'gameweek_id, player_code, prior_matches, prior_minutes, prior_xg, prior_xa, prior_saves, prior_clearances, prior_blocks, prior_interceptions, prior_tackles, prior_recoveries',
+        )
+        .eq('season', season)
+        .range(from, to)
+        .returns<FeatureHistoryRow[]>(),
+    )
+    if (featureHistoryError) {
+      if (isMissingTable(featureHistoryError, 'feature_history')) {
+        throw new BacktestError(`the "feature_history" table does not exist. Apply ${FEATURE_HISTORY_MIGRATION} first.`, 'feature_history')
+      }
+      throw new BacktestError(`feature_history lookup failed: ${featureHistoryError.message}`, 'feature_history')
+    }
+    const { count: featureHistoryExpectedCount, error: featureHistoryCountError } = await supabase
+      .from('feature_history')
+      .select('*', { count: 'exact', head: true })
+      .eq('season', season)
+    if (featureHistoryCountError) {
+      throw new BacktestError(`feature_history count check failed: ${featureHistoryCountError.message}`, 'feature_history')
+    }
+    assertRowCountMatches(`feature_history (season=${season})`, featureHistoryRows.length, featureHistoryExpectedCount ?? 0)
+
+    if (featureHistoryRows.length === 0) {
+      const message =
+        `${JOB_NAME}: feature_history is empty for season=${season}. Nothing to backtest — writing no report. ` +
+        'Run scripts/build-feature-history.ts for this season first.'
+      console.log(message)
+      await recordJobRun(supabase, { status: 'skipped', message, details: { season }, startedAt })
+      process.exit(0)
+      return
+    }
+
+    // --------------------------------------------------------------------
+    // 3. player_match_stats — actuals only, filtered to season + Premier
+    //    League (ticket #54). 15,000+ rows. Paginated, count-verified
+    //    against the identical filter on both queries.
+    // --------------------------------------------------------------------
+    const {
+      rows: matchStatsRows,
+      error: matchStatsError,
+      pages: matchStatsPagesFetched,
+    } = await fetchAllPages<ActualSourceRow>((from, to) =>
+      supabase
+        .from('player_match_stats')
+        .select(
+          'player_code, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries',
+        )
+        .eq('season', season)
+        .eq('competition', PREMIER_LEAGUE_COMPETITION)
+        .range(from, to)
+        .returns<ActualSourceRow[]>(),
+    )
+    if (matchStatsError) {
+      if (isMissingTable(matchStatsError, 'player_match_stats')) {
+        throw new BacktestError(`the "player_match_stats" table does not exist. Apply ${PLAYER_MATCH_STATS_MIGRATION} first.`, 'player_match_stats')
+      }
+      if (isMissingColumn(matchStatsError, 'team_goals_conceded')) {
+        throw new BacktestError(
+          `player_match_stats.team_goals_conceded does not exist in this database yet. Apply ${TEAM_GOALS_CONCEDED_MIGRATION} first.`,
+          'player_match_stats',
+        )
+      }
+      throw new BacktestError(`player_match_stats lookup failed: ${matchStatsError.message}`, 'player_match_stats')
+    }
+    const { count: matchStatsExpectedCount, error: matchStatsCountError } = await supabase
+      .from('player_match_stats')
+      .select('*', { count: 'exact', head: true })
+      .eq('season', season)
+      .eq('competition', PREMIER_LEAGUE_COMPETITION)
+    if (matchStatsCountError) {
+      throw new BacktestError(`player_match_stats count check failed: ${matchStatsCountError.message}`, 'player_match_stats')
+    }
+    assertRowCountMatches(`player_match_stats (season=${season}, competition=${PREMIER_LEAGUE_COMPETITION})`, matchStatsRows.length, matchStatsExpectedCount ?? 0)
+
+    // --------------------------------------------------------------------
+    // 4. Index actuals by (player_code, gameweek).
+    // --------------------------------------------------------------------
+    const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>()
+    for (const row of matchStatsRows) {
+      if (row.player_code === null) continue
+      const key = `${row.player_code}:${row.gameweek}`
+      const list = actualByPlayerGameweek.get(key) ?? []
+      list.push(row)
+      actualByPlayerGameweek.set(key, list)
+    }
+
+    // --------------------------------------------------------------------
+    // 5. Position priors, one per (gameweek, position) — see
+    //    computePositionPriors' own comment for why this carries no
+    //    lookahead.
+    // --------------------------------------------------------------------
+    const positionPriors = computePositionPriors(featureHistoryRows, (code) => codeToPosition.get(code))
+
+    // --------------------------------------------------------------------
+    // 6. Classify every row, project + reconstruct the measured population.
+    // --------------------------------------------------------------------
+    const exclusions = emptyExclusionCounts()
+    const measured: MeasuredRow[] = []
+    let actualRowsMatched = 0
+
+    for (const row of featureHistoryRows) {
+      const position = codeToPosition.get(row.player_code)
+      const actualRowsRaw = actualByPlayerGameweek.get(`${row.player_code}:${row.gameweek_id}`) ?? []
+      if (actualRowsRaw.length > 0) actualRowsMatched++
+
+      const classification = classifyRow(row, position, actualRowsRaw.map(toActualMatchStatsInput))
+      if (classification.kind === 'excluded') {
+        incrementExclusion(exclusions, classification.reason)
+        continue
+      }
+
+      const prior = positionPriors.get(positionPriorKey(row.gameweek_id, classification.position)) ?? fallbackPositionPrior(classification.position)
+      const projection = projectRow(row, classification.position, prior)
+      const projectedComponents = pickProjectedComponents(projection.fixtures[0].components)
+
+      measured.push(buildMeasuredRow(row.gameweek_id, classification.position, projection.expectedPoints, projectedComponents, classification.outcome))
+    }
+
+    assertReconciles(featureHistoryRows.length, measured.length, exclusions)
+
+    // --------------------------------------------------------------------
+    // 7. Aggregate, sanity-check, report.
+    // --------------------------------------------------------------------
+    const overall = summarizeErrors(measured)
+    const byPosition = summarizeByPosition(measured)
+    const byGameweek = summarizeByGameweek(measured)
+    const cleanSheetRateByPosition: Partial<Record<Position, number | null>> = {}
+    for (const position of POSITIONS) cleanSheetRateByPosition[position] = derivedCleanSheetRate(measured, position)
+    const sanity = checkSanityBounds(overall.meanAbsoluteError, cleanSheetRateByPosition)
+
+    const reportData: ReportData = {
+      generatedAt: new Date(),
+      season,
+      measured,
+      overall,
+      byPosition,
+      byGameweek,
+      cleanSheetRateByPosition,
+      sanity,
+      exclusions,
+      featureHistoryRowsRead: featureHistoryRows.length,
+      actualRowsMatched,
+      playersRowCount: playerRows.length,
+      matchStatsRowCount: matchStatsRows.length,
+    }
+    const reportMarkdown = generateReportMarkdown(reportData)
+    await mkdir(dirname(reportPath), { recursive: true })
+    await writeFile(reportPath, reportMarkdown, 'utf8')
+
+    const details: JsonRecord = {
+      season,
+      featureHistoryRowsRead: featureHistoryRows.length,
+      featureHistoryPagesFetched,
+      playersRowsFetched: playerRows.length,
+      playersPagesFetched,
+      matchStatsRowsFetched: matchStatsRows.length,
+      matchStatsPagesFetched,
+      actualRowsMatched,
+      rowsMeasured: measured.length,
+      exclusions,
+      overallMeanAbsoluteError: overall.meanAbsoluteError,
+      overallMeanSignedError: overall.meanSignedError,
+      byPosition: Object.fromEntries(POSITIONS.map((p) => [POSITION_NAMES[p], byPosition[p]])),
+      cleanSheetRateByPosition: Object.fromEntries(POSITIONS.map((p) => [POSITION_NAMES[p], cleanSheetRateByPosition[p]])),
+      sanity,
+      reportPath,
+    }
+
+    if (!sanity.ok) {
+      const message = `${JOB_NAME}: sanity bounds FAILED for season=${season}: ${sanity.failures.join('; ')}. Report written to ${reportPath} for diagnosis.`
+      console.error(message)
+      await recordJobRun(supabase, { status: 'failure', message, details, startedAt })
+      process.exit(1)
+      return
+    }
+
+    const message =
+      `${JOB_NAME}: season ${season} — ${measured.length} player-gameweek row(s) measured ` +
+      `(of ${featureHistoryRows.length} feature_history row(s) read). Mean absolute error ${fmt(overall.meanAbsoluteError)}, ` +
+      `mean signed error ${fmt(overall.meanSignedError)} — ${describeSignedError(overall.meanSignedError)}. Report written to ${reportPath}.`
+    console.log(message)
+    await recordJobRun(supabase, { status: 'success', message, details, startedAt })
+  } catch (err) {
+    const message =
+      err instanceof BacktestError || err instanceof BacktestSanityError
+        ? err.message
+        : err instanceof Error
+          ? `unexpected failure: ${err.message}`
+          : `unexpected failure: ${String(err)}`
+
+    console.error(`${JOB_NAME}: failed: ${message}`)
+
+    try {
+      await recordJobRun(supabase, { status: 'failure', message, details: { season }, startedAt })
+    } catch (recordErr) {
+      const recordMessage = recordErr instanceof Error ? recordErr.message : String(recordErr)
+      console.error(`${JOB_NAME}: additionally failed to record the failed job_runs row: ${recordMessage}`)
+    }
+
+    process.exit(1)
+  }
+}
+
+// Guarded, matching every other job in scripts/: importing this module (e.g.
+// from its test file) must not trigger a real run.
+const isMainModule = process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`
+if (isMainModule) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`${JOB_NAME}: unexpected top-level failure: ${message}`)
+    process.exit(1)
+  })
+}
