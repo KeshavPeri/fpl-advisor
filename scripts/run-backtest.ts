@@ -93,10 +93,40 @@
 //    selectable, which is the best signal this table can offer.
 //
 //  - Multi-fixture gameweeks: feature_history is one row per (player,
-//    gameweek), not per fixture, so this job always projects exactly one
-//    fixture per gameweek. A genuine double gameweek would under-project
-//    against an actual side that (correctly) sums both matches — a known,
-//    documented first-slice gap, not a bug to chase here.
+//    gameweek), not per fixture, so a naive projection would always project
+//    exactly one fixture per gameweek even when a player's team played
+//    twice — CLOSED by ticket #140 (Tier 2 — logged HIGH-IMPACT; see the
+//    Builder report for the full "because"). This job has no independent
+//    fixture-schedule table for a past season (the live `fixtures` table
+//    carries no `season` column — it is the CURRENT season's schedule
+//    only), so the fixture count fed to the projected side is the number of
+//    player_match_stats ROWS FOUND for that (player, gameweek) — exactly
+//    the count the actual side already sums (aggregateActualForGameweek's
+//    own matchesFound). Two identical neutral fixture contexts are then
+//    projected and summed via expectedPoints.ts's own projectPlayerGameweek
+//    (unmodified — it already sums whatever fixture array it is given).
+//    This is a real approximation: a player rotated out of ONE of his
+//    team's two fixtures that gameweek is still projected for 1, not the
+//    team's true 2, because this job has no signal of "team fixture count"
+//    independent of this player's own appearances. Documented, not hidden.
+//
+//  - Blank gameweeks (a player's team had NO fixture that gameweek — a
+//    postponement/rearrangement, not a benching) are a DIFFERENT case from
+//    "didNotFeature" (team played, this player just didn't) and get their
+//    own exclusion reason, `blankGameweek` — ticket #140. Distinguishing
+//    the two needs *some* notion of team schedule, which player_match_stats
+//    alone does not carry as a column — but match_id embeds it as text
+//    (e.g. "25-26-prem-manchester-united-vs-arsenal"). This job infers each
+//    player's team-for-the-season as the single team-slug appearing most
+//    often across ALL of that player's own match_id rows that season (see
+//    inferTeamSlug) — the player's own team appears in every one of his
+//    matches, each opponent in at most a handful — and treats a gameweek as
+//    "the team played" if that slug appears in ANY match_id, for ANY
+//    player, in that season+gameweek (see buildTeamSlugsByGameweek). A
+//    player with too little history to resolve a team-slug (or fewer than
+//    two matches, where the modal slug can tie) defaults to hadFixture =
+//    true — i.e. falls back to today's didNotFeature behaviour rather than
+//    guessing blankGameweek. Fail open, not fail confident.
 //
 // ============================================================================
 // THE MEASURED POPULATION (ticket text, verbatim rule).
@@ -112,7 +142,11 @@
 //      team_goals_conceded (~2% of rows, ticket #125's known gap, carried
 //      forward here rather than solved) — without it the clean-sheet/
 //      goals-conceded reconstruction is a guess, not a measurement.
-// Every row read falls into EXACTLY one of: measured, or one of the four
+//   4. the player's team did have a fixture that gameweek (ticket #140) —
+//      a genuine blank gameweek is excluded as `blankGameweek`, distinct
+//      from a player who simply did not feature in a fixture his team did
+//      play (`didNotFeature`). See "BLANK GAMEWEEKS" below.
+// Every row read falls into EXACTLY one of: measured, or one of the five
 // named exclusion reasons below — a strict partition, asserted in
 // assertReconciles() and covered by a named test.
 //
@@ -243,6 +277,40 @@ export const CLEAN_SHEET_RATE_UPPER_BOUND = 0.6
 
 /** A clean sheet requires 60+ minutes, same gate pointValues.ts's appearance-points split uses. */
 const CLEAN_SHEET_QUALIFYING_MINUTES = 60
+
+/**
+ * Ticket #140. A bucket (prior_matches range, or the multi-fixture
+ * diagnostic) with fewer than this many measured rows is reported as "too
+ * small to read" rather than as a figure — same threshold and same rule
+ * `src/lib/accuracy/derive.ts`'s `MIN_SAMPLE_SIZE` uses for the in-app
+ * rolling accuracy display (ticket #123). Defined locally rather than
+ * imported: this file's own documented convention is small, self-contained
+ * constants with a comment naming the ticket, not a cross-import into the
+ * display layer for one shared number.
+ */
+export const MIN_BUCKET_SAMPLE_SIZE = 50
+
+/**
+ * The `prior_matches` buckets the defcon and overall signed-error
+ * diagnostics report by, ticket text verbatim. A measured row always has
+ * `priorMatches >= 1` (rows with `prior_matches <= 0` are excluded as
+ * `noPriorMatches` before ever reaching the measured population), so these
+ * four buckets partition every measured row exactly once.
+ */
+export const PRIOR_MATCHES_BUCKETS: readonly { label: string; min: number; max: number }[] = [
+  { label: '1–4', min: 1, max: 4 },
+  { label: '5–9', min: 5, max: 9 },
+  { label: '10–19', min: 10, max: 19 },
+  { label: '20+', min: 20, max: Infinity },
+]
+
+/**
+ * The multi-fixture-headline sanity threshold from the ticket text
+ * verbatim: "if excluding [multi-fixture player-gameweeks] moves the season
+ * headline by more than 0.05, say so prominently." Applied to mean absolute
+ * error, the report's own headline figure.
+ */
+export const MULTI_FIXTURE_HEADLINE_THRESHOLD = 0.05
 
 const POSITIONS: readonly Position[] = [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD]
 const POSITION_NAMES: Readonly<Record<Position, string>> = {
@@ -524,8 +592,19 @@ function buildNeutralFixtureContext(gameweekId: number): FixtureContext {
  * from this row's prior_* totals (rate history, recent-minutes/defcon
  * approximations) and a position prior computed from the SAME gameweek's
  * data (computePositionPriors) — nothing here reads any later gameweek.
+ *
+ * `fixtureCount` (ticket #140) — how many fixtures the player's team held
+ * this gameweek, defaulting to 1 so every existing call site (and every
+ * pre-#140 test) is an EXACT no-op: one neutral fixture context, identical
+ * to this function's behaviour before this ticket. For fixtureCount > 1,
+ * the SAME neutral context (see buildNeutralFixtureContext's own header —
+ * expectedScore is exactly 0.5, the neutral value) is repeated and summed
+ * by projectPlayerGameweek, unmodified — never reimplemented here. A
+ * negative or fractional count is truncated at 0, defensively; main() never
+ * passes one (fixtureCount is always a real row count from the actual
+ * side).
  */
-export function projectRow(row: FeatureHistoryRow, position: Position, prior: PositionPrior): GameweekProjection {
+export function projectRow(row: FeatureHistoryRow, position: Position, prior: PositionPrior, fixtureCount = 1): GameweekProjection {
   const input: PlayerProjectionInput = {
     position,
     status: ASSUMED_AVAILABILITY_STATUS,
@@ -536,7 +615,9 @@ export function projectRow(row: FeatureHistoryRow, position: Position, prior: Po
     defconMatches: buildDefconMatches(row),
     defconPositionPrior: prior.defconHitRate,
   }
-  return projectPlayerGameweek(input, [buildNeutralFixtureContext(row.gameweek_id)])
+  const count = Math.max(0, Math.trunc(fixtureCount))
+  const fixtures: FixtureContext[] = Array.from({ length: count }, () => buildNeutralFixtureContext(row.gameweek_id))
+  return projectPlayerGameweek(input, fixtures)
 }
 
 /** The 7 point components this job compares — bonus is deliberately absent (see file header); projectPlayerFixture's own bonusPoints is always exactly 0. */
@@ -697,8 +778,8 @@ export function aggregateActualForGameweek(position: Position, rows: readonly Ac
   }
 }
 
-/** The four named exclusion reasons — see classifyRow. */
-export type ExclusionReason = 'noPriorMatches' | 'didNotFeature' | 'actualDataIncomplete' | 'unresolvedPlayerCode'
+/** The five named exclusion reasons — see classifyRow. `blankGameweek` added by ticket #140. */
+export type ExclusionReason = 'noPriorMatches' | 'didNotFeature' | 'actualDataIncomplete' | 'unresolvedPlayerCode' | 'blankGameweek'
 
 export type RowClassification =
   | { kind: 'excluded'; reason: ExclusionReason }
@@ -709,17 +790,25 @@ export type RowClassification =
  * one named exclusion reason — the single source of truth main() and this
  * file's tests both use, so the exclusion rule proven by test is the exact
  * rule the job runs. See this file's header, "THE MEASURED POPULATION".
+ *
+ * `hadFixture` (ticket #140) defaults to `true` so every existing 3-arg call
+ * site — every pre-#140 test included — is an EXACT no-op: unfeatured stays
+ * `didNotFeature`, unchanged. Only when the caller can positively determine
+ * the player's team had no fixture this gameweek (see file header, "BLANK
+ * GAMEWEEKS") does `hadFixture = false` redirect an unfeatured row to the
+ * new `blankGameweek` reason instead.
  */
 export function classifyRow(
   row: FeatureHistoryRow,
   position: Position | undefined,
   actualRows: readonly ActualMatchStatsInput[],
+  hadFixture = true,
 ): RowClassification {
   if (position === undefined) return { kind: 'excluded', reason: 'unresolvedPlayerCode' }
   if (row.prior_matches <= 0) return { kind: 'excluded', reason: 'noPriorMatches' }
 
   const outcome = aggregateActualForGameweek(position, actualRows)
-  if (!outcome.featured) return { kind: 'excluded', reason: 'didNotFeature' }
+  if (!outcome.featured) return { kind: 'excluded', reason: hadFixture ? 'didNotFeature' : 'blankGameweek' }
   if (!outcome.teamGoalsConcededKnown) return { kind: 'excluded', reason: 'actualDataIncomplete' }
 
   return { kind: 'measured', position, outcome }
@@ -740,6 +829,17 @@ export interface MeasuredRow {
   projectedComponents: ComponentTotals
   actualComponents: ComponentTotals
   actualMinutes: number
+  /**
+   * Ticket #140. How many fixtures this player's team held this gameweek —
+   * taken directly from the actual side's own `matchesFound` (the count of
+   * `player_match_stats` rows found for this player, this gameweek), the
+   * same count `projectRow` was given to build the matching number of
+   * projected fixtures. 1 for the ordinary case; >1 identifies a
+   * multi-fixture player-gameweek for the diagnostic below.
+   */
+  fixtureCount: number
+  /** Ticket #140. `feature_history.prior_matches` at classification time — the bucketing key for the defcon and overall signed-error diagnostics. */
+  priorMatches: number
 }
 
 export function buildMeasuredRow(
@@ -748,6 +848,7 @@ export function buildMeasuredRow(
   projectedPoints: number,
   projectedComponents: ComponentTotals,
   actual: ActualGameweekOutcome,
+  priorMatches = 0,
 ): MeasuredRow {
   const signedError = projectedPoints - actual.totalPoints
   return {
@@ -760,6 +861,8 @@ export function buildMeasuredRow(
     projectedComponents,
     actualComponents: actual.components,
     actualMinutes: actual.minutes,
+    fixtureCount: actual.matchesFound,
+    priorMatches,
   }
 }
 
@@ -857,16 +960,17 @@ export function checkSanityBounds(overallMae: number | null, cleanSheetRateByPos
   return { ok: failures.length === 0, failures }
 }
 
-/** The four named exclusion reasons — a strict partition of every feature_history row read, alongside measuredCount. See assertReconciles. */
+/** The five named exclusion reasons — a strict partition of every feature_history row read, alongside measuredCount. See assertReconciles. `blankGameweek` added by ticket #140. */
 export interface ExclusionCounts {
   noPriorMatches: number
   didNotFeature: number
   actualDataIncomplete: number
   unresolvedPlayerCode: number
+  blankGameweek: number
 }
 
 export function emptyExclusionCounts(): ExclusionCounts {
-  return { noPriorMatches: 0, didNotFeature: 0, actualDataIncomplete: 0, unresolvedPlayerCode: 0 }
+  return { noPriorMatches: 0, didNotFeature: 0, actualDataIncomplete: 0, unresolvedPlayerCode: 0, blankGameweek: 0 }
 }
 
 /** Mutates counts in place, incrementing the named reason by 1 — the one place a classifyRow exclusion reason is turned into a count. */
@@ -875,7 +979,7 @@ export function incrementExclusion(counts: ExclusionCounts, reason: ExclusionRea
 }
 
 export function totalExcluded(counts: ExclusionCounts): number {
-  return counts.noPriorMatches + counts.didNotFeature + counts.actualDataIncomplete + counts.unresolvedPlayerCode
+  return counts.noPriorMatches + counts.didNotFeature + counts.actualDataIncomplete + counts.unresolvedPlayerCode + counts.blankGameweek
 }
 
 /** rows read = rows measured + rows excluded, by reason, exactly — throws naming both sides on any mismatch. */
@@ -889,6 +993,161 @@ export function assertReconciles(rowsRead: number, measuredCount: number, counts
       'reconciliation',
     )
   }
+}
+
+// ============================================================================
+// Team-slug inference — ticket #140, blank-gameweek detection. Pure text
+// parsing over match_id, no I/O. See file header, "BLANK GAMEWEEKS".
+// ============================================================================
+
+/** Every match_id this job reads is already filtered to competition = prem at the query level (see main()). */
+const MATCH_ID_PREM_PREFIX_RE = /^\d{2}-\d{2}-prem-/
+
+/**
+ * Splits a Premier League match_id into its two team slugs, e.g.
+ * "25-26-prem-manchester-united-vs-arsenal" -> ["manchester-united",
+ * "arsenal"]. Returns null for anything that does not match the expected
+ * "<season>-prem-<home>-vs-<away>" shape — never guesses.
+ */
+export function parseMatchIdTeamSlugs(matchId: string): readonly [string, string] | null {
+  if (!MATCH_ID_PREM_PREFIX_RE.test(matchId)) return null
+  const remainder = matchId.replace(MATCH_ID_PREM_PREFIX_RE, '')
+  const parts = remainder.split('-vs-')
+  if (parts.length !== 2 || parts[0] === '' || parts[1] === '') return null
+  return [parts[0], parts[1]]
+}
+
+/**
+ * Infers a player's team-for-the-season as the single team-slug appearing
+ * MOST OFTEN across all of the match_ids passed in — a player's own team
+ * appears in every one of his matches, while any one opponent appears at
+ * most a handful of times (home leg, away leg, and rarely more via
+ * rearranged fixtures), so the modal slug is the player's team. Returns
+ * null with no parseable match_id at all. A player with exactly one
+ * parseable match can tie between his own team and that match's single
+ * opponent — this function returns whichever slug it encounters first in
+ * that case, which is why callers (see buildTeamSlugsByGameweek's caller in
+ * main()) treat an unresolved-or-unreliable team as hadFixture = true
+ * (fail open to today's didNotFeature behaviour) rather than trusting a
+ * single-match inference.
+ */
+export function inferTeamSlug(matchIds: readonly string[]): string | null {
+  const counts = new Map<string, number>()
+  for (const matchId of matchIds) {
+    const pair = parseMatchIdTeamSlugs(matchId)
+    if (pair === null) continue
+    for (const slug of pair) counts.set(slug, (counts.get(slug) ?? 0) + 1)
+  }
+  let bestSlug: string | null = null
+  let bestCount = 0
+  for (const [slug, count] of counts) {
+    if (count > bestCount) {
+      bestSlug = slug
+      bestCount = count
+    }
+  }
+  return bestSlug
+}
+
+/**
+ * The set of team-slugs that played at all in each gameweek, from every
+ * match_id across every player — the "did this team have a fixture this
+ * gameweek" lookup blankGameweek detection needs. Built once per run from
+ * the SAME player_match_stats rows already fetched for actuals, so it costs
+ * no extra Supabase round trip.
+ */
+export function buildTeamSlugsByGameweek(rows: readonly { gameweek: number; matchId: string }[]): Map<number, Set<string>> {
+  const result = new Map<number, Set<string>>()
+  for (const row of rows) {
+    const pair = parseMatchIdTeamSlugs(row.matchId)
+    if (pair === null) continue
+    const set = result.get(row.gameweek) ?? new Set<string>()
+    set.add(pair[0])
+    set.add(pair[1])
+    result.set(row.gameweek, set)
+  }
+  return result
+}
+
+// ============================================================================
+// Diagnostics — ticket #140. Pure, over the already-built measured
+// population, no I/O.
+// ============================================================================
+
+export interface BucketSummary {
+  label: string
+  n: number
+  /** null when n < MIN_BUCKET_SAMPLE_SIZE — "too small to read", not a guessed figure. */
+  meanSignedError: number | null
+  tooSmallToRead: boolean
+}
+
+/**
+ * Buckets measured rows by `priorMatches` into PRIOR_MATCHES_BUCKETS and
+ * reports the mean of whatever signed-error quantity `valueOf` picks off
+ * each row — used for both the defcon-only breakdown and the overall
+ * signed-error breakdown (ticket text: "the same bucketing"), so the
+ * bucketing logic itself is written once.
+ */
+export function bucketByPriorMatches(rows: readonly MeasuredRow[], valueOf: (row: MeasuredRow) => number): BucketSummary[] {
+  return PRIOR_MATCHES_BUCKETS.map(({ label, min, max }) => {
+    const bucketRows = rows.filter((r) => r.priorMatches >= min && r.priorMatches <= max)
+    const n = bucketRows.length
+    const tooSmallToRead = n < MIN_BUCKET_SAMPLE_SIZE
+    const meanSignedError = tooSmallToRead ? null : bucketRows.reduce((sum, r) => sum + valueOf(r), 0) / n
+    return { label, n, meanSignedError, tooSmallToRead }
+  })
+}
+
+/** The defcon-only signed error for one measured row: projected defcon points minus actual defcon points. */
+export function defconSignedError(row: MeasuredRow): number {
+  return row.projectedComponents.defensiveContributionPoints - row.actualComponents.defensiveContributionPoints
+}
+
+export interface MultiFixtureDiagnostic {
+  /** Player-gameweeks with fixtureCount > 1 — the population the diagnostic isolates. */
+  multiFixtureCount: number
+  /** The season headline (every measured row) — identical to ReportData.overall, repeated here so the "with"/"without" comparison is self-contained. */
+  withMultiFixture: ErrorSummary
+  /** The headline recomputed excluding multi-fixture player-gameweeks. */
+  withoutMultiFixture: ErrorSummary
+  /** withMultiFixture.MAE - withoutMultiFixture.MAE. Null if either side has no rows. */
+  maeDelta: number | null
+  /** Ticket text: "if excluding them moves the season headline by more than 0.05, say so prominently." */
+  movesHeadlineSignificantly: boolean
+}
+
+export function buildMultiFixtureDiagnostic(rows: readonly MeasuredRow[]): MultiFixtureDiagnostic {
+  const multiFixtureRows = rows.filter((r) => r.fixtureCount > 1)
+  const withMultiFixture = summarizeErrors(rows)
+  const withoutMultiFixture = summarizeErrors(rows.filter((r) => r.fixtureCount <= 1))
+  const maeDelta =
+    withMultiFixture.meanAbsoluteError !== null && withoutMultiFixture.meanAbsoluteError !== null
+      ? withMultiFixture.meanAbsoluteError - withoutMultiFixture.meanAbsoluteError
+      : null
+  return {
+    multiFixtureCount: multiFixtureRows.length,
+    withMultiFixture,
+    withoutMultiFixture,
+    maeDelta,
+    movesHeadlineSignificantly: maeDelta !== null && Math.abs(maeDelta) > MULTI_FIXTURE_HEADLINE_THRESHOLD,
+  }
+}
+
+/** Count of measured rows with fixtureCount > 1, per gameweek — the fixture-count column the by-gameweek table carries (ticket text). */
+export function countMultiFixtureRowsByGameweek(rows: readonly MeasuredRow[]): Map<number, number> {
+  const result = new Map<number, number>()
+  for (const row of rows) {
+    if (row.fixtureCount <= 1) continue
+    result.set(row.gameweekId, (result.get(row.gameweekId) ?? 0) + 1)
+  }
+  return result
+}
+
+/** "4,209 of 18,243 is 23%" — ticket text verbatim. Rounds to the nearest whole percentage point, and is 0% (never NaN) with zero rows read. */
+export function formatExclusionPercentage(count: number, rowsRead: number): string {
+  if (rowsRead <= 0) return '0%'
+  return `${Math.round((count / rowsRead) * 100)}%`
 }
 
 // ============================================================================
@@ -913,6 +1172,11 @@ interface ReportData {
   actualRowsMatched: number
   playersRowCount: number
   matchStatsRowCount: number
+  /** Ticket #140. */
+  multiFixtureByGameweek: Map<number, number>
+  multiFixtureDiagnostic: MultiFixtureDiagnostic
+  defconBuckets: BucketSummary[]
+  overallBuckets: BucketSummary[]
 }
 
 function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): string {
@@ -925,11 +1189,18 @@ function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanShe
   return [header, ...rows].join('\n')
 }
 
-function buildGameweekTable(byGameweek: Map<number, ErrorSummary>): string {
-  const header = '| Gameweek | n | Mean absolute error | Mean signed error |\n|---|---|---|---|'
+/** The fixture-count column (ticket text) is how many of that gameweek's measured player-gameweeks had more than one fixture — 0 for an ordinary gameweek, >0 flags a candidate double gameweek. */
+function buildGameweekTable(byGameweek: Map<number, ErrorSummary>, multiFixtureByGameweek: Map<number, number>): string {
+  const header = '| Gameweek | n | Mean absolute error | Mean signed error | Multi-fixture rows |\n|---|---|---|---|---|'
   const rows = [...byGameweek.entries()].map(
-    ([gw, s]) => `| ${gw} | ${s.n} | ${fmt(s.meanAbsoluteError)} | ${fmt(s.meanSignedError)} |`,
+    ([gw, s]) => `| ${gw} | ${s.n} | ${fmt(s.meanAbsoluteError)} | ${fmt(s.meanSignedError)} | ${multiFixtureByGameweek.get(gw) ?? 0} |`,
   )
+  return [header, ...rows].join('\n')
+}
+
+function buildBucketTable(buckets: readonly BucketSummary[]): string {
+  const header = '| prior_matches | n | Mean signed error |\n|---|---|---|'
+  const rows = buckets.map((b) => `| ${b.label} | ${b.n} | ${b.tooSmallToRead ? 'too small to read' : fmt(b.meanSignedError)} |`)
   return [header, ...rows].join('\n')
 }
 
@@ -995,8 +1266,10 @@ function generateReportMarkdown(data: ReportData): string {
       `- **rows measured (headline population)**: ${data.measured.length}\n` +
       `- excluded — no prior matches (\`prior_matches = 0\`, no point-in-time signal): ${data.exclusions.noPriorMatches}\n` +
       `- excluded — player did not feature this gameweek (a correct zero that would flatter the error): ${data.exclusions.didNotFeature}\n` +
+      `- excluded — blank gameweek (player's team had no fixture at all, ticket #140): ${data.exclusions.blankGameweek}\n` +
       `- excluded — actual data incomplete (\`team_goals_conceded\` null, ~2% known gap, ticket #125): ${data.exclusions.actualDataIncomplete}\n` +
-      `- excluded — unresolved \`player_code\` (no matching \`players\` row): ${data.exclusions.unresolvedPlayerCode}\n\n` +
+      `- excluded — unresolved \`player_code\` (no matching \`players\` row): ${data.exclusions.unresolvedPlayerCode} ` +
+      `(${formatExclusionPercentage(data.exclusions.unresolvedPlayerCode, data.featureHistoryRowsRead)} of rows read)\n\n` +
       `Reconciliation: ${data.measured.length} measured + ${totalExcluded(data.exclusions)} excluded = ` +
       `${data.measured.length + totalExcluded(data.exclusions)}, against ${data.featureHistoryRowsRead} rows read.`,
   )
@@ -1005,8 +1278,42 @@ function generateReportMarkdown(data: ReportData): string {
 
   sections.push(
     '## By gameweek\n\n' +
-      'A bad week is visible here rather than averaged away into the season figure above.\n\n' +
-      buildGameweekTable(data.byGameweek),
+      'A bad week is visible here rather than averaged away into the season figure above. "Multi-fixture rows" is ' +
+      'how many of that gameweek\'s measured player-gameweeks had more than one fixture (ticket #140) — a nonzero ' +
+      'value flags a candidate double gameweek.\n\n' +
+      buildGameweekTable(data.byGameweek, data.multiFixtureByGameweek),
+  )
+
+  sections.push(
+    '## Multi-fixture gameweeks (ticket #140)\n\n' +
+      `Player-gameweeks with more than one fixture: **${data.multiFixtureDiagnostic.multiFixtureCount}** of ${data.measured.length} measured.\n\n` +
+      `- Season headline WITH multi-fixture rows (the figure above): n=${data.multiFixtureDiagnostic.withMultiFixture.n}, ` +
+      `MAE=${fmt(data.multiFixtureDiagnostic.withMultiFixture.meanAbsoluteError)}, ` +
+      `mean signed error=${fmt(data.multiFixtureDiagnostic.withMultiFixture.meanSignedError)}\n` +
+      `- Season headline WITHOUT multi-fixture rows: n=${data.multiFixtureDiagnostic.withoutMultiFixture.n}, ` +
+      `MAE=${fmt(data.multiFixtureDiagnostic.withoutMultiFixture.meanAbsoluteError)}, ` +
+      `mean signed error=${fmt(data.multiFixtureDiagnostic.withoutMultiFixture.meanSignedError)}\n\n` +
+      (data.multiFixtureDiagnostic.movesHeadlineSignificantly
+        ? `**Excluding multi-fixture player-gameweeks moves the season MAE by ${fmt(data.multiFixtureDiagnostic.maeDelta)} — ` +
+          `more than the ${MULTI_FIXTURE_HEADLINE_THRESHOLD} threshold. This is worth reading before trusting the headline as-is.**`
+        : `Excluding multi-fixture player-gameweeks moves the season MAE by ${fmt(data.multiFixtureDiagnostic.maeDelta)} — ` +
+          `within the ${MULTI_FIXTURE_HEADLINE_THRESHOLD} threshold, not a material driver of the headline on its own.`),
+  )
+
+  sections.push(
+    '## Defensive-contribution signed error, by prior_matches bucket (ticket #140)\n\n' +
+      'Full-season calibration can look correct while point-in-time estimation shrinks hard toward the position ' +
+      'prior early in a player\'s history — this table is what tells a cold-start problem (shrinks toward 0 as the ' +
+      'bucket rises) apart from a level problem (stays flat). A bucket under ' +
+      `${MIN_BUCKET_SAMPLE_SIZE} measured rows is reported as "too small to read", never as a number nobody checked.\n\n` +
+      buildBucketTable(data.defconBuckets),
+  )
+
+  sections.push(
+    '## Overall signed error, by prior_matches bucket (ticket #140)\n\n' +
+      'The same bucketing applied to the overall signed error, for comparison against the defcon-only breakdown ' +
+      'above.\n\n' +
+      buildBucketTable(data.overallBuckets),
   )
 
   sections.push(
@@ -1039,6 +1346,8 @@ interface PlayerRow {
 
 interface ActualSourceRow {
   player_code: number | null
+  /** Ticket #140 — read only for team-slug inference (blank-gameweek detection); never used for point reconstruction. See file header, "BLANK GAMEWEEKS". */
+  match_id: string
   gameweek: number
   minutes_played: number | null
   goals: number | null
@@ -1161,7 +1470,7 @@ async function main(): Promise<void> {
       supabase
         .from('player_match_stats')
         .select(
-          'player_code, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries',
+          'player_code, match_id, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries',
         )
         .eq('season', season)
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
@@ -1194,13 +1503,30 @@ async function main(): Promise<void> {
     // 4. Index actuals by (player_code, gameweek).
     // --------------------------------------------------------------------
     const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>()
+    const matchIdsByPlayerCode = new Map<number, string[]>()
     for (const row of matchStatsRows) {
       if (row.player_code === null) continue
       const key = `${row.player_code}:${row.gameweek}`
       const list = actualByPlayerGameweek.get(key) ?? []
       list.push(row)
       actualByPlayerGameweek.set(key, list)
+
+      const matchIds = matchIdsByPlayerCode.get(row.player_code) ?? []
+      matchIds.push(row.match_id)
+      matchIdsByPlayerCode.set(row.player_code, matchIds)
     }
+
+    // --------------------------------------------------------------------
+    // 4b. Team-slug inference for blank-gameweek detection (ticket #140) —
+    //     see file header, "BLANK GAMEWEEKS". Built once from the SAME
+    //     matchStatsRows already fetched above; no extra Supabase call.
+    // --------------------------------------------------------------------
+    const teamSlugByPlayerCode = new Map<number, string>()
+    for (const [playerCode, matchIds] of matchIdsByPlayerCode) {
+      const slug = inferTeamSlug(matchIds)
+      if (slug !== null) teamSlugByPlayerCode.set(playerCode, slug)
+    }
+    const teamSlugsByGameweek = buildTeamSlugsByGameweek(matchStatsRows.map((r) => ({ gameweek: r.gameweek, matchId: r.match_id })))
 
     // --------------------------------------------------------------------
     // 5. Position priors, one per (gameweek, position) — see
@@ -1221,17 +1547,27 @@ async function main(): Promise<void> {
       const actualRowsRaw = actualByPlayerGameweek.get(`${row.player_code}:${row.gameweek_id}`) ?? []
       if (actualRowsRaw.length > 0) actualRowsMatched++
 
-      const classification = classifyRow(row, position, actualRowsRaw.map(toActualMatchStatsInput))
+      const teamSlug = teamSlugByPlayerCode.get(row.player_code) ?? null
+      // Fail open to today's didNotFeature behaviour when the team cannot be
+      // resolved — see inferTeamSlug's own comment on the single-match tie.
+      const hadFixture = teamSlug === null ? true : (teamSlugsByGameweek.get(row.gameweek_id)?.has(teamSlug) ?? false)
+
+      const classification = classifyRow(row, position, actualRowsRaw.map(toActualMatchStatsInput), hadFixture)
       if (classification.kind === 'excluded') {
         incrementExclusion(exclusions, classification.reason)
         continue
       }
 
+      // Ticket #140: project as many neutral fixtures as the actual side
+      // found rows for (classification.outcome.matchesFound) — the same
+      // count aggregateActualForGameweek summed on the actual side.
       const prior = positionPriors.get(positionPriorKey(row.gameweek_id, classification.position)) ?? fallbackPositionPrior(classification.position)
-      const projection = projectRow(row, classification.position, prior)
-      const projectedComponents = pickProjectedComponents(projection.fixtures[0].components)
+      const projection = projectRow(row, classification.position, prior, classification.outcome.matchesFound)
+      const projectedComponents = sumComponentTotals(projection.fixtures.map((f) => pickProjectedComponents(f.components)))
 
-      measured.push(buildMeasuredRow(row.gameweek_id, classification.position, projection.expectedPoints, projectedComponents, classification.outcome))
+      measured.push(
+        buildMeasuredRow(row.gameweek_id, classification.position, projection.expectedPoints, projectedComponents, classification.outcome, row.prior_matches),
+      )
     }
 
     assertReconciles(featureHistoryRows.length, measured.length, exclusions)
@@ -1245,6 +1581,10 @@ async function main(): Promise<void> {
     const cleanSheetRateByPosition: Partial<Record<Position, number | null>> = {}
     for (const position of POSITIONS) cleanSheetRateByPosition[position] = derivedCleanSheetRate(measured, position)
     const sanity = checkSanityBounds(overall.meanAbsoluteError, cleanSheetRateByPosition)
+    const multiFixtureByGameweek = countMultiFixtureRowsByGameweek(measured)
+    const multiFixtureDiagnostic = buildMultiFixtureDiagnostic(measured)
+    const defconBuckets = bucketByPriorMatches(measured, defconSignedError)
+    const overallBuckets = bucketByPriorMatches(measured, (r) => r.signedError)
 
     const reportData: ReportData = {
       generatedAt: new Date(),
@@ -1260,6 +1600,10 @@ async function main(): Promise<void> {
       actualRowsMatched,
       playersRowCount: playerRows.length,
       matchStatsRowCount: matchStatsRows.length,
+      multiFixtureByGameweek,
+      multiFixtureDiagnostic,
+      defconBuckets,
+      overallBuckets,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
     await mkdir(dirname(reportPath), { recursive: true })
@@ -1281,6 +1625,9 @@ async function main(): Promise<void> {
       byPosition: Object.fromEntries(POSITIONS.map((p) => [POSITION_NAMES[p], byPosition[p]])),
       cleanSheetRateByPosition: Object.fromEntries(POSITIONS.map((p) => [POSITION_NAMES[p], cleanSheetRateByPosition[p]])),
       sanity,
+      multiFixtureDiagnostic,
+      defconBuckets,
+      overallBuckets,
       reportPath,
     }
 
