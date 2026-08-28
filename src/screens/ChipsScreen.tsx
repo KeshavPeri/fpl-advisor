@@ -13,7 +13,8 @@ import './ChipsScreen.css'
  * which of the season's eight chips (two sets of four) are used, remaining
  * or lost, and how long the active set has left. It states the position; it
  * does not warn or recommend — item 26 (chip expiry, #97) added the
- * warning above; item 27 (ticket #126) adds the chip ADVISORY below — a
+ * warning above; item 27 (ticket #126) adds the chip-timing ADVISORY below,
+ * and item 28 (ticket #134) adds the squad-rebuild advisory beneath it — a
  * number and its limitation, never a "play this chip" instruction
  * (product-brief.md §6a). Owns its own fetch, independent of the home
  * screen, same
@@ -163,6 +164,27 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
             ))}
           </ul>
           {state.chipAdvisoryNote && <p className="chips-advisory__note">{state.chipAdvisoryNote}</p>}
+        </Surface>
+      )}
+
+      {state.squadAdvisories.length > 0 && (
+        <Surface className="chips-advisory">
+          <p className="chips-advisory__label">Squad-rebuild advisory</p>
+          <ul className="chips-advisory__list">
+            {state.squadAdvisories.map((advisory) => (
+              <li key={advisory.chipCode} className="chips-advisory__row">
+                <span className="chips-advisory__name">{advisory.displayName}</span>
+                <span className="chips-advisory__meta">
+                  <span className="num">
+                    {advisory.deltaWhole > 0 ? '+' : ''}
+                    {advisory.deltaWhole}
+                  </span>{' '}
+                  pts if rebuilt now
+                </span>
+              </li>
+            ))}
+          </ul>
+          {state.squadAdvisoryNote && <p className="chips-advisory__note">{state.squadAdvisoryNote}</p>}
         </Surface>
       )}
 

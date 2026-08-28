@@ -57,14 +57,46 @@ export interface ChipAdvisoryView {
   solutionIndex: number
 }
 
+/**
+ * One row read from `public.chip_advisories` where chip_code is 'WC' or
+ * 'FH' — ticket #134 (item 28). Same table and same shape as
+ * ChipAdvisoryRow above, but a full-squad-rebuild question ("is a wildcard
+ * worth it right now?") rather than a chip-timing one, and resolved
+ * separately from ChipAdvisoryRow in api.ts so a squad-rebuild-probe run
+ * can never be mistaken for the nightly chip-timing advisory (or vice
+ * versa) — see scripts/store-squad-advisory.ts for how this is written.
+ */
+export interface SquadAdvisoryRow {
+  chipCode: 'WC' | 'FH'
+  /** chip-enabled objective minus chip-free objective, already computed by the database (a GENERATED column) — never recomputed here. Can be large; see SQUAD_ADVISORY_HORIZON_NOTE in derive.ts for why a large number is not itself an instruction. */
+  delta: number
+}
+
+/**
+ * One squad-rebuild advisory resolved for display — ticket #134. States a
+ * point gap and its five-gameweek limitation; never a "play this chip"
+ * instruction (product-brief.md §6a — see SQUAD_ADVISORY_HORIZON_NOTE in
+ * derive.ts). design-reference.md: never coloured as a warning — a large
+ * delta is information, not an alarm.
+ */
+export interface SquadAdvisoryView {
+  chipCode: 'WC' | 'FH'
+  /** "Wildcard" or "Free Hit" — SQUAD_ADVISORY_DISPLAY_NAMES[chipCode] in derive.ts. */
+  displayName: string
+  /** Math.round(delta) — design-reference.md forbids decimal points on a projected-points figure; see derive.ts. */
+  deltaWhole: number
+}
+
 /** Everything deriveChipState needs, already read by src/lib/chips/api.ts. */
 export interface ChipSourceData {
   /** The most recently synced squads row's cumulative chips_used array — see api.ts for what "most recently synced" means and why. Empty array (never null) when nothing has been synced yet. */
   chipsUsed: readonly ChipUsageRecord[]
   /** Every known gameweek's id + deadline instant, ascending by id. Used to resolve both the Gameweek 19 deadline (never hardcoded — read from here) and how many gameweeks remain in the active set. Empty when the gameweeks table hasn't been ingested yet. */
   gameweeks: readonly GameweekDeadline[]
-  /** The current/next gameweek's chip advisory rows, from the LATEST solver run only — see api.ts. Empty when no chip was played in the latest solve, or none has run yet. */
+  /** The current/next gameweek's chip advisory rows (TC/BB only — see api.ts), from the LATEST solver run only. Empty when no chip was played in the latest solve, or none has run yet. */
   chipAdvisories: readonly ChipAdvisoryRow[]
+  /** The current/next gameweek's squad-rebuild advisory rows (WC/FH only — see api.ts), the latest stored row per chip code. Empty when squad-rebuild-probe.yml has never been dispatched for this gameweek. */
+  squadAdvisories: readonly SquadAdvisoryRow[]
 }
 
 /** One chip already used, resolved for display. */
@@ -164,4 +196,8 @@ export interface DerivedChipState {
   chipAdvisories: readonly ChipAdvisoryView[]
   /** CHIP_ADVISORY_HORIZON_NOTE when `chipAdvisories` is non-empty, null otherwise — present on the derived view itself so it is directly assertable without rendering the screen. */
   chipAdvisoryNote: string | null
+  /** Ticket #134: the latest squad-rebuild-probe run(s), one entry per chip code (WC and/or FH) that has ever been probed for the current gameweek. Empty when squad-rebuild-probe.yml has never been dispatched for it. */
+  squadAdvisories: readonly SquadAdvisoryView[]
+  /** SQUAD_ADVISORY_HORIZON_NOTE when `squadAdvisories` is non-empty, null otherwise — same "assertable without rendering" reasoning as chipAdvisoryNote above. */
+  squadAdvisoryNote: string | null
 }

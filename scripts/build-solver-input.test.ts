@@ -328,17 +328,22 @@ describe('buildSolverConfig', () => {
     "buildSolverConfig's own parameter type has no `variant` field — passing one is a TypeScript compile error, " +
       "not a runtime possibility that could be missed by a test fixture that forgets to try it",
     () => {
-      // @ts-expect-error — buildSolverConfig's params type is exactly
+      // buildSolverConfig's params type is exactly
       // `{ horizon; datasource; secs?; chipProbe? }`. There is no `variant`
-      // field to set. If this line ever stops being a type error — e.g.
-      // because a future edit widens buildSolverConfig's own signature to
-      // accept a rebuild variant, reopening the exact path ticket #134
-      // closes — this @ts-expect-error directive itself becomes an "unused
-      // @ts-expect-error" error, so `tsc -b` (npm run build) fails either
-      // way the drift could happen. This is a type-level assertion, not a
-      // runtime one — it proves nothing to vitest at run time, and needs
-      // none of the network/filesystem infrastructure the rest of this
-      // file avoids.
+      // field to set. If the line below ever stops being a type error —
+      // e.g. because a future edit widens buildSolverConfig's own signature
+      // to accept a rebuild variant, reopening the exact path ticket #134
+      // closes — the @ts-expect-error directive immediately below becomes
+      // an "unused @ts-expect-error" error, so `tsc -b` (npm run build)
+      // fails either way the drift could happen. This is a type-level
+      // assertion, not a runtime one — it proves nothing to vitest at run
+      // time, and needs none of the network/filesystem infrastructure the
+      // rest of this file avoids. NOTE: @ts-expect-error only suppresses
+      // the error on the LINE DIRECTLY BELOW IT — keep this comment above
+      // the directive, never between it and the code, or the directive
+      // itself silently becomes "unused" (nothing else on the intervening
+      // comment line to suppress) and this test stops proving anything.
+      // @ts-expect-error — no `variant` field on buildSolverConfig's params; see comment block above.
       buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'wc' })
     },
   )
