@@ -1,0 +1,263 @@
+name: Squad rebuild probe
+
+# Ticket #134 (feature-list item 28, first slice) — "is my squad far enough
+# from optimal that a wildcard is worth playing?" A dispatch-only diagnostic,
+# same shape as .github/workflows/solver-chip-probe.yml (#114): it runs the
+# solver in a mode this app has never used in a stored run, reads back a
+# single number, and stores nothing that could reach a recommendation. See
+# docs/solver-notes.md for the full write-up of what preseason: true does
+# and why it is safe only here.
+#
+# workflow_dispatch ONLY — manual trigger, nothing automatic. Never wired
+# into any other workflow, including solver-run.yml or the daily
+# ingest/projection chain: enabling `preseason: true` on any path that
+# stores picks would silently replace the app's recommendation with a
+# full-squad rebuild it never told anyone it was making — see
+# scripts/build-solver-input.ts's own header ("DELIBERATELY UNAUTHENTICATED,
+# FOREVER") and its "Rebuild config" section for the isolation this workflow
+# depends on.
+#
+# ============================================================================
+# THE SAFETY CASE.
+# ============================================================================
+# This workflow calls scripts/emit-projections-csv.ts and
+# scripts/build-solver-input.ts (both unmodified by this ticket) and
+# scripts/store-squad-advisory.ts (new, ticket #134) — and NOTHING else that
+# writes application state. In particular, this file never stores solver
+# picks, never generates a recommendation, never sends a notification of any
+# kind, and never snapshots a prediction — no step below calls any of the
+# scripts that do those four things, by name or otherwise. The rebuilt squad
+# itself — which fifteen players the solver would pick — is never read by
+# any script here at all; it exists only in the solve's own stdout log and
+# results CSV, both uploaded as artefacts below (with `if: always()`, so a
+# failed store step still leaves the squad readable) and never stored
+# anywhere else. Reading which players the solver would pick is the point of
+# looking; storing them is a different feature, explicitly out of this
+# ticket's scope.
+#
+# Runs TWO solves, both against the SAME projections CSV and the SAME
+# horizon (this ticket's own scope): a normal chip-free baseline (identical
+# in shape to solver-run.yml's own "Run solver" step) and a
+# preseason: true, single-chip-variant rebuild (wc OR fh, chosen by this
+# dispatch's own `variant` input — never both; see
+# scripts/build-solver-input.ts's buildRebuildSolverConfig). Both solves'
+# own team.json is built from squads/squad_picks — this app's own record of
+# the squad — never from FPL's authenticated in-progress-squad endpoint;
+# preseason: true discards it as soon as the solve starts (that is the
+# entire point of a rebuild probe) but never touches the database, and
+# team.json itself is rewritten fresh on this workflow's own next dispatch
+# regardless.
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Which chip to probe — never both in one run (see scripts/build-solver-input.ts)'
+        required: true
+        type: choice
+        options:
+          - wc
+          - fh
+        default: wc
+
+env:
+  PROJECTIONS_CSV_PATH: solver/data/fpladvisor.csv
+  TEAM_JSON_PATH: solver/data/team.json
+  BASELINE_SOLVER_CONFIG_PATH: solver/data/solver-config-baseline.json
+  BASELINE_SOLVER_LOG_PATH: solver/solve.log
+  REBUILD_SOLVER_CONFIG_PATH: solver/data/solver-config-rebuild.json
+  REBUILD_SOLVER_LOG_PATH: solver/solve-rebuild.log
+  SOLVER_RESULTS_DIR: solver/data/results
+
+jobs:
+  squad-rebuild-probe:
+    runs-on: ubuntu-latest
+    # Two solves, each with its own secs: 300 time limit (see
+    # scripts/build-solver-input.ts's SOLVER_TIME_LIMIT_SECS) — the same
+    # "up to ~10 minutes for two solves, plus single-digit-minute overhead,
+    # plus real headroom" reasoning solver-run.yml's own timeout-minutes
+    # comment uses for its own two-solve run. A full-squad rebuild explores
+    # a much larger search space than a single-transfer solve, so this
+    # leaves the same 35-minute budget rather than a smaller one.
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check out solver at pinned commit
+        uses: actions/checkout@v6
+        with:
+          repository: sertalpbilal/FPL-Optimization-Tools
+          # Same pin as solver-run.yml — see decisions/ticket-29.md and
+          # decisions/ticket-41.md. Do not move this to a branch or tag.
+          ref: 45131c5a41d7caadb5cb626c012bfa9111dca7a2
+          path: solver
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install solver dependencies (and pinned Python, via uv sync)
+        working-directory: solver
+        run: uv sync
+
+      - name: Emit projections CSV
+        # Reuses the existing, unmodified scripts/emit-projections-csv.ts
+        # (item 11) — this workflow never regenerates or reshapes the CSV.
+        # Read-only against player_projections/players/teams/gameweeks; the
+        # one write it performs is its own job_runs row, same as every other
+        # workflow that calls it.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/emit-projections-csv.ts
+
+      - name: Build solver input (baseline, chip-free)
+        id: build-baseline-input
+        # No CHIP_PROBE, no REBUILD_VARIANT — byte-for-byte the same config
+        # solver-run.yml's own "Build solver input" step produces: preseason
+        # false, chip_limits all zero. This is the "normal chip-free solve
+        # as a baseline" the ticket's own scope names. TEAM_JSON_PATH stays
+        # at its workflow-level default; only SOLVER_CONFIG_PATH is
+        # overridden so this build writes to its own file rather than a
+        # name shared with the rebuild build step below.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SOLVER_CONFIG_PATH: ${{ env.BASELINE_SOLVER_CONFIG_PATH }}
+          SOLVER_SECS: '300'
+        run: npx tsx scripts/build-solver-input.ts
+
+      - name: Run solver (baseline, chip-free)
+        id: solve-baseline
+        if: steps.build-baseline-input.outputs.squad_found == 'true'
+        working-directory: solver
+        # Exit code swallowed deliberately, same reasoning as
+        # solver-run.yml's equivalent step: the process's own exit code
+        # cannot distinguish a genuine crash/infeasible solve from a
+        # time-limit-reached-but-usable one, and scripts/store-squad-advisory.ts
+        # (not this step) makes that determination from the captured log.
+        run: |
+          set +e
+          uv run python run/solve.py --config data/solver-config-baseline.json > solve.log 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Build solver input (rebuild)
+        id: build-rebuild-input
+        # REBUILD_VARIANT is the only difference from the baseline build
+        # step above — see scripts/build-solver-input.ts's own comment on
+        # REBUILD_VARIANT and buildRebuildSolverConfig. This is the ONLY
+        # place in this app's workflows that sets REBUILD_VARIANT, and the
+        # ONLY thing that can make a real solve run with preseason: true.
+        # TEAM_JSON_PATH and PROJECTIONS_CSV_PATH are left at their
+        # workflow-level defaults — reused, byte-for-byte the same inputs as
+        # the baseline build (this ticket's own scope: "the same projections
+        # CSV, the same horizon").
+        if: steps.build-baseline-input.outputs.squad_found == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SOLVER_CONFIG_PATH: ${{ env.REBUILD_SOLVER_CONFIG_PATH }}
+          SOLVER_SECS: '300'
+          REBUILD_VARIANT: ${{ inputs.variant }}
+        run: npx tsx scripts/build-solver-input.ts
+
+      - name: Run solver (rebuild)
+        id: solve-rebuild
+        if: steps.build-rebuild-input.outputs.squad_found == 'true'
+        working-directory: solver
+        # Same exit-code-swallowing reasoning as "Run solver (baseline,
+        # chip-free)" above. Writes its own log file (solve-rebuild.log)
+        # so the baseline solve's own solve.log — which
+        # scripts/store-squad-advisory.ts still needs to re-read — is never
+        # touched.
+        run: |
+          set +e
+          uv run python run/solve.py --config data/solver-config-rebuild.json > solve-rebuild.log 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Store squad-rebuild advisory
+        id: store-squad-advisory
+        # Reads BOTH BASELINE_SOLVER_LOG_PATH and REBUILD_SOLVER_LOG_PATH —
+        # never a results CSV — parses both with scripts/lib/solver-output.ts,
+        # and stores ONE public.chip_advisories row (chip_code = "WC" or
+        # "FH", never both) keyed to the freshest EXISTING solver_runs row
+        # for the target gameweek. Writes to chip_advisories and job_runs
+        # only — see scripts/store-squad-advisory.ts's own file header for
+        # the full safety case. Gated on BOTH build steps' own squad_found
+        # outputs, matching solver-run.yml's own gating convention.
+        if: steps.build-baseline-input.outputs.squad_found == 'true' && steps.build-rebuild-input.outputs.squad_found == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          REBUILD_VARIANT: ${{ inputs.variant }}
+        run: npx tsx scripts/store-squad-advisory.ts
+
+      - name: Upload projections CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: squad-rebuild-probe-projections-csv
+          path: ${{ env.PROJECTIONS_CSV_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload team.json artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: squad-rebuild-probe-team-json
+          path: ${{ env.TEAM_JSON_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload baseline solver log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: squad-rebuild-probe-baseline-log
+          path: ${{ env.BASELINE_SOLVER_LOG_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload rebuild solver log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: squad-rebuild-probe-rebuild-log
+          path: ${{ env.REBUILD_SOLVER_LOG_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload rebuild solver config JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: squad-rebuild-probe-rebuild-config
+          path: ${{ env.REBUILD_SOLVER_CONFIG_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      # The REBUILT SQUAD itself — ticket's own scope: "The rebuilt squad is
+      # uploaded as a workflow artefact, never stored." print_squads: true
+      # (unchanged, every config this app builds sets it) makes the rebuild
+      # solve's own results CSV carry the fifteen picked players; this is
+      # the only place they are ever readable, and only for retention-days
+      # below, never in any table.
+      - name: Upload rebuild results CSV artifact (the rebuilt squad)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: squad-rebuild-probe-results-csv
+          path: ${{ env.SOLVER_RESULTS_DIR }}/*.csv
+          if-no-files-found: warn
+          retention-days: 14
