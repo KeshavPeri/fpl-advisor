@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../scoring/types.ts'
 import type { Position } from '../scoring/types.ts'
-import { defensiveMultiplier, expectedScore, expectedScoreFromDifficulty } from './fixture.ts'
-import { cleanSheetPoints as cleanSheetPointsFor } from './pointValues.ts'
+import { attackingMultiplier, defensiveMultiplier, expectedScore, expectedScoreFromDifficulty } from './fixture.ts'
+import { ASSIST_POINTS, cleanSheetPoints as cleanSheetPointsFor } from './pointValues.ts'
 import {
+  ASSIST_CONVERSION_DEFENDER,
+  ASSIST_CONVERSION_FORWARD,
+  ASSIST_CONVERSION_GOALKEEPER,
+  ASSIST_CONVERSION_MAX,
+  ASSIST_CONVERSION_MIDFIELDER,
+  ASSIST_CONVERSION_MIN,
+  assistConversionFactor,
+  clampAssistConversionFactor,
   cleanSheetProbability,
   expectedGoalsConcededPoints,
   expectedSavePoints,
@@ -416,6 +424,189 @@ describe('expectedEvents carries the raw event counts projectPlayerFixture alrea
     expect(events.pSixtyPlus).toBe(projection.modelInputs.pSixtyPlus)
   })
 
+})
+
+// ============================================================================
+// Ticket #148 -- assist conversion factor
+// ============================================================================
+
+describe('assist conversion clamp: ASSIST_CONVERSION_MIN/MAX', () => {
+  it('is [1.0, 2.5]', () => {
+    expect(ASSIST_CONVERSION_MIN).toBe(1.0)
+    expect(ASSIST_CONVERSION_MAX).toBe(2.5)
+  })
+
+  it('a value inside the range passes through unchanged', () => {
+    expect(clampAssistConversionFactor(1.3)).toBe(1.3)
+    expect(clampAssistConversionFactor(ASSIST_CONVERSION_MIN)).toBe(ASSIST_CONVERSION_MIN)
+    expect(clampAssistConversionFactor(ASSIST_CONVERSION_MAX)).toBe(ASSIST_CONVERSION_MAX)
+  })
+
+  it('a value outside the stated range is clamped rather than applied', () => {
+    // Above the max: a hypothetical future re-measurement of 10x is not applied as-is.
+    expect(clampAssistConversionFactor(10)).toBe(ASSIST_CONVERSION_MAX)
+    // Below the min: a hypothetical future re-measurement of 0.2x is not applied as-is either.
+    expect(clampAssistConversionFactor(0.2)).toBe(ASSIST_CONVERSION_MIN)
+    // A negative or zero raw ratio (e.g. a data glitch) is still floored at the min, not passed through.
+    expect(clampAssistConversionFactor(0)).toBe(ASSIST_CONVERSION_MIN)
+    expect(clampAssistConversionFactor(-3)).toBe(ASSIST_CONVERSION_MIN)
+  })
+})
+
+describe('the per-position assist conversion constants are the measured ratios, rounded to two decimals', () => {
+  it('goalkeeper 2.30, defender 1.30, midfielder 1.33, forward 2.12', () => {
+    expect(ASSIST_CONVERSION_GOALKEEPER).toBe(2.3)
+    expect(ASSIST_CONVERSION_DEFENDER).toBe(1.3)
+    expect(ASSIST_CONVERSION_MIDFIELDER).toBe(1.33)
+    expect(ASSIST_CONVERSION_FORWARD).toBe(2.12)
+  })
+
+  it('every measured constant already sits inside the clamp range (today\'s measurement needs no clamping)', () => {
+    for (const value of [ASSIST_CONVERSION_GOALKEEPER, ASSIST_CONVERSION_DEFENDER, ASSIST_CONVERSION_MIDFIELDER, ASSIST_CONVERSION_FORWARD]) {
+      expect(value).toBeGreaterThanOrEqual(ASSIST_CONVERSION_MIN)
+      expect(value).toBeLessThanOrEqual(ASSIST_CONVERSION_MAX)
+    }
+  })
+})
+
+describe('assistConversionFactor: goalkeeper is handled explicitly, not a fallthrough default', () => {
+  it('GOALKEEPER returns its own measured constant, not another position\'s', () => {
+    expect(assistConversionFactor(GOALKEEPER)).toBe(ASSIST_CONVERSION_GOALKEEPER)
+    expect(assistConversionFactor(GOALKEEPER)).not.toBe(assistConversionFactor(DEFENDER))
+    expect(assistConversionFactor(GOALKEEPER)).not.toBe(assistConversionFactor(MIDFIELDER))
+    expect(assistConversionFactor(GOALKEEPER)).not.toBe(assistConversionFactor(FORWARD))
+  })
+
+  it('every position returns its own clamped, named constant', () => {
+    expect(assistConversionFactor(GOALKEEPER)).toBe(clampAssistConversionFactor(ASSIST_CONVERSION_GOALKEEPER))
+    expect(assistConversionFactor(DEFENDER)).toBe(clampAssistConversionFactor(ASSIST_CONVERSION_DEFENDER))
+    expect(assistConversionFactor(MIDFIELDER)).toBe(clampAssistConversionFactor(ASSIST_CONVERSION_MIDFIELDER))
+    expect(assistConversionFactor(FORWARD)).toBe(clampAssistConversionFactor(ASSIST_CONVERSION_FORWARD))
+  })
+
+  it('a goalkeeper\'s projected assist points use the goalkeeper factor, not silently zero or a default', () => {
+    // A goalkeeper with a deliberately nonzero xaPer90 (unrealistic in practice, but exercises
+    // the position-specific path rather than relying on real GK xA being ~0).
+    const gk = player({
+      position: GOALKEEPER,
+      rateHistory: { minutesPlayed: 900, totalXg: 0, totalXa: 4.5, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
+      ratePositionPrior: { xgPer90: 0, xaPer90: 0.2, savesPer90: 0, cbiPer90: 0, recoveriesPer90: 0 },
+      recentMinutes: [90, 90, 90, 90, 90],
+    })
+    const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 3 }) // expectedScore 0.5 -> attackMultiplier 1
+    const projection = projectPlayerFixture(gk, f)
+
+    // playerRates.xaPer90 blends observed (0.2) with the (also 0) position prior via rates.ts's
+    // shrinkage, which this ticket does not touch -- rather than hand-deriving that blend here,
+    // assert the relationship this ticket DOES own: expectedAssists is exactly xaPer90 (as
+    // reported on modelInputs) x minutesFraction (1) x attackMultiplier (1) x the GK factor.
+    const expectedAssistsHand =
+      projection.modelInputs.xaPer90 * 1 * attackingMultiplier(0.5) * ASSIST_CONVERSION_GOALKEEPER
+    expect(projection.modelInputs.expectedAssists).toBeCloseTo(expectedAssistsHand, 10)
+    expect(projection.expectedEvents.expectedAssists).toBeCloseTo(expectedAssistsHand, 10)
+    expect(projection.components.assistPoints).toBeCloseTo(expectedAssistsHand * ASSIST_POINTS, 10)
+    // And it is NOT what the pre-ticket formula (no factor) would have given -- the factor is
+    // really being applied, not a no-op for goalkeepers.
+    const preTicketExpectedAssists = projection.modelInputs.xaPer90 * 1 * attackingMultiplier(0.5)
+    expect(projection.modelInputs.expectedAssists).not.toBeCloseTo(preTicketExpectedAssists, 5)
+  })
+})
+
+describe('projectPlayerFixture: expectedAssists is xaPer90 x minutesFraction x attackMultiplier x assistConversionFactor(position), and it alone drives assistPoints', () => {
+  it.each([
+    [DEFENDER, ASSIST_CONVERSION_DEFENDER],
+    [MIDFIELDER, ASSIST_CONVERSION_MIDFIELDER],
+    [FORWARD, ASSIST_CONVERSION_FORWARD],
+  ] as const)('%s uses its own factor (%d)', (position, factor) => {
+    const p = player({
+      position,
+      rateHistory: { minutesPlayed: 900, totalXg: 0, totalXa: 3.6, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 }, // 0.36 xA/90 observed
+      ratePositionPrior: { xgPer90: 0, xaPer90: 0.36, savesPer90: 0, cbiPer90: 0, recoveriesPer90: 0 }, // prior matches observed exactly, so shrinkage lands on 0.36 regardless of its exact formula
+      recentMinutes: [90, 90, 90, 90, 90],
+    })
+    const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 3, leagueBaselineGoals: 1.4 }) // expectedScore 0.5 -> attackMultiplier 1, minutesFraction 1
+    const projection = projectPlayerFixture(p, f)
+
+    expect(projection.modelInputs.xaPer90).toBeCloseTo(0.36, 10)
+    // minutesFraction = 1, attackMultiplier = 1 at this fixture -- expectedAssists is exactly xaPer90 x factor.
+    const expectedAssistsHand = 0.36 * factor
+    expect(projection.modelInputs.expectedAssists).toBeCloseTo(expectedAssistsHand, 10)
+    expect(projection.expectedEvents.expectedAssists).toBeCloseTo(expectedAssistsHand, 10)
+    expect(projection.components.assistPoints).toBeCloseTo(expectedAssistsHand * ASSIST_POINTS, 10)
+  })
+})
+
+describe('modelInputs.expectedAssists is surfaced alongside the existing fields', () => {
+  it('matches expectedEvents.expectedAssists and is present for every position', () => {
+    const positions: Position[] = [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD]
+    for (const position of positions) {
+      const p = player({
+        position,
+        rateHistory: { minutesPlayed: 900, totalXg: 0, totalXa: 1.8, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 },
+        ratePositionPrior: { xgPer90: 0, xaPer90: 0.18, savesPer90: 0, cbiPer90: 0, recoveriesPer90: 0 },
+      })
+      const projection = projectPlayerFixture(p, fixture())
+      expect(projection.modelInputs.expectedAssists).toBe(projection.expectedEvents.expectedAssists)
+      expect(Number.isFinite(projection.modelInputs.expectedAssists)).toBe(true)
+    }
+  })
+})
+
+describe('ticket #148: every component other than assistPoints (and expectedAssists) is byte-identical to the pre-ticket formula, for a fixed input, across every position', () => {
+  // Hand-computed pre-ticket values for this fixture and player shape (leagueBaselineGoals=1.4,
+  // teamElo/opponentElo null, fplDifficulty=3 -> expectedScore=0.5 -> attackMultiplier=1,
+  // defensiveMultiplier=1; recentMinutes all 90 with status 'a' -> pAppears=pSixtyPlus=1;
+  // xgPer90=0.3, savesPer90=2 observed with a matching prior so shrinkage lands exactly there):
+  //   teamLambdaConceded = expectedGoalsConceded(1.4, 0.5) = 1.4 x 2 x 0.5 = 1.4
+  //   pCleanSheet = exp(-1.4)
+  //   expectedGoals = 0.3 x 1 x 1 = 0.3
+  //   expectedSaves = 2 x 1 x defensiveMultiplier(0.5) = 2 x 1 x 1 = 2
+  //   defensiveContributionPoints = 0 (defconPositionPrior=0, no matches, for every position)
+  //   appearancePoints = 1 x 1 + 1 x 1 = 2
+  // None of these depend on xaPer90 or the new assist conversion factor -- unaffected by this ticket.
+  const rateHistory = { minutesPlayed: 900, totalXg: 3.0, totalXa: 3.6, totalSaves: 20, totalCbi: 0, totalRecoveries: 0 }
+  const ratePositionPrior = { xgPer90: 0.3, xaPer90: 0.36, savesPer90: 2, cbiPer90: 0, recoveriesPer90: 0 }
+  const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 3, leagueBaselineGoals: 1.4 })
+  const teamLambdaConceded = 1.4
+  const pCleanSheet = cleanSheetProbability(teamLambdaConceded)
+  const expectedGoalsHand = 0.3
+  const expectedSavesHand = 2
+
+  it.each([
+    [GOALKEEPER, 4, ASSIST_CONVERSION_GOALKEEPER],
+    [DEFENDER, 4, ASSIST_CONVERSION_DEFENDER],
+    [MIDFIELDER, 1, ASSIST_CONVERSION_MIDFIELDER],
+    [FORWARD, 0, ASSIST_CONVERSION_FORWARD],
+  ] as const)('%s: every component except assistPoints matches the pre-ticket formula exactly; assistPoints reflects the factor', (position, expectedCleanSheetPointsValue, factor) => {
+    const p = player({ position, rateHistory, ratePositionPrior, defconPositionPrior: 0, defconMatches: [] })
+    const projection = projectPlayerFixture(p, f)
+
+    expect(cleanSheetPointsFor(position)).toBe(expectedCleanSheetPointsValue) // sanity-check the table read above
+    expect(projection.components.appearancePoints).toBeCloseTo(2, 12)
+    expect(projection.components.goalPoints).toBeCloseTo(expectedGoalsHand * goalPointsForAssistTest(position), 10)
+    expect(projection.components.cleanSheetPoints).toBeCloseTo(pCleanSheet * 1 * expectedCleanSheetPointsValue, 12)
+    expect(projection.components.goalsConcededPoints).toBeCloseTo(expectedGoalsConcededPoints(teamLambdaConceded, position), 12)
+    expect(projection.components.savePoints).toBeCloseTo(expectedSavePoints(expectedSavesHand, position), 10)
+    expect(projection.components.defensiveContributionPoints).toBe(0)
+    expect(projection.components.bonusPoints).toBe(0)
+
+    // assistPoints DOES change: it is xaPer90 x minutesFraction x attackMultiplier x this
+    // position's factor x ASSIST_POINTS, not the pre-ticket xaPer90 x minutesFraction x
+    // attackMultiplier x ASSIST_POINTS.
+    const preTicketAssistPoints = 0.36 * 1 * 1 * ASSIST_POINTS
+    const postTicketAssistPoints = 0.36 * 1 * 1 * factor * ASSIST_POINTS
+    expect(projection.components.assistPoints).toBeCloseTo(postTicketAssistPoints, 10)
+    expect(projection.components.assistPoints).not.toBeCloseTo(preTicketAssistPoints, 5)
+  })
+})
+
+// Local helper for the byte-identical test above -- goalPoints(position) from pointValues.ts,
+// imported under its own name so it does not collide with this file's `goalPoints` test data.
+function goalPointsForAssistTest(position: Position): number {
+  return { 1: 10, 2: 6, 3: 5, 4: 4 }[position]
+}
+
+describe('expectedEvents: expectedCbi and expectedRecoveries (ticket #78, unaffected by ticket #148)', () => {
   it('expectedCbi and expectedRecoveries scale with minutesFraction only -- no fixture attacking multiplier applied', () => {
     // A heavily favoured fixture (high expectedScore) inflates expectedGoals/expectedAssists via the
     // attacking multiplier, but must leave expectedCbi/expectedRecoveries untouched -- they are
