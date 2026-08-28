@@ -13,12 +13,53 @@
 // `TC2, BB4` means Triple Captain in gameweek 2, Bench Boost in gameweek 4.
 // This is the parse target: one compact line per `solution_index` (the
 // `iter` column), the same key solver_picks and recommendations already
-// use. The literal text above — quoted verbatim in the ticket, "Verified
-// from the real log, 28 August 2026" — is this module's one directly
-// verified fixture; everything else about the log's shape is inferred (see
-// "WHAT IS INFERRED, NOT VERIFIED" below), same discipline
-// docs/solver-notes.md's own "Resolved" section applies: write down what is
-// actually known, and say plainly what is not.
+// use. The literal text above — quoted verbatim in ticket #126, "Verified
+// from the real log, 28 August 2026" — was this module's one directly
+// verified fixture at the time it was written; everything else about the
+// log's shape was inferred (see "WHAT IS INFERRED, NOT VERIFIED" below).
+//
+// ============================================================================
+// TICKET #132 — the defect this ticket's own DoD predicted.
+// ============================================================================
+// #126's own definition of done said plainly: "a solve that plays no chip
+// has never been observed." It hadn't. In production the chip-free solve —
+// the NORMAL run, which is the common case — failed on every run:
+// `the "Results" table was found but no data rows could be parsed under its
+// header row.` Two real shapes, both captured from the same production run
+// of 29 August 2026, exposed three accidents the original parser had baked
+// in from its one example:
+//
+//   1. An empty cell is the literal token `-`, not blank, in EVERY column —
+//      including `sell` and `buy` on a rolled transfer (no player sold, none
+//      bought), not just `chip`. The old row regex treated the chip column's
+//      absence as "nothing to consume" (an optional group matching zero
+//      characters); a literal `-` character sitting in that column position
+//      is a real character the regex had no path to consume, so the whole
+//      row failed to match.
+//   2. The header's own column spacing shifts between a chip-enabled log and
+//      a chip-free one (the chip column is narrower when every value is a
+//      bare `-` rather than "BB2, TC3"), because the table is column-padded
+//      to fit whatever the widest value in each column happens to be. A
+//      parser keyed to one log's exact spacing breaks on the other's.
+//   3. The chip cell can itself contain a space — "BB2, TC3" is ONE cell of
+//      two comma-separated tokens, not two whitespace-delimited fields.
+//
+// The fix below (see "COLUMN SPLITTING" further down) treats `-` as the
+// literal empty-cell marker in every column, and derives column boundaries
+// from each log's OWN header line at parse time — never from a stored
+// character offset — so a shift in column padding between logs changes
+// nothing about how the row is read. `SolverSolution` also gains
+// `playerSold` / `playerBought` (`string | null`, `-` -> null) so a rolled
+// transfer is representable at all; the old parser silently discarded both
+// columns.
+//
+// The chip-enabled solve's own timing (BB in gameweek 2, TC in gameweek 3)
+// differs from the chip probe's (#114, TC in gameweek 2, BB in gameweek 4) on
+// a near-identical squad two days apart — #126's central design decision
+// (compare the SAME night's two solves, not a different night's) is what
+// makes that instability harmless: the chip-free baseline it is compared
+// against is read from the very same run. See the Builder's report on ticket
+// #132 for the actual delta measured (+18.33 over the horizon).
 //
 // ============================================================================
 // THE CROSS-CHECK — the most important thing this file does.
@@ -101,7 +142,11 @@ export interface ChipPlay {
 export interface SolverSolution {
   /** The Results table's own "iter" column — the same key solver_picks.solution_index already uses. */
   solutionIndex: number
-  /** Empty when no chip was played in this solution — not an error, not omitted. */
+  /** The Results table's own "sell" column — the web_name of the player sold this solution, or null when the cell is the literal `-` (a rolled transfer, no player sold). Ticket #132, defect 1. */
+  playerSold: string | null
+  /** The Results table's own "buy" column — the web_name of the player bought this solution, or null when the cell is the literal `-` (a rolled transfer, no player bought). Ticket #132, defect 1. */
+  playerBought: string | null
+  /** Empty when no chip was played in this solution — not an error, not omitted. `-` in the Results table's chip column parses to this same empty array (ticket #132, defect 1) — never distinguished from a blank cell. */
   chips: readonly ChipPlay[]
   /** The Results table's own "score" column — this solution's objective. */
   score: number
@@ -125,21 +170,44 @@ export class SolverOutputParseError extends Error {
 // ============================================================================
 
 const POOL_SIZE_RE = /Filtered player pool from \d+ to (\d+) players/
-const RESULTS_HEADER_LINE_RE = /^\s*iter\s+sell\s+buy\s+chip\s+score\s*$/i
-/**
- * One Results-table data row. sell/buy are matched as `\S+` (a single
- * whitespace-free token) — FPL web_names have no internal spaces (verified
- * against the real example: "Muharemović", "Thiaw", "Wirtz", "Tavernier",
- * "Botman" are all single tokens). The chip group is OPTIONAL and, when
- * absent, consumes nothing — see parseChipColumn's own test coverage for the
- * empty-column case.
- */
-const RESULTS_ROW_RE = /^\s*(\d+)\s+(\S+)\s+(\S+)\s+(?:([A-Z]{2}\d+(?:,\s*[A-Z]{2}\d+)*)\s+)?(-?\d+(?:\.\d+)?)\s*$/
 const CHIP_TOKEN_RE = /^([A-Z]{2})(\d+)$/
 /** A bare gameweek header line, e.g. "GW 2" or "GW2" — nothing else on the line, so this never matches a Transfer Overview line like "GW2: (TC) Muharemović -> Thiaw" (see file header). */
 const GW_HEADER_RE = /^GW\s*(\d+)$/i
 /** A bare per-gameweek chip line, e.g. "CHIP TC" — see file header for the format's provenance. */
 const CHIP_LINE_RE = /^CHIP\s+([A-Z]{2})$/i
+
+/** The literal placeholder the solver prints for an empty cell — in sell, buy AND chip alike (ticket #132, defect 1). Never blank. */
+const EMPTY_CELL = '-'
+
+/** The Results table's column names, in order — stable, per the ticket's own wording ("the header names are stable; their positions are not"). Column WIDTHS and spacing are never assumed; see splitResultsColumns below. */
+const RESULTS_COLUMNS = ['iter', 'sell', 'buy', 'chip', 'score'] as const
+
+// ============================================================================
+// COLUMN SPLITTING — ticket #132, defect 1's actual fix.
+// ============================================================================
+// The Results table is not whitespace-delimited in the ordinary sense: a
+// column is separated from its neighbour by a RUN of two or more spaces,
+// while a value that itself contains a single space — the chip column's
+// "BB2, TC3" — is never split apart, because a comma-plus-single-space never
+// matches a run of two-or-more. This holds across both real shapes captured
+// 29 August 2026 regardless of how the column padding differs between them
+// (a chip-enabled log needs a wider chip column than a chip-free one, which
+// shows up as MORE padding before "score", not less — see the file header).
+//
+// This is deliberately NOT a fixed character-offset scheme: no column start
+// position is ever hardcoded, stored, or derived once and reused — every
+// call re-derives the split purely from the run-of-whitespace structure
+// each individual line already carries. The only thing "derived from the
+// header" in the DoD's sense is the COLUMN COUNT AND NAMES (RESULTS_COLUMNS
+// above, validated against the header actually present in THIS log before a
+// single data row is trusted) — never a numeric character offset.
+function splitResultsColumns(line: string): string[] {
+  return line.trim().split(/ {2,}/)
+}
+
+function formatColumnList(names: readonly string[]): string {
+  return names.map((n) => `"${n}"`).join(', ')
+}
 
 // ============================================================================
 // Pool size
@@ -151,22 +219,30 @@ function parsePoolSize(logText: string): number | null {
 }
 
 // ============================================================================
-// Chip column — "TC2, BB4" -> [{chipCode:'TC',gameweekId:2},{chipCode:'BB',gameweekId:4}]
+// Chip column — "TC2, BB4" -> [{chipCode:'TC',gameweekId:2},{chipCode:'BB',gameweekId:4}];
+// "-" (or blank) -> [] (ticket #132, defect 1: "-" is now a real character
+// this module reads, not something a regex could leave unconsumed).
 // ============================================================================
 
-function parseChipColumn(raw: string | undefined): ChipPlay[] {
-  if (!raw || raw.trim() === '') return []
-  return raw.split(',').map((token) => {
-    const trimmed = token.trim()
-    const match = CHIP_TOKEN_RE.exec(trimmed)
+function parseChipColumn(raw: string): ChipPlay[] {
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed === EMPTY_CELL) return []
+  return trimmed.split(',').map((token) => {
+    const chipToken = token.trim()
+    const match = CHIP_TOKEN_RE.exec(chipToken)
     if (!match) {
       throw new SolverOutputParseError(
-        `unrecognized chip token "${trimmed}" in the Results table's chip column (raw value: "${raw}"). Expected the shape ` +
-          '"<2 uppercase letters><gameweek number>", e.g. "TC2".',
+        `unrecognized chip token "${chipToken}" in the Results table's chip column (raw value: "${raw}"). Expected the shape ` +
+          '"<2 uppercase letters><gameweek number>", e.g. "TC2", or the literal "-" for no chip.',
       )
     }
     return { chipCode: match[1], gameweekId: Number(match[2]) }
   })
+}
+
+/** "-" -> null (no player sold/bought this solution — a rolled transfer); anything else is the web_name verbatim. Ticket #132, defect 1. */
+function parseNameCell(raw: string): string | null {
+  return raw === EMPTY_CELL ? null : raw
 }
 
 // ============================================================================
@@ -186,10 +262,16 @@ function parseResultsTable(lines: readonly string[]): SolverSolution[] {
   let cursor = resultsIndex + 1
   while (cursor < lines.length && lines[cursor].trim() === '') cursor++
   const headerLine = lines[cursor]
-  if (!headerLine || !RESULTS_HEADER_LINE_RE.test(headerLine)) {
+  if (headerLine === undefined) {
+    throw new SolverOutputParseError('the "Results" table has no header row — the log ends immediately after "Results".')
+  }
+  const headerColumns = splitResultsColumns(headerLine).map((c) => c.toLowerCase())
+  const headerMatchesExpected =
+    headerColumns.length === RESULTS_COLUMNS.length && RESULTS_COLUMNS.every((name, i) => headerColumns[i] === name)
+  if (!headerMatchesExpected) {
     throw new SolverOutputParseError(
-      `the "Results" table's header row does not match the expected "iter sell buy chip score" shape ` +
-        `(got: ${JSON.stringify(headerLine ?? '<end of log>')}).`,
+      `the "Results" table's header row does not have the expected columns ${formatColumnList(RESULTS_COLUMNS)} in that order ` +
+        `(got: ${JSON.stringify(headerLine)}, parsed as ${formatColumnList(headerColumns)}).`,
     )
   }
   cursor++
@@ -197,13 +279,32 @@ function parseResultsTable(lines: readonly string[]): SolverSolution[] {
   const solutions: SolverSolution[] = []
   while (cursor < lines.length && lines[cursor].trim() !== '') {
     const line = lines[cursor]
-    const match = RESULTS_ROW_RE.exec(line)
-    if (!match) break
-    const [, iterStr, , , chipRaw, scoreStr] = match
+    const cells = splitResultsColumns(line)
+    if (cells.length !== RESULTS_COLUMNS.length) {
+      throw new SolverOutputParseError(
+        `the "Results" table has a malformed row under its header: expected ${RESULTS_COLUMNS.length} columns ` +
+          `${formatColumnList(RESULTS_COLUMNS)} but found ${cells.length} (row: ${JSON.stringify(line)}).`,
+      )
+    }
+    const [iterRaw, sellRaw, buyRaw, chipRaw, scoreRaw] = cells
+
+    if (!/^\d+$/.test(iterRaw)) {
+      throw new SolverOutputParseError(
+        `the "Results" table's "iter" column could not be read as a whole number (got: ${JSON.stringify(iterRaw)}, row: ${JSON.stringify(line)}).`,
+      )
+    }
+    if (!/^-?\d+(?:\.\d+)?$/.test(scoreRaw)) {
+      throw new SolverOutputParseError(
+        `the "Results" table's "score" column could not be read as a number (got: ${JSON.stringify(scoreRaw)}, row: ${JSON.stringify(line)}).`,
+      )
+    }
+
     solutions.push({
-      solutionIndex: Number(iterStr),
+      solutionIndex: Number(iterRaw),
+      playerSold: parseNameCell(sellRaw),
+      playerBought: parseNameCell(buyRaw),
       chips: parseChipColumn(chipRaw),
-      score: Number(scoreStr),
+      score: Number(scoreRaw),
     })
     cursor++
   }

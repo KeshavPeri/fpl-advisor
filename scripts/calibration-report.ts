@@ -290,12 +290,29 @@ async function recordJobRun(supabase: SupabaseClient, input: JobRunInput): Promi
 // reimplemented.
 // ============================================================================
 
-/** The subset of a player_match_stats row this job needs, with nulls exactly as Postgres/PostgREST returns them for an unplayed or partially-recorded match. */
+/**
+ * The subset of a player_match_stats row this job needs, with nulls exactly
+ * as Postgres/PostgREST returns them for an unplayed or partially-recorded
+ * match.
+ *
+ * Ticket #132, defect 2: `teamGoalsConceded` — sourced from
+ * player_match_stats.team_goals_conceded, populated on every player's row
+ * regardless of position. This is deliberately NOT the old `goalsConceded`
+ * field, which read the OTHER, goalkeeper-only stat column on that same
+ * table (see the #125 migration's own header for its exact name) — a
+ * stat (74% populated on keeper rows, 1.1% on outfield rows) that produced
+ * an impossible ~95% "clean sheet rate" for outfielders when read as though
+ * it applied to them. See ticket #125's migration header and
+ * LEARNINGS-second-build-wave.md §2 for the same bug's first occurrence.
+ * `null` means genuinely unknown (the source's own 2% gap for 2025-2026),
+ * never "conceded zero" — see reconstructActualMatchPoints below for how
+ * that unknown is handled.
+ */
 export interface ActualMatchStatsInput {
   minutesPlayed: number | null
   goals: number | null
   assists: number | null
-  goalsConceded: number | null
+  teamGoalsConceded: number | null
   saves: number | null
   clearances: number | null
   blocks: number | null
@@ -333,24 +350,46 @@ export interface ReconstructedMatch {
   fullComponents: MatchPointComponents
   components: ComponentTotals
   totalPoints: number
+  /**
+   * Ticket #132, defect 2: true when this match's team_goals_conceded was a
+   * real number (including 0), false when it was null. `components.cleanSheetPoints`
+   * and `components.goalsConcededPoints` are exactly 0 when this is false —
+   * "unknown", not "conceded zero" — and the aggregator below uses this flag
+   * to exclude this match's minutes from the clean-sheet/goals-conceded
+   * per-90 denominator specifically, without dropping the match's other
+   * components (goals, assists, appearance, defensive contribution, which
+   * team_goals_conceded has no bearing on).
+   */
+  teamGoalsConcededKnown: boolean
 }
 
 /**
  * Reconstructs one player-match's actual FPL points. Appearance: 1 point for
  * 1-59 minutes, 2 for 60+, 0 for zero minutes (a zero-minute row scores 0
  * here and is excluded from per-appearance means by the aggregator below —
- * see its named test). Clean sheet: goals conceded = 0 AND minutes >= 60,
- * at whatever value CLEAN_SHEET_POINTS gives this position (0 for forwards,
- * by table, so no separate forward gate is needed here). Goals-conceded and
- * save points apply only to the positions pointValues.ts says they apply to
- * (GK/DEF for goals-conceded, GK only for saves) — gated with that module's
- * own predicates, not a locally re-derived position check.
+ * see its named test). Clean sheet: team goals conceded = 0 AND minutes >=
+ * 60, at whatever value CLEAN_SHEET_POINTS gives this position (0 for
+ * forwards, by table, so no separate forward gate is needed here).
+ * Goals-conceded and save points apply only to the positions pointValues.ts
+ * says they apply to (GK/DEF for goals-conceded, GK only for saves) — gated
+ * with that module's own predicates, not a locally re-derived position
+ * check.
+ *
+ * Ticket #132, defect 2: when `stats.teamGoalsConceded` is null, clean-sheet
+ * and goals-conceded points are 0 for THIS match — not because zero goals
+ * were conceded, but because it is unknown — and `teamGoalsConcededKnown` is
+ * false so the aggregator can exclude this match's minutes from those two
+ * figures' own denominator. Every other component (goals, assists,
+ * appearance, defensive contribution) is computed exactly as normal: a
+ * missing team-level goals-conceded figure says nothing about whether this
+ * player scored a goal.
  */
 export function reconstructActualMatchPoints(position: Position, stats: ActualMatchStatsInput): ReconstructedMatch {
   const minutes = stats.minutesPlayed ?? 0
   const goals = stats.goals ?? 0
   const assists = stats.assists ?? 0
-  const goalsConceded = stats.goalsConceded ?? 0
+  const teamGoalsConcededKnown = stats.teamGoalsConceded !== null
+  const teamGoalsConceded = stats.teamGoalsConceded ?? 0
   const saves = stats.saves ?? 0
 
   const defconStats: DefensiveActionStats = {
@@ -362,16 +401,17 @@ export function reconstructActualMatchPoints(position: Position, stats: ActualMa
   }
 
   const appearancePoints = minutes === 0 ? 0 : minutes < 60 ? APPEARANCE_POINTS_UNDER_60 : APPEARANCE_POINTS_60_PLUS
-  const isCleanSheet = minutes >= 60 && goalsConceded === 0
+  const isCleanSheet = teamGoalsConcededKnown && minutes >= 60 && teamGoalsConceded === 0
 
   const components: ComponentTotals = {
     appearancePoints,
     goalPoints: goals * goalPoints(position),
     assistPoints: assists * ASSIST_POINTS,
     cleanSheetPoints: isCleanSheet ? cleanSheetPoints(position) : 0,
-    goalsConcededPoints: goalsConcededPointsApply(position)
-      ? Math.floor(goalsConceded / GOALS_CONCEDED_DIVISOR) * GOALS_CONCEDED_POINTS_PER_UNIT
-      : 0,
+    goalsConcededPoints:
+      teamGoalsConcededKnown && goalsConcededPointsApply(position)
+        ? Math.floor(teamGoalsConceded / GOALS_CONCEDED_DIVISOR) * GOALS_CONCEDED_POINTS_PER_UNIT
+        : 0,
     savePoints: savePointsApply(position) ? goalkeeperSavePoints(saves) : 0,
     defensiveContributionPoints: defensiveContributionPoints(position, defconStats),
   }
@@ -386,7 +426,7 @@ export function reconstructActualMatchPoints(position: Position, stats: ActualMa
     bonusPoints: 0,
   }
 
-  return { minutes, fullComponents, components, totalPoints: totalMatchPoints(fullComponents) }
+  return { minutes, fullComponents, components, totalPoints: totalMatchPoints(fullComponents), teamGoalsConcededKnown }
 }
 
 // ============================================================================
@@ -430,6 +470,14 @@ export interface ActualAggregationInput {
   minutes: number
   totalPoints: number
   components: ComponentTotals
+  /**
+   * Ticket #132, defect 2. Optional so pre-existing fixtures that never
+   * touch team_goals_conceded continue to pass unmodified — absent is
+   * treated as true (known), matching every record built before this field
+   * existed, all of which came from a real reconstructed value. See
+   * ProjectedAggregationInput.excludedBonus above for the same convention.
+   */
+  teamGoalsConcededKnown?: boolean
 }
 
 export interface PositionActualAggregate {
@@ -443,7 +491,18 @@ export interface PositionActualAggregate {
   meanPointsPerAppearance: number | null
   meanPointsPer90: number | null
   componentTotals: ComponentTotals
+  /**
+   * Ticket #132, defect 2: componentPer90.cleanSheetPoints and
+   * .goalsConcededPoints are scaled by cleanSheetEligibleMinutes below, NOT
+   * totalMinutes — a match whose team_goals_conceded was null is excluded
+   * from those two figures' own denominator, not diluted into it. Every
+   * other component in this object is scaled by the ordinary totalMinutes.
+   */
   componentPer90: ComponentTotals | null
+  /** Ticket #132, defect 2: player-matches with a known (non-null) team_goals_conceded — the sample size behind componentPer90's cleanSheetPoints/goalsConcededPoints figures specifically. */
+  cleanSheetEligibleMatchCount: number
+  /** Ticket #132, defect 2: minutes from cleanSheetEligibleMatchCount's matches only — the denominator for componentPer90's cleanSheetPoints/goalsConcededPoints. */
+  cleanSheetEligibleMinutes: number
 }
 
 /**
@@ -452,6 +511,18 @@ export interface PositionActualAggregate {
  * contribute 0 to each, correctly) but are EXCLUDED from appearanceCount and
  * meanPointsPerAppearance — see this file's test for the named case this
  * covers.
+ *
+ * Ticket #132, defect 2: a record whose team_goals_conceded was null (see
+ * ActualMatchStatsInput / reconstructActualMatchPoints) already carries
+ * cleanSheetPoints = 0 and goalsConcededPoints = 0 in its own components —
+ * that much is unavoidable, we cannot invent a value for what is unknown.
+ * What this aggregator does on top is keep that match's minutes OUT of the
+ * denominator used to turn those two totals into a per-90 rate, so an
+ * unknown match dilutes neither the numerator (already 0) nor the
+ * denominator of the clean-sheet/goals-conceded figures specifically. Every
+ * other component (goals, assists, appearance, defensive contribution) is
+ * unaffected and still scaled by the full totalMinutes, exactly as before —
+ * a null team_goals_conceded says nothing about whether a goal was scored.
  */
 export function aggregateActualByPosition(
   records: readonly ActualAggregationInput[],
@@ -466,6 +537,26 @@ export function aggregateActualByPosition(
     const componentTotals = sumComponents(forPosition.map((r) => r.components))
     const distinctPlayerCount = new Set(forPosition.map((r) => r.playerCode).filter((c): c is number => c !== null)).size
 
+    const cleanSheetEligible = forPosition.filter((r) => r.teamGoalsConcededKnown ?? true)
+    const cleanSheetEligibleMinutes = cleanSheetEligible.reduce((sum, r) => sum + r.minutes, 0)
+    // componentTotals.cleanSheetPoints/.goalsConcededPoints already sum to
+    // exactly the eligible rows' contribution (ineligible rows contribute a
+    // real 0 — see reconstructActualMatchPoints) — only the DENOMINATOR
+    // needs to change for these two components.
+    const cleanSheetFigures = componentsPer90(
+      { ...emptyComponentTotals(), cleanSheetPoints: componentTotals.cleanSheetPoints, goalsConcededPoints: componentTotals.goalsConcededPoints },
+      cleanSheetEligibleMinutes,
+    )
+    const componentPer90 = componentsPer90(componentTotals, totalMinutes)
+    const blendedComponentPer90: ComponentTotals | null =
+      componentPer90 === null
+        ? null
+        : {
+            ...componentPer90,
+            cleanSheetPoints: cleanSheetFigures?.cleanSheetPoints ?? 0,
+            goalsConcededPoints: cleanSheetFigures?.goalsConcededPoints ?? 0,
+          }
+
     result[position] = {
       position,
       playerMatchCount: forPosition.length,
@@ -477,7 +568,9 @@ export function aggregateActualByPosition(
         appearances.length > 0 ? appearances.reduce((sum, r) => sum + r.totalPoints, 0) / appearances.length : null,
       meanPointsPer90: totalMinutes > 0 ? (totalPoints / totalMinutes) * 90 : null,
       componentTotals,
-      componentPer90: componentsPer90(componentTotals, totalMinutes),
+      componentPer90: blendedComponentPer90,
+      cleanSheetEligibleMatchCount: cleanSheetEligible.length,
+      cleanSheetEligibleMinutes,
     }
   }
 
@@ -540,6 +633,69 @@ export function aggregateProjectedByPosition(
 export function ratio(projectedPer90: number | null, actualPer90: number | null): number | null {
   if (projectedPer90 === null || actualPer90 === null || actualPer90 === 0) return null
   return projectedPer90 / actualPer90
+}
+
+// ============================================================================
+// Clean-sheet rate bound — ticket #132, defect 2. Pure, no I/O.
+// ============================================================================
+// "Bounds-check any derived rate that has a known real-world limit" (the
+// ticket's own words). A clean sheet is worth a fixed number of points
+// (CLEAN_SHEET_POINTS, from pointValues.ts); dividing the measured
+// clean-sheet points/90 by that fixed value gives back the RATE of matches
+// that were clean sheets — and that rate has a real, checkable ceiling. It
+// cannot plausibly exceed 60% for any position across a full season: this is
+// the same arithmetic that turned a goalkeeper-only column read as though it
+// applied to outfielders into an "impossible" ~95% figure — the third time
+// this exact bug has shipped (LEARNINGS-second-build-wave.md §2). A bound
+// that WARNS rather than FAILS would not have caught it any of the three
+// times; this one throws.
+// ============================================================================
+
+/** A real clean-sheet rate cannot plausibly exceed this, for any position, across a full season. Derivation: the ticket's own measurement puts the true 2025/26 rate at roughly 28%; 60% is a wide, deliberately generous ceiling above that, not a tight statistical bound — the earlier ~95% bug was never close to this line. */
+export const CLEAN_SHEET_RATE_UPPER_BOUND = 0.6
+
+/**
+ * projected/actual pts-per-90 ratio's sibling for clean sheets specifically:
+ * derives the IMPLIED clean-sheet rate (a fraction, 0..1) from a measured
+ * clean-sheet points/90 figure and this position's fixed points-per-clean-sheet
+ * value. Null when there is no per-90 figure to derive from, or when this
+ * position's clean-sheet point value is 0 (forwards) — a rate cannot be
+ * derived from a zero denominator, and reporting one as 0% would claim
+ * knowledge ("forwards never keep a clean sheet") this arithmetic does not
+ * have.
+ */
+export function computeCleanSheetRate(cleanSheetPointsPer90: number | null, position: Position): number | null {
+  if (cleanSheetPointsPer90 === null) return null
+  const perCleanSheet = cleanSheetPoints(position)
+  if (perCleanSheet <= 0) return null
+  return cleanSheetPointsPer90 / perCleanSheet
+}
+
+/**
+ * Throws — the report FAILS rather than printing an impossible figure — the
+ * moment any position's derived clean-sheet rate exceeds
+ * CLEAN_SHEET_RATE_UPPER_BOUND. Names both the position and the rate, so the
+ * failure is actionable from the job_runs message alone. A null rate (no
+ * data, or a position with no clean-sheet value) is not a violation — there
+ * is nothing implausible about "no data".
+ */
+export function assertCleanSheetRatesPlausible(ratesByPosition: ReadonlyMap<Position, number | null>): void {
+  for (const [position, rate] of ratesByPosition) {
+    if (rate !== null && rate > CLEAN_SHEET_RATE_UPPER_BOUND) {
+      throw new CalibrationReportError(
+        `${POSITION_NAMES[position]}'s derived clean-sheet rate is ${(rate * 100).toFixed(1)}% — above the ` +
+          `${(CLEAN_SHEET_RATE_UPPER_BOUND * 100).toFixed(0)}% bound a real clean-sheet rate can ever plausibly reach across a ` +
+          'full season. This is impossible, not a finding — refusing to print it. The same signature (goalkeepers correct, ' +
+          'outfielders not) already broke this report twice before (LEARNINGS-second-build-wave.md §2): a clean-sheet figure ' +
+          'read from the wrong column.',
+        'clean_sheet_rate_bound',
+      )
+    }
+  }
+}
+
+function fmtPercent(rate: number | null): string {
+  return rate === null ? 'n/a' : `${(rate * 100).toFixed(0)}%`
 }
 
 // ============================================================================
@@ -627,7 +783,8 @@ interface MatchStatsRow {
   minutes_played: number | null
   goals: number | null
   assists: number | null
-  goals_conceded: number | null
+  /** Ticket #132, defect 2: the team-level figure — see ActualMatchStatsInput.teamGoalsConceded above. Never read the OTHER, goalkeeper-only column on this table (see the #125 migration's own header) that this replaces. */
+  team_goals_conceded: number | null
   saves: number | null
   clearances: number | null
   blocks: number | null
@@ -747,6 +904,8 @@ interface ReportData {
   matchStatsRowsExcludedNullCompetition: number
   /** Ticket #127: bound check on the mean bonus excluded per player-appearance across every projected row read — see checkExcludedBonusBound. */
   excludedBonusBound: ExcludedBonusBoundCheck
+  /** Ticket #132, defect 2: player_match_stats rows (within the season/competition sample above) whose team_goals_conceded was null — excluded from the clean-sheet and goals-conceded figures only, not from the rest of that row's components, and never read as zero conceded. Counted here, alongside the other sample sizes, per the ticket's own DoD. */
+  matchStatsRowsNullTeamGoalsConceded: number
 }
 
 function averageBonusPerAppearance(): number {
@@ -847,6 +1006,27 @@ function buildComponentTable(
   return sections.join('\n\n')
 }
 
+/**
+ * Ticket #132, defect 2 DoD: "the clean-sheet rate is printed per position
+ * as a percentage... so the implausible number is visible without anyone
+ * doing division in their head." Mirrors the ticket's own illustrative
+ * table (Position | Actual clean-sheet pts/90 | Points per clean sheet |
+ * Implied clean-sheet rate).
+ */
+function buildCleanSheetRateTable(actual: Record<Position, PositionActualAggregate>): string {
+  const header =
+    '| Position | Actual clean-sheet pts/90 (eligible matches, minutes) | Points per clean sheet | Implied clean-sheet rate |\n' +
+    '|---|---|---|---|'
+  const rows = POSITIONS.map((position) => {
+    const a = actual[position]
+    const cleanSheetPer90 = a.componentPer90?.cleanSheetPoints ?? null
+    const perCleanSheet = cleanSheetPoints(position)
+    const rateCell = `${fmtPercent(computeCleanSheetRate(cleanSheetPer90, position))}`
+    return `| ${POSITION_NAMES[position]} | ${fmt(cleanSheetPer90)} (${a.cleanSheetEligibleMatchCount} matches, ${Math.round(a.cleanSheetEligibleMinutes)} min) | ${perCleanSheet} | ${rateCell} |`
+  })
+  return [header, ...rows].join('\n')
+}
+
 function buildTopTable(title: string, actualRows: PlayerActualTotal[], projectedRows: PlayerProjectedMean[]): string {
   const actualHeader = `**Top ${actualRows.length} actual scorers (2025/26, total points)**\n\n| # | Player | Total pts | Matches |\n|---|---|---|---|`
   const actualBody = actualRows
@@ -916,6 +1096,19 @@ function generateReportMarkdown(data: ReportData): string {
   )
 
   sections.push(
+    '## Clean-sheet rate, by position\n\n' +
+      'Ticket #132: the implied clean-sheet rate behind the actual clean-sheet pts/90 figure above, printed explicitly as a ' +
+      'percentage so an implausible reading is visible without doing the division by hand — `Implied clean-sheet rate` is the ' +
+      '`Actual clean-sheet pts/90` column divided by `Points per clean sheet`. A rate above ' +
+      `${(CLEAN_SHEET_RATE_UPPER_BOUND * 100).toFixed(0)}% for any position is impossible and would have made this report fail ` +
+      `before reaching this line (see \`assertCleanSheetRatesPlausible\`) — this is the check that would have caught the ~95% bug ` +
+      'three times over. A row with a null `team_goals_conceded` is excluded from the eligible matches/minutes behind this table ' +
+      `(${data.matchStatsRowsNullTeamGoalsConceded} such row(s) this run — see the provenance section below), never read as a ` +
+      'clean sheet.\n\n' +
+      buildCleanSheetRateTable(data.actualByPosition),
+  )
+
+  sections.push(
     '## By point component\n\n' +
       'Per-90 rates, actual vs projected, so a gap in the totals above is attributable to a specific component rather than only ' +
       'visible in aggregate. Bonus and cards are omitted from this table: the actual side is fixed at exactly 0 for both (no data), ' +
@@ -957,6 +1150,9 @@ function generateReportMarkdown(data: ReportData): string {
       `- player_match_stats rows excluded for a null competition (season=${TARGET_SEASON}, not yet re-stamped since ticket #54): ` +
       `${data.matchStatsRowsExcludedNullCompetition}\n` +
       `- player_match_stats rows skipped (no player_code, or player_code not found in players): ${data.skippedMatchStatsNoPosition}\n` +
+      `- player_match_stats rows with a null team_goals_conceded (ticket #132): ${data.matchStatsRowsNullTeamGoalsConceded} — ` +
+      'excluded from the clean-sheet and goals-conceded figures only (see the Clean-sheet rate section above); every other ' +
+      'component for these rows is still counted normally, never read as zero conceded\n' +
       `- player_projections rows fetched (model_version=${MODEL_VERSION}): ${data.projectionRowCount}\n` +
       `- player_projections rows skipped (player_id not found in players): ${data.skippedProjectionsNoPosition}\n`,
   )
@@ -1041,7 +1237,7 @@ async function main(): Promise<void> {
       supabase
         .from('player_match_stats')
         .select(
-          'player_code, minutes_played, goals, assists, goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries',
+          'player_code, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries',
         )
         .eq('season', TARGET_SEASON)
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
@@ -1164,6 +1360,15 @@ async function main(): Promise<void> {
     //    by accident).
     // --------------------------------------------------------------------
     let skippedMatchStatsNoPosition = 0
+    // Ticket #132, defect 2: rows with a null team_goals_conceded are NOT
+    // skipped — every other component (goals, assists, appearance,
+    // defensive contribution) is still real and still counted. Only their
+    // clean-sheet/goals-conceded contribution is 0 (unknown, not zero
+    // conceded — see reconstructActualMatchPoints), and their minutes are
+    // excluded from THAT figure's own per-90 denominator by
+    // aggregateActualByPosition. This counter is purely informational,
+    // reported in the provenance section below.
+    let matchStatsRowsNullTeamGoalsConceded = 0
     const actualInputs: ActualAggregationInput[] = []
     const actualPlayerTotals = new Map<number, PlayerActualTotal>()
 
@@ -1174,11 +1379,13 @@ async function main(): Promise<void> {
         continue
       }
 
+      if (row.team_goals_conceded === null) matchStatsRowsNullTeamGoalsConceded++
+
       const reconstructed = reconstructActualMatchPoints(position, {
         minutesPlayed: row.minutes_played,
         goals: row.goals,
         assists: row.assists,
-        goalsConceded: row.goals_conceded,
+        teamGoalsConceded: row.team_goals_conceded,
         saves: row.saves,
         clearances: row.clearances,
         blocks: row.blocks,
@@ -1193,6 +1400,7 @@ async function main(): Promise<void> {
         minutes: reconstructed.minutes,
         totalPoints: reconstructed.totalPoints,
         components: reconstructed.components,
+        teamGoalsConcededKnown: reconstructed.teamGoalsConcededKnown,
       })
 
       const existing = actualPlayerTotals.get(row.player_code)
@@ -1211,6 +1419,20 @@ async function main(): Promise<void> {
     }
 
     const actualByPosition = aggregateActualByPosition(actualInputs)
+
+    // --------------------------------------------------------------------
+    // 5b. Ticket #132, defect 2: the bound that would have caught the ~95%
+    //     bug three times over. Runs BEFORE any report content is written —
+    //     an impossible clean-sheet rate must fail the job, never reach the
+    //     file on disk.
+    // --------------------------------------------------------------------
+    const cleanSheetRatesByPosition = new Map<Position, number | null>(
+      POSITIONS.map((position) => [
+        position,
+        computeCleanSheetRate(actualByPosition[position].componentPer90?.cleanSheetPoints ?? null, position),
+      ]),
+    )
+    assertCleanSheetRatesPlausible(cleanSheetRatesByPosition)
 
     // --------------------------------------------------------------------
     // 6. Projected side. Position via player_id = players.id — a real FK
@@ -1299,6 +1521,7 @@ async function main(): Promise<void> {
       matchStatsRowsExcludedNonPremierLeague: matchStatsRowsExcludedNonPremierLeague ?? 0,
       matchStatsRowsExcludedNullCompetition: matchStatsRowsNullCompetition ?? 0,
       excludedBonusBound,
+      matchStatsRowsNullTeamGoalsConceded,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
 
@@ -1339,6 +1562,9 @@ async function main(): Promise<void> {
       projectionRowsSkippedNoPosition: skippedProjectionsNoPosition,
       // Ticket #127: the bound check on the mean bonus excluded from every projected total this report compares.
       excludedBonusBound,
+      // Ticket #132, defect 2: rows excluded from the clean-sheet/goals-conceded figures only (see reportData above).
+      matchStatsRowsNullTeamGoalsConceded,
+      cleanSheetRatesByPosition: Object.fromEntries(cleanSheetRatesByPosition),
     }
 
     const bonusBoundNote = excludedBonusBound.withinBound
