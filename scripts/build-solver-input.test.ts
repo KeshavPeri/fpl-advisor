@@ -16,6 +16,7 @@ import {
   BuildInputError,
   DECAY_BASE,
   EV_PER_PRICE_CUTOFF,
+  FT_VALUE_LIST,
   HIT_COST,
   ITERATION_CRITERION,
   KEEP_TOP_EV_PERCENT,
@@ -143,7 +144,7 @@ describe('buildSolverConfig', () => {
     expect(config.ev_per_price_cutoff).toBe(EV_PER_PRICE_CUTOFF)
   })
 
-  it('full-object equality: the built config matches the known-good baseline exactly (horizon/xmin_lb/decay_base/chip_limits/etc.), so an accidental edit to any other setting fails this test', () => {
+  it('full-object equality: the built config matches the known-good baseline exactly (horizon/xmin_lb/decay_base/ft_value_list/chip_limits/etc.), so an accidental edit to any other setting fails this test', () => {
     const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300 })
     expect(config).toEqual({
       horizon: 3,
@@ -154,6 +155,7 @@ describe('buildSolverConfig', () => {
       ev_per_price_cutoff: 10,
       no_transfer_last_gws: 0,
       decay_base: 0.9,
+      ft_value_list: { '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 },
       datasource: 'fpladvisor',
       chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
       secs: 300,
@@ -165,6 +167,21 @@ describe('buildSolverConfig', () => {
       print_squads: true,
       print_transfer_chip_summary: true,
     })
+  })
+
+  // --------------------------------------------------------------------
+  // Ticket #142 — stop inheriting ft_value_list (shipped default
+  // {"2": 2, "3": 1.6, "4": 1.3, "5": 1.1}, unchanged here) from the solver.
+  // The last key ticket #95's audit left open after #108 and #120 closed
+  // the two scalars. See FT_VALUE_LIST's own comment in
+  // build-solver-input.ts for the key-direction verification and the
+  // pricing rationale.
+  // --------------------------------------------------------------------
+
+  it('sets ft_value_list to the reviewed-and-kept schedule {"2": 2, "3": 1.6, "4": 1.3, "5": 1.1} — unchanged behaviour, now explicit rather than inherited', () => {
+    const config = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
+    expect(config.ft_value_list).toEqual({ '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 })
+    expect(config.ft_value_list).toEqual(FT_VALUE_LIST)
   })
 
   // --------------------------------------------------------------------
@@ -255,6 +272,7 @@ describe('buildSolverConfig', () => {
       ev_per_price_cutoff: 10,
       no_transfer_last_gws: 0,
       decay_base: 0.9,
+      ft_value_list: { '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 },
       datasource: 'fpladvisor',
       chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
       secs: 300,
@@ -284,6 +302,7 @@ describe('buildSolverConfig', () => {
       ev_per_price_cutoff: 10,
       no_transfer_last_gws: 0,
       decay_base: 0.9,
+      ft_value_list: { '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 },
       datasource: 'fpladvisor',
       chip_limits: { bb: 1, wc: 0, fh: 0, tc: 1 },
       secs: 300,
@@ -295,6 +314,13 @@ describe('buildSolverConfig', () => {
       print_squads: true,
       print_transfer_chip_summary: true,
     })
+  })
+
+  it('ticket #142 — chip-enabled variant: ft_value_list is identical to the CHIP_PROBE-unset case, named test per DoD', () => {
+    const off = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
+    const on = buildSolverConfig({ horizon: 3, datasource: 'fpladvisor', chipProbe: true })
+    expect(on.ft_value_list).toEqual(off.ft_value_list)
+    expect(on.ft_value_list).toEqual(FT_VALUE_LIST)
   })
 
   it('preseason is false in BOTH the CHIP_PROBE-unset and CHIP_PROBE-set cases — must never regress to the shipped true, which wipes the squad', () => {
@@ -367,6 +393,7 @@ describe('buildRebuildSolverConfig', () => {
       ev_per_price_cutoff: 10,
       no_transfer_last_gws: 0,
       decay_base: 0.9,
+      ft_value_list: { '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 },
       datasource: 'fpladvisor',
       chip_limits: { bb: 0, wc: 1, fh: 0, tc: 0 },
       secs: 300,
@@ -391,6 +418,7 @@ describe('buildRebuildSolverConfig', () => {
       ev_per_price_cutoff: 10,
       no_transfer_last_gws: 0,
       decay_base: 0.9,
+      ft_value_list: { '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 },
       datasource: 'fpladvisor',
       chip_limits: { bb: 0, wc: 0, fh: 1, tc: 0 },
       secs: 300,
@@ -402,6 +430,13 @@ describe('buildRebuildSolverConfig', () => {
       print_squads: true,
       print_transfer_chip_summary: true,
     })
+  })
+
+  it('ticket #142 — wc and fh rebuild variants both carry the same ft_value_list as buildSolverConfig\'s own output, named test per DoD', () => {
+    const wc = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'wc' })
+    const fh = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'fh' })
+    expect(wc.ft_value_list).toEqual(FT_VALUE_LIST)
+    expect(fh.ft_value_list).toEqual(FT_VALUE_LIST)
   })
 
   it('never sets both wc and fh — each variant produces exactly one of them at 1, the other pinned to 0', () => {
