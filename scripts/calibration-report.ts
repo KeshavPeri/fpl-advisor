@@ -81,19 +81,31 @@
 // ============================================================================
 // player_match_stats carries neither bonus nor cards, so both are reported
 // as exactly 0 on the actual side — an honest UNDER-count, not a claim that
-// nobody earned bonus. Cards remain out of scope on both sides (G4). Bonus
-// is DIFFERENT since ticket #78: src/lib/projection/expectedPoints.ts still
-// hardcodes bonusPoints to 0 for a single player-fixture, but
-// scripts/project-points.ts's second, fixture-grouped pass now allocates a
-// real (projected) bonus figure into player_projections.expected_points
-// before this report reads it — so the two sides are NOT on the same basis
-// any more, and this report's own caveats section says so explicitly rather
-// than claiming a like-for-like comparison it can no longer make. See the
-// report's own caveats section for the rough average bonus is worth per
-// match, computed from the FPL bonus system's known 3/2/1 structure
-// (BONUS_POINTS_PER_MATCH_TOTAL / PLAYERS_ON_PITCH_PER_MATCH below) — NOT
-// derived from any per-player data this job reads, and not used in any
-// point total.
+// nobody earned bonus. Cards remain out of scope on both sides (G4). This is
+// a SETTLED FACT for bonus, verified directly from the FPL-Core-Insights
+// source CSV header on 28 Aug 2026 (ticket #127): no `bonus` column, no
+// `bps` column. It cannot be fixed by improving the actual side — there is
+// nothing there to read, and sourcing bonus elsewhere is a whole separate
+// ticket (a new data source, Tier 2), not this one.
+//
+// Bonus on the PROJECTED side is different, and ticket #127 restores this
+// report to a like-for-like comparison. src/lib/projection/expectedPoints.ts
+// still returns bonusPoints: 0 for a single player-fixture, but ticket #78's
+// second, fixture-grouped pass in scripts/project-points.ts allocates a real
+// (projected) bonus share into player_projections.expected_points before
+// this report reads it. Left alone, that would bias every comparison below
+// AGAINST the model by roughly the size of the bonus term, concentrated
+// exactly where the Top-20 tables look. Instead, this report subtracts
+// components.points.bonusPoints back out of every projected total it
+// compares (excludeBonusFromProjection below) — a reporting decision only;
+// player_projections itself is never written to or altered. The excluded
+// amount is printed alongside each projected total, and its mean per
+// player-appearance is bound-checked against the arithmetic ceiling of
+// BONUS_POINTS_PER_MATCH_TOTAL bonus points shared per match (see
+// EXCLUDED_BONUS_LOWER_BOUND / EXCLUDED_BONUS_UPPER_BOUND and the caveats
+// section) — an instrument that cannot bound its own adjustment is not one
+// to trust, so a mean outside that bound is reported prominently rather
+// than silently passed over.
 //
 // ============================================================================
 // Wiring.
@@ -478,6 +490,8 @@ export interface ProjectedAggregationInput {
   expectedPoints: number
   expectedMinutes: number
   components: ComponentTotals
+  /** Bonus already subtracted out of expectedPoints above (ticket #127) — carried separately so the report can print what was excluded alongside each total. Optional so pre-existing fixtures that never touch bonus continue to pass unmodified; absent is treated as zero, same as excludeBonusFromProjection's own default. */
+  excludedBonus?: number
 }
 
 export interface PositionProjectedAggregate {
@@ -488,6 +502,9 @@ export interface PositionProjectedAggregate {
   totalExpectedPoints: number
   meanPointsPer90: number | null
   componentPer90: ComponentTotals | null
+  /** Ticket #127 — total and per-90 bonus excluded from totalExpectedPoints above, for this position, printed alongside the projected total in the report. */
+  totalExcludedBonus: number
+  excludedBonusPer90: number | null
 }
 
 /** Aggregates stored player_projections rows by position — same per-90 shape as the actual side, so the two are directly comparable. */
@@ -500,6 +517,7 @@ export function aggregateProjectedByPosition(
     const forPosition = records.filter((r) => r.position === position)
     const totalExpectedMinutes = forPosition.reduce((sum, r) => sum + r.expectedMinutes, 0)
     const totalExpectedPoints = forPosition.reduce((sum, r) => sum + r.expectedPoints, 0)
+    const totalExcludedBonus = forPosition.reduce((sum, r) => sum + (r.excludedBonus ?? 0), 0)
     const componentTotals = sumComponents(forPosition.map((r) => r.components))
 
     result[position] = {
@@ -510,6 +528,8 @@ export function aggregateProjectedByPosition(
       totalExpectedPoints,
       meanPointsPer90: totalExpectedMinutes > 0 ? (totalExpectedPoints / totalExpectedMinutes) * 90 : null,
       componentPer90: componentsPer90(componentTotals, totalExpectedMinutes),
+      totalExcludedBonus,
+      excludedBonusPer90: totalExpectedMinutes > 0 ? (totalExcludedBonus / totalExpectedMinutes) * 90 : null,
     }
   }
 
@@ -555,6 +575,8 @@ export interface PlayerProjectedMean {
   position: Position
   meanExpectedPoints: number
   rowCount: number
+  /** Ticket #127 — mean bonus excluded per row for this player, printed alongside meanExpectedPoints (which already has that bonus subtracted out). Optional so pre-existing fixtures that never touch bonus continue to pass unmodified; absent renders as zero. */
+  meanExcludedBonus?: number
 }
 
 export function topProjectedPlayersByPosition(
@@ -646,6 +668,65 @@ function pickProjectedComponents(points: ProjectionPointsJson | undefined): Comp
 }
 
 // ============================================================================
+// Bonus exclusion — ticket #127. Pure, no I/O, unit-testable. Restores this
+// report to a like-for-like comparison: the actual side can never carry
+// bonus (verified — see the file header's "Bonus and cards" section), so
+// the only way to make the two sides comparable is to remove bonus from the
+// side that HAS it (the projected side, since ticket #78), not to invent
+// bonus on the side that doesn't. The stored projection is never touched —
+// this only affects the figure THIS REPORT compares.
+// ============================================================================
+
+export interface BonusExclusion {
+  /** The projected total this report compares against the actual side — expectedPoints with bonus subtracted back out. */
+  comparedPoints: number
+  /** The bonus that was subtracted, printed alongside comparedPoints so the reader can see the size of what was set aside rather than taking the adjustment on trust. Zero for a row whose components carry no bonusPoints key — every row written before ticket #78 — treated as zero excluded bonus, not dropped and not an error. */
+  excludedBonus: number
+}
+
+export function excludeBonusFromProjection(expectedPoints: number, bonusPoints: number | undefined): BonusExclusion {
+  const excludedBonus = bonusPoints ?? 0
+  return { comparedPoints: expectedPoints - excludedBonus, excludedBonus }
+}
+
+/**
+ * The bound this report checks its own adjustment against. The FPL bonus
+ * system shares BONUS_POINTS_PER_MATCH_TOTAL (6) points among however many
+ * players a match's projected rows cover, so the mean excluded bonus per
+ * player-appearance should sit somewhere near a small fraction of that
+ * ceiling — not at exactly zero (the exclusion not applying at all) and not
+ * anywhere close to the full 6 (something read from the wrong field). 0.05
+ * to 1.00 is that "near" band, not a guess: see the ticket for the derivation.
+ */
+export const EXCLUDED_BONUS_LOWER_BOUND = 0.05
+export const EXCLUDED_BONUS_UPPER_BOUND = 1.0
+
+export interface ExcludedBonusBoundCheck {
+  rowCount: number
+  meanExcludedBonusPerAppearance: number | null
+  withinBound: boolean
+}
+
+/**
+ * Bound-checks the mean excluded bonus per player-appearance against
+ * EXCLUDED_BONUS_LOWER_BOUND / EXCLUDED_BONUS_UPPER_BOUND above. An
+ * instrument that cannot bound its own adjustment is not one to trust: no
+ * rows at all reports a null mean, which also fails the bound — "not
+ * comparable" is a legitimate output, not a case to paper over with a
+ * default.
+ */
+export function checkExcludedBonusBound(excludedBonusValues: readonly number[]): ExcludedBonusBoundCheck {
+  const rowCount = excludedBonusValues.length
+  const meanExcludedBonusPerAppearance =
+    rowCount > 0 ? excludedBonusValues.reduce((sum, v) => sum + v, 0) / rowCount : null
+  const withinBound =
+    meanExcludedBonusPerAppearance !== null &&
+    meanExcludedBonusPerAppearance >= EXCLUDED_BONUS_LOWER_BOUND &&
+    meanExcludedBonusPerAppearance <= EXCLUDED_BONUS_UPPER_BOUND
+  return { rowCount, meanExcludedBonusPerAppearance, withinBound }
+}
+
+// ============================================================================
 // Report generation.
 // ============================================================================
 
@@ -664,10 +745,36 @@ interface ReportData {
   matchStatsRowsExcludedNonPremierLeague: number
   /** Ticket #54: player_match_stats rows for TARGET_SEASON whose competition was NULL (not yet re-stamped since the #54 migration added the column) — excluded and counted separately from a known non-Premier-League value above. */
   matchStatsRowsExcludedNullCompetition: number
+  /** Ticket #127: bound check on the mean bonus excluded per player-appearance across every projected row read — see checkExcludedBonusBound. */
+  excludedBonusBound: ExcludedBonusBoundCheck
 }
 
 function averageBonusPerAppearance(): number {
   return BONUS_POINTS_PER_MATCH_TOTAL / PLAYERS_ON_PITCH_PER_MATCH
+}
+
+/**
+ * Ticket #127: states the measured mean excluded bonus per player-appearance
+ * and its bound check, prominently, every time — not just when it fails.
+ * "Not comparable" is a legitimate output: if the bound fires, this says so
+ * loudly, in the report itself, rather than burying it in a footnote.
+ */
+function excludedBonusBoundNote(bound: ExcludedBonusBoundCheck): string {
+  const meanText =
+    bound.meanExcludedBonusPerAppearance === null
+      ? 'n/a (no projected rows read)'
+      : `${bound.meanExcludedBonusPerAppearance.toFixed(3)} pts`
+  const boundLine =
+    `Mean excluded bonus per player-appearance: **${meanText}** (n=${bound.rowCount} projected rows), checked against the ` +
+    `${EXCLUDED_BONUS_LOWER_BOUND}–${EXCLUDED_BONUS_UPPER_BOUND} bound — the arithmetic ceiling is ` +
+    `${BONUS_POINTS_PER_MATCH_TOTAL} bonus points shared per match.`
+  if (bound.withinBound) return `${boundLine} Within bound.`
+  return (
+    `${boundLine}\n\n**⚠️ BONUS EXCLUSION OUT OF BOUND — this comparison is NOT reliable.** An excluded-bonus mean ` +
+    'outside the expected range means the bonus adjustment itself cannot be trusted, so the Top-20 tables and position totals ' +
+    'in this report should NOT be read as like-for-like until this is investigated. Reported here, prominently, rather than ' +
+    'silently passed over.'
+  )
 }
 
 function defenderHeadline(
@@ -698,15 +805,16 @@ function buildPositionTable(
   projected: Record<Position, PositionProjectedAggregate>,
 ): string {
   const header =
-    '| Position | Actual pts/appearance (n) | Actual pts/90 (matches, players) | Projected pts/90 (rows, players) | Ratio (proj/actual) |\n' +
-    '|---|---|---|---|---|'
+    '| Position | Actual pts/appearance (n) | Actual pts/90 (matches, players) | Projected pts/90 (rows, players) | Excluded bonus pts/90 | Ratio (proj/actual) |\n' +
+    '|---|---|---|---|---|---|'
   const rows = POSITIONS.map((position) => {
     const a = actual[position]
     const p = projected[position]
     const actualAppearanceCell = `${fmt(a.meanPointsPerAppearance)} (n=${a.appearanceCount})`
     const actualPer90Cell = `${fmt(a.meanPointsPer90)} (${a.playerMatchCount} matches, ${a.distinctPlayerCount} players)`
     const projPer90Cell = `${fmt(p.meanPointsPer90)} (${p.rowCount} rows, ${p.distinctPlayerCount} players)`
-    return `| ${POSITION_NAMES[position]} | ${actualAppearanceCell} | ${actualPer90Cell} | ${projPer90Cell} | ${fmtRatio(ratio(p.meanPointsPer90, a.meanPointsPer90))} |`
+    // Ticket #127: projPer90Cell above already has bonus subtracted out — this column states how much, so the adjustment is never taken on trust.
+    return `| ${POSITION_NAMES[position]} | ${actualAppearanceCell} | ${actualPer90Cell} | ${projPer90Cell} | ${fmt(p.excludedBonusPer90)} | ${fmtRatio(ratio(p.meanPointsPer90, a.meanPointsPer90))} |`
   })
   return [header, ...rows].join('\n')
 }
@@ -744,11 +852,14 @@ function buildTopTable(title: string, actualRows: PlayerActualTotal[], projected
   const actualBody = actualRows
     .map((r, i) => `| ${i + 1} | ${r.webName} | ${r.totalPoints} | ${r.matchCount} |`)
     .join('\n')
-  const projHeader = `**Top ${projectedRows.length} projected players (baseline-v1, mean expected points)**\n\n| # | Player | Mean expected pts | Rows |\n|---|---|---|---|`
+  // Ticket #127: mean expected pts below already excludes bonus — "Excluded bonus" states how much, alongside every projected total, so the adjustment is never taken on trust.
+  const projHeader =
+    `**Top ${projectedRows.length} projected players (baseline-v1, mean expected points, bonus excluded)**\n\n` +
+    '| # | Player | Mean expected pts (excl. bonus) | Excluded bonus | Rows |\n|---|---|---|---|---|'
   const projBody = projectedRows
-    .map((r, i) => `| ${i + 1} | ${r.webName} | ${fmt(r.meanExpectedPoints)} | ${r.rowCount} |`)
+    .map((r, i) => `| ${i + 1} | ${r.webName} | ${fmt(r.meanExpectedPoints)} | ${fmt(r.meanExcludedBonus ?? 0)} | ${r.rowCount} |`)
     .join('\n')
-  return `#### ${title}\n\n${actualHeader}\n${actualBody || '| — | (none) | — | — |'}\n\n${projHeader}\n${projBody || '| — | (none) | — | — |'}`
+  return `#### ${title}\n\n${actualHeader}\n${actualBody || '| — | (none) | — | — |'}\n\n${projHeader}\n${projBody || '| — | (none) | — | — | — |'}`
 }
 
 function generateReportMarkdown(data: ReportData): string {
@@ -766,7 +877,7 @@ function generateReportMarkdown(data: ReportData): string {
 
   sections.push(
     '## Why this comparison is imperfect\n\n' +
-      '**Directional evidence, not a verdict** — three reasons:\n\n' +
+      '**Directional evidence, not a verdict** — four reasons:\n\n' +
       `1. **Different seasons, mostly different players.** \`player_match_stats\` holds ${TARGET_SEASON} match data; ` +
       `\`player_projections\` holds \`${MODEL_VERSION}\`'s 2026/27 output. This is a *distributional* comparison — does a defender ` +
       'score about this many points per 90 and does a forward score about that many — not a player-for-player check. ' +
@@ -775,17 +886,25 @@ function generateReportMarkdown(data: ReportData): string {
       `2. **${TARGET_SEASON} was played under the PREVIOUS BPS rules.** The 2026/27 BPS rebalance (CBI at 1 per 3 actions instead ` +
       'of 2, the tackled penalty removed, revised goalkeeper save BPS) changes who earns bonus. The actual side below still ' +
       'cannot see bonus at all regardless of which rules apply — see point 3.\n' +
-      '3. **The actual side has no bonus or cards data; the projected side now has projected bonus (ticket #78), so the two are ' +
-      'NOT on the same basis any more.** `player_match_stats` carries neither bonus nor cards, so the actual figures below are ' +
-      `an **under-count**. The FPL bonus system awards ${BONUS_POINTS_PER_MATCH_TOTAL} points (3/2/1) to three players out of ` +
-      `the ~${PLAYERS_ON_PITCH_PER_MATCH} who appear in a match — roughly **${avgBonus.toFixed(2)} points per player-appearance ` +
-      'on average**, concentrated among a match\'s standout performers rather than spread evenly, so this under-count is larger ' +
-      'for the top of the distribution (the Top-20 tables below) than for the position means. The projected side is DIFFERENT: ' +
-      'since ticket #78, `scripts/project-points.ts` allocates a projected bonus share into `player_projections.expected_points` ' +
-      '(the totals and Top-20 tables below read that figure), computed from expected BPS above a bare-appearance baseline — a ' +
-      'proportional share, not a simulated BPS ranking, and still not validated against any real bonus or BPS figure (nothing in ' +
-      'the database records either — see `docs/projection-model-backlog.md` G3). Cards remain unmodelled on both sides. The ' +
-      '**By point component** table below is unaffected by this asymmetry: it omits bonus/cards entirely (see its own note).',
+      `3. **The actual side can never include bonus or cards.** \`player_match_stats\` (sourced from FPL-Core-Insights) has no ` +
+      '`bonus` column and no `bps` column — verified directly from the source CSV header on 28 Aug 2026 (ticket #127) — so the ' +
+      'actual figures below are a permanent **under-count**, not a temporary gap a future ingest could close. The FPL bonus ' +
+      `system awards ${BONUS_POINTS_PER_MATCH_TOTAL} points (3/2/1) to three players out of the ~${PLAYERS_ON_PITCH_PER_MATCH} ` +
+      `who appear in a match — roughly **${avgBonus.toFixed(2)} points per player-appearance on average**, concentrated among ` +
+      'a match\'s standout performers rather than spread evenly, so this under-count is larger for the top of the distribution ' +
+      '(the Top-20 tables below) than for the position means. Cards remain unmodelled on both sides.\n' +
+      '4. **The projected side models bonus (ticket #78); this report excludes it from every total it compares (ticket #127), ' +
+      'to stay like-for-like against a side that can never have it.** `scripts/project-points.ts` allocates a projected bonus ' +
+      'share into `player_projections.expected_points`; this report subtracts `components.points.bonusPoints` back out before ' +
+      'summing, averaging or ranking anything below — a reporting decision only, `player_projections` itself is never written ' +
+      'to or altered — and prints the excluded amount alongside each projected total (the **By position: totals** and ' +
+      '**Top scorers** tables below) so the reader can see the size of what was set aside rather than taking the adjustment on ' +
+      'trust. A projection row whose components carry no `bonusPoints` key — every row written before ticket #78 — is treated ' +
+      `as exactly zero excluded bonus, not dropped and not an error. This means the Top-20 tables now read a little lower than ` +
+      'the total a player would actually see in-app, which is intentional: the comparison would otherwise be biased against ' +
+      'the model by exactly the size of the bonus term, concentrated exactly where those tables look. ' +
+      `${excludedBonusBoundNote(data.excludedBonusBound)}\n\n` +
+      'The **By point component** table below is unaffected by any of this: it omits bonus/cards entirely (see its own note).',
   )
 
   sections.push('## Headline: are defenders over-projected?\n\n' + defenderHeadline(data.actualByPosition, data.projectedByPosition))
@@ -818,9 +937,9 @@ function generateReportMarkdown(data: ReportData): string {
 
   sections.push(
     '## What this bears on, in `docs/projection-model-backlog.md`\n\n' +
-      '- **G3 (bonus):** addressed by ticket #78 — the projected side\'s totals now include a projected bonus share, so this ' +
-      'report\'s numbers speak to it differently than before: see the caveats section above for why the two sides are no longer ' +
-      'on the same basis, and the rough per-appearance bonus figure for how large the actual side\'s remaining under-count is.\n' +
+      '- **G3 (bonus):** addressed by ticket #78 (bonus now modelled) and restored to a fair comparison by ticket #127 (this ' +
+      'report excludes projected bonus from every total it compares, because the actual side can never carry it — verified, no ' +
+      '`bonus` or `bps` column in the source). See the caveats section above for the mean excluded bonus and its bound check.\n' +
       `- **G6 (last season's behaviour under this season's rules):** this report is itself an instance of the residual risk G6 ` +
       'names — the actual side is scored under 2026/27 rules applied to 2025/26 raw actions, exactly as `src/lib/scoring/` is built to do, ' +
       'but the *behaviour* that produced those raw actions was not shaped by 2026/27 incentives.\n' +
@@ -1101,7 +1220,12 @@ async function main(): Promise<void> {
     // --------------------------------------------------------------------
     let skippedProjectionsNoPosition = 0
     const projectedInputs: ProjectedAggregationInput[] = []
-    const projectedPlayerSums = new Map<number, { webName: string; position: Position; sum: number; count: number }>()
+    const projectedPlayerSums = new Map<
+      number,
+      { webName: string; position: Position; sum: number; count: number; excludedBonusSum: number }
+    >()
+    // Ticket #127: every excluded-bonus value read, across all positions, for the report-wide bound check below (checkExcludedBonusBound).
+    const allExcludedBonusValues: number[] = []
 
     for (const row of projectionRows) {
       const position = idToPosition.get(row.player_id)
@@ -1111,29 +1235,38 @@ async function main(): Promise<void> {
       }
 
       const components = pickProjectedComponents(row.components?.points)
+      // Ticket #127: subtract bonus back out of the stored expected_points before this report compares it against the
+      // actual side — the actual side can never carry bonus (verified, see file header), so the projected side is the
+      // only side this CAN be made comparable from. Nothing here writes back to player_projections.
+      const { comparedPoints, excludedBonus } = excludeBonusFromProjection(row.expected_points, row.components?.points?.bonusPoints)
+      allExcludedBonusValues.push(excludedBonus)
       projectedInputs.push({
         position,
         playerId: row.player_id,
-        expectedPoints: row.expected_points,
+        expectedPoints: comparedPoints,
         expectedMinutes: row.expected_minutes,
         components,
+        excludedBonus,
       })
 
       const existing = projectedPlayerSums.get(row.player_id)
       if (existing) {
-        existing.sum += row.expected_points
+        existing.sum += comparedPoints
         existing.count += 1
+        existing.excludedBonusSum += excludedBonus
       } else {
         projectedPlayerSums.set(row.player_id, {
           webName: idToWebName.get(row.player_id) ?? `id:${row.player_id}`,
           position,
-          sum: row.expected_points,
+          sum: comparedPoints,
           count: 1,
+          excludedBonusSum: excludedBonus,
         })
       }
     }
 
     const projectedByPosition = aggregateProjectedByPosition(projectedInputs)
+    const excludedBonusBound = checkExcludedBonusBound(allExcludedBonusValues)
 
     // --------------------------------------------------------------------
     // 7. Top-N distribution tables.
@@ -1145,6 +1278,7 @@ async function main(): Promise<void> {
       position: v.position,
       meanExpectedPoints: v.sum / v.count,
       rowCount: v.count,
+      meanExcludedBonus: v.excludedBonusSum / v.count,
     }))
     const topProjected = topProjectedPlayersByPosition(projectedMeans, TOP_N_PLAYERS)
 
@@ -1164,6 +1298,7 @@ async function main(): Promise<void> {
       projectionRowCount: projectionRows.length,
       matchStatsRowsExcludedNonPremierLeague: matchStatsRowsExcludedNonPremierLeague ?? 0,
       matchStatsRowsExcludedNullCompetition: matchStatsRowsNullCompetition ?? 0,
+      excludedBonusBound,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
 
@@ -1202,15 +1337,23 @@ async function main(): Promise<void> {
       projectionRowsFetched: projectionRows.length,
       projectionsPagesFetched,
       projectionRowsSkippedNoPosition: skippedProjectionsNoPosition,
+      // Ticket #127: the bound check on the mean bonus excluded from every projected total this report compares.
+      excludedBonusBound,
     }
 
+    const bonusBoundNote = excludedBonusBound.withinBound
+      ? ''
+      : ' WARNING: excluded-bonus bound check FAILED — see the report\'s caveats section before trusting any figure in it.'
     const message =
       `${JOB_NAME}: compared ${matchStatsRows.length} actual Premier League player-matches (${TARGET_SEASON}) against ` +
       `${projectionRows.length} projection rows (${MODEL_VERSION}) ` +
       `(${matchStatsRowsExcludedNonPremierLeague ?? 0} non-Premier-League row(s) and ` +
       `${matchStatsRowsNullCompetition ?? 0} null-competition row(s) excluded). Defender pts/90 — actual ${fmt(
         actualByPosition[DEFENDER].meanPointsPer90,
-      )}, projected ${fmt(projectedByPosition[DEFENDER].meanPointsPer90)}. Report written to ${reportPath}.`
+      )}, projected ${fmt(projectedByPosition[DEFENDER].meanPointsPer90)} (bonus excluded). Mean excluded bonus/appearance: ${fmt(
+        excludedBonusBound.meanExcludedBonusPerAppearance,
+        3,
+      )}. Report written to ${reportPath}.${bonusBoundNote}`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {

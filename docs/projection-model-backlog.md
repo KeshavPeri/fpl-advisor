@@ -180,6 +180,26 @@ unmodelled (G4). **No validation against actual bonus or BPS exists** — `playe
 records neither, so nothing in this app can currently check whether a projected bonus figure
 resembles a real one. That is deferred to the backtest (feature-list item 32).
 
+**Cannot be validated against per-match actuals from this source — settled, verified, ticket
+#127, 27 Aug 2026.** The paragraph above already said `player_match_stats` records neither
+bonus nor BPS; ticket #127 verified this directly against the source rather than relying on
+that recollection — fetching the header of `data/2025-2026/By Gameweek/GW1/playermatchstats.csv`
+in FPL-Core-Insights on 28 Aug 2026 confirmed **no `bonus` column and no `bps` column exists at
+all**. This is a permanent property of the source, not a temporary ingest gap: there is nothing
+to add to `player_match_stats` that would close it, and no future re-ingest fixes it. Sourcing
+bonus/BPS from elsewhere is a new-data-source decision (Tier 2) and a whole separate ticket of
+verification — not attempted here.
+
+**Consequence ticket #78 introduced for the calibration report, and #127 fixed.** Once this
+ticket made the projected side carry real (non-zero) bonus, `scripts/calibration-report.ts` —
+which compares projected points against actuals reconstructed from `player_match_stats` — was
+comparing a bonus-inclusive projected figure against a bonus-blind actual figure, biasing every
+comparison against the model by roughly the size of the bonus term, concentrated at the top of
+the distribution (the Top-20 tables, and the G7 defender-captaincy question below). Ticket #127
+restored the report to like-for-like by subtracting the projected bonus back out before
+comparing — a reporting-side fix only, nothing here in `src/lib/projection/` or in
+`player_projections` itself changed. See G7 below for what this means for that open question.
+
 **Direction of the error this fixes.** Before #78, the model systematically **undervalued** the
 players who attract bonus most — high-BPS defenders and goalkeepers, and attackers who score —
 compressing the gap between the best players and the rest, which is precisely the gap a transfer
@@ -297,6 +317,20 @@ that reason. So the model may be tracking a real shift, or over-weighting it.
 **Do not act on this from argument alone.** Both artefacts exist and neither had been read. The
 earlier version of this same worry, on 16 Aug, was resolved the *opposite* way by measurement and the
 alarm turned out to be unfounded — see the note in G2 and the report's own headline history.
+
+**Artefact 2 is meaningful again — ticket #127, 27 Aug 2026, still outstanding.** Between this
+entry being written and now, ticket #78 gave the calibration report's projected side a real
+bonus figure while its actual side (built from `player_match_stats`, which has no bonus/BPS
+column — verified, see G3) stayed bonus-blind. That silently broke artefact 2: every re-run
+would have compared a bonus-inclusive projected total against a bonus-blind actual total,
+biasing the comparison against the model by roughly the size of the bonus term — concentrated
+exactly at the top of the distribution this question turns on. Re-running it in that state
+would have produced a confidently wrong answer to G7, not an answer. Ticket #127 restored the
+report to a like-for-like comparison (projected bonus excluded from every total it compares, a
+reporting-side fix only — see G3). **Artefact 2 is trustworthy again and is still the
+outstanding piece of evidence for G7** — it has not been re-run as part of #127, deliberately
+(that ticket's scope is the instrument, not the reading of it). Dispatching the report and
+reading its headline is the next step, per the note above: not from argument alone.
 
 ## G8 — Fixture sensitivity may be too narrow
 
