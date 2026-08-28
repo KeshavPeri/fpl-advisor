@@ -215,6 +215,39 @@ export const NO_TRANSFER_LAST_GWS = 0
  */
 export const DECAY_BASE = 0.9
 
+/**
+ * Ticket #142 — closes the inherited-solver-settings audit `docs/solver-notes.md` left open
+ * after #120 (which moved `decay_base` out of the inherited column and named `ft_value_list` as
+ * the one remaining item, deliberately deferred rather than folded in — see that ticket's own
+ * comment above). `buildSolverConfig` never used to set this explicitly, so it silently
+ * inherited the shipped `data/user_settings.json`'s `ft_value_list` at the pinned commit
+ * (45131c5a41d7caadb5cb626c012bfa9111dca7a2).
+ *
+ * Prices a banked free transfer by how many are already held — the number the optimiser weighs
+ * against making a transfer now, which is what makes "roll your transfer" a real option rather
+ * than an obviously wasted week (product-brief.md §6d's transfer-hit trade-off leans on the same
+ * idea: a marginal move isn't automatically worth making now).
+ *
+ * dev/solver.py's actual use, verified directly against the source at the pinned commit
+ * (lines ~812-818, not assumed from the shipped file's shape):
+ *   ft_state_value = {}
+ *   for s in ft_states:  # ft_states = [0, 1, 2, 3, 4, 5]
+ *       ft_state_value[s] = ft_state_value.get(s - 1, 0) + ft_value_list.get(str(s), ft_value)
+ * This is a running total over `s`, so `ft_value_list`'s own entry at key `s` is the MARGINAL
+ * value added by the transition that ARRIVES AT `s` banked free transfers (`ft_state_value[s]`
+ * builds on `ft_state_value[s - 1]`). **The keys are the transfer count being moved TO, not
+ * moved from** — key `"2"` prices going from 1 to 2 banked transfers, not from 2 to 3. Getting
+ * this backwards would silently invert which end of the schedule rewards patience most.
+ *
+ * Reviewed and kept, unchanged from what has been running: going from one transfer to two is
+ * worth 2 points, two to three 1.6, three to four 1.3, four to five 1.1 (five is the maximum
+ * rollable, product-brief.md §6d) — a shrinking marginal reward, so the model doesn't value
+ * hoarding transfers forever. This ticket makes the schedule an explicit, chosen value rather
+ * than a silently inherited one; it does not tune it. See docs/solver-notes.md — every key
+ * `data/user_settings.json` ships is now explicitly set, closing the audit #95 started.
+ */
+export const FT_VALUE_LIST: Record<string, number> = { '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 }
+
 // ============================================================================
 // Env
 // ============================================================================
@@ -465,6 +498,7 @@ export interface SolverConfig {
   ev_per_price_cutoff: number
   no_transfer_last_gws: number
   decay_base: number
+  ft_value_list: Record<string, number>
   datasource: string
   chip_limits: ChipLimits
   secs: number
@@ -516,6 +550,13 @@ export interface SolverConfig {
  * bookkeeping, not a behaviour change: the value is unchanged from what has been running. See
  * DECAY_BASE's own comment above for the discount mechanics.
  *
+ * `ft_value_list: FT_VALUE_LIST` (`{"2": 2, "3": 1.6, "4": 1.3, "5": 1.1}`) — ticket #142. Set
+ * EXPLICITLY (never left to the shipped data/user_settings.json default, which also happens to
+ * be this exact schedule) so it is no longer silently inherited — the last key ticket #95's audit
+ * left open after #108 and #120 closed the two scalars. This is bookkeeping, not a behaviour
+ * change: the schedule is unchanged from what has been running. See FT_VALUE_LIST's own comment
+ * above for the key-direction verification and the discount mechanics.
+ *
  * `chip_limits` — ticket #114 (dispatch-only chip probe, feature-list item 27's diagnostic
  * precursor). Defaults to `{ bb: 0, wc: 0, fh: 0, tc: 0 }`, exactly as before this ticket, UNLESS
  * `params.chipProbe` is `true`, in which case it is `{ bb: 1, wc: 0, fh: 0, tc: 1 }` — Bench Boost
@@ -553,6 +594,7 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
     ev_per_price_cutoff: EV_PER_PRICE_CUTOFF,
     no_transfer_last_gws: NO_TRANSFER_LAST_GWS,
     decay_base: DECAY_BASE,
+    ft_value_list: FT_VALUE_LIST,
     datasource: params.datasource,
     chip_limits: params.chipProbe ? { bb: 1, wc: 0, fh: 0, tc: 1 } : { bb: 0, wc: 0, fh: 0, tc: 0 },
     secs: params.secs ?? SOLVER_TIME_LIMIT_SECS,
