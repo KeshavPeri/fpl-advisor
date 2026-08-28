@@ -10,9 +10,11 @@ import {
   CHIP_DISPLAY_NAMES,
   FIRST_CHIP_SET_LAST_GAMEWEEK,
   SOLVER_CHIP_DISPLAY_NAMES,
+  SQUAD_ADVISORY_DISPLAY_NAMES,
+  SQUAD_ADVISORY_HORIZON_NOTE,
   deriveChipState,
 } from './derive.ts'
-import type { ChipAdvisoryRow, ChipSourceData, GameweekDeadline } from './types.ts'
+import type { ChipAdvisoryRow, ChipSourceData, GameweekDeadline, SquadAdvisoryRow } from './types.ts'
 
 /** A full, evenly-spaced season of gameweek deadlines, GW1..GW38, one week
  *  apart, so "current gameweek" and "gameweeks remaining" arithmetic has
@@ -43,6 +45,7 @@ function sourceData(overrides: Partial<ChipSourceData> = {}): ChipSourceData {
     chipsUsed: [],
     gameweeks,
     chipAdvisories: [],
+    squadAdvisories: [],
     ...overrides,
   }
 }
@@ -362,5 +365,73 @@ describe('deriveChipState — chip advisory (ticket #126)', () => {
 
   it('SOLVER_CHIP_DISPLAY_NAMES maps exactly the two chip codes ever observed', () => {
     expect(SOLVER_CHIP_DISPLAY_NAMES).toEqual({ TC: 'Triple Captain', BB: 'Bench Boost' })
+  })
+})
+
+// ============================================================================
+// Squad-rebuild advisory — ticket #134 (feature-list item 28). Same
+// clock-independence as the chip-timing advisory block above: every case
+// below is independent of nowMs.
+// ============================================================================
+
+describe('deriveChipState — squad-rebuild advisory (ticket #134)', () => {
+  it('is empty, with a null note, when no squad-rebuild rows are given', () => {
+    const state = deriveChipState(sourceData({ squadAdvisories: [] }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisories).toEqual([])
+    expect(state.squadAdvisoryNote).toBeNull()
+  })
+
+  it('resolves WC to "Wildcard" and rounds the delta to a whole number', () => {
+    const squadAdvisories: SquadAdvisoryRow[] = [{ chipCode: 'WC', delta: 46.8 }]
+    const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisories).toEqual([{ chipCode: 'WC', displayName: 'Wildcard', deltaWhole: 47 }])
+  })
+
+  it('resolves FH to "Free Hit"', () => {
+    const squadAdvisories: SquadAdvisoryRow[] = [{ chipCode: 'FH', delta: 30 }]
+    const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisories[0].displayName).toBe('Free Hit')
+  })
+
+  it('can carry BOTH a Wildcard and a Free Hit row at once — two separate questions, two separate answers', () => {
+    const squadAdvisories: SquadAdvisoryRow[] = [
+      { chipCode: 'WC', delta: 47 },
+      { chipCode: 'FH', delta: 31 },
+    ]
+    const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisories).toEqual([
+      { chipCode: 'WC', displayName: 'Wildcard', deltaWhole: 47 },
+      { chipCode: 'FH', displayName: 'Free Hit', deltaWhole: 31 },
+    ])
+  })
+
+  it('rounds a delta like 6.5 up and 6.49 down — Math.round, not truncation', () => {
+    const squadAdvisories: SquadAdvisoryRow[] = [
+      { chipCode: 'WC', delta: 6.5 },
+      { chipCode: 'FH', delta: 6.49 },
+    ]
+    const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisories[0].deltaWhole).toBe(7)
+    expect(state.squadAdvisories[1].deltaWhole).toBe(6)
+  })
+
+  it('carries the fixed five-gameweek limitation sentence on the derived view whenever there is at least one squad advisory', () => {
+    const squadAdvisories: SquadAdvisoryRow[] = [{ chipCode: 'WC', delta: 47 }]
+    const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisoryNote).toBe(SQUAD_ADVISORY_HORIZON_NOTE)
+    expect(state.squadAdvisoryNote).toMatch(/five-gameweek/)
+  })
+
+  it('the squad-advisory note and the chip-timing advisory note are independent — one can be present without the other', () => {
+    const state = deriveChipState(
+      sourceData({ chipAdvisories: [], squadAdvisories: [{ chipCode: 'WC', delta: 47 }] }),
+      GW19_DEADLINE_MS - 1,
+    )
+    expect(state.chipAdvisoryNote).toBeNull()
+    expect(state.squadAdvisoryNote).toBe(SQUAD_ADVISORY_HORIZON_NOTE)
+  })
+
+  it('SQUAD_ADVISORY_DISPLAY_NAMES maps exactly the two squad-rebuild chip codes', () => {
+    expect(SQUAD_ADVISORY_DISPLAY_NAMES).toEqual({ WC: 'Wildcard', FH: 'Free Hit' })
   })
 })

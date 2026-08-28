@@ -1,5 +1,17 @@
 import { supabase } from '../supabase'
-import type { ChipAdvisoryRow, ChipSourceData, ChipUsageRecord, GameweekDeadline } from './types.ts'
+import type { ChipAdvisoryRow, ChipSourceData, ChipUsageRecord, GameweekDeadline, SquadAdvisoryRow } from './types.ts'
+
+/**
+ * The solver's own two-letter codes for the chip-TIMING advisory (ticket
+ * #126) — TC/BB only, matching src/lib/chips/derive.ts's own
+ * SOLVER_CHIP_DISPLAY_NAMES. Named here, not re-derived from that map,
+ * because api.ts has no reason to import derive.ts's display-name
+ * vocabulary just to get a filter list — this module already keeps its own
+ * local copies of raw shapes it reads (see ChipAdvisoryDbRow below).
+ */
+const CHIP_TIMING_CODES = ['TC', 'BB'] as const
+/** The solver's own two-letter codes for the squad-REBUILD advisory (ticket #134) — WC/FH only. Never overlaps CHIP_TIMING_CODES above. */
+const SQUAD_REBUILD_CODES = ['WC', 'FH'] as const
 
 /**
  * Same wrapping as src/lib/squad/api.ts's raise() / src/lib/verdict/api.ts's
@@ -28,6 +40,13 @@ interface ChipAdvisoryDbRow {
   delta: number
   solution_index: number
   solver_run_id: number
+}
+
+/** One row of `public.chip_advisories` where chip_code is 'WC'/'FH', as selected below — see scripts/store-squad-advisory.ts for how it is written. `id` is chip_advisories' own append-only identity primary key, read here (not solver_run_id) since squad-rebuild rows are dispatched irregularly, not nightly — see the query's own comment. */
+interface SquadAdvisoryDbRow {
+  id: number
+  chip_code: string
+  delta: number
 }
 
 /**
@@ -108,7 +127,7 @@ export async function fetchChipSourceData(): Promise<ChipSourceData> {
   const chipsUsed = parseChipsUsed((squadRows ?? [])[0]?.chips_used)
 
   // --------------------------------------------------------------------
-  // Chip advisory (ticket #126, item 27) — every stored row for the
+  // Chip advisory (ticket #126, item 27) — every stored TC/BB row for the
   // current/next gameweek, newest solver_run_id first, then filtered down
   // to just that newest run's own rows below. `chip_advisories` is
   // append-only (a re-run of the same gameweek adds new rows rather than
@@ -118,13 +137,25 @@ export async function fetchChipSourceData(): Promise<ChipSourceData> {
   // most a handful of chips are ever played per solve (two, in the one
   // real example observed), across at most a few solutions, so this can
   // never approach PostgREST's 1,000-row cap.
+  //
+  // `.in('chip_code', CHIP_TIMING_CODES)` (ticket #134) — this table now
+  // also carries squad-rebuild rows (chip_code 'WC'/'FH', a DIFFERENT
+  // question, see the squad-advisory read below), written from a
+  // completely separate, manually-dispatched workflow with its OWN
+  // solver_run_id anchor. Without this filter, a squad-rebuild-probe run
+  // dispatched after tonight's nightly chip-enabled solve could have a
+  // NEWER solver_run_id than any TC/BB row, and `latestSolverRunId` below
+  // would silently resolve to a run that has no TC/BB rows at all —
+  // emptying this list even though a real chip-timing advisory exists.
   // --------------------------------------------------------------------
   let chipAdvisories: ChipAdvisoryRow[] = []
+  const squadAdvisories: SquadAdvisoryRow[] = []
   if (nextGameweek !== null) {
     const { data: advisoryRows, error: advisoryError } = await supabase
       .from('chip_advisories')
       .select('chip_code, chip_gameweek_id, delta, solution_index, solver_run_id')
       .eq('gameweek_id', nextGameweek.id)
+      .in('chip_code', CHIP_TIMING_CODES)
       .order('solver_run_id', { ascending: false })
       .order('solution_index', { ascending: true })
       .limit(50)
@@ -140,7 +171,36 @@ export async function fetchChipSourceData(): Promise<ChipSourceData> {
         delta: row.delta,
         solutionIndex: row.solution_index,
       }))
+
+    // ------------------------------------------------------------------
+    // Squad-rebuild advisory (ticket #134, item 28) — the WC/FH rows the
+    // query above deliberately excludes. squad-rebuild-probe.yml is
+    // dispatched irregularly (never nightly), so "latest per solver run"
+    // is the wrong grouping here — instead, this takes the single most
+    // recent row (highest `id`, chip_advisories' own append-only bigint
+    // identity primary key — see that migration's header) for EACH chip
+    // code independently: Wildcard and Free Hit are two separate
+    // questions, so a Wildcard probe from last week and a Free Hit probe
+    // from yesterday can both still be the "latest known answer" for
+    // their own chip at once. Bounded by the same `.limit(50)` discipline.
+    // ------------------------------------------------------------------
+    const { data: squadRebuildRows, error: squadRebuildError } = await supabase
+      .from('chip_advisories')
+      .select('id, chip_code, delta')
+      .eq('gameweek_id', nextGameweek.id)
+      .in('chip_code', SQUAD_REBUILD_CODES)
+      .order('id', { ascending: false })
+      .limit(50)
+      .returns<SquadAdvisoryDbRow[]>()
+    if (squadRebuildError) raise(squadRebuildError)
+
+    const seenChipCodes = new Set<string>()
+    for (const row of squadRebuildRows ?? []) {
+      if (seenChipCodes.has(row.chip_code)) continue
+      seenChipCodes.add(row.chip_code)
+      squadAdvisories.push({ chipCode: row.chip_code as 'WC' | 'FH', delta: row.delta })
+    }
   }
 
-  return { chipsUsed, gameweeks, chipAdvisories }
+  return { chipsUsed, gameweeks, chipAdvisories, squadAdvisories }
 }

@@ -30,6 +30,8 @@ import type {
   KnownChipId,
   RemainingChipView,
   SecondChipSetView,
+  SquadAdvisoryRow,
+  SquadAdvisoryView,
   UsedChipView,
 } from './types.ts'
 
@@ -189,6 +191,56 @@ function deriveChipAdvisories(rows: readonly ChipAdvisoryRow[]): ChipAdvisoryVie
   }))
 }
 
+/**
+ * Ticket #134 (item 28). Squad-rebuild chip code -> display name —
+ * DELIBERATELY a separate constant from both CHIP_DISPLAY_NAMES (FPL's own
+ * chip identifiers) and SOLVER_CHIP_DISPLAY_NAMES (the solver's TC/BB
+ * timing-advisory codes) above: WC/FH here are the solver's own two-letter
+ * codes too, read from scripts/lib/solver-output.ts's parse of the
+ * squad-rebuild-probe's stdout, but they never appear in
+ * SOLVER_CHIP_DISPLAY_NAMES — that map's own test asserts it "maps exactly
+ * the two chip codes ever observed" (TC/BB) and must keep doing so; WC/FH
+ * are a different question (a full-squad rebuild, not a chip PLAYED within
+ * the current squad) with their own display path below.
+ */
+export const SQUAD_ADVISORY_DISPLAY_NAMES: Readonly<Record<'WC' | 'FH', string>> = {
+  WC: 'Wildcard',
+  FH: 'Free Hit',
+}
+
+/**
+ * The fixed sentence design-reference.md's DoD requires: "a sentence
+ * stating that it is a five-gameweek view and that a wildcard's real value
+ * depends on fixtures the model cannot see." One constant, never composed
+ * per-row — see ChipsScreen.tsx, which renders it once beneath the
+ * squad-advisory list, matching CHIP_ADVISORY_HORIZON_NOTE's own pattern.
+ * Deliberately mentions both chips generically (never singles out only
+ * "wildcard") since squadAdvisories can hold a Free Hit row, a Wildcard
+ * row, or both — see the ticket's own Notes: "report both as one-gameweek
+ * rebuild gaps and say so."
+ */
+export const SQUAD_ADVISORY_HORIZON_NOTE =
+  "This is a five-gameweek view — a wildcard or free hit's real value depends on fixtures the model cannot see."
+
+/**
+ * Resolves each stored squad-rebuild advisory row for display. `delta` is
+ * already a database-computed figure (chip_advisories' own GENERATED
+ * column, same one CHIP/TC/BB advisories share) — this only rounds it to a
+ * whole number, per design-reference.md's "no decimal projected-points
+ * values" rule, and attaches a display name. Every SquadAdvisoryRow's
+ * `chipCode` is already narrowed to 'WC' | 'FH' by api.ts's own query (see
+ * that file), so there is no "unknown chip" fallback to render here — unlike
+ * deriveChipAdvisories above, which reads a bare `string` chip_code that can
+ * genuinely be anything.
+ */
+function deriveSquadAdvisories(rows: readonly SquadAdvisoryRow[]): SquadAdvisoryView[] {
+  return rows.map((row) => ({
+    chipCode: row.chipCode,
+    displayName: SQUAD_ADVISORY_DISPLAY_NAMES[row.chipCode],
+    deltaWhole: Math.round(row.delta),
+  }))
+}
+
 function bandForGameweeksRemaining(gameweeksRemaining: number): ChipExpiryBand {
   if (gameweeksRemaining > 8) return 'none'
   if (gameweeksRemaining >= 5) return 'noted'
@@ -339,6 +391,7 @@ export function deriveChipState(data: ChipSourceData, nowMs: number): DerivedChi
   }
 
   const chipAdvisories = deriveChipAdvisories(data.chipAdvisories)
+  const squadAdvisories = deriveSquadAdvisories(data.squadAdvisories)
 
   return {
     hasUsedAnyChip: usedChips.length > 0,
@@ -348,5 +401,7 @@ export function deriveChipState(data: ChipSourceData, nowMs: number): DerivedChi
     expiryWarning: deriveExpiryWarning(firstSet),
     chipAdvisories,
     chipAdvisoryNote: chipAdvisories.length > 0 ? CHIP_ADVISORY_HORIZON_NOTE : null,
+    squadAdvisories,
+    squadAdvisoryNote: squadAdvisories.length > 0 ? SQUAD_ADVISORY_HORIZON_NOTE : null,
   }
 }

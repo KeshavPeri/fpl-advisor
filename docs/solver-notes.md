@@ -200,3 +200,80 @@ building the chip-parsing logic should dispatch this workflow, read the uploaded
 the same discipline this document's "Resolved: no bundled sample projections CSV exists"
 section above already establishes for this file: write down what was actually run, not a guess
 from reading the README.
+
+## `preseason: true` — what it does, and why it is safe only in isolation (ticket #134)
+
+`data/user_settings.json` ships `preseason: true` by default. `scripts/build-solver-input.ts`'s
+`buildSolverConfig` — the ONLY function that produces a config for the production solve path
+(`solver-run.yml`, `solver-chip-probe.yml`) — has set `preseason: false` explicitly since ticket
+#41, and its own comment there explains why: `true` makes `dev/solver.py` **discard the current
+squad entirely** and build a brand-new one from scratch within the budget, ignoring
+`team.json`'s `picks` array (see `buildTeamJson`'s own header — `team.json` is built from
+`squads`/`squad_picks`, never from FPL's authenticated squad endpoint, and preseason mode would
+throw that input away regardless of where it came from). `product-brief.md` §3 puts full-squad
+building out of scope until item 28 — this ticket.
+
+**Why this is destructive if it ever reaches a stored table.** Every downstream consumer of a
+solve — `store-solver-output.ts` → `solver_picks`, `generate-recommendations.ts` →
+`recommendations`, the verdict card, the Telegram message, the notification schedule — reads
+"the most recent solve" and has no mechanism to tell a probe apart from the real thing. A
+`preseason: true` solve's output landing in any of those tables would silently become the app's
+answer: fourteen transfers presented with the same confidence as a normal one-transfer
+recommendation. This is not a hypothetical; it is the entire reason item 28 waited until #126
+(the chip-timing advisory) established a table shape — `chip_advisories` — that is architecturally
+incapable of being read by any of those consumers (see that migration's own header: "Never read
+by recommendations/solver_picks/the Telegram message").
+
+**The guard rails, concretely:**
+
+1. **`buildSolverConfig` itself never changes.** `preseason: true` is reachable ONLY through a
+   separately-named function, `buildRebuildSolverConfig`, added by this ticket. There is no
+   parameter on `buildSolverConfig` that can request it — provable by a `@ts-expect-error` test
+   in `scripts/build-solver-input.test.ts` that fails `tsc -b` if that ever stops being true, plus
+   a runtime test that every parameter shape `buildSolverConfig` actually accepts still returns
+   `preseason: false`.
+2. **Only one workflow ever calls `buildRebuildSolverConfig`.** The `REBUILD_VARIANT` environment
+   variable is what routes `scripts/build-solver-input.ts`'s `main()` to it instead of
+   `buildSolverConfig`, and `.github/workflows/squad-rebuild-probe.yml` is the only workflow file
+   in this repository that sets it. `solver-run.yml` and `solver-chip-probe.yml` are untouched by
+   this ticket.
+3. **The rebuild probe's own workflow never stores a pick, a recommendation, or a notification.**
+   `.github/workflows/squad-rebuild-probe.yml` calls `emit-projections-csv.ts`,
+   `build-solver-input.ts` and `store-squad-advisory.ts` — and nothing else that writes
+   application state. It is `workflow_dispatch`-only with no `schedule` key, so it never runs
+   automatically.
+4. **`scripts/store-squad-advisory.ts` writes to exactly two tables: `chip_advisories` (insert
+   only, one row per run) and `job_runs`.** It never reads or writes `solver_picks`,
+   `recommendations`, or anything Telegram-related. It never even reads *which players* the
+   rebuild solve picked — only the two solves' own Results-table scores. The rebuilt squad's
+   fifteen players exist only in the workflow's own uploaded artefacts (the results CSV, `if:
+   always()`), never in any table.
+5. **Wildcard and Free Hit are mutually exclusive within one run.** `chip_limits` carries `wc: 1`
+   or `fh: 1`, never both — `buildRebuildSolverConfig`'s `variant` parameter is a single required
+   `'wc' | 'fh'` union, not two independent flags, so "both" is not a representable value.
+
+**What this ticket reports, and what it deliberately does not.** The advisory is a single
+number — the rebuild solve's objective minus the chip-free baseline's, both solved fresh against
+the same projections CSV and the same five-gameweek horizon in the same dispatch — plus a fixed
+sentence stating the horizon limitation. It is always a large, positive-looking number: the
+rebuild is unconstrained by the current squad and by transfer costs, so it will beat the baseline
+comfortably even in gameweeks where playing a wildcard would be a bad idea (the same "solver
+always wants to play a chip now" finding the dispatch-only chip probe above already documented,
+sharper here because there is no existing squad constraining the alternative at all). The UI
+never colours this as a warning (design-reference.md: a large delta is information, not an
+alarm) and never turns it into an instruction — see `product-brief.md` §6a and the chip-timing
+advisory's own precedent above.
+
+**Free Hit vs. Wildcard — modelled identically here, on purpose.** A real Free Hit reverts the
+squad the following gameweek; a real Wildcard does not. Modelling that reversion across the
+five-gameweek horizon is explicitly out of this slice — both variants are reported as a
+one-gameweek rebuild gap, and the horizon-note sentence says so generically ("a wildcard or free
+hit's real value depends on fixtures the model cannot see") rather than making a claim this
+ticket cannot back up for either chip specifically.
+
+**What could not be verified before this ticket's own review.** `preseason: true` has never been
+run in this project — `squad-rebuild-probe.yml` cannot run until it is on the default branch (a
+`workflow_dispatch` workflow file is only invocable from there), so nothing here proves the
+solver behaves sanely in that mode, only that the config sent to it is correctly isolated. The
+first real dispatch after merge is the first time this app has ever asked `dev/solver.py` to
+build a squad from nothing.
