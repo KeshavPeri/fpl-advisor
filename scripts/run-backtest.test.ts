@@ -22,26 +22,38 @@ import { describe, expect, it } from 'vitest'
 import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../src/lib/scoring/types.ts'
 import { positionPriorRates } from '../src/lib/projection/rates.ts'
 import { positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
+import { projectPlayerGameweek } from '../src/lib/projection/expectedPoints.ts'
+import { LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
 import {
   aggregateActualForGameweek,
   assertReconciles,
   averageMinutesPerMatch,
+  bucketByPriorMatches,
   buildDefconMatches,
   buildMeasuredRow,
+  buildMultiFixtureDiagnostic,
   buildPlayerRateHistory,
   buildRateHistoryMatch,
   buildRecentMinutes,
+  buildTeamSlugsByGameweek,
   checkSanityBounds,
   classifyRow,
   CLEAN_SHEET_RATE_UPPER_BOUND,
   computePositionPriors,
+  countMultiFixtureRowsByGameweek,
   DEFAULT_SEASON,
+  defconSignedError,
   derivedCleanSheetRate,
   describeSignedError,
   emptyExclusionCounts,
+  formatExclusionPercentage,
   incrementExclusion,
+  inferTeamSlug,
   MAE_LOWER_BOUND,
   MAE_UPPER_BOUND,
+  MIN_BUCKET_SAMPLE_SIZE,
+  MULTI_FIXTURE_HEADLINE_THRESHOLD,
+  parseMatchIdTeamSlugs,
   pickProjectedComponents,
   projectRow,
   reconstructActualMatchPoints,
@@ -137,6 +149,80 @@ describe('projectRow — no lookahead', () => {
       prior_xa: 0.4, // gw1 only
     })
     expect(buildPlayerRateHistory(correctRow2).totalXa).toBeCloseTo(0.4, 10)
+  })
+})
+
+// ============================================================================
+// projectRow — fixture count (ticket #140). THE MOST IMPORTANT TEST IN
+// THIS FILE, per the ticket text.
+// ============================================================================
+
+describe('projectRow — a player with two fixtures in one gameweek', () => {
+  it('is projected as the sum of both fixtures — matching what the actual side sums via aggregateActualForGameweek', () => {
+    const row = featureRow({
+      gameweek_id: 10,
+      player_code: 700,
+      prior_matches: 5,
+      prior_minutes: 450,
+      prior_xg: 2,
+      prior_xa: 1,
+    })
+    const prior = zeroPrior(FORWARD)
+
+    const oneFixture = projectRow(row, FORWARD, prior, 1)
+    const twoFixtures = projectRow(row, FORWARD, prior, 2)
+
+    // Two IDENTICAL neutral fixture contexts must sum to exactly double a
+    // single one — projectPlayerGameweek's own summation, unmodified.
+    expect(twoFixtures.fixtures.length).toBe(2)
+    expect(twoFixtures.expectedPoints).toBeCloseTo(oneFixture.expectedPoints * 2, 10)
+    expect(twoFixtures.expectedMinutes).toBeCloseTo(oneFixture.expectedMinutes * 2, 10)
+
+    // The count itself is exactly what the actual side counts: a double
+    // gameweek is two player_match_stats rows, summed independently by
+    // aggregateActualForGameweek — matchesFound is the count run-backtest.ts
+    // feeds into projectRow as fixtureCount (see main()).
+    const actualOutcome = aggregateActualForGameweek(FORWARD, [
+      actualRow({ minutesPlayed: 90, goals: 1 }),
+      actualRow({ minutesPlayed: 90, goals: 0 }),
+    ])
+    expect(actualOutcome.matchesFound).toBe(2)
+    expect(actualOutcome.featured).toBe(true)
+  })
+
+  it('a blank fixture count (0) projects zero points, never an error', () => {
+    const row = featureRow({ gameweek_id: 12, player_code: 702, prior_matches: 2, prior_minutes: 180 })
+    const projection = projectRow(row, FORWARD, zeroPrior(FORWARD), 0)
+    expect(projection.fixtures).toEqual([])
+    expect(projection.expectedPoints).toBe(0)
+  })
+})
+
+describe('projectRow — a single-fixture gameweek is a no-op, unchanged from before ticket #140', () => {
+  it('omitting fixtureCount defaults to exactly 1 fixture, identical to passing 1 explicitly', () => {
+    const row = featureRow({ gameweek_id: 11, player_code: 701, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
+    const prior = zeroPrior(MIDFIELDER)
+    expect(projectRow(row, MIDFIELDER, prior)).toEqual(projectRow(row, MIDFIELDER, prior, 1))
+  })
+
+  it('full equality: the default single-fixture projection matches a hand-built one-neutral-fixture call to projectPlayerGameweek directly', () => {
+    const row = featureRow({ gameweek_id: 20, player_code: 703, prior_matches: 4, prior_minutes: 360, prior_xg: 3, prior_xa: 0.5 })
+    const prior = zeroPrior(DEFENDER)
+    const viaProjectRow = projectRow(row, DEFENDER, prior)
+    const viaDirectCall = projectPlayerGameweek(
+      {
+        position: DEFENDER,
+        status: 'a',
+        chanceOfPlayingNextRound: null,
+        recentMinutes: buildRecentMinutes(row),
+        rateHistory: buildPlayerRateHistory(row),
+        ratePositionPrior: prior.rate,
+        defconMatches: buildDefconMatches(row),
+        defconPositionPrior: prior.defconHitRate,
+      },
+      [{ fixtureId: row.gameweek_id, isHome: true, teamElo: null, opponentElo: null, fplDifficulty: 3, leagueBaselineGoals: LEAGUE_BASELINE_GOALS_PER_TEAM }],
+    )
+    expect(viaProjectRow).toEqual(viaDirectCall)
   })
 })
 
@@ -361,6 +447,32 @@ describe('classifyRow — a player who did not feature in a gameweek is excluded
   })
 })
 
+describe('classifyRow — a blank gameweek (ticket #140): the player is unfeatured because their team had NO fixture, not because they were benched', () => {
+  it('excludes with reason blankGameweek when hadFixture is explicitly false and the player did not feature', () => {
+    const row = featureRow({ gameweek_id: 6, player_code: 50, prior_matches: 4, prior_minutes: 360 })
+    const result = classifyRow(row, MIDFIELDER, [], false)
+    expect(result).toEqual({ kind: 'excluded', reason: 'blankGameweek' })
+  })
+
+  it('a row with actual rows present but 0 minutes is still blankGameweek when hadFixture is false — the exclusion reason follows hadFixture, not the shape of the (empty) actual data', () => {
+    const row = featureRow({ gameweek_id: 6, player_code: 51, prior_matches: 4, prior_minutes: 360 })
+    const result = classifyRow(row, MIDFIELDER, [actualRow({ minutesPlayed: 0 })], false)
+    expect(result).toEqual({ kind: 'excluded', reason: 'blankGameweek' })
+  })
+
+  it('defaults to didNotFeature (hadFixture = true) — every pre-#140 3-arg call site is an exact no-op', () => {
+    const row = featureRow({ gameweek_id: 6, player_code: 52, prior_matches: 4, prior_minutes: 360 })
+    expect(classifyRow(row, MIDFIELDER, [])).toEqual({ kind: 'excluded', reason: 'didNotFeature' })
+    expect(classifyRow(row, MIDFIELDER, [], true)).toEqual({ kind: 'excluded', reason: 'didNotFeature' })
+  })
+
+  it('a MEASURED row is unaffected by hadFixture — the flag only matters when the player is unfeatured', () => {
+    const row = featureRow({ gameweek_id: 6, player_code: 53, prior_matches: 4, prior_minutes: 360 })
+    const result = classifyRow(row, FORWARD, [actualRow({ minutesPlayed: 90, teamGoalsConceded: 1 })], false)
+    expect(result.kind).toBe('measured')
+  })
+})
+
 describe('classifyRow — other reasons', () => {
   it('excludes with reason unresolvedPlayerCode when position cannot be resolved', () => {
     const row = featureRow({ gameweek_id: 5, player_code: 43, prior_matches: 3, prior_minutes: 270 })
@@ -402,6 +514,16 @@ describe('assertReconciles', () => {
     incrementExclusion(counts, 'noPriorMatches')
     expect(() => assertReconciles(10, 3, counts)).toThrow(/reconciliation failed/)
   })
+
+  it('reconciles with the new blankGameweek reason included (ticket #140)', () => {
+    const counts = emptyExclusionCounts()
+    incrementExclusion(counts, 'noPriorMatches')
+    incrementExclusion(counts, 'didNotFeature')
+    incrementExclusion(counts, 'blankGameweek')
+    incrementExclusion(counts, 'blankGameweek')
+    expect(totalExcluded(counts)).toBe(4)
+    expect(() => assertReconciles(6, 2, counts)).not.toThrow() // 2 measured + 4 excluded = 6 read
+  })
 })
 
 // ============================================================================
@@ -417,6 +539,11 @@ function measuredRow(overrides: Partial<MeasuredRow> & Pick<MeasuredRow, 'gamewe
     projectedComponents: sumComponentTotals([]),
     actualComponents: sumComponentTotals([]),
     actualMinutes: 90,
+    // Ticket #140 defaults — an ordinary single-fixture row with no history,
+    // overridable per test. Existing tests that predate #140 never set
+    // these, so they exercise exactly this default.
+    fixtureCount: 1,
+    priorMatches: 0,
     ...overrides,
   }
 }
@@ -557,6 +684,181 @@ describe('checkSanityBounds — derived clean-sheet rate bound', () => {
 })
 
 // ============================================================================
+// parseMatchIdTeamSlugs / inferTeamSlug / buildTeamSlugsByGameweek — ticket
+// #140, blank-gameweek detection.
+// ============================================================================
+
+describe('parseMatchIdTeamSlugs', () => {
+  it('splits a Premier League match_id into its two team slugs', () => {
+    expect(parseMatchIdTeamSlugs('25-26-prem-manchester-united-vs-arsenal')).toEqual(['manchester-united', 'arsenal'])
+  })
+
+  it('handles hyphenated team names on both sides', () => {
+    expect(parseMatchIdTeamSlugs('25-26-prem-nottingham-forest-vs-wolverhampton-wanderers')).toEqual([
+      'nottingham-forest',
+      'wolverhampton-wanderers',
+    ])
+  })
+
+  it('works across season prefixes, season-value-agnostic like competition.ts', () => {
+    expect(parseMatchIdTeamSlugs('26-27-prem-arsenal-vs-chelsea')).toEqual(['arsenal', 'chelsea'])
+  })
+
+  it('returns null for a non-prem competition slug — this job only ever reads prem rows, but the parser does not guess', () => {
+    expect(parseMatchIdTeamSlugs('25-26-fa-cup-arsenal-vs-liverpool')).toBeNull()
+  })
+
+  it('returns null for a malformed match_id', () => {
+    expect(parseMatchIdTeamSlugs('not-a-real-match-id')).toBeNull()
+    expect(parseMatchIdTeamSlugs('25-26-prem-onlyoneteam')).toBeNull()
+  })
+})
+
+describe('inferTeamSlug', () => {
+  it('picks the slug appearing most often — the player\'s own team, not any single opponent', () => {
+    const matchIds = [
+      '25-26-prem-arsenal-vs-chelsea',
+      '25-26-prem-liverpool-vs-arsenal',
+      '25-26-prem-arsenal-vs-everton',
+    ]
+    expect(inferTeamSlug(matchIds)).toBe('arsenal')
+  })
+
+  it('returns null with no parseable match_ids', () => {
+    expect(inferTeamSlug([])).toBeNull()
+    expect(inferTeamSlug(['garbage'])).toBeNull()
+  })
+})
+
+describe('buildTeamSlugsByGameweek', () => {
+  it('groups the set of team-slugs that played, per gameweek, across every row', () => {
+    const rows = [
+      { gameweek: 1, matchId: '25-26-prem-arsenal-vs-chelsea' },
+      { gameweek: 1, matchId: '25-26-prem-liverpool-vs-everton' },
+      { gameweek: 2, matchId: '25-26-prem-arsenal-vs-fulham' },
+    ]
+    const byGameweek = buildTeamSlugsByGameweek(rows)
+    expect([...byGameweek.get(1)!].sort()).toEqual(['arsenal', 'chelsea', 'everton', 'liverpool'])
+    expect([...byGameweek.get(2)!].sort()).toEqual(['arsenal', 'fulham'])
+    expect(byGameweek.has(3)).toBe(false)
+  })
+})
+
+// ============================================================================
+// bucketByPriorMatches / defconSignedError — ticket #140.
+// ============================================================================
+
+describe('defconSignedError', () => {
+  it('is projected defcon minus actual defcon, mirroring the overall signedError convention', () => {
+    const row = measuredRow({
+      gameweekId: 1,
+      position: DEFENDER,
+      projectedPoints: 0,
+      actualPoints: 0,
+      projectedComponents: { ...sumComponentTotals([]), defensiveContributionPoints: 0.3 },
+      actualComponents: { ...sumComponentTotals([]), defensiveContributionPoints: 1.1 },
+    })
+    expect(defconSignedError(row)).toBeCloseTo(0.3 - 1.1, 10)
+  })
+})
+
+describe('bucketByPriorMatches', () => {
+  const rowWithPriorMatches = (priorMatches: number, value: number) =>
+    measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: value, actualPoints: 0, priorMatches })
+
+  it('partitions rows into the 1–4 / 5–9 / 10–19 / 20+ buckets by label', () => {
+    const rows = [rowWithPriorMatches(2, 1), rowWithPriorMatches(7, 1), rowWithPriorMatches(15, 1), rowWithPriorMatches(25, 1)]
+    // Pad each bucket past MIN_BUCKET_SAMPLE_SIZE so the figure is reported, not "too small to read".
+    const padded = rows.flatMap((r) => Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, () => r))
+    const buckets = bucketByPriorMatches(padded, (r) => r.signedError)
+    expect(buckets.map((b) => b.label)).toEqual(['1–4', '5–9', '10–19', '20+'])
+    expect(buckets.map((b) => b.n)).toEqual([MIN_BUCKET_SAMPLE_SIZE, MIN_BUCKET_SAMPLE_SIZE, MIN_BUCKET_SAMPLE_SIZE, MIN_BUCKET_SAMPLE_SIZE])
+    for (const b of buckets) expect(b.tooSmallToRead).toBe(false)
+  })
+
+  it('labels a bucket "too small to read" (rather than a figure) below MIN_BUCKET_SAMPLE_SIZE — same rule ticket #123\'s accuracy display uses', () => {
+    const rows = Array.from({ length: MIN_BUCKET_SAMPLE_SIZE - 1 }, () => rowWithPriorMatches(2, 5))
+    const buckets = bucketByPriorMatches(rows, (r) => r.signedError)
+    const bucket14 = buckets.find((b) => b.label === '1–4')!
+    expect(bucket14.n).toBe(MIN_BUCKET_SAMPLE_SIZE - 1)
+    expect(bucket14.tooSmallToRead).toBe(true)
+    expect(bucket14.meanSignedError).toBeNull()
+  })
+
+  it('reports the exact mean at precisely MIN_BUCKET_SAMPLE_SIZE rows', () => {
+    const rows = Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, () => rowWithPriorMatches(30, 4)) // signedError = 4 - 0 = 4
+    const buckets = bucketByPriorMatches(rows, (r) => r.signedError)
+    const bucket20plus = buckets.find((b) => b.label === '20+')!
+    expect(bucket20plus.tooSmallToRead).toBe(false)
+    expect(bucket20plus.meanSignedError).toBeCloseTo(4, 10)
+  })
+})
+
+// ============================================================================
+// buildMultiFixtureDiagnostic / countMultiFixtureRowsByGameweek — ticket #140.
+// ============================================================================
+
+describe('buildMultiFixtureDiagnostic', () => {
+  it('separates multi-fixture rows and reports the headline with and without them', () => {
+    const ordinary = measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 4, actualPoints: 4, fixtureCount: 1 }) // error 0
+    const double = measuredRow({ gameweekId: 33, position: FORWARD, projectedPoints: 4, actualPoints: 9, fixtureCount: 2 }) // error 5
+    const diagnostic = buildMultiFixtureDiagnostic([ordinary, double])
+    expect(diagnostic.multiFixtureCount).toBe(1)
+    expect(diagnostic.withMultiFixture.n).toBe(2)
+    expect(diagnostic.withoutMultiFixture.n).toBe(1)
+    expect(diagnostic.withoutMultiFixture.meanAbsoluteError).toBe(0)
+  })
+
+  it('flags movesHeadlineSignificantly only when the MAE delta exceeds MULTI_FIXTURE_HEADLINE_THRESHOLD', () => {
+    const ordinary = measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 4, actualPoints: 4, fixtureCount: 1 })
+    const bigMiss = measuredRow({ gameweekId: 33, position: FORWARD, projectedPoints: 0, actualPoints: 10, fixtureCount: 2 })
+    const diagnostic = buildMultiFixtureDiagnostic([ordinary, bigMiss])
+    expect(diagnostic.maeDelta).not.toBeNull()
+    expect(Math.abs(diagnostic.maeDelta!)).toBeGreaterThan(MULTI_FIXTURE_HEADLINE_THRESHOLD)
+    expect(diagnostic.movesHeadlineSignificantly).toBe(true)
+  })
+
+  it('does not flag when there are no multi-fixture rows at all — delta is exactly 0', () => {
+    const rows = [
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 4, actualPoints: 5, fixtureCount: 1 }),
+      measuredRow({ gameweekId: 2, position: FORWARD, projectedPoints: 3, actualPoints: 3, fixtureCount: 1 }),
+    ]
+    const diagnostic = buildMultiFixtureDiagnostic(rows)
+    expect(diagnostic.multiFixtureCount).toBe(0)
+    expect(diagnostic.maeDelta).toBe(0)
+    expect(diagnostic.movesHeadlineSignificantly).toBe(false)
+  })
+})
+
+describe('countMultiFixtureRowsByGameweek', () => {
+  it('counts only fixtureCount > 1 rows, grouped by gameweek', () => {
+    const rows = [
+      measuredRow({ gameweekId: 33, position: FORWARD, projectedPoints: 0, actualPoints: 0, fixtureCount: 2 }),
+      measuredRow({ gameweekId: 33, position: MIDFIELDER, projectedPoints: 0, actualPoints: 0, fixtureCount: 2 }),
+      measuredRow({ gameweekId: 33, position: DEFENDER, projectedPoints: 0, actualPoints: 0, fixtureCount: 1 }),
+      measuredRow({ gameweekId: 10, position: FORWARD, projectedPoints: 0, actualPoints: 0, fixtureCount: 1 }),
+    ]
+    const counts = countMultiFixtureRowsByGameweek(rows)
+    expect(counts.get(33)).toBe(2)
+    expect(counts.has(10)).toBe(false)
+  })
+})
+
+// ============================================================================
+// formatExclusionPercentage — ticket #140 ("4,209 of 18,243 is 23%").
+// ============================================================================
+
+describe('formatExclusionPercentage', () => {
+  it('matches the ticket\'s own worked example', () => {
+    expect(formatExclusionPercentage(4209, 18243)).toBe('23%')
+  })
+
+  it('is 0% (never NaN or a divide-by-zero) with zero rows read', () => {
+    expect(formatExclusionPercentage(0, 0)).toBe('0%')
+  })
+})
+
+// ============================================================================
 // DEFAULT_SEASON.
 // ============================================================================
 
@@ -657,12 +959,16 @@ describe('run-backtest.ts — the join is on player_code, never player_id', () =
 
   it('reads team_goals_conceded, never the per-player goals_conceded column, for actuals', () => {
     expect(source).toMatch(
-      /'player_code, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries'/,
+      /'player_code, match_id, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries'/,
     )
     // A bare "goals_conceded" column in a select list (comma-delimited, not
     // prefixed by "team_") would appear as ", goals_conceded," or end a
     // select string as ", goals_conceded'" — neither pattern occurs.
     expect(source).not.toMatch(/,\s*goals_conceded\s*[,']/)
+  })
+
+  it('selects match_id from player_match_stats — ticket #140, team-slug inference for blank-gameweek detection only, never used for point reconstruction', () => {
+    expect(source).toMatch(/match_id/)
   })
 })
 

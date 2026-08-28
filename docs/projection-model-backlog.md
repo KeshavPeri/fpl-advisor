@@ -445,3 +445,75 @@ possible from the Builder session that shipped this ticket, since a new `workflo
 workflow cannot run until its file is on the default branch), the natural next question is
 whether the *projection* errors measured here are small enough, and unbiased enough by position,
 to trust replaying transfers and captaincy on top of them — item 32's remaining work.
+
+---
+
+## G10 — Ticket #140, 28 Aug 2026: the first backtest run's two open questions, and the fixture-count fix
+
+G9's first live run (28 Aug 2026) passed its sanity bounds — season MAE ~1.83, in
+`[MAE_LOWER_BOUND, MAE_UPPER_BOUND]` — and its own output raised two questions the ticket text
+answered inside the harness, because both are questions about the measurement, not the model.
+
+**1. Gameweek 33's error was triple the season norm (MAE 2.532 vs ~1.83, n=240 vs ~236 — a
+normal sample size, an abnormal error) — CLOSED, the mechanism was real.** G9's three documented
+approximations (above) never included one for multi-fixture gameweeks: `feature_history` is one
+row per (player, gameweek), so before this ticket the projected side always built exactly one
+neutral fixture per gameweek, while the actual side (correctly) summed every matching
+`player_match_stats` row — two rows, and double the real points, for a player whose team played
+twice. Ticket #140 closes this: `run-backtest.ts` now projects as many neutral fixtures as the
+actual side found rows for that (player, gameweek) — `aggregateActualForGameweek`'s own
+`matchesFound`, the exact count the actual side already sums — via `projectPlayerGameweek`'s
+existing (unmodified) fixture-array summation. The by-gameweek table now carries a
+"Multi-fixture rows" column, and a dedicated diagnostic section reports the season headline with
+and without multi-fixture player-gameweeks, flagged prominently if excluding them moves the MAE
+by more than 0.05. **This was a hypothesis with a clear test, not a confirmed finding, until a
+live run reads it** — the human check after merge (dispatching "Backtest" and reading whether
+gameweek 33's error came back toward ~1.8) is what confirms it; #140's own tests prove the
+arithmetic on constructed rows only.
+
+**2. Defensive contribution's signed error is the model's single largest component error, and
+the calibration report disagrees — OPEN, a diagnostic now exists to separate the two
+explanations, neither ruled out.** From the same first run: mean actual defcon 0.259, mean
+projected defcon 0.070 — the model captures only 27% of it, the largest single component error
+and the biggest contributor to the -0.524 overall bias. `scripts/calibration-report.ts`
+(full-season hindsight, ticket #133/#127) reports defcon at 0.88x for defenders — nearly
+right — over the same season. **Both figures are true simultaneously, and that is the
+puzzle, not a contradiction to resolve by picking one.**
+
+Two competing explanations, and this ticket's own text is explicit that **choosing between them
+from this evidence alone would be guessing, not measuring:**
+
+- **Cold-start explanation.** `defconRate.ts`'s `estimateDefconHitRate()` shrinks toward the
+  position prior using `k = 5` phantom matches. Early in a player's history (few prior matches),
+  the estimate is dominated by the position prior rather than his own rate — the model is
+  *correctly* cautious with little evidence, and the gap should shrink as `prior_matches` rises
+  within a season. If this is the whole story, the error resolves itself as the season
+  progresses and needs no model change.
+- **Level explanation.** The shrinkage formula, or `k = 5` itself, is miscalibrated — the model
+  under-projects defcon even with substantial history, and the gap does not close as
+  `prior_matches` rises. If this is (also) true, `calibration-report.ts`'s full-season hindsight
+  view is the wrong instrument to have judged this by: full-season rates and point-in-time
+  estimates answer different questions, and only the second is what a live, mid-season
+  recommendation actually runs on.
+
+**Ticket #140's diagnostic is built to distinguish these, not to answer which is true.**
+`run-backtest.ts` now buckets every measured row's defcon signed error (`projected -
+actual`, defcon component only) by `prior_matches` — 1–4, 5–9, 10–19, 20+ — with sample size
+beside each figure, and a bucket under 50 rows is reported as "too small to read" rather than
+guessed at (same rule `src/lib/accuracy/derive.ts`'s `MIN_SAMPLE_SIZE` uses for the in-app
+rolling accuracy display, ticket #123). The overall signed error is bucketed identically, for
+comparison. **A shrinking gap across rising buckets points at cold start; a flat gap points at a
+level problem** — but reading that verdict is explicitly deferred to the human dispatching a
+live run, per the ticket text: **do NOT tune `k`, the shrinkage formula, or any constant in
+`defconRate.ts` from this evidence** (or from #140 at all — #140 touches
+`scripts/run-backtest.ts` only, nothing under `src/`). Whichever explanation the buckets
+support is a later ticket's work.
+
+**Two more measurement gaps this ticket reports, not fixes.** A genuine blank gameweek (a
+player's team had no fixture at all — a postponement, not a benching) is now its own exclusion
+reason, `blankGameweek`, distinct from `didNotFeature` (team played, player just didn't
+feature) — inferred from `player_match_stats.match_id`'s own team-slug text, since this job has
+no independent fixture-schedule table for a past season. And the unresolved-`player_code`
+exclusion — 4,209 of 18,243 rows in the first run, `feature_history`/#121's own known gap — is
+now reported as a percentage (23%) alongside the count, so its size doesn't require doing the
+division by hand to notice.
