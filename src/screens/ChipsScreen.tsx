@@ -12,8 +12,11 @@ import './ChipsScreen.css'
  * The chips screen (ticket #85, feature-list item 25) — `/chips`. States
  * which of the season's eight chips (two sets of four) are used, remaining
  * or lost, and how long the active set has left. It states the position; it
- * does not warn or recommend — that's items 26 and 27 (see the ticket's own
- * Scope OUT). Owns its own fetch, independent of the home screen, same
+ * does not warn or recommend — item 26 (chip expiry, #97) added the
+ * warning above; item 27 (ticket #126) adds the chip ADVISORY below — a
+ * number and its limitation, never a "play this chip" instruction
+ * (product-brief.md §6a). Owns its own fetch, independent of the home
+ * screen, same
  * "fetch → derive → render whatever the view says" split as
  * src/screens/ReasoningScreen.tsx and src/lib/reasoning/derive.ts. `Date.now()`
  * is called exactly once, right here — deriveChipState itself reads no
@@ -140,6 +143,28 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
         unknownChips={unknownSecond}
         locked={!state.secondSet.isAvailable}
       />
+
+      {state.chipAdvisories.length > 0 && (
+        <Surface className="chips-advisory">
+          <p className="chips-advisory__label">Chip advisory</p>
+          <ul className="chips-advisory__list">
+            {state.chipAdvisories.map((advisory) => (
+              <li key={`${advisory.chipCode}-${advisory.solutionIndex}`} className="chips-advisory__row">
+                <span className="chips-advisory__name">{advisory.displayName}</span>
+                <span className="chips-advisory__meta">
+                  {advisory.gameweekLabel} ·{' '}
+                  <span className="num">
+                    {advisory.deltaWhole > 0 ? '+' : ''}
+                    {advisory.deltaWhole}
+                  </span>{' '}
+                  pts
+                </span>
+              </li>
+            ))}
+          </ul>
+          {state.chipAdvisoryNote && <p className="chips-advisory__note">{state.chipAdvisoryNote}</p>}
+        </Surface>
+      )}
 
       {unclassified.length > 0 && (
         <Surface className="chips-unclassified" role="status">

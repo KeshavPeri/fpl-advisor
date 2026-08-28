@@ -24,12 +24,47 @@ export interface GameweekDeadline {
   deadlineMs: number
 }
 
+/**
+ * One row read from `public.chip_advisories` for the current/next gameweek
+ * — ticket #126 (item 27). See scripts/store-chip-advisory.ts for how it is
+ * written: one row per chip played per solution, keyed to the normal
+ * (chip-free) run it is compared against via `solverRunId` — already
+ * resolved to "the latest run for this gameweek" by src/lib/chips/api.ts, so
+ * this type carries no run id at all; there is nothing here to compare
+ * across runs by mistake.
+ */
+export interface ChipAdvisoryRow {
+  chipCode: string
+  /** The horizon gameweek this chip would be played in — may differ from the target gameweek being solved for. */
+  chipGameweekId: number
+  /** chip-enabled objective minus chip-free objective, already computed by the database (a GENERATED column) — never recomputed here. */
+  delta: number
+  solutionIndex: number
+}
+
+/**
+ * One chip advisory resolved for display — ticket #126. States a number and
+ * its limitation; never a "play this chip" instruction (product-brief.md
+ * §6a — see CHIP_ADVISORY_HORIZON_NOTE in derive.ts).
+ */
+export interface ChipAdvisoryView {
+  chipCode: string
+  /** e.g. "Triple Captain" — SOLVER_CHIP_DISPLAY_NAMES[chipCode] in derive.ts, or an explicit unknown-chip label. */
+  displayName: string
+  gameweekLabel: string
+  /** Math.round(delta) — design-reference.md forbids decimal points on a projected-points figure; see derive.ts. */
+  deltaWhole: number
+  solutionIndex: number
+}
+
 /** Everything deriveChipState needs, already read by src/lib/chips/api.ts. */
 export interface ChipSourceData {
   /** The most recently synced squads row's cumulative chips_used array — see api.ts for what "most recently synced" means and why. Empty array (never null) when nothing has been synced yet. */
   chipsUsed: readonly ChipUsageRecord[]
   /** Every known gameweek's id + deadline instant, ascending by id. Used to resolve both the Gameweek 19 deadline (never hardcoded — read from here) and how many gameweeks remain in the active set. Empty when the gameweeks table hasn't been ingested yet. */
   gameweeks: readonly GameweekDeadline[]
+  /** The current/next gameweek's chip advisory rows, from the LATEST solver run only — see api.ts. Empty when no chip was played in the latest solve, or none has run yet. */
+  chipAdvisories: readonly ChipAdvisoryRow[]
 }
 
 /** One chip already used, resolved for display. */
@@ -125,4 +160,8 @@ export interface DerivedChipState {
   secondSet: SecondChipSetView
   /** Ticket #97: how urgent it is to play the first set's unused chips before they're lost. Always 'none' once the first set has expired or has nothing left unused, or while the second set is active — see deriveExpiryWarning's own comment in derive.ts. */
   expiryWarning: ChipExpiryWarning
+  /** Ticket #126: the latest chip-enabled solve's advisory, if any chip was played in it. Empty when none was. */
+  chipAdvisories: readonly ChipAdvisoryView[]
+  /** CHIP_ADVISORY_HORIZON_NOTE when `chipAdvisories` is non-empty, null otherwise — present on the derived view itself so it is directly assertable without rendering the screen. */
+  chipAdvisoryNote: string | null
 }

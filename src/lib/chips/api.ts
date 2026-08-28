@@ -1,5 +1,5 @@
 import { supabase } from '../supabase'
-import type { ChipSourceData, ChipUsageRecord, GameweekDeadline } from './types.ts'
+import type { ChipAdvisoryRow, ChipSourceData, ChipUsageRecord, GameweekDeadline } from './types.ts'
 
 /**
  * Same wrapping as src/lib/squad/api.ts's raise() / src/lib/verdict/api.ts's
@@ -14,10 +14,20 @@ function raise(error: { message: string }): never {
 interface GameweekRow {
   id: number
   deadline_time: string
+  is_next: boolean
 }
 
 interface SquadsChipsRow {
   chips_used: unknown
+}
+
+/** One row of `public.chip_advisories`, as selected below — see scripts/store-chip-advisory.ts for how it is written. */
+interface ChipAdvisoryDbRow {
+  chip_code: string
+  chip_gameweek_id: number
+  delta: number
+  solution_index: number
+  solver_run_id: number
 }
 
 /**
@@ -62,7 +72,7 @@ function parseChipsUsed(raw: unknown): ChipUsageRecord[] {
 export async function fetchChipSourceData(): Promise<ChipSourceData> {
   const { data: gwRows, error: gwError } = await supabase
     .from('gameweeks')
-    .select('id, deadline_time')
+    .select('id, deadline_time, is_next')
     .order('id', { ascending: true })
     .returns<GameweekRow[]>()
   if (gwError) raise(gwError)
@@ -71,6 +81,7 @@ export async function fetchChipSourceData(): Promise<ChipSourceData> {
     id: row.id,
     deadlineMs: new Date(row.deadline_time).getTime(),
   }))
+  const nextGameweek = (gwRows ?? []).find((row) => row.is_next) ?? null
 
   // The most recently synced squads row — "most recently" meaning the
   // highest gameweek_id row that actually exists, never an assumption that
@@ -96,5 +107,40 @@ export async function fetchChipSourceData(): Promise<ChipSourceData> {
 
   const chipsUsed = parseChipsUsed((squadRows ?? [])[0]?.chips_used)
 
-  return { chipsUsed, gameweeks }
+  // --------------------------------------------------------------------
+  // Chip advisory (ticket #126, item 27) — every stored row for the
+  // current/next gameweek, newest solver_run_id first, then filtered down
+  // to just that newest run's own rows below. `chip_advisories` is
+  // append-only (a re-run of the same gameweek adds new rows rather than
+  // overwriting — see that migration's header), so without this filter an
+  // older night's advisory would linger alongside tonight's. Bounded by an
+  // explicit `.limit()`, matching this file's own convention above: at
+  // most a handful of chips are ever played per solve (two, in the one
+  // real example observed), across at most a few solutions, so this can
+  // never approach PostgREST's 1,000-row cap.
+  // --------------------------------------------------------------------
+  let chipAdvisories: ChipAdvisoryRow[] = []
+  if (nextGameweek !== null) {
+    const { data: advisoryRows, error: advisoryError } = await supabase
+      .from('chip_advisories')
+      .select('chip_code, chip_gameweek_id, delta, solution_index, solver_run_id')
+      .eq('gameweek_id', nextGameweek.id)
+      .order('solver_run_id', { ascending: false })
+      .order('solution_index', { ascending: true })
+      .limit(50)
+      .returns<ChipAdvisoryDbRow[]>()
+    if (advisoryError) raise(advisoryError)
+
+    const latestSolverRunId = (advisoryRows ?? [])[0]?.solver_run_id ?? null
+    chipAdvisories = (advisoryRows ?? [])
+      .filter((row) => row.solver_run_id === latestSolverRunId)
+      .map((row) => ({
+        chipCode: row.chip_code,
+        chipGameweekId: row.chip_gameweek_id,
+        delta: row.delta,
+        solutionIndex: row.solution_index,
+      }))
+  }
+
+  return { chipsUsed, gameweeks, chipAdvisories }
 }

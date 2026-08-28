@@ -219,6 +219,62 @@
   color: var(--text-tertiary);
 }
 
+/* ---- Chip advisory (ticket #126) ----
+   The difference a chip-enabled solve would make, not a recommendation.
+   Deliberately no accent colour here (unlike the used/lost slot colours
+   above) — an accent would read as "this is the answer", and
+   product-brief.md §6a forbids exactly that framing. Numbers use the same
+   tabular `.num` token as every other figure on this screen. */
+
+.chips-advisory {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.chips-advisory__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.chips-advisory__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.chips-advisory__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.chips-advisory__list .chips-advisory__row:first-child {
+  border-top: none;
+}
+
+.chips-advisory__name {
+  font: var(--text-body);
+  color: var(--text-primary);
+}
+
+.chips-advisory__meta {
+  font: var(--text-label);
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.chips-advisory__note {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
 /* ---- Chip activity with no recorded gameweek — rare, defensive ---- */
 
 .chips-unclassified {
