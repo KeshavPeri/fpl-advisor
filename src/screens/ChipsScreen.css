@@ -219,22 +219,44 @@
   color: var(--text-tertiary);
 }
 
-/* ---- Chip advisory (ticket #126) ----
+/* ---- Chip advisory (ticket #126, collapsed for display by #141) ----
    The difference a chip-enabled solve would make, not a recommendation.
    Deliberately no accent colour here (unlike the used/lost slot colours
    above) — an accent would read as "this is the answer", and
    product-brief.md §6a forbids exactly that framing. Numbers use the same
-   tabular `.num` token as every other figure on this screen. */
+   tabular `.num` token as every other figure on this screen.
+
+   One `.chips-advisory__plan` per DISTINCT set of chip decisions the
+   solver's stored solutions propose (ticket #141) — usually exactly one.
+   Its decisions list names each chip once, with no delta on the row; the
+   plan's single points figure sits below the list, stated once for the
+   whole set rather than repeated per chip. A second plan (solutions
+   genuinely disagreeing) gets its own block, separated by a rule — the
+   same "no border on the first item" pattern chips-advisory__row already
+   uses for its own rows. */
 
 .chips-advisory {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
 .chips-advisory__label {
   font: var(--text-label);
   color: var(--text-tertiary);
+}
+
+.chips-advisory__plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--panel-border);
+}
+
+.chips-advisory__label + .chips-advisory__plan {
+  padding-top: 0;
+  border-top: none;
 }
 
 .chips-advisory__list {
@@ -268,6 +290,12 @@
   font: var(--text-label);
   color: var(--text-secondary);
   text-align: right;
+}
+
+.chips-advisory__delta {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--text-primary);
 }
 
 .chips-advisory__note {
