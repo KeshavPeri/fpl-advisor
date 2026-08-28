@@ -19,7 +19,15 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { buildEloByCode, planTeamEloUpdates, TEAMS_REQUIRED_COLUMNS, toMatchStatRow, type TeamIdentityRow } from './ingest-core-insights.js'
+import {
+  buildElementTypeMap,
+  buildEloByCode,
+  planTeamEloUpdates,
+  TEAMS_REQUIRED_COLUMNS,
+  toMatchStatRow,
+  UnknownPositionError,
+  type TeamIdentityRow,
+} from './ingest-core-insights.js'
 
 // ============================================================================
 // TEAMS_REQUIRED_COLUMNS — the schema-change guard the DoD says must survive.
@@ -255,7 +263,12 @@ describe('competition (ticket #54) — source invariants', () => {
     // throw propagates out of the per-row loop in upsertPlayerMatchStats and
     // all the way to main()'s own catch block — which is what turns an
     // unknown token into a failed job_runs row rather than a skipped row.
-    const toMatchStatRowBody = source.slice(source.indexOf('function toMatchStatRow'), source.indexOf('function toMatchStatRow') + 800)
+    // Widened from 800 to 2200 chars by ticket #146, which added a fifth
+    // parameter (elementTypeByPlayerId) and its doc comment ahead of the
+    // parseCompetition() call this test looks for — the function itself is
+    // ~2100 chars end to end; 2200 covers it with headroom rather than
+    // re-deriving an exact boundary.
+    const toMatchStatRowBody = source.slice(source.indexOf('function toMatchStatRow'), source.indexOf('function toMatchStatRow') + 2200)
     expect(toMatchStatRowBody).toMatch(/parseCompetition\(/)
     expect(toMatchStatRowBody).not.toMatch(/try\s*\{/)
   })
@@ -340,6 +353,76 @@ describe('toMatchStatRow — team_goals_conceded (ticket #125)', () => {
   })
 })
 
+// ============================================================================
+// buildElementTypeMap / toMatchStatRow — element_type (ticket #146). Same
+// "exercise the pure function directly" technique buildPlayerCodeMap's own
+// (untested-in-isolation, but toMatchStatRow-exercised) counterpart uses —
+// this one is exported and tested directly since it is the piece the
+// backtest and feature_history depend on getting exactly right.
+// ============================================================================
+
+describe('buildElementTypeMap', () => {
+  it('maps every known FPL-Core-Insights position word to the plain FPL position code', () => {
+    const map = buildElementTypeMap([
+      { player_id: '1', position: 'Goalkeeper' },
+      { player_id: '2', position: 'Defender' },
+      { player_id: '3', position: 'Midfielder' },
+      { player_id: '4', position: 'Forward' },
+    ])
+    expect(map.get(1)).toBe(1)
+    expect(map.get(2)).toBe(2)
+    expect(map.get(3)).toBe(3)
+    expect(map.get(4)).toBe(4)
+  })
+
+  it('leaves a blank position cell out of the map — the same "small, expected gap" treatment as an unparseable player_code', () => {
+    const map = buildElementTypeMap([{ player_id: '5', position: '' }])
+    expect(map.has(5)).toBe(false)
+  })
+
+  it('leaves a row whose player_id does not parse out of the map', () => {
+    const map = buildElementTypeMap([{ player_id: '', position: 'Defender' }])
+    expect(map.size).toBe(0)
+  })
+
+  // DoD's central "fail loudly on schema drift" case, mirroring
+  // scripts/lib/competition.ts's parseCompetition().
+  it('throws UnknownPositionError, naming the player_id and the bad value, on a non-blank position outside the known four words', () => {
+    expect(() => buildElementTypeMap([{ player_id: '7', position: 'Wing-back' }])).toThrow(UnknownPositionError)
+    try {
+      buildElementTypeMap([{ player_id: '7', position: 'Wing-back' }])
+      expect.unreachable()
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnknownPositionError)
+      expect((err as UnknownPositionError).playerId).toBe(7)
+      expect((err as UnknownPositionError).position).toBe('Wing-back')
+      expect((err as Error).message).toMatch(/Wing-back/)
+      expect((err as Error).message).toMatch(/7/)
+    }
+  })
+})
+
+describe('toMatchStatRow — element_type (ticket #146)', () => {
+  it('reads element_type from the supplied player_id -> code map', () => {
+    const elementTypeByPlayerId = new Map([[10, 2]])
+    const row = toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map(), elementTypeByPlayerId)
+    expect(row?.element_type).toBe(2)
+  })
+
+  it('writes null, not a default position, for a player_id absent from the map', () => {
+    const row = toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map(), new Map())
+    expect(row?.element_type).toBeNull()
+  })
+
+  // The DoD's own signature: this is the exact 4-argument call every existing
+  // call site made before this ticket. It must still write element_type:
+  // null, not throw and not require every caller to be updated.
+  it('defaults elementTypeByPlayerId to an empty map when the 5th argument is omitted entirely', () => {
+    const row = toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map())
+    expect(row?.element_type).toBeNull()
+  })
+})
+
 describe('MATCH_STATS_REQUIRED_COLUMNS / row mapping — source invariants (ticket #125)', () => {
   const sourcePath = fileURLToPath(new URL('./ingest-core-insights.ts', import.meta.url))
   const source = readFileSync(sourcePath, 'utf8')
@@ -416,6 +499,104 @@ describe('supabase/README.md (ticket #125)', () => {
   it('lists the new migration, marked not yet applied', () => {
     expect(readmeSource).toMatch(/20260828090000_player_match_stats_team_goals_conceded\.sql/)
     const rowMatch = readmeSource.match(/\| `20260828090000_player_match_stats_team_goals_conceded\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
+  })
+})
+
+// ============================================================================
+// element_type (ticket #146) — source invariants, same grep-on-real-source
+// technique as the competition and team_goals_conceded sections above.
+// ============================================================================
+
+describe('element_type (ticket #146) — source invariants', () => {
+  const sourcePath = fileURLToPath(new URL('./ingest-core-insights.ts', import.meta.url))
+  const source = readFileSync(sourcePath, 'utf8')
+
+  it('position appears in the required-columns list', () => {
+    const listBody = source.slice(
+      source.indexOf('const PLAYERS_REQUIRED_COLUMNS'),
+      source.indexOf(']', source.indexOf('const PLAYERS_REQUIRED_COLUMNS')),
+    )
+    expect(listBody).toMatch(/'position'/)
+  })
+
+  it('element_type appears in the row mapping (toMatchStatRow), read from the supplied map rather than a literal', () => {
+    expect(source).toMatch(/element_type:\s*elementTypeByPlayerId\.get\(playerId\)\s*\?\?\s*null/)
+  })
+
+  it('the row shape sent to the upsert carries element_type as one of MatchStatRow\'s own fields', () => {
+    const interfaceBody = source.slice(source.indexOf('interface MatchStatRow'), source.indexOf('interface MatchStatRow') + 900)
+    expect(interfaceBody).toMatch(/element_type:\s*number\s*\|\s*null/)
+  })
+
+  it('reports a named non-null-element_type count in job_runs.details', () => {
+    expect(source).toMatch(/matchRowsWithElementType/)
+  })
+
+  it('does not wrap buildElementTypeMap in a try/catch that would swallow UnknownPositionError in main()', () => {
+    const mainBody = source.slice(source.indexOf('async function main'))
+    const callSite = mainBody.slice(
+      mainBody.indexOf('buildElementTypeMap('),
+      mainBody.indexOf('buildElementTypeMap(') + 60,
+    )
+    expect(callSite).toMatch(/buildElementTypeMap\(/)
+    // The call itself sits inside main()'s own try block (same as every other
+    // step in main()) but not inside any NESTED try — a second, local
+    // try/catch immediately around the call would swallow the throw before it
+    // reaches main()'s catch. None of the ~60 chars right around the call site
+    // contain another try.
+    expect(callSite).not.toMatch(/try\s*\{/)
+  })
+
+  it('never defaults an unrecognized position past the map — no catch of UnknownPositionError anywhere in the file', () => {
+    expect(source).not.toMatch(/catch[^{]*\{[^}]*UnknownPositionError/s)
+  })
+})
+
+// ============================================================================
+// supabase/migrations/20260829090000_feature_history_position_and_defcon.sql
+// and supabase/README.md — grep-checkable DoD items against the real shipped
+// files (ticket #146). The migration's feature_history-side columns are
+// asserted in scripts/build-feature-history.test.ts, which owns that table;
+// this file owns the player_match_stats.element_type side, since it is the
+// column this file's own job populates.
+// ============================================================================
+
+describe('supabase/migrations/20260829090000_feature_history_position_and_defcon.sql — player_match_stats side', () => {
+  const migrationPath = fileURLToPath(
+    new URL('../supabase/migrations/20260829090000_feature_history_position_and_defcon.sql', import.meta.url),
+  )
+  const migrationSource = readFileSync(migrationPath, 'utf8')
+
+  it('adds player_match_stats.element_type as a nullable smallint with no default', () => {
+    expect(migrationSource).toMatch(/ALTER TABLE public\.player_match_stats ADD COLUMN IF NOT EXISTS element_type smallint;/)
+  })
+
+  it('is idempotent: ADD COLUMN IF NOT EXISTS', () => {
+    expect(migrationSource).toMatch(/ADD COLUMN IF NOT EXISTS/)
+  })
+
+  it('carries a COMMENT ON COLUMN for player_match_stats.element_type', () => {
+    expect(migrationSource).toMatch(/COMMENT ON COLUMN public\.player_match_stats\.element_type IS/)
+  })
+
+  it('issues no GRANT statement — table-level grants already cover both tables (see file header)', () => {
+    const codeOnly = migrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
+})
+
+describe('supabase/README.md (ticket #146)', () => {
+  const readmePath = fileURLToPath(new URL('../supabase/README.md', import.meta.url))
+  const readmeSource = readFileSync(readmePath, 'utf8')
+
+  it('lists the new migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260829090000_feature_history_position_and_defcon\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260829090000_feature_history_position_and_defcon\.sql` \|.*\|\s*$/m)
     expect(rowMatch).not.toBeNull()
     expect(rowMatch![0]).toMatch(/not yet applied/i)
   })
