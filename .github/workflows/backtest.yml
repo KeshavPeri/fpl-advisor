@@ -1,0 +1,64 @@
+name: Backtest
+
+# Ticket #133 (feature-list item 32, first slice) — a measurement job, not a
+# scheduled one. Reads public.feature_history (point-in-time, lookahead-free
+# per-player totals — ticket #121/#125) and public.player_match_stats, and
+# reports point-in-time projection vs actual points, per player and
+# gameweek — see scripts/run-backtest.ts's own file header for the full
+# method and its documented approximations. Read-only against Supabase
+# except for one job_runs row; writes one markdown report, uploaded as a
+# workflow artifact.
+#
+# workflow_dispatch only, deliberately no schedule: this reads a whole
+# season and answers a question about the MODEL, not a nightly data
+# question — run by hand, on demand. A NEW file, not a step folded into
+# scheduled-jobs.yml or calibration-report.yml, for the same reason
+# calibration-report.yml is its own file: other tickets in this batch own
+# other workflow files, and a separate file cannot collide with them.
+
+on:
+  workflow_dispatch: {}
+
+env:
+  BACKTEST_REPORT_PATH: out/backtest-report.md
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run backtest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          # BACKTEST_SEASON left unset deliberately — scripts/run-backtest.ts
+          # defaults to DEFAULT_SEASON ('2025-2026'). Set it explicitly here
+          # (via workflow_dispatch inputs, a future change) to backtest a
+          # different season.
+        run: npx tsx scripts/run-backtest.ts
+
+      - name: Upload backtest report artifact
+        # if: always() — the report is most useful when the job failed a
+        # sanity bound too (see run-backtest.ts's checkSanityBounds): the
+        # report is still written before the job exits non-zero, and
+        # if-no-files-found: warn means a genuinely missing file (the
+        # empty-table skip path writes none, by design) only warns, never
+        # fails this step.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-report
+          path: ${{ env.BACKTEST_REPORT_PATH }}
+          if-no-files-found: warn
+          retention-days: 90
