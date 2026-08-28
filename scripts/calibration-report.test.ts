@@ -20,6 +20,11 @@
 // Ticket #127 (restore like-for-like: exclude bonus from the projected
 // side) appends its own tests at the bottom too, same reason and same
 // technique where main()'s I/O would otherwise be needed.
+//
+// Ticket #132, defect 2 (clean sheets/goals conceded must read
+// team_goals_conceded, never the goalkeeper-only goals_conceded, plus the
+// impossible-rate bound) appends its own tests at the very bottom, same
+// reason and technique again.
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -29,8 +34,12 @@ import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import {
   aggregateActualByPosition,
   aggregateProjectedByPosition,
+  assertCleanSheetRatesPlausible,
   checkExcludedBonusBound,
+  CLEAN_SHEET_RATE_UPPER_BOUND,
   componentsPer90,
+  computeCleanSheetRate,
+  CalibrationReportError,
   EXCLUDED_BONUS_LOWER_BOUND,
   EXCLUDED_BONUS_UPPER_BOUND,
   emptyComponentTotals,
@@ -54,7 +63,7 @@ describe('reconstructActualMatchPoints — appearance points', () => {
       minutesPlayed: 0,
       goals: 0,
       assists: 0,
-      goalsConceded: 0,
+      teamGoalsConceded: 0,
       saves: 0,
       clearances: 0,
       blocks: 0,
@@ -72,7 +81,7 @@ describe('reconstructActualMatchPoints — appearance points', () => {
       minutesPlayed: 45,
       goals: 0,
       assists: 0,
-      goalsConceded: 0,
+      teamGoalsConceded: 0,
       saves: 0,
       clearances: 0,
       blocks: 0,
@@ -88,7 +97,7 @@ describe('reconstructActualMatchPoints — appearance points', () => {
       minutesPlayed: 60,
       goals: 0,
       assists: 0,
-      goalsConceded: 0,
+      teamGoalsConceded: 0,
       saves: 0,
       clearances: 0,
       blocks: 0,
@@ -104,7 +113,7 @@ describe('reconstructActualMatchPoints — appearance points', () => {
       minutesPlayed: null,
       goals: null,
       assists: null,
-      goalsConceded: null,
+      teamGoalsConceded: null,
       saves: null,
       clearances: null,
       blocks: null,
@@ -126,7 +135,7 @@ describe('reconstructActualMatchPoints — clean sheet points, per position', ()
     minutesPlayed: 90,
     goals: 0,
     assists: 0,
-    goalsConceded: 0,
+    teamGoalsConceded: 0,
     saves: 0,
     clearances: 0,
     blocks: 0,
@@ -157,7 +166,7 @@ describe('reconstructActualMatchPoints — clean sheet points, per position', ()
   })
 
   it('does not award a clean sheet at 60+ minutes if a goal was conceded', () => {
-    const result = reconstructActualMatchPoints(DEFENDER, { ...cleanSheetStats, goalsConceded: 1 })
+    const result = reconstructActualMatchPoints(DEFENDER, { ...cleanSheetStats, teamGoalsConceded: 1 })
     expect(result.components.cleanSheetPoints).toBe(0)
   })
 })
@@ -171,7 +180,7 @@ describe('reconstructActualMatchPoints — goals-conceded and save points are po
     minutesPlayed: 90,
     goals: 0,
     assists: 0,
-    goalsConceded: 2,
+    teamGoalsConceded: 2,
     saves: 4,
     clearances: 0,
     blocks: 0,
@@ -214,7 +223,7 @@ describe('reconstructActualMatchPoints — defensive contribution is delegated t
       minutesPlayed: 90,
       goals: 0,
       assists: 0,
-      goalsConceded: 0,
+      teamGoalsConceded: 0,
       saves: 0,
       clearances: 5,
       blocks: 5,
@@ -230,7 +239,7 @@ describe('reconstructActualMatchPoints — defensive contribution is delegated t
       minutesPlayed: 90,
       goals: 0,
       assists: 0,
-      goalsConceded: 0,
+      teamGoalsConceded: 0,
       saves: 0,
       clearances: 1,
       blocks: 1,
@@ -252,7 +261,7 @@ describe('reconstructActualMatchPoints — goals and assists', () => {
       minutesPlayed: 90,
       goals: 2,
       assists: 1,
-      goalsConceded: 0,
+      teamGoalsConceded: 0,
       saves: 0,
       clearances: 0,
       blocks: 0,
@@ -269,7 +278,7 @@ describe('reconstructActualMatchPoints — goals and assists', () => {
       minutesPlayed: 90,
       goals: 1,
       assists: 0,
-      goalsConceded: 0,
+      teamGoalsConceded: 0,
       saves: 0,
       clearances: 0,
       blocks: 0,
@@ -479,14 +488,13 @@ describe('calibration-report.ts — Premier League filter (source invariants, ti
     expect(source).not.toMatch(/\.delete\(\s*\)/)
   })
 
-  it('does not touch the clean-sheet reconstruction — out of scope for this ticket', () => {
-    // reconstructActualMatchPoints' clean-sheet gate must still read
-    // goals_conceded (not a team_goals_conceded column this ticket does not
-    // add) — a grep guard against silently doing the folded-in scope from
-    // the newer tickets/drafts/ file that this ticket's own issue text
-    // explicitly excludes.
-    expect(source).not.toMatch(/team_goals_conceded/)
-  })
+  // The "does not touch the clean-sheet reconstruction" assertion that used
+  // to live here — asserting the source NEVER references
+  // team_goals_conceded — is REMOVED by ticket #132 (defect 2 DoD, its own
+  // words): reading the clean-sheet/goals-conceded figures from
+  // team_goals_conceded instead of the goalkeeper-only goals_conceded column
+  // is now exactly what this report must do. See the "clean-sheet reads from
+  // team_goals_conceded" describe block below for the replacement coverage.
 })
 
 // ============================================================================
@@ -596,5 +604,222 @@ describe('calibration-report.ts — bonus exclusion restored to like-for-like (s
   it('imports and uses the bound constants rather than hardcoded 0.05/1.00 literals at the call site', () => {
     expect(source).toMatch(/EXCLUDED_BONUS_LOWER_BOUND\s*=\s*0\.05/)
     expect(source).toMatch(/EXCLUDED_BONUS_UPPER_BOUND\s*=\s*1(\.0+)?/)
+  })
+})
+
+// ============================================================================
+// Ticket #132, defect 2 — clean sheets and goals conceded must read
+// team_goals_conceded, never the goalkeeper-only goals_conceded column, and
+// an impossible derived clean-sheet rate (>60% for any position) must fail
+// the report rather than print it. Same file, same reason main()'s I/O
+// needs a live project the Builder's session does not have — pure functions
+// tested directly, source invariants grepped for what only main() wires up.
+// ============================================================================
+
+describe('reconstructActualMatchPoints — team_goals_conceded null (ticket #132, defect 2)', () => {
+  const base = {
+    minutesPlayed: 90,
+    goals: 2,
+    assists: 1,
+    teamGoalsConceded: null,
+    saves: 0,
+    clearances: 0,
+    blocks: 0,
+    interceptions: 0,
+    tackles: 0,
+    recoveries: 0,
+  }
+
+  it('scores 0 clean-sheet points and 0 goals-conceded points when team_goals_conceded is null — never read as zero conceded', () => {
+    const result = reconstructActualMatchPoints(DEFENDER, base)
+    expect(result.components.cleanSheetPoints).toBe(0)
+    expect(result.components.goalsConcededPoints).toBe(0)
+    expect(result.teamGoalsConcededKnown).toBe(false)
+  })
+
+  it('still scores goals and assists normally — only the clean-sheet/goals-conceded figures are affected by the null', () => {
+    const result = reconstructActualMatchPoints(FORWARD, base)
+    expect(result.components.goalPoints).toBe(8) // 2 goals * 4 pts (forward)
+    expect(result.components.assistPoints).toBe(3) // 1 assist * 3 pts
+    expect(result.components.appearancePoints).toBe(2) // 90 minutes
+  })
+
+  it('flags teamGoalsConcededKnown true (and awards the clean sheet) when the value is a real number, including 0', () => {
+    const result = reconstructActualMatchPoints(DEFENDER, { ...base, teamGoalsConceded: 0 })
+    expect(result.teamGoalsConcededKnown).toBe(true)
+    expect(result.components.cleanSheetPoints).toBe(4)
+  })
+
+  it('a known non-zero team_goals_conceded still scores goals-conceded points normally, not 0', () => {
+    const result = reconstructActualMatchPoints(GOALKEEPER, { ...base, teamGoalsConceded: 2 })
+    expect(result.teamGoalsConcededKnown).toBe(true)
+    expect(result.components.goalsConcededPoints).toBe(-1) // floor(2/2) * -1
+    expect(result.components.cleanSheetPoints).toBe(0)
+  })
+})
+
+describe('aggregateActualByPosition — team_goals_conceded-null rows are excluded from the clean-sheet/goals-conceded per-90 denominator only (ticket #132, defect 2)', () => {
+  it('excludes ineligible minutes from cleanSheetPoints/goalsConcededPoints per-90, but not from other components', () => {
+    const eligible = reconstructActualMatchPoints(DEFENDER, {
+      minutesPlayed: 90,
+      goals: 0,
+      assists: 0,
+      teamGoalsConceded: 0,
+      saves: 0,
+      clearances: 0,
+      blocks: 0,
+      interceptions: 0,
+      tackles: 0,
+      recoveries: 0,
+    })
+    const ineligible = reconstructActualMatchPoints(DEFENDER, {
+      minutesPlayed: 90,
+      goals: 1,
+      assists: 0,
+      teamGoalsConceded: null,
+      saves: 0,
+      clearances: 0,
+      blocks: 0,
+      interceptions: 0,
+      tackles: 0,
+      recoveries: 0,
+    })
+
+    const records: ActualAggregationInput[] = [
+      {
+        position: DEFENDER,
+        playerCode: 1,
+        minutes: eligible.minutes,
+        totalPoints: eligible.totalPoints,
+        components: eligible.components,
+        teamGoalsConcededKnown: eligible.teamGoalsConcededKnown,
+      },
+      {
+        position: DEFENDER,
+        playerCode: 2,
+        minutes: ineligible.minutes,
+        totalPoints: ineligible.totalPoints,
+        components: ineligible.components,
+        teamGoalsConcededKnown: ineligible.teamGoalsConcededKnown,
+      },
+    ]
+    const result = aggregateActualByPosition(records)
+
+    // Eligible clean sheet: 4 points in 90 minutes -> 4 pts/90, using ONLY
+    // the eligible row's own 90 minutes as the denominator, not both rows'
+    // combined 180 — the ineligible row must not dilute this figure.
+    expect(result[DEFENDER].componentPer90?.cleanSheetPoints).toBeCloseTo(4, 6)
+    expect(result[DEFENDER].cleanSheetEligibleMinutes).toBe(90)
+    expect(result[DEFENDER].cleanSheetEligibleMatchCount).toBe(1)
+    // Goal points are UNAFFECTED by team_goals_conceded: 6 points (1 goal *
+    // 6 for a defender) over the FULL 180 minutes -> 3 pts/90.
+    expect(result[DEFENDER].componentPer90?.goalPoints).toBeCloseTo(3, 6)
+    expect(result[DEFENDER].totalMinutes).toBe(180)
+    expect(result[DEFENDER].playerMatchCount).toBe(2)
+  })
+
+  it('a record with teamGoalsConcededKnown omitted is treated as known (true) — pre-existing fixtures continue to pass unmodified', () => {
+    const records: ActualAggregationInput[] = [
+      { position: MIDFIELDER, playerCode: 1, minutes: 90, totalPoints: 5, components: { ...emptyComponentTotals(), cleanSheetPoints: 1 } },
+    ]
+    const result = aggregateActualByPosition(records)
+    expect(result[MIDFIELDER].cleanSheetEligibleMatchCount).toBe(1)
+    expect(result[MIDFIELDER].cleanSheetEligibleMinutes).toBe(90)
+  })
+})
+
+describe('computeCleanSheetRate (ticket #132, defect 2)', () => {
+  it('derives ~27% for the goalkeeper example from the ticket (1.09 actual clean-sheet pts/90, 4 pts per clean sheet)', () => {
+    expect(computeCleanSheetRate(1.09, GOALKEEPER)).toBeCloseTo(0.2725, 3)
+  })
+
+  it('reproduces the impossible ~95% figure the bug produced (3.81 pts/90 for a defender), before the bound catches it', () => {
+    expect(computeCleanSheetRate(3.81, DEFENDER)).toBeCloseTo(0.9525, 3)
+  })
+
+  it('is null for forwards, whose clean-sheet point value is 0 — a rate cannot be derived from a zero denominator', () => {
+    expect(computeCleanSheetRate(2, FORWARD)).toBeNull()
+  })
+
+  it('is null when there is no per-90 figure at all (no data)', () => {
+    expect(computeCleanSheetRate(null, DEFENDER)).toBeNull()
+  })
+})
+
+describe('assertCleanSheetRatesPlausible — the bound that would have caught the ~95% bug three times over (ticket #132, defect 2)', () => {
+  it(`passes exactly at the bound, ${CLEAN_SHEET_RATE_UPPER_BOUND}`, () => {
+    expect(() => assertCleanSheetRatesPlausible(new Map([[DEFENDER, CLEAN_SHEET_RATE_UPPER_BOUND]]))).not.toThrow()
+  })
+
+  it('passes at 59% — implausibly high, but not impossible', () => {
+    expect(() => assertCleanSheetRatesPlausible(new Map([[DEFENDER, 0.59]]))).not.toThrow()
+  })
+
+  it('fails at 61%, naming both the position and the rate — the report must fail, not warn', () => {
+    expect(() => assertCleanSheetRatesPlausible(new Map([[DEFENDER, 0.61]]))).toThrow(CalibrationReportError)
+    try {
+      assertCleanSheetRatesPlausible(new Map([[DEFENDER, 0.61]]))
+      expect.unreachable('assertCleanSheetRatesPlausible should have thrown')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      expect(message).toContain('Defender')
+      expect(message).toContain('61')
+    }
+  })
+
+  it('a null rate (no data) never violates the bound', () => {
+    expect(() => assertCleanSheetRatesPlausible(new Map([[FORWARD, null]]))).not.toThrow()
+  })
+
+  it('checks every position in the map, not just the first', () => {
+    expect(() =>
+      assertCleanSheetRatesPlausible(
+        new Map([
+          [GOALKEEPER, 0.3],
+          [DEFENDER, 0.28],
+          [MIDFIELDER, 0.92], // the impossible reading from the ticket's own component table
+          [FORWARD, null],
+        ]),
+      ),
+    ).toThrow(/Midfielder/)
+  })
+})
+
+describe('calibration-report.ts — clean-sheet reads from team_goals_conceded, never goals_conceded (source invariants, ticket #132, defect 2)', () => {
+  it('goals_conceded appears in the source only as part of the string "team_goals_conceded" (DoD, grep-checkable)', () => {
+    const bareOccurrences = source.match(/goals_conceded/g) ?? []
+    const teamOccurrences = source.match(/team_goals_conceded/g) ?? []
+    // Every "goals_conceded" substring must be embedded inside
+    // "team_goals_conceded" — if a standalone "goals_conceded" existed
+    // anywhere else in the file, the first count would exceed the second.
+    expect(bareOccurrences.length).toBe(teamOccurrences.length)
+    expect(teamOccurrences.length).toBeGreaterThan(0)
+  })
+
+  it('selects team_goals_conceded from player_match_stats, not goals_conceded', () => {
+    expect(source).toMatch(/\.select\(\s*\n?\s*['"][^'"]*team_goals_conceded[^'"]*['"]/)
+  })
+
+  it('the excluded-row count for a null team_goals_conceded is reported in the provenance section', () => {
+    expect(source).toMatch(/matchStatsRowsNullTeamGoalsConceded/)
+    expect(source).toMatch(/null team_goals_conceded/)
+  })
+
+  it('the clean-sheet rate bound throws (via CalibrationReportError) rather than merely warning', () => {
+    expect(source).toMatch(/assertCleanSheetRatesPlausible/)
+    expect(source).toMatch(/throw new CalibrationReportError\(\s*\n\s*`\$\{POSITION_NAMES\[position\]\}'s derived clean-sheet rate/)
+  })
+
+  it('the clean-sheet rate is printed per position as a percentage in the report body', () => {
+    expect(source).toMatch(/Implied clean-sheet rate/)
+    expect(source).toMatch(/fmtPercent/)
+  })
+
+  it('the assertion runs before the report is written to disk — an impossible rate must never reach the file', () => {
+    const assertIndex = source.indexOf('assertCleanSheetRatesPlausible(cleanSheetRatesByPosition)')
+    const writeIndex = source.indexOf('await writeFile(reportPath')
+    expect(assertIndex).toBeGreaterThan(-1)
+    expect(writeIndex).toBeGreaterThan(-1)
+    expect(assertIndex).toBeLessThan(writeIndex)
   })
 })

@@ -2,6 +2,10 @@
 // #126. No Supabase, no filesystem: buildChipAdvisoryRows is exercised
 // directly against SolverSolution fixtures, matching this codebase's
 // convention of proving every DoD item provable without a database here.
+//
+// Ticket #132 added SolverSolution.playerSold / .playerBought (defect 1) —
+// every fixture below sets both to null since buildChipAdvisoryRows never
+// reads either field; only their presence (required by the type) is new.
 
 import { describe, expect, it } from 'vitest'
 import type { SolverSolution } from './lib/solver-output.js'
@@ -12,6 +16,8 @@ describe('buildChipAdvisoryRows — one row per (gameweek, solution_index, chip_
     const chipSolutions: SolverSolution[] = [
       {
         solutionIndex: 0,
+        playerSold: null,
+        playerBought: null,
         chips: [
           { chipCode: 'TC', gameweekId: 2 },
           { chipCode: 'BB', gameweekId: 4 },
@@ -19,7 +25,9 @@ describe('buildChipAdvisoryRows — one row per (gameweek, solution_index, chip_
         score: 256.48,
       },
     ]
-    const chipFreeSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250.0 }]
+    const chipFreeSolutions: SolverSolution[] = [
+      { solutionIndex: 0, playerSold: null, playerBought: null, chips: [], score: 250.0 },
+    ]
 
     const rows = buildChipAdvisoryRows({
       gameweekId: 2,
@@ -54,8 +62,12 @@ describe('buildChipAdvisoryRows — one row per (gameweek, solution_index, chip_
 
 describe('buildChipAdvisoryRows — a chip-free solution produces no row', () => {
   it('skips solutions with an empty chips array, without error', () => {
-    const chipSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250.0 }]
-    const chipFreeSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250.0 }]
+    const chipSolutions: SolverSolution[] = [
+      { solutionIndex: 0, playerSold: null, playerBought: null, chips: [], score: 250.0 },
+    ]
+    const chipFreeSolutions: SolverSolution[] = [
+      { solutionIndex: 0, playerSold: null, playerBought: null, chips: [], score: 250.0 },
+    ]
 
     const rows = buildChipAdvisoryRows({ gameweekId: 2, solverRunId: 1, chipSolutions, chipFreeSolutions })
     expect(rows).toEqual([])
@@ -65,16 +77,16 @@ describe('buildChipAdvisoryRows — a chip-free solution produces no row', () =>
 describe('buildChipAdvisoryRows — the delta is always chip-enabled minus chip-free of the SAME solver_run_id, never a different run', () => {
   it('pairs each chip-enabled solution with its OWN solution_index in the chip-free set, never a different index', () => {
     const chipSolutions: SolverSolution[] = [
-      { solutionIndex: 0, chips: [{ chipCode: 'TC', gameweekId: 2 }], score: 256.48 },
-      { solutionIndex: 1, chips: [{ chipCode: 'TC', gameweekId: 2 }], score: 256.29 },
+      { solutionIndex: 0, playerSold: null, playerBought: null, chips: [{ chipCode: 'TC', gameweekId: 2 }], score: 256.48 },
+      { solutionIndex: 1, playerSold: null, playerBought: null, chips: [{ chipCode: 'TC', gameweekId: 2 }], score: 256.29 },
     ]
     // Chip-free scores deliberately differ per solution_index — if the
     // pairing were positional-but-wrong (or grabbed a single shared value),
     // this test would catch it: solution 0 must pair with 250.0, solution 1
     // with 248.0, never swapped.
     const chipFreeSolutions: SolverSolution[] = [
-      { solutionIndex: 0, chips: [], score: 250.0 },
-      { solutionIndex: 1, chips: [], score: 248.0 },
+      { solutionIndex: 0, playerSold: null, playerBought: null, chips: [], score: 250.0 },
+      { solutionIndex: 1, playerSold: null, playerBought: null, chips: [], score: 248.0 },
     ]
 
     const rows = buildChipAdvisoryRows({ gameweekId: 2, solverRunId: 99, chipSolutions, chipFreeSolutions })
@@ -88,15 +100,23 @@ describe('buildChipAdvisoryRows — the delta is always chip-enabled minus chip-
   })
 
   it('stamps every row with the single solverRunId passed in — never a value read from elsewhere', () => {
-    const chipSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'BB', gameweekId: 4 }], score: 100 }]
-    const chipFreeSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 90 }]
+    const chipSolutions: SolverSolution[] = [
+      { solutionIndex: 0, playerSold: null, playerBought: null, chips: [{ chipCode: 'BB', gameweekId: 4 }], score: 100 },
+    ]
+    const chipFreeSolutions: SolverSolution[] = [
+      { solutionIndex: 0, playerSold: null, playerBought: null, chips: [], score: 90 },
+    ]
     const rows = buildChipAdvisoryRows({ gameweekId: 5, solverRunId: 777, chipSolutions, chipFreeSolutions })
     expect(rows.every((r) => r.solver_run_id === 777)).toBe(true)
   })
 
   it('throws when a chip-enabled solution has no matching solution_index in the chip-free set — refuses to compare against a missing baseline', () => {
-    const chipSolutions: SolverSolution[] = [{ solutionIndex: 2, chips: [{ chipCode: 'TC', gameweekId: 2 }], score: 256 }]
-    const chipFreeSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250 }]
+    const chipSolutions: SolverSolution[] = [
+      { solutionIndex: 2, playerSold: null, playerBought: null, chips: [{ chipCode: 'TC', gameweekId: 2 }], score: 256 },
+    ]
+    const chipFreeSolutions: SolverSolution[] = [
+      { solutionIndex: 0, playerSold: null, playerBought: null, chips: [], score: 250 },
+    ]
 
     expect(() =>
       buildChipAdvisoryRows({ gameweekId: 2, solverRunId: 1, chipSolutions, chipFreeSolutions }),
