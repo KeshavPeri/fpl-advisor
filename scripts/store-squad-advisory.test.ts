@@ -23,8 +23,8 @@ import { SquadAdvisoryBuildError, buildSquadAdvisoryRow } from './store-squad-ad
 
 describe('buildSquadAdvisoryRow — one row per run, always solution_index 0', () => {
   it('builds a WC row from the primary (solution_index 0) solution of each solve, delta = rebuild objective - baseline objective', () => {
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 7 }], score: 320.5 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 273.2 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 7 }], score: 320.5, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 273.2, playerSold: null, playerBought: null }]
 
     const row = buildSquadAdvisoryRow({
       gameweekId: 7,
@@ -54,8 +54,8 @@ describe('buildSquadAdvisoryRow — one row per run, always solution_index 0', (
   })
 
   it('builds an FH row the same way, with chip_code "FH" — never both WC and FH in one row', () => {
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'FH', gameweekId: 5 }], score: 300 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'FH', gameweekId: 5 }], score: 300, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250, playerSold: null, playerBought: null }]
 
     const row = buildSquadAdvisoryRow({
       gameweekId: 5,
@@ -71,14 +71,14 @@ describe('buildSquadAdvisoryRow — one row per run, always solution_index 0', (
 
   it('ignores solution_index 1 and 2 (alternates) on both sides — only iteration 0 is compared', () => {
     const rebuildSolutions: SolverSolution[] = [
-      { solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 310 },
-      { solutionIndex: 1, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 305 },
-      { solutionIndex: 2, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 300 },
+      { solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 310, playerSold: null, playerBought: null },
+      { solutionIndex: 1, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 305, playerSold: null, playerBought: null },
+      { solutionIndex: 2, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 300, playerSold: null, playerBought: null },
     ]
     const baselineSolutions: SolverSolution[] = [
-      { solutionIndex: 0, chips: [], score: 260 },
-      { solutionIndex: 1, chips: [], score: 255 },
-      { solutionIndex: 2, chips: [], score: 250 },
+      { solutionIndex: 0, chips: [], score: 260, playerSold: null, playerBought: null },
+      { solutionIndex: 1, chips: [], score: 255, playerSold: null, playerBought: null },
+      { solutionIndex: 2, chips: [], score: 250, playerSold: null, playerBought: null },
     ]
 
     const row = buildSquadAdvisoryRow({
@@ -94,8 +94,8 @@ describe('buildSquadAdvisoryRow — one row per run, always solution_index 0', (
   })
 
   it('stamps the row with the gameweekId and solverRunId passed in, never a value read from elsewhere', () => {
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 12 }], score: 100 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 80 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 12 }], score: 100, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 80, playerSold: null, playerBought: null }]
 
     const row = buildSquadAdvisoryRow({
       gameweekId: 12,
@@ -113,8 +113,8 @@ describe('buildSquadAdvisoryRow — one row per run, always solution_index 0', (
     // A rebuild solved FOR gameweek 5 that plays the chip at horizon position
     // 6 (a real absolute gameweek id, same convention TC2/BB4 already use —
     // see scripts/lib/solver-output.ts's own header).
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 6 }], score: 200 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 150 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 6 }], score: 200, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 150, playerSold: null, playerBought: null }]
 
     const row = buildSquadAdvisoryRow({
       gameweekId: 5,
@@ -131,8 +131,8 @@ describe('buildSquadAdvisoryRow — one row per run, always solution_index 0', (
 
 describe('buildSquadAdvisoryRow — refuses to guess, throws on anything it cannot prove', () => {
   it('throws when the rebuild solve has no solution_index 0', () => {
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 1, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 300 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 1, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 300, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250, playerSold: null, playerBought: null }]
 
     expect(() =>
       buildSquadAdvisoryRow({ gameweekId: 3, solverRunId: 1, variant: 'wc', rebuildSolutions, baselineSolutions }),
@@ -143,8 +143,8 @@ describe('buildSquadAdvisoryRow — refuses to guess, throws on anything it cann
   })
 
   it('throws when the baseline solve has no solution_index 0', () => {
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 300 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 1, chips: [], score: 250 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 300, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 1, chips: [], score: 250, playerSold: null, playerBought: null }]
 
     expect(() =>
       buildSquadAdvisoryRow({ gameweekId: 3, solverRunId: 1, variant: 'wc', rebuildSolutions, baselineSolutions }),
@@ -152,8 +152,8 @@ describe('buildSquadAdvisoryRow — refuses to guess, throws on anything it cann
   })
 
   it('throws when the baseline solution played a chip — refuses to compare against a contaminated baseline', () => {
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 300 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'BB', gameweekId: 2 }], score: 250 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'WC', gameweekId: 3 }], score: 300, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'BB', gameweekId: 2 }], score: 250, playerSold: null, playerBought: null }]
 
     expect(() =>
       buildSquadAdvisoryRow({ gameweekId: 3, solverRunId: 1, variant: 'wc', rebuildSolutions, baselineSolutions }),
@@ -164,8 +164,8 @@ describe('buildSquadAdvisoryRow — refuses to guess, throws on anything it cann
   })
 
   it('throws when the rebuild solution did not actually play the requested variant\'s chip', () => {
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 300 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 300, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250, playerSold: null, playerBought: null }]
 
     expect(() =>
       buildSquadAdvisoryRow({ gameweekId: 3, solverRunId: 1, variant: 'wc', rebuildSolutions, baselineSolutions }),
@@ -173,8 +173,8 @@ describe('buildSquadAdvisoryRow — refuses to guess, throws on anything it cann
   })
 
   it('throws when the rebuild solution played the OTHER variant\'s chip instead of the requested one', () => {
-    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'FH', gameweekId: 3 }], score: 300 }]
-    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250 }]
+    const rebuildSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [{ chipCode: 'FH', gameweekId: 3 }], score: 300, playerSold: null, playerBought: null }]
+    const baselineSolutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 250, playerSold: null, playerBought: null }]
 
     expect(() =>
       buildSquadAdvisoryRow({ gameweekId: 3, solverRunId: 1, variant: 'wc', rebuildSolutions, baselineSolutions }),
