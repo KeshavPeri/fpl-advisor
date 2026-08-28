@@ -517,3 +517,59 @@ no independent fixture-schedule table for a past season. And the unresolved-`pla
 exclusion — 4,209 of 18,243 rows in the first run, `feature_history`/#121's own known gap — is
 now reported as a percentage (23%) alongside the count, so its size doesn't require doing the
 division by hand to notice.
+
+---
+
+## G11 — Ticket #147, 28 Aug 2026: ranking skill — a different question from calibration, and it is
+## still open
+
+G9/G10 (above) measure how close the model's *numbers* are — mean absolute error, mean signed
+error, defcon and clean-sheet calibration. **Every decision this app makes is a ranking decision**:
+the captain is by definition the squad's highest-projected player, and a transfer is a claim that
+one player will outscore another. A model can have a poor absolute error and excellent ranking, or
+the reverse — `product-brief.md` §8's confidence bands exist precisely because *"the gap between the
+top three transfer options is routinely under one point,"* a statement about ordering, not
+magnitude. Nothing before this ticket measured whether that ordering is any good.
+`scripts/calibration-report.ts` tried and could not: it compares two independent top-20 lists not
+paired by player, because full-season hindsight on both sides gives it no point-in-time basis to
+pair them on. `feature_history`'s strictly-before guarantee (the same one G9 uses) provides one.
+
+**What this slice measures, over the exact same measured population G9/G10 already build (no new
+Supabase read, no change to the exclusions or the reconciliation).** Two ranking-skill figures,
+each reported per gameweek, per position, and as a season aggregate:
+
+- **Spearman rank correlation** between projected and actual points — tied values (common: many
+  rows project identically at the position prior) share the average of the ranks they would
+  occupy, the standard tie correction. 1 is perfect agreement, −1 is perfect reversal, 0 is no
+  relationship.
+- **Top-10 / top-20 overlap** — of the rows ranked in the model's top 10 (or top 20) that gameweek
+  by projected points, how many were also in the top 10 (or top 20) by actual points. Closer to
+  what the app actually does than a correlation coefficient is: a captain choice or a transfer
+  looks at the top of a list, not the whole ordering.
+
+A gameweek under 50 measured rows (`MIN_BUCKET_SAMPLE_SIZE`, the same threshold G10's buckets use)
+is reported "too small to read", never as a correlation nobody could trust. Sanity bounds — a
+Spearman correlation outside [−0.2, 0.9], or a top-10 overlap above 9 of 10 — fail the report,
+naming the figure, checked on the season aggregate and on each position. **The upper bound matters
+more than the lower one: a suspiciously good correlation is the shape a lookahead leak takes** — if
+actual points reached the projected side, the model would appear to predict beautifully and every
+population count would still reconcile.
+
+**What this slice deliberately does not measure, still.** No replay of transfers, captaincy against
+a real squad, or league position — there is no stored squad for 2025-26 (the app did not exist
+that season), so a genuine captaincy replay is not possible and inventing one would measure
+nothing. This remains item 32's open, larger work. Whether the model's *ranking* is good enough to
+trust a replay on top of it is exactly what this slice exists to answer — and it draws no
+conclusion of its own about that; reading the figure is deliberately left to the human dispatching
+a live run.
+
+**The live number is not yet read.** As with G9, this Builder session has no live Supabase project
+and no way to run a new `workflow_dispatch` job before its file reaches the default branch — every
+test here proves the statistics on constructed rankings (perfect agreement, perfect reversal, a
+hand-computed 6–8 player case, three tied projections, each sanity bound), not that the figure
+produced from the real ~8,500+ measured rows is meaningful. **Read it against expectation before
+believing it**, per the ticket's own guidance: something in the 0.3–0.6 Spearman range is what a
+real, useful, imperfect projection model looks like; above 0.8 suggests a leak; below 0.1 suggests
+the model has no ranking skill at all and the whole recommendation approach needs rethinking. Both
+extremes are findings, neither should be assumed, and this is the open question G11 leaves for that
+first live run.
