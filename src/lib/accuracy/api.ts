@@ -79,7 +79,14 @@ export async function fetchPredictionLog(): Promise<PredictionLogRow[]> {
           'actual_points, actual_minutes, settled_at, error'
       )
       .not('settled_at', 'is', null)
+      // Ordered on the full (gameweek_id, player_id, model_version) primary
+      // key, not just gameweek_id -- ~600 rows tie per gameweek_id value, so
+      // ordering on that column alone left Postgres free to reorder those
+      // ties differently between two page requests, which duplicates one
+      // row and drops another across a multi-page read (ticket #152).
       .order('gameweek_id', { ascending: true })
+      .order('player_id', { ascending: true })
+      .order('model_version', { ascending: true })
       .range(from, to)
       .returns<DbPredictionLogRow[]>()
 

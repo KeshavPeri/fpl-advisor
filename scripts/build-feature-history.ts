@@ -563,6 +563,8 @@ async function main(): Promise<void> {
           'player_code, element_type, competition, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, team_goals_conceded',
         )
         .eq('season', season)
+        .order('player_id', { ascending: true })
+        .order('match_id', { ascending: true })
         .range(from, to)
         .returns<SourceMatchRow[]>(),
     )

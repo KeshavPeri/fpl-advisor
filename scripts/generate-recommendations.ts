@@ -424,7 +424,14 @@ async function main(): Promise<void> {
       error: runIdError,
       pages: runIdPagesFetched,
     } = await fetchAllPages<{ run_id: number | null }>((from, to) =>
-      supabase.from('solver_picks').select('run_id').range(from, to).returns<{ run_id: number | null }[]>(),
+      supabase
+        .from('solver_picks')
+        .select('run_id')
+        .order('solution_index', { ascending: true })
+        .order('gameweek_id', { ascending: true })
+        .order('player_id', { ascending: true })
+        .range(from, to)
+        .returns<{ run_id: number | null }[]>(),
     )
     if (runIdError) {
       if (isMissingTable(runIdError, 'solver_picks')) {
@@ -478,6 +485,9 @@ async function main(): Promise<void> {
           'solution_index, gameweek_id, player_id, player_code, is_lineup, bench_order, is_captain, is_vice_captain, is_transfer_in, is_transfer_out, expected_points, run_id',
         )
         .eq('run_id', latestRunId)
+        .order('solution_index', { ascending: true })
+        .order('gameweek_id', { ascending: true })
+        .order('player_id', { ascending: true })
         .range(from, to)
         .returns<SolverPickRow[]>(),
     )
@@ -729,7 +739,14 @@ async function main(): Promise<void> {
         error: matchStatsError,
         pages: matchStatsPagesFetched,
       } = await fetchAllPages<MatchStatsCodeRow>((from, to) =>
-        supabase.from('player_match_stats').select('player_code').in('player_code', codesArray).range(from, to).returns<MatchStatsCodeRow[]>(),
+        supabase
+          .from('player_match_stats')
+          .select('player_code')
+          .in('player_code', codesArray)
+          .order('player_id', { ascending: true })
+          .order('match_id', { ascending: true })
+          .range(from, to)
+          .returns<MatchStatsCodeRow[]>(),
       )
       if (matchStatsError) {
         throw new GenerateRecommendationsError(`player_match_stats lookup failed: ${matchStatsError.message}`, 'player_match_stats')
@@ -767,7 +784,7 @@ async function main(): Promise<void> {
       error: playersError,
       pages: playersPagesFetched,
     } = await fetchAllPages<PlayerRow>((from, to) =>
-      supabase.from('players').select('id, web_name').in('id', playerIdsArray).range(from, to).returns<PlayerRow[]>(),
+      supabase.from('players').select('id, web_name').in('id', playerIdsArray).order('id', { ascending: true }).range(from, to).returns<PlayerRow[]>(),
     )
     if (playersError) {
       throw new GenerateRecommendationsError(`players lookup failed: ${playersError.message}`, 'players')

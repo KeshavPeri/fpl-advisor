@@ -78,7 +78,15 @@ async function fetchAllDecisionRows(): Promise<DbDecisionRow[]> {
     const { data, error } = await supabase
       .from('recommendation_decisions')
       .select('gameweek_id, plan_index, kind, decided_at, snapshot')
+      // decided_at alone is not the table's primary key (that's the bigint
+      // identity `id`) and is not guaranteed unique, so a tie between two
+      // rows could be ordered differently across two page requests --
+      // ticket #152. Ordering by `id` too (not part of the current select,
+      // but still a real column PostgREST can order by) makes the sort
+      // deterministic while leaving the primary decided_at-ascending order
+      // -- and therefore this function's existing output -- unchanged.
       .order('decided_at', { ascending: true })
+      .order('id', { ascending: true })
       .range(from, to)
       .returns<DbDecisionRow[]>()
 

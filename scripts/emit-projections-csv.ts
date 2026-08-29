@@ -398,7 +398,7 @@ async function main(): Promise<void> {
       error: playersError,
       pages: playersPagesFetched,
     } = await fetchAllPages<PlayerRow>((from, to) =>
-      supabase.from('players').select('id, web_name, team_id, element_type').range(from, to).returns<PlayerRow[]>(),
+      supabase.from('players').select('id, web_name, team_id, element_type').order('id', { ascending: true }).range(from, to).returns<PlayerRow[]>(),
     )
     if (playersError) {
       if (isMissingTable(playersError, 'players')) {
@@ -450,6 +450,9 @@ async function main(): Promise<void> {
         .select('gameweek_id, player_id, expected_points, expected_minutes')
         .eq('model_version', MODEL_VERSION)
         .in('gameweek_id', horizonGwIds)
+        .order('gameweek_id', { ascending: true })
+        .order('player_id', { ascending: true })
+        .order('model_version', { ascending: true })
         .range(from, to)
         .returns<ProjectionRow[]>(),
     )
@@ -515,6 +518,9 @@ async function main(): Promise<void> {
         .select('gameweek_id')
         .eq('model_version', MODEL_VERSION)
         .gt('gameweek_id', maxHorizonGwId)
+        .order('gameweek_id', { ascending: true })
+        .order('player_id', { ascending: true })
+        .order('model_version', { ascending: true })
         .range(from, to)
         .returns<Pick<ProjectionRow, 'gameweek_id'>[]>(),
     )

@@ -233,8 +233,15 @@ function fakeFrom(table: string) {
   const filters: Array<(row: Row) => boolean> = []
   let isCountHead = false
   let single = false
+  // Real supabase-js exposes an unawaited query builder's clauses via
+  // `url.searchParams` (see scripts/lib/paginate.ts's ordering guard, ticket
+  // #152) -- this fake reproduces just that one detail so `order()` calls
+  // here actually register, rather than every fake query silently tripping
+  // the guard's fail-closed path.
+  const url = new URL(`https://example.supabase.co/rest/v1/${table}`)
 
   const builder = {
+    url,
     select(_cols?: string, opts?: { count?: string; head?: boolean }) {
       if (opts?.head) isCountHead = true
       return builder
@@ -247,7 +254,11 @@ function fakeFrom(table: string) {
       filters.push((row) => vals.includes(row[col]))
       return builder
     },
-    order() {
+    order(column: string, opts?: { ascending?: boolean; referencedTable?: string; foreignTable?: string }) {
+      const referencedTable = opts?.referencedTable ?? opts?.foreignTable
+      const key = referencedTable ? `${referencedTable}.order` : 'order'
+      const existing = url.searchParams.get(key)
+      url.searchParams.set(key, `${existing ? `${existing},` : ''}${column}.${opts?.ascending === false ? 'desc' : 'asc'}`)
       return builder
     },
     range() {

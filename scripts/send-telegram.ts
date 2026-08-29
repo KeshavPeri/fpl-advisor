@@ -403,7 +403,14 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
       error: recGwError,
       pages: recGwPages,
     } = await fetchAllPages<{ gameweek_id: number }>((from, to) =>
-      supabase.from('recommendations').select('gameweek_id').eq('plan_index', 0).range(from, to).returns<{ gameweek_id: number }[]>(),
+      supabase
+        .from('recommendations')
+        .select('gameweek_id')
+        .eq('plan_index', 0)
+        .order('gameweek_id', { ascending: true })
+        .order('plan_index', { ascending: true })
+        .range(from, to)
+        .returns<{ gameweek_id: number }[]>(),
     )
     if (recGwError) {
       if (isMissingTable(recGwError, 'recommendations')) {
