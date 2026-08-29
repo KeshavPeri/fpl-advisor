@@ -59,10 +59,108 @@ export interface FetchAllPagesResult<T> {
   pages: number
 }
 
+// THE SECOND BUG THIS FILE EXISTS TO PREVENT (ticket #152). Postgres makes no
+// promise that two separate queries against the same table return rows in
+// the same order. Paging a table with no `.order()` therefore issues N
+// independent, unordered queries -- between any two of them the server is
+// free to hand back rows in a different sequence, so a row can land on two
+// pages (duplicated) or on none (dropped). `assertRowCountMatches` cannot
+// catch this: one row duplicated and one row dropped leaves the total count
+// unchanged. The only fix is to refuse to page a query that has no
+// deterministic ordering at all, before a single page is requested.
+//
+// MECHANISM (verified against the installed @supabase/postgrest-js, 2.112.2,
+// 29 Aug 2026 -- see scripts/lib/paginate.test.ts for the proof). A
+// PostgREST query builder is a thenable: `fetchPage(from, to)` returns the
+// builder itself, synchronously, before anything is awaited. `.order()`
+// writes its clause into the builder's `url.searchParams` under the key
+// `order` (or `<referencedTable>.order` for a referenced-table ordering,
+// which does NOT establish a deterministic order on this table's own rows
+// and must not satisfy this guard). That means the returned-but-unawaited
+// object can be inspected for a bare `order` key before the first page is
+// requested at all.
+
+/**
+ * Thrown by the ordering guard inside `fetchAllPages`. Covers two distinct
+ * failures that both amount to "cannot prove this page request is
+ * ordered": a recognisable query object with no `.order()` clause, and an
+ * object whose shape this guard does not recognise at all (see
+ * `isOrderableQueryShape` below) -- the guard fails CLOSED on the latter
+ * rather than assuming an unfamiliar shape is fine.
+ */
+export class UnorderedPaginationError extends Error {
+  constructor(detail: string) {
+    super(
+      `Refusing to page an unordered query (${detail}). A multi-page read with no ` +
+        `deterministic .order() can duplicate one row and drop another between pages ` +
+        `while the total row count stays the same -- add .order() on the table's full ` +
+        `primary key (outermost column first) before calling fetchAllPages.`,
+    )
+    this.name = 'UnorderedPaginationError'
+  }
+}
+
+/**
+ * The narrow structural shape this guard needs from the object a page thunk
+ * returns, synchronously, before it is awaited. `url` is declared
+ * `protected` on the real PostgrestBuilder/PostgrestFilterBuilder classes in
+ * the shipped `.d.ts` (`@supabase/postgrest-js` 2.112.2), so this repo
+ * cannot import that type and read `.url` off it directly -- TypeScript
+ * would reject the access. This interface, plus the `unknown`-typed
+ * structural check in `isOrderableQueryShape`, is the narrow, commented
+ * escape hatch that reads the field anyway without reaching for a blanket
+ * `any`: it asserts only the one property this guard actually uses.
+ */
+interface OrderableQueryShape {
+  url: URL
+}
+
+/**
+ * Fails CLOSED: returns `true` only for an object that actually exposes a
+ * `URL` at `.url` (which is what every real PostgREST builder does, ordered
+ * or not). Anything else -- a plain object, a bare `Promise`, a future
+ * postgrest-js version that renamed or restructured the field, a hand-rolled
+ * test stub -- returns `false`, and the caller below throws rather than
+ * silently treating an unrecognisable shape as ordered.
+ */
+function isOrderableQueryShape(value: unknown): value is OrderableQueryShape {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { url?: unknown }
+  return candidate.url instanceof URL
+}
+
+/**
+ * Throws `UnorderedPaginationError` unless `pending` is a recognisable query
+ * object carrying a bare `order` key in its URL's search params. Deliberately
+ * checks the bare key only -- a referenced-table ordering writes
+ * `<referencedTable>.order` instead (see the mechanism note above) and does
+ * not make this table's own row order deterministic.
+ */
+function assertQueryIsOrdered(pending: unknown, from: number, to: number): void {
+  if (!isOrderableQueryShape(pending)) {
+    throw new UnorderedPaginationError(
+      `page [${from}, ${to}]: the page thunk returned an object this guard does not ` +
+        `recognise as a PostgREST query (no readable .url) -- failing closed rather than ` +
+        `assuming an unfamiliar shape is ordered`,
+    )
+  }
+  if (!pending.url.searchParams.has('order')) {
+    throw new UnorderedPaginationError(`page [${from}, ${to}]: query has no .order() clause`)
+  }
+}
+
 /**
  * Fetches every row of a query by issuing `.range(from, to)` requests of
  * `pageSize` until a page shorter than `pageSize` — including an outright
  * empty page — proves the source is exhausted.
+ *
+ * Before each page is awaited, the (already-constructed, not-yet-resolved)
+ * query object is checked for a deterministic `.order()` clause and the call
+ * throws `UnorderedPaginationError` if none is found — see the mechanism
+ * note above this function. This runs on every page, not just the first:
+ * the check is a synchronous, no-network inspection of a URL that has
+ * already been built, so repeating it costs nothing and does not assume the
+ * caller builds every page's query identically.
  *
  * A page whose length is exactly `pageSize` is deliberately NOT treated as
  * the end: this function always issues one further request to confirm
@@ -87,7 +185,9 @@ export async function fetchAllPages<T>(
 
   for (;;) {
     const to = from + pageSize - 1
-    const { data, error } = await fetchPage(from, to)
+    const pending = fetchPage(from, to)
+    assertQueryIsOrdered(pending, from, to)
+    const { data, error } = await pending
     if (error) {
       return { rows, error, pages }
     }
