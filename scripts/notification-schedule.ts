@@ -215,6 +215,7 @@ export async function main(): Promise<void> {
         .eq('gameweek_id', targetGameweekId)
         .eq('outcome', 'sent')
         .in('trigger', SCHEDULED_TRIGGERS)
+        .order('id', { ascending: true })
         .range(from, to)
         .returns<{ trigger: string }[]>(),
     )

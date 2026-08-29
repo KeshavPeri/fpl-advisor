@@ -272,6 +272,9 @@ async function main(): Promise<void> {
         .select('gameweek_id, player_id, player_code, expected_points, expected_minutes, components')
         .eq('gameweek_id', currentGw.id)
         .eq('model_version', MODEL_VERSION)
+        .order('gameweek_id', { ascending: true })
+        .order('player_id', { ascending: true })
+        .order('model_version', { ascending: true })
         .range(from, to)
         .returns<ProjectionRow[]>(),
     )

@@ -1263,6 +1263,8 @@ async function main(): Promise<void> {
               .from('squad_picks')
               .select('is_starting, is_captain, is_vice_captain')
               .eq('gameweek_id', targetGameweekId as number)
+              .order('gameweek_id', { ascending: true })
+              .order('squad_position', { ascending: true })
               .range(from, to)
               .returns<SquadPickRow[]>(),
           () => supabase.from('squad_picks').select('*', { count: 'exact', head: true }).eq('gameweek_id', targetGameweekId as number),
@@ -1303,6 +1305,9 @@ async function main(): Promise<void> {
             .select('player_id, expected_points, expected_minutes')
             .eq('gameweek_id', targetGameweekId as number)
             .eq('model_version', MODEL_VERSION)
+            .order('gameweek_id', { ascending: true })
+            .order('player_id', { ascending: true })
+            .order('model_version', { ascending: true })
             .range(from, to)
             .returns<ProjectionRow[]>(),
         () =>
@@ -1318,20 +1323,28 @@ async function main(): Promise<void> {
           supabase
             .from('players')
             .select('id, web_name, status, chance_of_playing_next_round, team_id')
+            .order('id', { ascending: true })
             .range(from, to)
             .returns<PlayerAvailabilityRow[]>(),
         () => supabase.from('players').select('*', { count: 'exact', head: true }),
       )
       const teamIdsRead = await safeFetchAllPages<TeamIdRow>(
         'teams',
-        (from, to) => supabase.from('teams').select('id').range(from, to).returns<TeamIdRow[]>(),
+        (from, to) => supabase.from('teams').select('id').order('id', { ascending: true }).range(from, to).returns<TeamIdRow[]>(),
         () => supabase.from('teams').select('*', { count: 'exact', head: true }),
       )
       // Filtered in the database (eq on event_id) and read via the shared
       // pagination helper, matching every other multi-row read in this file.
       const gwFixturesRead = await safeFetchAllPages<FixtureRow>(
         'fixtures',
-        (from, to) => supabase.from('fixtures').select('team_h, team_a').eq('event_id', targetGameweekId as number).range(from, to).returns<FixtureRow[]>(),
+        (from, to) =>
+          supabase
+            .from('fixtures')
+            .select('team_h, team_a')
+            .eq('event_id', targetGameweekId as number)
+            .order('id', { ascending: true })
+            .range(from, to)
+            .returns<FixtureRow[]>(),
         () => supabase.from('fixtures').select('*', { count: 'exact', head: true }).eq('event_id', targetGameweekId as number),
       )
 
@@ -1453,7 +1466,7 @@ async function main(): Promise<void> {
     } else {
       const teamsRead = await safeFetchAllPages<TeamRow>(
         'teams',
-        (from, to) => supabase.from('teams').select('id, elo').range(from, to).returns<TeamRow[]>(),
+        (from, to) => supabase.from('teams').select('id, elo').order('id', { ascending: true }).range(from, to).returns<TeamRow[]>(),
         () => supabase.from('teams').select('*', { count: 'exact', head: true }),
       )
       if (teamsRead.error) {
@@ -1469,7 +1482,14 @@ async function main(): Promise<void> {
         } else {
           const fixturesRead = await safeFetchAllPages<FixtureRow>(
             'fixtures',
-            (from, to) => supabase.from('fixtures').select('team_h, team_a').in('event_id', horizonIds).range(from, to).returns<FixtureRow[]>(),
+            (from, to) =>
+              supabase
+                .from('fixtures')
+                .select('team_h, team_a')
+                .in('event_id', horizonIds)
+                .order('id', { ascending: true })
+                .range(from, to)
+                .returns<FixtureRow[]>(),
             () => supabase.from('fixtures').select('*', { count: 'exact', head: true }).in('event_id', horizonIds),
           )
           if (fixturesRead.error) {
@@ -1512,6 +1532,8 @@ async function main(): Promise<void> {
             .from('player_match_stats')
             .select('player_code, season')
             .eq('competition', PREMIER_LEAGUE_COMPETITION)
+            .order('player_id', { ascending: true })
+            .order('match_id', { ascending: true })
             .range(from, to)
             .returns<MatchStatsGroupRow[]>(),
         () => supabase.from('player_match_stats').select('*', { count: 'exact', head: true }).eq('competition', PREMIER_LEAGUE_COMPETITION),
@@ -1581,6 +1603,7 @@ async function main(): Promise<void> {
             .eq('gameweek_id', targetGameweekId as number)
             .eq('outcome', 'sent')
             .in('trigger', SCHEDULED_TRIGGERS)
+            .order('id', { ascending: true })
             .range(from, to)
             .returns<NotificationRow[]>(),
         () =>

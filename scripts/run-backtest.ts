@@ -1789,7 +1789,7 @@ async function main(): Promise<void> {
       error: playersError,
       pages: playersPagesFetched,
     } = await fetchAllPages<PlayerRow>((from, to) =>
-      supabase.from('players').select('code, element_type').range(from, to).returns<PlayerRow[]>(),
+      supabase.from('players').select('code, element_type').order('id', { ascending: true }).range(from, to).returns<PlayerRow[]>(),
     )
     if (playersError) {
       throw new BacktestError(`players lookup failed: ${playersError.message}`, 'players')
@@ -1822,6 +1822,9 @@ async function main(): Promise<void> {
           'gameweek_id, player_code, prior_matches, prior_minutes, prior_xg, prior_xa, prior_saves, prior_clearances, prior_blocks, prior_interceptions, prior_tackles, prior_recoveries',
         )
         .eq('season', season)
+        .order('season', { ascending: true })
+        .order('gameweek_id', { ascending: true })
+        .order('player_code', { ascending: true })
         .range(from, to)
         .returns<FeatureHistoryRow[]>(),
     )
@@ -1867,6 +1870,8 @@ async function main(): Promise<void> {
         )
         .eq('season', season)
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
+        .order('player_id', { ascending: true })
+        .order('match_id', { ascending: true })
         .range(from, to)
         .returns<ActualSourceRow[]>(),
     )

@@ -456,6 +456,9 @@ async function main(): Promise<void> {
         .select('gameweek_id')
         .eq('model_version', MODEL_VERSION)
         .is('settled_at', null)
+        .order('gameweek_id', { ascending: true })
+        .order('player_id', { ascending: true })
+        .order('model_version', { ascending: true })
         .range(from, to)
         .returns<{ gameweek_id: number }[]>(),
     )
@@ -520,7 +523,7 @@ async function main(): Promise<void> {
         error: fixturesError,
         pages: fixturesPagesFetched,
       } = await fetchAllPages<FixtureRow>((from, to) =>
-        supabase.from('fixtures').select('kickoff_time').eq('event_id', gwId).range(from, to).returns<FixtureRow[]>(),
+        supabase.from('fixtures').select('kickoff_time').eq('event_id', gwId).order('id', { ascending: true }).range(from, to).returns<FixtureRow[]>(),
       )
       if (fixturesError) {
         throw new SettleError(`fixtures lookup for gameweek ${gwId} failed: ${fixturesError.message}`, 'fixtures')
@@ -581,6 +584,9 @@ async function main(): Promise<void> {
           .eq('gameweek_id', gwId)
           .eq('model_version', MODEL_VERSION)
           .is('settled_at', null)
+          .order('gameweek_id', { ascending: true })
+          .order('player_id', { ascending: true })
+          .order('model_version', { ascending: true })
           .range(from, to)
           .returns<UnsettledPredictionRow[]>(),
       )

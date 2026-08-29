@@ -512,6 +512,7 @@ async function main(): Promise<void> {
       supabase
         .from('players')
         .select('id, code, team_id, element_type, status, chance_of_playing_next_round, now_cost')
+        .order('id', { ascending: true })
         .range(from, to)
         .returns<PlayerRow[]>(),
     )
@@ -614,6 +615,8 @@ async function main(): Promise<void> {
           'player_code, season, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries',
         )
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
+        .order('player_id', { ascending: true })
+        .order('match_id', { ascending: true })
         .range(from, to)
         .returns<MatchStatsRow[]>(),
     )
