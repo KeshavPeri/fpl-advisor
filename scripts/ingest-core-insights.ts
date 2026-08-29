@@ -129,6 +129,29 @@
 // supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql
 // (the migration that actually adds it) and the corrected README rows, both
 // from ticket #125.
+//
+// element_type (ticket #146): players.csv's own "position" column (already
+// required by PLAYERS_REQUIRED_COLUMNS, but never previously read past that
+// validation) is now mapped to the plain FPL position code — 1 = goalkeeper,
+// 2 = defender, 3 = midfielder, 4 = forward, matching src/lib/scoring/types.ts
+// — and written to player_match_stats.element_type on every row, via the same
+// player_id -> value map shape buildPlayerCodeMap already uses for
+// player_code. WHY NOT THE LIVE public.players TABLE: that table holds only
+// the CURRENT season's players (616 for 2026/27) and has no row at all for
+// anyone who has since left the league (841 players in 2025-2026) — exactly
+// the cross-season identity problem player_code already exists to solve one
+// level up (deltas.md D9, tickets #22/#32). scripts/build-feature-history.ts
+// (also ticket #146) copies this column onto feature_history.element_type so
+// a backtest can know a player's position without that join.
+// FAIL LOUDLY ON AN UNKNOWN POSITION STRING, same philosophy as
+// parseCompetition() in scripts/lib/competition.ts: a non-blank position cell
+// that does not match one of the four known words throws UnknownPositionError,
+// which is deliberately NOT caught in buildElementTypeMap — it propagates to
+// main()'s own catch block and fails the whole run, rather than silently
+// mapping a schema change to null. A genuinely BLANK position cell, by
+// contrast, is treated the same as player_code's own "small, expected gap":
+// the player_id is simply left out of the map, and every row for it writes
+// element_type = null, not skipped and not an error.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { parse } from 'csv-parse/sync'
@@ -496,6 +519,12 @@ async function applyTeamEloNulls(supabase: SupabaseClient, nulls: Array<{ id: nu
 interface MatchStatRow {
   player_id: number
   player_code: number | null
+  // Ticket #146: the FPL position code as it was in this ingested season,
+  // from players.csv's own "position" column -- see buildElementTypeMap and
+  // this file's header. NULL means the player_id had no resolvable position
+  // in that season's players.csv, same "small, expected gap" treatment as
+  // player_code above.
+  element_type: number | null
   match_id: string
   competition: string
   season: string
@@ -535,7 +564,12 @@ export function toMatchStatRow(
   record: Record<string, string>,
   season: string,
   gameweek: number,
-  playerCodeByPlayerId: Map<number, number>
+  playerCodeByPlayerId: Map<number, number>,
+  // Ticket #146. Defaulted to an empty map (not made required) so every
+  // existing call site/test written before this ticket keeps writing
+  // element_type: null without needing to pass one — the same reasoning
+  // playerCodeByPlayerId itself would get if it were added today.
+  elementTypeByPlayerId: Map<number, number> = new Map()
 ): MatchStatRow | null {
   const playerId = toInt(record.player_id)
   const matchId = record.match_id?.trim()
@@ -549,6 +583,7 @@ export function toMatchStatRow(
   return {
     player_id: playerId,
     player_code: playerCodeByPlayerId.get(playerId) ?? null,
+    element_type: elementTypeByPlayerId.get(playerId) ?? null,
     match_id: matchId,
     competition,
     season,
@@ -597,6 +632,10 @@ interface PlayerMatchStatsUpsertResult {
   // statement about the source data being complete, not about this job's
   // logic.
   withTeamGoalsConceded: number
+  // Rows written carrying a non-null element_type (ticket #146). Same
+  // "not expected to equal `written` until every player_id this job has ever
+  // seen has a resolvable position" caveat as withTeamGoalsConceded above.
+  withElementType: number
 }
 
 async function upsertPlayerMatchStats(
@@ -605,12 +644,13 @@ async function upsertPlayerMatchStats(
   season: string,
   gameweek: number,
   records: Array<Record<string, string>>,
-  playerCodeByPlayerId: Map<number, number>
+  playerCodeByPlayerId: Map<number, number>,
+  elementTypeByPlayerId: Map<number, number>
 ): Promise<PlayerMatchStatsUpsertResult> {
   const rows: MatchStatRow[] = []
   let skipped = 0
   for (const record of records) {
-    const row = toMatchStatRow(record, season, gameweek, playerCodeByPlayerId)
+    const row = toMatchStatRow(record, season, gameweek, playerCodeByPlayerId, elementTypeByPlayerId)
     if (row) {
       rows.push(row)
     } else {
@@ -623,7 +663,8 @@ async function upsertPlayerMatchStats(
   const missingPlayerCode = rows.filter((r) => r.player_code === null).length
   const withCompetition = rows.filter((r) => r.competition !== null && r.competition !== undefined && r.competition !== '').length
   const withTeamGoalsConceded = rows.filter((r) => r.team_goals_conceded !== null).length
-  if (rows.length === 0) return { written: 0, missingPlayerCode: 0, withCompetition: 0, withTeamGoalsConceded: 0 }
+  const withElementType = rows.filter((r) => r.element_type !== null).length
+  if (rows.length === 0) return { written: 0, missingPlayerCode: 0, withCompetition: 0, withTeamGoalsConceded: 0, withElementType: 0 }
 
   const { error } = await supabase.from('player_match_stats').upsert(rows, { onConflict: 'player_id,match_id' })
   if (error) {
@@ -632,7 +673,7 @@ async function upsertPlayerMatchStats(
     }
     throw new IngestError(`upsert into player_match_stats failed for ${url}: ${error.message}`)
   }
-  return { written: rows.length, missingPlayerCode, withCompetition, withTeamGoalsConceded }
+  return { written: rows.length, missingPlayerCode, withCompetition, withTeamGoalsConceded, withElementType }
 }
 
 // ============================================================================
@@ -651,6 +692,66 @@ function buildPlayerCodeMap(playerRecords: Array<Record<string, string>>): Map<n
     if (playerId !== null && playerCode !== null) {
       map.set(playerId, playerCode)
     }
+  }
+  return map
+}
+
+// ============================================================================
+// element_type map — ticket #146. Same shape and same players.csv source as
+// buildPlayerCodeMap above, mapping player_id -> the plain FPL position code
+// (1 = goalkeeper, 2 = defender, 3 = midfielder, 4 = forward — matching
+// src/lib/scoring/types.ts) instead of player_code. See this file's header
+// for why the live public.players table is never used for this.
+// ============================================================================
+
+/**
+ * Every position word FPL-Core-Insights is known to publish in players.csv's
+ * "position" column, verified directly against the source on 28 Aug 2026
+ * (data/2025-2026/players.csv). Values, never keys, are the plain FPL
+ * position code every other module in this repo already uses.
+ */
+const POSITION_TO_ELEMENT_TYPE: Readonly<Record<string, number>> = Object.freeze({
+  Goalkeeper: 1,
+  Defender: 2,
+  Midfielder: 3,
+  Forward: 4,
+})
+
+export class UnknownPositionError extends Error {
+  playerId: number
+  position: string
+  constructor(playerId: number, position: string) {
+    super(
+      `unrecognized position "${position}" for player_id ${playerId} in players.csv — expected one of ` +
+        `${Object.keys(POSITION_TO_ELEMENT_TYPE).join(', ')}. This is a new or unexpected position at the ` +
+        'source and must be mapped deliberately, not defaulted past.',
+    )
+    this.name = 'UnknownPositionError'
+    this.playerId = playerId
+    this.position = position
+  }
+}
+
+/**
+ * Throws UnknownPositionError — never defaults to a guessed position, never
+ * writes it as-is — on a non-blank position cell outside POSITION_TO_ELEMENT_TYPE,
+ * the same "fail loudly on a schema change" philosophy scripts/lib/competition.ts's
+ * parseCompetition() applies to match_id. A genuinely BLANK cell is not an
+ * error: the player_id is simply left out of the map (same "small, expected
+ * gap" treatment buildPlayerCodeMap gives an unparseable player_code).
+ */
+export function buildElementTypeMap(playerRecords: Array<Record<string, string>>): Map<number, number> {
+  const map = new Map<number, number>()
+  for (const record of playerRecords) {
+    const playerId = toInt(record.player_id)
+    if (playerId === null) continue
+    const position = (record.position ?? '').trim()
+    if (position === '') continue
+    const elementType = POSITION_TO_ELEMENT_TYPE[position]
+    if (elementType === undefined) {
+      throw new UnknownPositionError(playerId, position)
+    }
+    map.set(playerId, elementType)
   }
   return map
 }
@@ -711,6 +812,7 @@ async function main(): Promise<void> {
           matchRowsWithoutPlayerCode: 0,
           matchRowsWithCompetition: 0,
           matchRowsWithTeamGoalsConceded: 0,
+          matchRowsWithElementType: 0,
         },
         startedAt,
       })
@@ -723,6 +825,11 @@ async function main(): Promise<void> {
     const playerRecords = parseCsvRecords(playersResp.text, playersUrl, PLAYERS_REQUIRED_COLUMNS)
     logPlayerIdAlignmentNote(playerRecords)
     const playerCodeByPlayerId = buildPlayerCodeMap(playerRecords)
+    // Throws UnknownPositionError on a position word outside
+    // POSITION_TO_ELEMENT_TYPE — deliberately NOT caught here, same as
+    // parseCompetition() elsewhere in this file; it propagates to this
+    // function's own catch block below and fails the whole run (ticket #146).
+    const elementTypeByPlayerId = buildElementTypeMap(playerRecords)
 
     const teamsUrl = seasonRootUrl(season, 'teams.csv')
     const teamsResp = await fetchCsv(teamsUrl)
@@ -747,6 +854,7 @@ async function main(): Promise<void> {
     let matchRowsWithoutPlayerCode = 0
     let matchRowsWithCompetition = 0
     let matchRowsWithTeamGoalsConceded = 0
+    let matchRowsWithElementType = 0
     for (let gw = 1; gw <= MAX_GAMEWEEKS; gw++) {
       const url = gameweekUrl(season, gw)
       const resp = await fetchCsv(url)
@@ -767,11 +875,12 @@ async function main(): Promise<void> {
       // is deliberately NOT caught here — it propagates to this function's
       // own try/catch below, failing the whole run loudly rather than
       // skipping the offending gameweek file. See scripts/lib/competition.ts.
-      const result = await upsertPlayerMatchStats(supabase, url, season, gw, records, playerCodeByPlayerId)
+      const result = await upsertPlayerMatchStats(supabase, url, season, gw, records, playerCodeByPlayerId, elementTypeByPlayerId)
       matchRowsWritten += result.written
       matchRowsWithoutPlayerCode += result.missingPlayerCode
       matchRowsWithCompetition += result.withCompetition
       matchRowsWithTeamGoalsConceded += result.withTeamGoalsConceded
+      matchRowsWithElementType += result.withElementType
     }
 
     const message =
@@ -784,7 +893,8 @@ async function main(): Promise<void> {
       `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted ` +
       `(${matchRowsWithoutPlayerCode} without a matching player_code in players.csv, ` +
       `${matchRowsWithCompetition} carrying a non-null competition, ` +
-      `${matchRowsWithTeamGoalsConceded} carrying a non-null team_goals_conceded)`
+      `${matchRowsWithTeamGoalsConceded} carrying a non-null team_goals_conceded, ` +
+      `${matchRowsWithElementType} carrying a non-null element_type)`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
@@ -803,6 +913,7 @@ async function main(): Promise<void> {
         matchRowsWithoutPlayerCode,
         matchRowsWithCompetition,
         matchRowsWithTeamGoalsConceded,
+        matchRowsWithElementType,
       },
       startedAt,
     })

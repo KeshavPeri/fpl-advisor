@@ -19,8 +19,38 @@
 // batch) — storing a rate would freeze one version of a moving model into a
 // table meant to outlive all of them. A raw prior-match total is a fact
 // about football that never changes; any rate model, past or future, can be
-// applied to it afterwards. Nothing under src/lib/projection/ is imported or
-// read here — this file computes nothing beyond arithmetic sums.
+// applied to it afterwards.
+//
+// POSITION + DEFCON COUNTERS (ticket #146). Two more columns, same "raw
+// facts, never a moving model's output" reasoning as above:
+//
+//   - element_type: the FPL position code (1/2/3/4) as it was in the
+//     ingested season, copied from player_match_stats.element_type (itself
+//     populated by scripts/ingest-core-insights.ts from that season's own
+//     players.csv — ticket #146's companion change) — NEVER from the live
+//     public.players table, which holds only the current season's players
+//     and has no row at all for anyone who has since left the league. This
+//     is the same cross-season identity problem player_code already solves
+//     one level up (deltas.md D9); see the migration file's header.
+//   - prior_defcon_qualifying_matches / prior_defcon_hits: raw per-match
+//     COUNTS (matches with 60+ minutes; of those, matches that reached the
+//     player's position threshold), strictly before the row's gameweek —
+//     never a stored rate. A hit rate cannot be recovered from
+//     prior_clearances/prior_blocks/prior_interceptions/prior_tackles/
+//     prior_recoveries: those are cumulative totals, and a player with 30
+//     clearances over 10 matches might have hit the threshold three times or
+//     never — the totals alone cannot say which. These two counts are
+//     computed match by match, using isQualifyingMatch (imported from
+//     src/lib/projection/defconRate.ts) for the 60-minute qualifying rule and
+//     defensiveContributionPoints (imported from
+//     src/lib/scoring/defensiveContribution.ts) for the position threshold
+//     itself — NEITHER threshold value (60 minutes; 10 CBIT; 12 CBIRT) is
+//     reimplemented here. This is the one deliberate, narrow exception to the
+//     "nothing under src/lib/projection/ is imported" line ticket #121 wrote
+//     above: only the pure per-match qualifying/threshold determination is
+//     used, never any shrinkage or rate-estimation function from that
+//     module, and never any hit-rate constant — the model itself is
+//     untouched by this ticket (see its own scope).
 //
 // KEYED ON player_code, NEVER the FPL element id. 453 of 458 players changed
 // element id between the 2025-2026 and 2026-2027 seasons (see the #12/#22
@@ -88,10 +118,19 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
 import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
+import type { Position } from '../src/lib/scoring/types.ts'
+import { defensiveContributionPoints } from '../src/lib/scoring/defensiveContribution.ts'
+import { isQualifyingMatch } from '../src/lib/projection/defconRate.ts'
 
 const JOB_NAME = 'build-feature-history'
 const PLAYER_MATCH_STATS_MIGRATION = 'supabase/migrations/20260811170000_player_match_stats.sql'
 const FEATURE_HISTORY_MIGRATION = 'supabase/migrations/20260827090000_feature_history.sql'
+const POSITION_AND_DEFCON_MIGRATION = 'supabase/migrations/20260829090000_feature_history_position_and_defcon.sql'
+
+/** The four FPL position codes this job ever sees on a resolved element_type — see src/lib/scoring/types.ts. Guards the cast into `Position` below without reimplementing what a valid code is. */
+function isPosition(value: number): value is Position {
+  return value === 1 || value === 2 || value === 3 || value === 4
+}
 
 /**
  * The season this job builds feature history for, read the same way
@@ -207,9 +246,13 @@ async function recordJobRun(supabase: SupabaseClient, input: JobRunInput): Promi
 // build-feature-history.test.ts.
 // ============================================================================
 
-/** The columns this job reads off player_match_stats — only what it sums. */
+/** The columns this job reads off player_match_stats — everything it sums, plus (ticket #146) element_type, which it copies rather than sums. */
 export interface SourceMatchRow {
   player_code: number | null
+  // Ticket #146. NOT summed like the fields below — copied as-is onto the
+  // player's own dense rows (see resolveElementType). NULL is a real, expected
+  // value (see player_match_stats.element_type's own COMMENT ON COLUMN).
+  element_type: number | null
   competition: string | null
   gameweek: number
   minutes_played: number | null
@@ -258,6 +301,18 @@ export interface FeatureHistoryRow extends FeatureTotals {
   season: string
   gameweek_id: number
   player_code: number
+  // Ticket #146. A single value per player per season (see
+  // resolveElementType) — not itself a "prior" quantity, so it is not
+  // recomputed per gameweek the way the counters below are. NULL when this
+  // player's position could not be resolved at ingest time (see
+  // player_match_stats.element_type's own COMMENT ON COLUMN).
+  element_type: number | null
+  // Ticket #146. Raw per-match counts, strictly before gameweek_id — see
+  // this file's header. Always real numbers, never null, exactly like every
+  // prior_* total above: a player's first gameweek carries 0 for both, not
+  // an absent value.
+  prior_defcon_qualifying_matches: number
+  prior_defcon_hits: number
   computed_at: string
 }
 
@@ -292,6 +347,47 @@ function addMatch(totals: FeatureTotals, row: SourceMatchRow): FeatureTotals {
   }
 }
 
+/**
+ * A player's element_type for the whole season: the first non-null value
+ * seen across his contributing matches. In practice every one of a player's
+ * rows carries the identical value — element_type is stamped once per
+ * ingest run from that run's single players.csv snapshot (ticket #146) — so
+ * this is a single lookup, not a per-gameweek computation. Returns null only
+ * when none of the player's matches carry a resolved position (the source's
+ * own "small, expected gap" — see player_match_stats.element_type's COMMENT
+ * ON COLUMN).
+ */
+function resolveElementType(matches: readonly SourceMatchRow[]): number | null {
+  for (const match of matches) {
+    if (match.element_type !== null && match.element_type !== undefined) return match.element_type
+  }
+  return null
+}
+
+/**
+ * Did this one match reach the player's position's defensive-contribution
+ * threshold? Delegates entirely to defensiveContributionPoints (imported,
+ * never reimplemented — see this file's header) with the same
+ * DefensiveActionStats shape it already expects; null stat cells map to 0,
+ * matching addMatch's own null-handling above. Returns false, never throws,
+ * when elementType is not a valid Position (null, or an out-of-range value) —
+ * a match this job cannot score a hit for still counts toward
+ * prior_defcon_qualifying_matches (that check is position-independent, see
+ * isQualifyingMatch), it just never counts as a hit.
+ */
+function reachedDefconThreshold(elementType: number | null, match: SourceMatchRow): boolean {
+  if (elementType === null || !isPosition(elementType)) return false
+  return (
+    defensiveContributionPoints(elementType, {
+      clearances: match.clearances ?? 0,
+      blocks: match.blocks ?? 0,
+      interceptions: match.interceptions ?? 0,
+      tackles: match.tackles ?? 0,
+      recoveries: match.recoveries ?? 0,
+    }) > 0
+  )
+}
+
 export interface BuildFeatureHistoryResult {
   rows: FeatureHistoryRow[]
   sourceRowsRead: number
@@ -313,6 +409,17 @@ export interface BuildFeatureHistoryResult {
   // — the upper bound every player's dense row range is built out to. 0 when
   // `rows` is empty. Ticket #125.
   lastGameweekInData: number
+  // Ticket #146 — surfaced in job_runs.details. Count of `rows` carrying a
+  // non-null element_type. Expected to equal rows.length once every player
+  // this job has ever seen has a resolvable position (see resolveElementType);
+  // not assumed equal to it here, computed independently instead.
+  rowsWithElementType: number
+  // Ticket #146 — surfaced in job_runs.details. Count of `rows` carrying
+  // non-null prior_defcon_qualifying_matches AND prior_defcon_hits. Both
+  // fields are always real numbers by construction (see FeatureHistoryRow),
+  // so this is expected to equal rows.length on every run; computed
+  // independently rather than assumed, same reasoning as rowsWithElementType.
+  rowsWithDefconCounters: number
 }
 
 /**
@@ -363,9 +470,16 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
   for (const [playerCode, matches] of matchesByPlayerCode) {
     const sorted = [...matches].sort((a, b) => a.gameweek - b.gameweek)
     const firstGameweek = sorted[0].gameweek
+    const elementType = resolveElementType(sorted)
 
     let runningTotals: FeatureTotals = ZERO_TOTALS
     let matchIndex = 0
+    // Ticket #146: the same strictly-before accumulators as runningTotals
+    // above, folded in the SAME while loop below so they share exactly one
+    // "strictly before this gameweek" boundary — there is no way for the
+    // counters to disagree with the totals about which matches are prior.
+    let defconQualifyingMatches = 0
+    let defconHits = 0
 
     // Every integer gameweek from this player's first contributing match
     // through the last gameweek present anywhere in the season's data —
@@ -376,18 +490,31 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
       // in nothing, leaving runningTotals — and therefore this row —
       // identical to the previous gameweek's row.
       while (matchIndex < sorted.length && sorted[matchIndex].gameweek < gameweekId) {
-        runningTotals = addMatch(runningTotals, sorted[matchIndex])
+        const match = sorted[matchIndex]
+        runningTotals = addMatch(runningTotals, match)
+        if (isQualifyingMatch({ minutesPlayed: match.minutes_played ?? 0 })) {
+          defconQualifyingMatches++
+          if (reachedDefconThreshold(elementType, match)) defconHits++
+        }
         matchIndex++
       }
       outputRows.push({
         season,
         gameweek_id: gameweekId,
         player_code: playerCode,
+        element_type: elementType,
+        prior_defcon_qualifying_matches: defconQualifyingMatches,
+        prior_defcon_hits: defconHits,
         ...runningTotals,
         computed_at: computedAt,
       })
     }
   }
+
+  const rowsWithElementType = outputRows.filter((r) => r.element_type !== null).length
+  const rowsWithDefconCounters = outputRows.filter(
+    (r) => r.prior_defcon_qualifying_matches !== null && r.prior_defcon_hits !== null,
+  ).length
 
   return {
     rows: outputRows,
@@ -397,6 +524,8 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
     playersCovered: matchesByPlayerCode.size,
     gameweeksCovered: gameweeksSeen.size,
     lastGameweekInData,
+    rowsWithElementType,
+    rowsWithDefconCounters,
   }
 }
 
@@ -431,7 +560,7 @@ async function main(): Promise<void> {
       supabase
         .from('player_match_stats')
         .select(
-          'player_code, competition, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, team_goals_conceded',
+          'player_code, element_type, competition, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, team_goals_conceded',
         )
         .eq('season', season)
         .range(from, to)
@@ -451,6 +580,13 @@ async function main(): Promise<void> {
             'substituted — see this file\'s header). Apply ' +
             'supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql (ticket #125) ' +
             'before running this job.',
+          'player_match_stats',
+        )
+      }
+      if (isMissingColumn(sourceError, 'element_type')) {
+        throw new FeatureHistoryError(
+          'player_match_stats.element_type does not exist in this database yet. This job requires it ' +
+            `(see this file's header). Apply ${POSITION_AND_DEFCON_MIGRATION} (ticket #146) before running this job.`,
           'player_match_stats',
         )
       }
@@ -487,6 +623,17 @@ async function main(): Promise<void> {
             'feature_history',
           )
         }
+        if (
+          isMissingColumn(error, 'element_type') ||
+          isMissingColumn(error, 'prior_defcon_qualifying_matches') ||
+          isMissingColumn(error, 'prior_defcon_hits')
+        ) {
+          throw new FeatureHistoryError(
+            'feature_history is missing one of element_type / prior_defcon_qualifying_matches / ' +
+              `prior_defcon_hits. Apply ${POSITION_AND_DEFCON_MIGRATION} (ticket #146) before running this job.`,
+            'feature_history',
+          )
+        }
         throw new FeatureHistoryError(`upsert into "feature_history" failed: ${error.message}`, 'feature_history')
       }
     }
@@ -499,6 +646,8 @@ async function main(): Promise<void> {
       rowsContributingToTotals: result.rowsContributingToTotals,
       nonPremierLeagueRowsExcluded: result.nonPremierLeagueRowsExcluded,
       rowsWritten: result.rows.length,
+      rowsWithElementType: result.rowsWithElementType,
+      rowsWithDefconCounters: result.rowsWithDefconCounters,
       playersCovered: result.playersCovered,
       gameweeksCovered: result.gameweeksCovered,
       lastGameweekInData: result.lastGameweekInData,
@@ -507,7 +656,9 @@ async function main(): Promise<void> {
       `${JOB_NAME}: season ${season} — ${result.sourceRowsRead} source row(s) read ` +
       `(${result.rowsContributingToTotals} Premier League row(s) contributing to totals, ` +
       `${result.nonPremierLeagueRowsExcluded} row(s) excluded), ${result.rows.length} dense feature_history row(s) ` +
-      `written across ${result.playersCovered} player(s), through gameweek ${result.lastGameweekInData}.`
+      `written across ${result.playersCovered} player(s), through gameweek ${result.lastGameweekInData} ` +
+      `(${result.rowsWithElementType} carrying a non-null element_type, ` +
+      `${result.rowsWithDefconCounters} carrying non-null defcon counters).`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {
