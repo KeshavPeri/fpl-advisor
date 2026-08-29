@@ -30,11 +30,19 @@
 // ============================================================================
 // feature_history is keyed on player_code, never the FPL element id — 453 of
 // 458 element ids changed between the 2025-2026 and 2026-2027 seasons (see
-// the #12/#22 migrations). This job selects no player_id from either table
-// and resolves position via players.code = feature_history.player_code /
-// player_match_stats.player_code exclusively. Actuals are filtered to
-// competition = PREMIER_LEAGUE_COMPETITION (ticket #54) — cup and European
-// rows score no FPL points and carry 34% higher xG per 90.
+// the #12/#22 migrations). This job selects no player_id from either table.
+// POSITION (ticket #154, fixing a defect this file used to have): the
+// PRIMARY source is feature_history.element_type itself — populated at
+// ingest time from that ROW'S OWN season's players.csv (ticket #146) — with
+// the live players.code = feature_history.player_code / .player_code join a
+// FALLBACK for rows written before that column existed, never the primary
+// path any more. Joining to the live `players` table was the defect: that
+// table holds only the CURRENT season's players, so a 2025-2026 player no
+// longer in the 2026/27 game had no row there and the row was silently
+// dropped as unresolvedPlayerCode — 23% of this job's population. See
+// resolveRowPosition. Actuals are filtered to competition =
+// PREMIER_LEAGUE_COMPETITION (ticket #54) — cup and European rows score no
+// FPL points and carry 34% higher xG per 90.
 //
 // RATE INPUTS COME FROM feature_history's prior_* TOTALS AND NOTHING ELSE.
 // This job never reads player_match_stats to build a rate — that table is
@@ -63,17 +71,31 @@
 //    entirely knowable before that gameweek, so the prior carries no
 //    lookahead either.
 //
-//  - Minutes and defensive-contribution hit rate need PER-MATCH data
-//    (minutes.ts's last-five list; defconRate.ts's per-match threshold
-//    check) that a cumulative total cannot reconstruct exactly. This job
-//    approximates a player's "typical match" — average minutes per prior
-//    match, average CBIT/CBIRT per prior match — and feeds that single
-//    averaged match into estimateMinutes()/estimateDefconHitRate()
-//    unmodified. This is a real approximation (it answers "did the AVERAGE
-//    match cross the threshold", not the true match-to-match distribution)
-//    and is deliberately not hidden: see docs/projection-model-backlog.md's
-//    new section for the "because" and the sanity bounds this file checks
-//    partly guard against exactly this kind of harness error.
+//  - Minutes need PER-MATCH data (minutes.ts's last-five list) that a
+//    cumulative total cannot reconstruct exactly. This job approximates a
+//    player's "typical match" — average minutes per prior match — and feeds
+//    that single averaged match into estimateMinutes() unmodified. This is a
+//    real approximation and is deliberately not hidden: see
+//    docs/projection-model-backlog.md's new section for the "because" and
+//    the sanity bounds this file checks partly guard against exactly this
+//    kind of harness error. Unchanged by ticket #154 — see below.
+//
+//  - Defensive-contribution hit rate ALSO needed per-match data
+//    (defconRate.ts's per-match threshold check), and until ticket #154 was
+//    approximated exactly like minutes above (one averaged "typical match",
+//    checked once against the threshold) — a defect, not a deliberate
+//    approximation: with defconRate.ts's own shrinkage strength that
+//    approximation could never let a player's own evidence carry more than
+//    1/6 of the estimate's weight, REGARDLESS of how many real matches he
+//    had (ticket #146's prior_matches bucket diagnostic below found this
+//    shape and could not explain it until now). Ticket #146 added the real
+//    per-match counters (prior_defcon_qualifying_matches, prior_defcon_hits)
+//    feature_history was missing; ticket #154 reads them and reproduces the
+//    real qualifying-match count and hit count exactly (buildDefconMatches /
+//    buildDefconMatchesFromCounts) — see resolveRowPosition's sibling
+//    section below. The single-averaged-match path remains, unmodified, as
+//    the fallback for a row written before that migration (hasDefconCounters
+//    false) — see buildDefconMatches's own comment.
 //
 //  - Fixture difficulty does not exist in feature_history at all (no
 //    opponent, no elo, no FDR). Every row is projected against a NEUTRAL
@@ -500,11 +522,36 @@ export interface FeatureHistoryPriorFields {
   prior_interceptions: number
   prior_tackles: number
   prior_recoveries: number
+  /**
+   * Ticket #146/#154. Count of this player's Premier League matches strictly
+   * before gameweek_id, this season, with 60+ minutes played — the same
+   * qualifying rule defconRate.ts's isQualifyingMatch() applies. NULL means
+   * never computed (a row written before the #146 migration); 0 is a real
+   * measurement. See the migration's own column comment.
+   */
+  prior_defcon_qualifying_matches: number | null
+  /**
+   * Ticket #146/#154. Of prior_defcon_qualifying_matches, how many reached
+   * the player's position threshold — determined per match via
+   * src/lib/scoring/defensiveContribution.ts, never reimplemented here. NULL
+   * means never computed; 0 is a real measurement.
+   */
+  prior_defcon_hits: number | null
 }
 
 export interface FeatureHistoryRow extends FeatureHistoryPriorFields {
   gameweek_id: number
   player_code: number
+  /**
+   * Ticket #146/#154. The FPL position code as it was in THIS ingested
+   * season, copied from that season's own players.csv — never from the live
+   * `players` table, which holds only the current season's players and
+   * silently drops anyone who has since left the league (23% of this job's
+   * population — see file header). NULL means this row predates the #146
+   * migration or the position could not be resolved that season; the
+   * `players`-table fallback map applies only then — see resolveRowPosition.
+   */
+  element_type: number | null
 }
 
 /** Exact, non-approximated mapping — rates.ts's shrinkage formula is generic in the underlying count. */
@@ -548,12 +595,108 @@ export function buildRecentMinutes(row: Pick<FeatureHistoryPriorFields, 'prior_m
 }
 
 /**
- * The same single-averaged-match approximation, for defconRate.ts's
- * estimateDefconHitRate() — average clearances/blocks/interceptions/tackles/
- * recoveries per prior match, checked once against the position's threshold
- * rather than per real match. Empty for a player with no prior matches.
+ * Ticket #154. True when a feature_history row carries the #146 defensive-
+ * contribution counters — distinguishes "zero qualifying matches, actually
+ * measured" (0, a real value) from "never computed" (null — a row written
+ * before the #146 migration). Both fields are populated together by
+ * build-feature-history.ts, so checking one would do, but checking both
+ * documents the pairing rather than assuming it.
+ */
+export function hasDefconCounters(
+  row: Pick<FeatureHistoryPriorFields, 'prior_defcon_qualifying_matches' | 'prior_defcon_hits'>,
+): boolean {
+  return row.prior_defcon_qualifying_matches !== null && row.prior_defcon_qualifying_matches !== undefined &&
+    row.prior_defcon_hits !== null && row.prior_defcon_hits !== undefined
+}
+
+/** Ticket #154. Which construction `buildDefconMatches` used for one row — surfaced so main() can count and report both, rather than only being able to infer it after the fact. */
+export type DefconMatchSource = 'storedCounters' | 'averagedFallback'
+
+/** Ticket #154. Pure classifier mirroring `buildDefconMatches`'s own branch — kept as its own exported function so the branch main() counts is the exact same branch buildDefconMatches takes, never a second guess at it. */
+export function classifyDefconSource(
+  row: Pick<FeatureHistoryPriorFields, 'prior_defcon_qualifying_matches' | 'prior_defcon_hits'>,
+): DefconMatchSource {
+  return hasDefconCounters(row) ? 'storedCounters' : 'averagedFallback'
+}
+
+/**
+ * Ticket #154. Minutes for every synthetic match `buildDefconMatchesFromCounts`
+ * builds — comfortably over defconRate.ts's own 60-minute qualifying gate, so
+ * every synthetic match this function builds is counted as qualifying by
+ * `isQualifyingMatch`, matching the real per-match rule it is standing in for.
+ */
+const SYNTHETIC_DEFCON_MATCH_MINUTES = 90
+
+/**
+ * Ticket #154. A defensive-actions count no real position's threshold can
+ * reach (defender: 10 CBIT; midfielder/forward: 12 CBIRT — see
+ * src/lib/scoring/defensiveContribution.ts) — used only to guarantee a
+ * synthetic "hit" match clears whichever threshold applies, never compared
+ * against a threshold value directly. This file still never holds the
+ * threshold number itself; it only needs two counts unambiguously on either
+ * side of it, for every position.
+ */
+const GUARANTEED_HIT_DEFENSIVE_ACTIONS = 999
+
+function syntheticHitMatch(): DefensiveContributionMatch {
+  return {
+    minutesPlayed: SYNTHETIC_DEFCON_MATCH_MINUTES,
+    clearances: GUARANTEED_HIT_DEFENSIVE_ACTIONS,
+    blocks: 0,
+    interceptions: 0,
+    tackles: 0,
+    recoveries: 0,
+  }
+}
+
+function syntheticMissMatch(): DefensiveContributionMatch {
+  return { minutesPlayed: SYNTHETIC_DEFCON_MATCH_MINUTES, clearances: 0, blocks: 0, interceptions: 0, tackles: 0, recoveries: 0 }
+}
+
+/**
+ * Ticket #154. Builds exactly `qualifyingMatches` synthetic matches — `hits`
+ * of them constructed to unambiguously reach ANY position's defensive-
+ * contribution threshold, the remaining `qualifyingMatches - hits`
+ * constructed to unambiguously miss it. Every one of them is 90 minutes, so
+ * all `qualifyingMatches` of them pass defconRate.ts's own `isQualifyingMatch`
+ * gate unmodified. Fed through `estimateDefconHitRate` (also unmodified) this
+ * reproduces EXACTLY `(hits + SHRINKAGE_K * positionPrior) / (qualifyingMatches
+ * + SHRINKAGE_K)` — the real per-match threshold check is never
+ * reimplemented here, only two extremes safely on either side of it.
+ *
+ * `hits` is clamped to `[0, qualifyingMatches]` and both inputs are floored
+ * at 0 — defensive against a corrupt row, never expected from a real
+ * feature_history read (prior_defcon_hits <= prior_defcon_qualifying_matches
+ * by construction, see the #146 migration).
+ */
+export function buildDefconMatchesFromCounts(qualifyingMatches: number, hits: number): DefensiveContributionMatch[] {
+  const n = Math.max(0, Math.trunc(qualifyingMatches))
+  const h = Math.min(n, Math.max(0, Math.trunc(hits)))
+  return [...Array.from({ length: h }, syntheticHitMatch), ...Array.from({ length: n - h }, syntheticMissMatch)]
+}
+
+/**
+ * For defconRate.ts's estimateDefconHitRate() — the player's real per-match
+ * qualifying-match count and hit count (ticket #146/#154) when
+ * `feature_history` carries them, reproduced exactly via
+ * `buildDefconMatchesFromCounts`. Falls back to the single-averaged-match
+ * approximation (average clearances/blocks/interceptions/tackles/recoveries
+ * per prior match, checked once) only for a row written before the #146
+ * migration — see `hasDefconCounters`. Empty for a player with no prior
+ * matches and no stored counters.
+ *
+ * The fallback path is the pre-#154 defect this ticket fixes: it feeds
+ * estimateDefconHitRate exactly 0 or 1 matches regardless of how much real
+ * history the row carries, so at defconRate.ts's own shrinkage strength (see
+ * that file's SHRINKAGE_K) a player's own evidence could never carry more
+ * than 1/6 of the estimate's weight. Kept, not deleted, because it is still
+ * the only option for a pre-migration row — see this file's tests for both
+ * paths and the named test proving the old path was the defect.
  */
 export function buildDefconMatches(row: FeatureHistoryPriorFields): DefensiveContributionMatch[] {
+  if (hasDefconCounters(row)) {
+    return buildDefconMatchesFromCounts(row.prior_defcon_qualifying_matches as number, row.prior_defcon_hits as number)
+  }
   if (row.prior_matches <= 0) return []
   const n = row.prior_matches
   return [
@@ -625,6 +768,41 @@ export function computePositionPriors(
 /** Fallback prior for a (gameweek, position) key with no contributing rows — should not occur for a row with prior_matches > 0 (it would have contributed to its own key), kept as a defensive, non-throwing default rather than an assumption the map is always populated. */
 export function fallbackPositionPrior(position: Position): PositionPrior {
   return { rate: positionPriorRates([]), defconHitRate: positionPriorHitRate(position, []) }
+}
+
+// ============================================================================
+// Position resolution — ticket #154. feature_history.element_type is the
+// primary source (populated at ingest time from THAT season's own
+// players.csv — never drops a player who has since left the league); the
+// live `players` table is a fallback for a row written before the #146
+// migration, never the primary source. See file header, "Defect 1".
+// ============================================================================
+
+/** Which of the two sources actually resolved one row's position — surfaced so main() can count all three outcomes for the report, not just apply them. */
+export type PositionResolutionSource = 'elementType' | 'playersFallback' | 'unresolved'
+
+export interface PositionResolution {
+  position: Position | undefined
+  source: PositionResolutionSource
+}
+
+/**
+ * One row's position: `feature_history.element_type` when non-null (cast the
+ * same way `players.element_type` already is at the one existing call site —
+ * no second mapping invented), the `players`-table fallback map when null,
+ * `undefined` (source 'unresolved') only when neither resolves. Named test
+ * covers all three paths.
+ */
+export function resolveRowPosition(
+  row: Pick<FeatureHistoryRow, 'player_code' | 'element_type'>,
+  codeToPosition: ReadonlyMap<number, Position>,
+): PositionResolution {
+  if (row.element_type !== null && row.element_type !== undefined) {
+    return { position: row.element_type as Position, source: 'elementType' }
+  }
+  const fallback = codeToPosition.get(row.player_code)
+  if (fallback !== undefined) return { position: fallback, source: 'playersFallback' }
+  return { position: undefined, source: 'unresolved' }
 }
 
 /** Neutral fixture — see file header. At fplDifficulty 3, every fixture.ts multiplier this produces is exactly 1.0. */
@@ -1046,6 +1224,56 @@ export function assertReconciles(rowsRead: number, measuredCount: number, counts
       'reconciliation',
     )
   }
+}
+
+/**
+ * Ticket #154. How every `feature_history` row read resolved its position —
+ * a strict 3-way partition (`fromElementType + fromPlayersFallback +
+ * unresolved === rows read`), reported alongside the existing exclusion
+ * counts. `unresolved` is the same population `exclusions.unresolvedPlayerCode`
+ * counts (a row that resolves to neither is always excluded that way) —
+ * kept as its own counter rather than reused so the population section can
+ * show the position-resolution breakdown as one self-contained group.
+ */
+export interface PositionResolutionCounts {
+  fromElementType: number
+  fromPlayersFallback: number
+  unresolved: number
+}
+
+export function emptyPositionResolutionCounts(): PositionResolutionCounts {
+  return { fromElementType: 0, fromPlayersFallback: 0, unresolved: 0 }
+}
+
+/** Mutates counts in place from one row's `resolveRowPosition` result. */
+export function incrementPositionResolution(counts: PositionResolutionCounts, source: PositionResolutionSource): void {
+  if (source === 'elementType') counts.fromElementType++
+  else if (source === 'playersFallback') counts.fromPlayersFallback++
+  else counts.unresolved++
+}
+
+/**
+ * Ticket #154. How every `feature_history` row read built its defensive-
+ * contribution match evidence — a strict 2-way partition
+ * (`fromStoredCounters + fromAveragedFallback === rows read`), reported
+ * alongside the position-resolution counters above. Counted over every row
+ * read (not only the measured population): `buildDefconMatches` is also
+ * called for excluded rows via `computePositionPriors`, so this reports the
+ * whole population's defcon-evidence quality, not just the headline's.
+ */
+export interface DefconSourceCounts {
+  fromStoredCounters: number
+  fromAveragedFallback: number
+}
+
+export function emptyDefconSourceCounts(): DefconSourceCounts {
+  return { fromStoredCounters: 0, fromAveragedFallback: 0 }
+}
+
+/** Mutates counts in place from one row's `classifyDefconSource` result. */
+export function incrementDefconSource(counts: DefconSourceCounts, source: DefconMatchSource): void {
+  if (source === 'storedCounters') counts.fromStoredCounters++
+  else counts.fromAveragedFallback++
 }
 
 // ============================================================================
@@ -1475,6 +1703,9 @@ interface ReportData {
   cleanSheetRateByPosition: Partial<Record<Position, number | null>>
   sanity: SanityCheckResult
   exclusions: ExclusionCounts
+  /** Ticket #154. */
+  positionResolution: PositionResolutionCounts
+  defconSource: DefconSourceCounts
   featureHistoryRowsRead: number
   actualRowsMatched: number
   playersRowCount: number
@@ -1610,10 +1841,23 @@ function generateReportMarkdown(data: ReportData): string {
       `- excluded — player did not feature this gameweek (a correct zero that would flatter the error): ${data.exclusions.didNotFeature}\n` +
       `- excluded — blank gameweek (player's team had no fixture at all, ticket #140): ${data.exclusions.blankGameweek}\n` +
       `- excluded — actual data incomplete (\`team_goals_conceded\` null, ~2% known gap, ticket #125): ${data.exclusions.actualDataIncomplete}\n` +
-      `- excluded — unresolved \`player_code\` (no matching \`players\` row): ${data.exclusions.unresolvedPlayerCode} ` +
+      `- excluded — unresolved position (neither \`feature_history.element_type\` nor the \`players\` fallback resolves, ticket #154): ${data.exclusions.unresolvedPlayerCode} ` +
       `(${formatExclusionPercentage(data.exclusions.unresolvedPlayerCode, data.featureHistoryRowsRead)} of rows read)\n\n` +
       `Reconciliation: ${data.measured.length} measured + ${totalExcluded(data.exclusions)} excluded = ` +
       `${data.measured.length + totalExcluded(data.exclusions)}, against ${data.featureHistoryRowsRead} rows read.`,
+  )
+
+  sections.push(
+    '## Position resolution and defensive-contribution evidence (ticket #154)\n\n' +
+      'Ticket #146 added `element_type` and the two per-match defcon counters to `feature_history`; this is the ' +
+      'first slice to read them. Position resolution is a strict 3-way partition of every row read; defcon-evidence ' +
+      'source is a strict 2-way partition of the same population (not only the measured rows below — ' +
+      '`buildDefconMatches` also runs for excluded rows via the position-prior computation).\n\n' +
+      `- position from \`feature_history.element_type\` (primary source): ${data.positionResolution.fromElementType}\n` +
+      `- position from the \`players\` table fallback (row predates ticket #146): ${data.positionResolution.fromPlayersFallback}\n` +
+      `- position unresolved (neither source — excluded as \`unresolvedPlayerCode\` above): ${data.positionResolution.unresolved}\n` +
+      `- defensive-contribution evidence from stored \`prior_defcon_qualifying_matches\`/\`prior_defcon_hits\` counters: ${data.defconSource.fromStoredCounters}\n` +
+      `- defensive-contribution evidence from the pre-#154 single-averaged-match fallback (row predates ticket #146): ${data.defconSource.fromAveragedFallback}\n`,
   )
 
   sections.push('## By position\n\n' + buildPositionTable(data.byPosition, data.cleanSheetRateByPosition))
@@ -1819,7 +2063,8 @@ async function main(): Promise<void> {
       supabase
         .from('feature_history')
         .select(
-          'gameweek_id, player_code, prior_matches, prior_minutes, prior_xg, prior_xa, prior_saves, prior_clearances, prior_blocks, prior_interceptions, prior_tackles, prior_recoveries',
+          'gameweek_id, player_code, element_type, prior_matches, prior_minutes, prior_xg, prior_xa, prior_saves, prior_clearances, prior_blocks, ' +
+            'prior_interceptions, prior_tackles, prior_recoveries, prior_defcon_qualifying_matches, prior_defcon_hits',
         )
         .eq('season', season)
         .order('season', { ascending: true })
@@ -1927,11 +2172,29 @@ async function main(): Promise<void> {
     const teamSlugsByGameweek = buildTeamSlugsByGameweek(matchStatsRows.map((r) => ({ gameweek: r.gameweek, matchId: r.match_id })))
 
     // --------------------------------------------------------------------
+    // 4c. Ticket #154. Resolve one position per player_code for
+    //     computePositionPriors (which keys its own aggregation by player
+    //     code, not by row — see its own comment). First-resolved wins per
+    //     code: feature_history rows are read ordered by (gameweek_id,
+    //     player_code), never by season alone, so this is deterministic run
+    //     to run, not an arbitrary pick. The per-ROW classification loop
+    //     below (step 6) calls resolveRowPosition directly on each row
+    //     instead of this map, for the row-exact resolution the ticket text
+    //     asks for and this map's own comment above.
+    // --------------------------------------------------------------------
+    const resolvedPositionByCode = new Map<number, Position>()
+    for (const row of featureHistoryRows) {
+      if (resolvedPositionByCode.has(row.player_code)) continue
+      const resolution = resolveRowPosition(row, codeToPosition)
+      if (resolution.position !== undefined) resolvedPositionByCode.set(row.player_code, resolution.position)
+    }
+
+    // --------------------------------------------------------------------
     // 5. Position priors, one per (gameweek, position) — see
     //    computePositionPriors' own comment for why this carries no
     //    lookahead.
     // --------------------------------------------------------------------
-    const positionPriors = computePositionPriors(featureHistoryRows, (code) => codeToPosition.get(code))
+    const positionPriors = computePositionPriors(featureHistoryRows, (code) => resolvedPositionByCode.get(code))
 
     // --------------------------------------------------------------------
     // 6. Classify every row, project + reconstruct the measured population.
@@ -1939,9 +2202,18 @@ async function main(): Promise<void> {
     const exclusions = emptyExclusionCounts()
     const measured: MeasuredRow[] = []
     let actualRowsMatched = 0
+    // Ticket #154 — population-health counters, over every feature_history
+    // row read (not only the measured population): see the two interfaces'
+    // own comments for why each counts what it counts.
+    const positionResolutionCounts = emptyPositionResolutionCounts()
+    const defconSourceCounts = emptyDefconSourceCounts()
 
     for (const row of featureHistoryRows) {
-      const position = codeToPosition.get(row.player_code)
+      const resolution = resolveRowPosition(row, codeToPosition)
+      incrementPositionResolution(positionResolutionCounts, resolution.source)
+      incrementDefconSource(defconSourceCounts, classifyDefconSource(row))
+
+      const position = resolution.position
       const actualRowsRaw = actualByPlayerGameweek.get(`${row.player_code}:${row.gameweek_id}`) ?? []
       if (actualRowsRaw.length > 0) actualRowsMatched++
 
@@ -2001,6 +2273,8 @@ async function main(): Promise<void> {
       cleanSheetRateByPosition,
       sanity,
       exclusions,
+      positionResolution: positionResolutionCounts,
+      defconSource: defconSourceCounts,
       featureHistoryRowsRead: featureHistoryRows.length,
       actualRowsMatched,
       playersRowCount: playerRows.length,
@@ -2029,6 +2303,8 @@ async function main(): Promise<void> {
       actualRowsMatched,
       rowsMeasured: measured.length,
       exclusions,
+      positionResolution: positionResolutionCounts,
+      defconSource: defconSourceCounts,
       overallMeanAbsoluteError: overall.meanAbsoluteError,
       overallMeanSignedError: overall.meanSignedError,
       byPosition: Object.fromEntries(POSITIONS.map((p) => [POSITION_NAMES[p], byPosition[p]])),
