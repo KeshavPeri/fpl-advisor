@@ -1,5 +1,5 @@
-v2.0 — rewritten 21 Aug 2026, the morning before the GW1 deadline. Supersedes the v1.0 written in
-the Phase 1 design workshop, which had drifted badly out of date.
+v3.0 — rewritten 29 Aug 2026 against the actual codebase and the `decisions/` log, not from the
+previous version. Supersedes v2.0 (21 Aug), whose status column was wrong on eight items.
 
 # Feature list — build order and status
 
@@ -9,21 +9,26 @@ below it.
 **This is not a ticket list.** Tickets are written from it against the actual codebase, never from
 the brief alone.
 
+**Keep this file current in the merging PR.** v2.0 was eight days old at handover and wrong about
+eight items, which is what produced the twice-asked question *"are these tickets even on the feature
+list?"* — a fair challenge nobody could answer confidently, because the list had stopped tracking
+reality. See `LEARNINGS-second-build-wave.md` §16e.
+
 ---
 
-## Status at a glance, 21 Aug 2026
+## Status at a glance, 29 Aug 2026
 
-**The value loop is closed.** Items 1–15 are all shipped and merged. Real squad in → projections →
-solver-format CSV → solve → recommendation → a Telegram message that arrives on the phone. Verified
-end to end on live data.
+**The value loop closed on 21 Aug and has run on live data since.** Everything merged in the eight
+days since has been model quality, chips, and measurement.
 
-**36 pull requests merged.** 15 migrations, all applied. 15 background jobs. 7 workflows.
-31 per-ticket decision logs.
+**26 of 33 items complete, 2 partly done, 5 open.** Roughly 60 pull requests merged, 20 migrations
+all applied, 68 per-ticket decision logs.
 
-Items 16 and 18 from wave 4 were pulled forward and are also done. **17 of 33 items complete.**
+**The app surface is finished** — items 16 to 21 and 24 all shipped. There is no unbuilt screen on
+this list.
 
-Seven tickets shipped that were never on this list at all — see "Off-list work" at the end. Five of
-the seven were defects found by reading output, not by planning.
+**One item is blocked on an owner decision, not on work:** item 22's in-app "Run now" button needs a
+credential in the browser, which is Tier 1.
 
 ---
 
@@ -35,7 +40,7 @@ the seven were defects found by reading output, not by planning.
 4. ✅ **FPL API ingest job** — `bootstrap-static/` and `fixtures/`. *#11*
 5. ✅ **FPL-Core-Insights ingest job** — per-match CSVs including CBIT and recoveries. *#12*
 6. ✅ **Squad state schema and manual squad entry** — `/squad`. *#13*
-7. ✅ **Squad sync from the public FPL API** — reconciles, never silently overwrites. *#14*
+7. ✅ **Squad sync from the public FPL API** — reconciles, never silently overwrites. *#14*, carry-forward *#101*
 
 ## Wave 2 — projections ✅ complete
 
@@ -46,85 +51,107 @@ the seven were defects found by reading output, not by planning.
 
 ## Wave 3 — recommendation and delivery ✅ complete
 
-12. ✅ **Solver integration** — runs `sertalpbilal/FPL-Optimization-Tools` at a pinned commit,
-    stores `solver_runs` / `solver_picks`. *#41*
+12. ✅ **Solver integration** — `sertalpbilal/FPL-Optimization-Tools` at a pinned commit,
+    stores `solver_runs` / `solver_picks`. *#41*, fails loudly on no squad *#83*
 13. ✅ **Recommendation generation** — Plan A/B/C, confidence bands, explicit hit cost,
-    stored reasoning, data-coverage flags. *#47*, refined by *#60*
+    stored reasoning, data-coverage flags. *#47*, refined *#60*
 14. ✅ **Telegram sender** — headline first, no emoji, no decimals. *#55*
 15. ✅ **Notification schedule** — 24h and 10h before each deadline, double-send prevented by a
-    database constraint. *#59*
+    database constraint. *#59*, duplicate check scoped to its trigger *#90*
 
-## Wave 4 — the app surface 🔶 partly done
+## Wave 4 — the app surface ✅ complete
 
 16. ✅ **Pitch view** — formation, bench separated, availability rings. *#38*, polished *#44*
-17. ✅ **Verdict card** — the recommendation on the home screen. *#61*, corrected by *#68* and *#72*
+17. ✅ **Verdict card** — the recommendation on the home screen. *#61*, corrected *#68*, *#72*
 18. ✅ **Deadline countdown** — understated, escalating inside 24 hours. *#42*
-19. ⬜ **Commit action** — one tap per recommendation. *Depends on 17.*
-20. ⬜ **Override registration** — deliberate friction, writes the decision ledger. *Depends on 7, 19.*
-21. ⬜ **Reasoning screen** — stored reasons and the underlying numbers. *Depends on 13, 17.*
-    **Next UI ticket.** Right now the only way to see why a recommendation was made is a SQL query
-    against `player_projections.components`.
+19. ✅ **Commit action** — one tap per recommendation. *#84*
+20. ✅ **Override registration** — deliberate friction, writes the decision ledger. *#91*,
+    records the recommendation inside the snapshot *#107*
+21. ✅ **Reasoning screen** — stored reasons and the underlying numbers. *#79*, Plan B and Plan C
+    added *#102*
 
-## Wave 5 — daily cadence
+## Wave 5 — daily cadence 🔶 blocked on an owner decision
 
-22. ⬜ **Daily projection run and "Run now" button** — plus the early-transfer advisory.
-    *Depends on 13, 14.* The daily run half already exists via `scheduled-jobs.yml` and
-    `solver-run.yml`; the in-app trigger does not, and needs a credential in the browser, which
-    is a Tier 1 problem to solve deliberately.
+22. ⬜ **Daily projection run and "Run now" button.** **The daily run half is done** —
+    `scheduled-jobs.yml` and `solver-run.yml` run it. **The in-app trigger is not built and is not
+    a normal ticket:** firing a workflow from the browser needs a GitHub credential in the client
+    bundle, which is Tier 1 and owner-only. Decide the mechanism before writing a ticket for it.
 
-## Wave 6 — self-measurement 🔶 partly done
+## Wave 6 — self-measurement ✅ complete
 
 23. ✅ **Prediction log and post-lockdown settlement** — snapshot frozen at the deadline, settled
     after 09:00 UK the morning after the final match, signed error stored. *#73*
-24. ⬜ **Rolling accuracy display** — visible, not buried. *Depends on 23.* Nothing reads the
-    prediction log yet.
+24. ✅ **Rolling accuracy display** — on the home screen, with a minimum sample size below which it
+    reports "too small to read" rather than a number. *#96*
 
-## Wave 7 — chips
+## Wave 7 — chips ✅ complete
 
-25. ⬜ **Chip state tracking** — which used, which set, expiry against the GW19 deadline.
-    *Depends on 7.* `squads.chips_used` already stores the raw state.
-26. ⬜ **Chip expiry warnings** — escalating as 2 January 2027 approaches. *Depends on 15, 25.*
-27. ⬜ **Chip recommendation** — enable the solver's chip flags. *Depends on 12, 25.*
-    `chip_limits` are currently all zero, deliberately.
+25. ✅ **Chip state tracking** — which used, which set, expiry against the GW19 deadline. *#85*
+26. ✅ **Chip expiry warnings** — escalating urgency band as 2 January 2027 approaches. *#97*
+27. ✅ **Chip recommendation — shipped as an ADVISORY, deliberately never an instruction.**
+    Dispatch-only probe first *#114*, then the stored advisory *#126*, display corrected *#141*.
+    `chip_advisories` is architecturally unreadable by `recommendations`, `solver_picks` or the
+    Telegram message, so a chip delta can never become "play this chip". Per `product-brief.md` §6a.
 
-## Wave 8 — full-squad solving
+## Wave 8 — full-squad solving 🔶 built, never run
 
-28. ⬜ **Wildcard and free-hit full-squad solve** — the solver's squad-build path.
-    *Depends on 12, 27.* The solver's `preseason` mode does this and is deliberately never enabled.
+28. 🔶 **Wildcard and free-hit full-squad solve.** *#134* built `squad-rebuild-probe.yml` and
+    `store-squad-advisory.ts`, with five stated guard rails keeping `preseason: true` away from
+    every stored table. **The workflow has never been dispatched** — a `workflow_dispatch` file is
+    only invocable once it is on the default branch, so nothing has yet proved the solver behaves
+    sanely building a squad from nothing. **This is an outstanding human check, not a ticket.**
 
 ## Wave 9 — the model upgrade
 
-29. ⬜ **Point-in-time historical feature pipeline** — lookahead-free reconstruction. *Depends on 5.*
-    **The single largest item on this list**, shared with the backtest. Repeatedly declared
-    out of scope in tickets, on purpose.
-30. ⬜ **OpenFPL retrain on post-defcon data.** *Depends on 29.*
+29. ✅ **Point-in-time historical feature pipeline** — `feature_history`, strictly-before cumulative
+    totals per (season, gameweek, player_code). *#121*, completed *#125*, position and per-match
+    defensive-contribution counters added *#146*. **The substrate is finished; `run-backtest.ts`
+    still reads neither `element_type` nor the two defcon counters**, which is why the 23% backtest
+    exclusion and the defcon error are both unchanged. That consumer read is the open work.
+30. ⬜ **OpenFPL retrain on post-defcon data.** *Depends on 29.* Not started.
 31. ⬜ **Swap the projection source behind the CSV seam.** *Depends on 11, 30.* Should touch nothing
     but the projection job. `player_projections.model_version` exists so a successor can be written
     alongside `baseline-v1` rather than over it.
 
-## Wave 10 — backtest
+## Wave 10 — backtest 🔶 partly done
 
-32. ⬜ **Season simulation harness.** *Depends on 12, 29.*
-33. ⬜ **Mini-league comparison** against the ~20 real managers. *Depends on 32.*
+32. 🔶 **Season simulation harness.** The **projection-level** slices are built: the harness itself
+    *#133*, multi-fixture gameweeks and the defcon diagnostic *#140*, ranking skill *#147*.
+    **The recommendation-level replay — transfers, captaincy, a season's league position — is not
+    built**, and cannot be a genuine replay of Keshav's own decisions: the app did not exist in
+    2025/26 and there is no stored squad for that season.
+33. ⬜ **Mini-league comparison** against the ~20 real managers. *Depends on 32.* Not started.
 
 ---
 
 ## Off-list work that shipped
 
-None of these were planned. Five of the seven were defects found by reading output.
+None of these were planned. The majority were defects found by reading output, not by testing —
+which `LEARNINGS-second-build-wave.md` §2 and §9 name as the most valuable input the human provides.
 
-| Ticket | What | How it was found |
-|---|---|---|
-| #22 | `player_code` stable cross-season join key | QA on #12 noticed element ids move between seasons |
-| #26 | Fixed backdrop behind scrolling content | Visual review on the phone |
-| #29 | Solver GitHub Action smoke test | Pulled forward as the largest unproven risk |
-| #32 | ClubElo matched by team **code**, not id | Reading the ingest code while writing item 10's ticket |
-| #43 | Paginate every Supabase read | 1,000 exactly — a round number in a job's own counters |
-| #48 | Baseline calibration report | Written to settle a modelling doubt with a number |
-| #54 | Premier-League-only match filter, `team_goals_conceded` | Keshav noticed a 38-game season showing 54 matches |
-| #63 | Null ClubElo for unmatched clubs | Preflight's own counters reconciling to the wrong number |
-| #69 | Preflight check | Written because nothing answered "is the whole chain healthy" |
-| #72 | Verdict card filtered to one solver run | A displayed figure that was roughly double |
+**Waves 1–3 (to 21 Aug):** *#22* stable `player_code` join key · *#26* fixed backdrop ·
+*#29* solver smoke test · *#32* ClubElo matched by team code · *#43* paginate every Supabase read ·
+*#48* baseline calibration report · *#54* Premier-League-only filter and `team_goals_conceded` ·
+*#63* null ClubElo for unmatched clubs · *#69* preflight check · *#72* verdict card scoped to one
+solver run.
+
+**Since 21 Aug:**
+
+| Ticket | What |
+|---|---|
+| #66 | Chip cross-check — solution indexing and body layout |
+| #77 | Treat an FPL overall rank of zero as unranked |
+| #78 | **Project bonus points** and share them across each fixture — the largest model gap on the v2.0 list |
+| #89 | Narrow the preflight projections check to available players |
+| #95 | Widen the solver's player pool (`keep_top_ev_percent` 5→25, `ev_per_price_cutoff` 30→10) |
+| #103, #107 | Decision history screen, and the recommendation inside the override snapshot |
+| #108, #120, #142 | Solver settings audit closed — `no_transfer_last_gws`, `decay_base`, `ft_value_list` all now set explicitly |
+| #109 | Scale goalkeeper saves with fixture difficulty |
+| #113 | **Two-stage shrinkage** — this season, shrunk toward (last season, shrunk toward the position average) |
+| #115 | Preflight alarm for the league-baseline-goals fallback |
+| #119 | Price as a weak prior for players with no Premier League history |
+| #127, #132 | Instrument repairs — calibration report restored to like-for-like, solver Results parser and clean-sheet source fixed |
+| #148 | Position-specific assist conversion — assist signed error −0.095 → −0.032 |
 
 ---
 
@@ -132,15 +159,22 @@ None of these were planned. Five of the seven were defects found by reading outp
 
 Not tickets — the shape of the queue. Whoever writes them must read the codebase first.
 
-1. **Bonus-point projection.** The largest single gap in the model and the known cause of an open
-   question about captaincy. See `docs/projection-model-backlog.md` G3.
-2. **Item 21, the reasoning screen.** The app cannot currently explain itself.
-3. **Item 24, rolling accuracy.** The prediction log has nowhere to surface.
-4. **Widen the solver's player pool.** `keep_top_ev_percent` (5) and `ev_per_price_cutoff` (30)
-   prune hard; the solver has only ever surfaced a handful of transfer targets.
-5. **Items 19 and 20 together**, the commit action and override registration.
-6. **Narrow the preflight projections check** to available players only — it currently fails on a
-   non-reason. Draft already written: `tickets/drafts/32-preflight-available-players-only.md`.
+1. **Deterministic ordering on every paginated read.** Draft written:
+   `tickets/drafts/73-deterministic-pagination.md`. Roughly 31 paginated call sites pass no
+   `ORDER BY`, and one more orders by a non-unique column. Currently visible as preflight check 7
+   failing. **This goes first because every measurement depends on it**, and it should run alone or
+   with one companion that touches `src/lib/projection/` only.
+2. **Make the consumers read `feature_history.element_type` and the two defcon counters** (item 29's
+   open half). Kills the 23% backtest exclusion and makes the defensive-contribution question
+   answerable. Unblocked by #146; touches `scripts/run-backtest.ts`, so it cannot batch with 1.
+3. **A ranking baseline comparator, plus the top-N population cap.** #147's Spearman 0.289 has no
+   comparator and is uninterpretable; its by-position top-N overlap is arithmetically fake wherever
+   the position's population is smaller than N. Both defects are in
+   `scripts/run-backtest.ts` — cannot batch with 1 or 2.
 
-`docs/projection-model-backlog.md` holds eight known model gaps, each with its direction of error
-and the shape of a fix. Read it before writing anything that touches projections.
+**After those:** horizon ranking (the solver optimises over 5 gameweeks; #147 measured 1) ·
+goalkeeper ranking, Spearman 0.024 · the residual GW33 error · item 29's consumer work feeding
+item 30.
+
+**Drafts written, deliberately not filed:** `tickets/drafts/59-model-version-seam.md`,
+`tickets/drafts/69-ft-value-list-explicit.md` (may have been filed as #142 — check before reusing).
