@@ -102,6 +102,134 @@ export function cleanSheetProbability(lambdaConceded: number): number {
 }
 
 // ============================================================================
+// Assist conversion — ticket #148.
+//
+// MECHANISM (verified, not assumed). `expectedAssists = xaPer90 x
+// minutesFraction x attackMultiplier` measures the QUALITY of chances a
+// player creates (xA), not whether the recipient actually scored. FPL's
+// assist rule credits some events xA does not model at all -- a penalty won
+// (and converted by someone else), an own goal forced, and (in some
+// seasons) a second assist. Goals are calibrated near-perfectly on two
+// independent instruments that use this SAME attackMultiplier and minutes
+// model (backtest: -0.006 signed error; calibration report: 1.02x-1.03x
+// proj/actual) -- which rules out both as the cause and localises the gap
+// to this xA-to-assist conversion step specifically. No other component in
+// this file is touched by this section.
+//
+// MEASUREMENT (28 Aug 2026, ticket #148): actual assists / sum(xA), by
+// position, computed directly from FPL-Core-Insights' published per-gameweek
+// player-match CSVs -- the same source scripts/ingest-core-insights.ts reads
+// into player_match_stats -- for season 2025-2026, Premier League matches
+// only (competition = 'prem' after stripping the season prefix, the same
+// rule scripts/lib/competition.ts's PREMIER_LEAGUE_COMPETITION applies to
+// player_match_stats.match_id). Position resolved via that season's own
+// players.csv (player_id -> position), fetched from the same source, since
+// FPL element ids are not stable across a season boundary (see the
+// player_match_stats migration's own header) and this repo does not hold a
+// locally queryable 2025-2026 players table to join against.
+//
+//   Position   | actual assists | sum(xA)    | ratio (actual/xA) | sample
+//   Goalkeeper |             5  |   2.170866 |  2.303228          | n=1026 player-matches, 56 players (THIN -- 5 events total; see clamp below)
+//   Defender   |           237  | 182.908110 |  1.295733          | n=4450 player-matches, 189 players
+//   Midfielder |           593  | 444.415323 |  1.334337          | n=5763 player-matches, 254 players
+//   Forward    |           107  |  50.556239 |  2.116455          | n=1515 player-matches, 66 players
+//
+// This is a per-position table, not one flat factor, because the gap is not
+// flat: forwards measure at roughly double defenders/midfielders here, and
+// the ticket's two other, independently-built instruments (a point-in-time
+// backtest and a separately-computed calibration report, built from
+// different data on a different basis) corroborate the same direction and
+// roughly the same relative size (defender 0.74x, midfielder 0.78x, forward
+// 0.43x proj/actual -- inverting to roughly 1.35x/1.28x/2.33x actual/proj,
+// in the same range as the ratios measured directly above). A single factor
+// fitted across all four would over-correct defenders/midfielders and
+// under-correct forwards -- exactly the comparison a captaincy decision
+// turns on. Had the four positions instead measured close together, a
+// single flat factor would have been the right, simpler call; they did not.
+// ============================================================================
+
+/**
+ * Clamp range for the assist conversion factors below. A calibration
+ * constant derived from one season on one data source is a reasonable
+ * correction and a poor law -- a future re-measurement on a thinner sample
+ * (an early-season slice, or a position with few events, exactly like the
+ * goalkeeper row above) must not be able to swing `expectedAssists` by an
+ * arbitrary amount. The clamp is applied at the point of use (see
+ * `assistConversionFactor` below), not baked into the constants themselves,
+ * so it protects a future edit to those constants too, not only today's
+ * values.
+ *
+ * MIN = 1.0: the mechanism this factor corrects for (missing credit for
+ * penalties won, own goals forced, and second assists) only ever ADDS
+ * assists beyond what xA predicts -- a strictly upward correction. A
+ * measured factor below 1.0 would claim the opposite (xA overcounts
+ * assists), contradicting both the documented mechanism and the goals
+ * comparison above (goals need no downward correction either -- effectively
+ * 1.0x on both instruments). Below 1.0 is treated as measurement noise, not
+ * a real effect, and floored at 1.0.
+ *
+ * MAX = 2.5: comfortably above the largest well-supported measured ratio
+ * above (forward, 2.12x, n=107 assists) without permitting an unbounded
+ * multiplier from a thin future sample -- the goalkeeper row above (2.30x
+ * from just 5 assists league-wide) is exactly the kind of thin sample this
+ * bound exists to contain; it happens to land under 2.5 this season, but a
+ * different season's small handful of goalkeeper assists easily might not.
+ */
+export const ASSIST_CONVERSION_MIN = 1.0
+export const ASSIST_CONVERSION_MAX = 2.5
+
+/** Measured actual/xA ratio, goalkeepers, rounded to two decimals. Raw measurement: 5 / 2.170866 = 2.303228 (n=1026 player-matches, 56 players) -- see the section header above. Thin sample; the clamp above is this constant's real protection. */
+export const ASSIST_CONVERSION_GOALKEEPER = 2.3
+/** Measured actual/xA ratio, defenders, rounded to two decimals. Raw measurement: 237 / 182.908110 = 1.295733 (n=4450 player-matches, 189 players) -- see the section header above. */
+export const ASSIST_CONVERSION_DEFENDER = 1.3
+/** Measured actual/xA ratio, midfielders, rounded to two decimals. Raw measurement: 593 / 444.415323 = 1.334337 (n=5763 player-matches, 254 players) -- see the section header above. */
+export const ASSIST_CONVERSION_MIDFIELDER = 1.33
+/** Measured actual/xA ratio, forwards, rounded to two decimals. Raw measurement: 107 / 50.556239 = 2.116455 (n=1515 player-matches, 66 players) -- see the section header above. */
+export const ASSIST_CONVERSION_FORWARD = 2.12
+
+/** Clamps a raw assist conversion factor into [ASSIST_CONVERSION_MIN, ASSIST_CONVERSION_MAX]. See the clamp comment above for why this exists and why the bounds sit where they do. */
+export function clampAssistConversionFactor(factor: number): number {
+  return Math.min(ASSIST_CONVERSION_MAX, Math.max(ASSIST_CONVERSION_MIN, factor))
+}
+
+/**
+ * This position's assist conversion factor, clamped. A `switch` with one
+ * explicit, named case per position -- goalkeeper gets its own named case
+ * and its own measured constant, exactly like every outfield position,
+ * rather than silently inheriting a shared fallback. The only `default:` is
+ * `assertNeverPosition` below, which every valid `Position` value is
+ * guaranteed by the four cases above never to reach -- it exists so an
+ * invalid position code fails loudly instead of one of the four real cases
+ * quietly acting as an unlabelled default for it.
+ *
+ * Cased on the plain position codes (1 GK, 2 DEF, 3 MID, 4 FWD) rather than
+ * the imported GOALKEEPER/DEFENDER/... constants: those are typed as the
+ * widened `Position` union in scoring/types.ts, not as literal types (see
+ * pointValues.ts's own comment on the same point), so TypeScript cannot
+ * narrow `position` down to `never` after them the way it can after the
+ * literals.
+ */
+export function assistConversionFactor(position: Position): number {
+  switch (position) {
+    case 1: // goalkeeper
+      return clampAssistConversionFactor(ASSIST_CONVERSION_GOALKEEPER)
+    case 2: // defender
+      return clampAssistConversionFactor(ASSIST_CONVERSION_DEFENDER)
+    case 3: // midfielder
+      return clampAssistConversionFactor(ASSIST_CONVERSION_MIDFIELDER)
+    case 4: // forward
+      return clampAssistConversionFactor(ASSIST_CONVERSION_FORWARD)
+    default:
+      return assertNeverPosition(position)
+  }
+}
+
+/** Unreachable at runtime for a valid `Position` -- exists only so TypeScript can verify the switch above is exhaustive without a `default:` case that would silently swallow an unrecognised position code. */
+function assertNeverPosition(position: never): never {
+  throw new Error(`assistConversionFactor: unhandled position code ${String(position)}`)
+}
+
+// ============================================================================
 // Player + fixture inputs
 // ============================================================================
 
@@ -175,6 +303,8 @@ export interface FixtureModelInputs {
   xaPer90: number
   savesPer90: number
   defconHitRate: number
+  /** xaPer90 x minutesFraction x attackMultiplier x this position's assistConversionFactor -- ticket #148. The same value assistPoints is derived from; surfaced here (alongside the existing per-fixture inputs) as well as on expectedEvents so the reasoning screen and any future calibration work can see the adjusted figure, not only the resulting points. */
+  expectedAssists: number
   expectedScore: number
   expectedGoalsConceded: number
   /** The defensive multiplier applied to savesPer90 for this fixture -- see fixture.ts's defensiveMultiplier. Ticket #109. */
@@ -221,7 +351,13 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
   const teamLambdaConceded = expectedGoalsConceded(fixture.leagueBaselineGoals, expectedScoreValue)
 
   const expectedGoals = playerRates.xgPer90 * minutesFraction * attackMultiplier
-  const expectedAssists = playerRates.xaPer90 * minutesFraction * attackMultiplier
+  // Ticket #148: xA measures chance quality, not conversion -- see this
+  // file's "Assist conversion" section above for the mechanism, the
+  // measurement and why it is per-position rather than one flat factor.
+  // Nothing upstream of this line (xaPer90, minutesFraction,
+  // attackMultiplier) is touched by that ticket.
+  const expectedAssists =
+    playerRates.xaPer90 * minutesFraction * attackMultiplier * assistConversionFactor(player.position)
   // Saves scale with the same fixture pressure that raises goals conceded --
   // a keeper facing a team twice as likely to score faces roughly twice the
   // shot volume. See fixture.ts's defensiveMultiplier and
@@ -274,6 +410,7 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
       xaPer90: playerRates.xaPer90,
       savesPer90: playerRates.savesPer90,
       defconHitRate,
+      expectedAssists,
       expectedScore: expectedScoreValue,
       expectedGoalsConceded: teamLambdaConceded,
       savesMultiplier,
