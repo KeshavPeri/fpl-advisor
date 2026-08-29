@@ -108,6 +108,86 @@
 // than silently passed over.
 //
 // ============================================================================
+// Appearance-weighted projected side (ticket #155).
+// ============================================================================
+// The run of 29 Aug 2026, 16:30 UTC printed a goalkeeper appearance-points
+// ratio of 1.42x (proj/actual) — arithmetically impossible, since appearance
+// points are capped at 2 per match and do not scale continuously with
+// minutes the way a goal does. The cause: the projected side (section 6
+// below) computed Σ component / Σ expectedMinutes × 90 over EVERY projected
+// row, including every backup and third-choice player, while the actual side
+// (section 5) computes Σ points / Σ minutes × 90 over matches that were
+// ACTUALLY PLAYED. Substituting the model's own definitions
+// (expectedMinutes = avgMinutesGivenAppearing × pAppears,
+// pSixtyPlus = sixtyPlusRate × pAppears, from src/lib/projection/minutes.ts)
+// shows a single row's own LOCAL ratio (component_row / expectedMinutes_row
+// × 90) does not depend on pAppears at all — it cancels out of that one
+// row's own division. That is fine for any ONE row, but it means the
+// previous ratio-of-SUMS across many rows implicitly weighted each row by
+// its own expectedMinutes (which bakes a row's typical playing time back
+// into the weight, on top of that same playing time already setting the
+// row's local ratio) rather than by how often the model actually expects
+// that row to be a genuine appearance at all.
+//
+// The fix (appearanceWeightedPer90 below): weight each row's contribution
+// to BOTH the numerator and the denominator by its own pAppears, ON TOP of
+// expectedMinutes (which already carries one pAppears factor from the
+// substitution above) — Σ(pAppears × value) / Σ(pAppears × expectedMinutes)
+// × 90, an EXTRA appearance-confidence discount, not a replacement for the
+// minutes-based weight. A simpler first design — a MEAN OF a row's own
+// local ratio, weighted by pAppears alone (dropping expectedMinutes from
+// the weight entirely) — was tried and DISPROVEN by hand before this one
+// shipped: because expectedMinutes already bakes in one pAppears factor,
+// weighting by pAppears alone REMOVES the avgMinutes term from the weight,
+// which makes a low-minutes backup row's relative influence LARGER than the
+// pre-#155 construction gave it, provably, for any pAppears values — the
+// opposite of the intended fix (see appearanceWeightedPer90's own doc
+// comment for the algebra, and the constructed four-position fixture that
+// caught it: every position's ratio went UP under that design). The
+// construction actually shipped has the reverse, correct property: a row's
+// weight-share against a nailed starter's is exactly
+// (pAppears_row / pAppears_starter) times SMALLER than under the pre-#155
+// construction, regardless of avgMinutes — so the estimate answers
+// "conditional on the player appearing, weighted by how often the model
+// expects him to appear" (the ticket's own words) in a way that actually
+// suppresses backup drag, the same quantity the actual side already
+// measures by construction (a match either happened or it did not). This
+// is applied to every per-90 figure on the projected side: the headline
+// total (meanPointsPer90), every per-component rate (componentPer90), and
+// the excluded-bonus rate (excludedBonusPer90, ticket #127) — not
+// appearance points alone.
+//
+// pAppears/pSixtyPlus are read from player_projections.components.fixtures[]
+// — VERIFIED against the live shape scripts/project-points.ts actually
+// writes (src/lib/projection/expectedPoints.ts's FixtureModelInputs, read
+// 29 Aug 2026 for this ticket): each element of components.fixtures IS a
+// FixtureModelInputs object directly (fixtureId, pAppears, pSixtyPlus, ...),
+// NOT nested one level deeper under its own .modelInputs key as an earlier
+// draft of this ticket assumed. A player's fixtures within one gameweek
+// share an identical pAppears/pSixtyPlus (estimateMinutes is called once
+// per player-gameweek on player-level inputs, reused for every fixture — see
+// expectedPoints.ts's projectPlayerFixture), so reading components.fixtures[0]
+// is exact, not an approximation, for however many fixtures a row covers
+// (including a double gameweek).
+//
+// A row with no components.fixtures array, an empty one, or a fixture whose
+// pAppears is absent — every row written before ticket #109/#148 added
+// modelInputs — is weighted 1 (its raw value and raw expectedMinutes pass
+// through unscaled), exactly the PRE-#155 construction for that row alone
+// (ticket Notes: "acceptable and probably right"). rowsAppearanceWeighted /
+// rowsFallbackUnweighted on PositionProjectedAggregate count the two
+// populations per position; the report states both counts in its
+// provenance section.
+//
+// A sanity bound (assertAppearancePointsPlausible, below) checks projected
+// appearance pts/90 against a plausible range around the arithmetic ceiling
+// of 2 points per appearance, per position, and FAILS the report — never
+// merely warns — when a position falls outside it. This is the guard that
+// would have caught the 29 Aug run's 2.84 goalkeeper figure; see this file's
+// test for that exact reproduction.
+// ============================================================================
+
+// ============================================================================
 // Wiring.
 // ============================================================================
 // Reads exactly SUPABASE_URL and SUPABASE_SECRET_KEY. No VITE_-prefixed
@@ -585,6 +665,17 @@ export interface ProjectedAggregationInput {
   components: ComponentTotals
   /** Bonus already subtracted out of expectedPoints above (ticket #127) — carried separately so the report can print what was excluded alongside each total. Optional so pre-existing fixtures that never touch bonus continue to pass unmodified; absent is treated as zero, same as excludeBonusFromProjection's own default. */
   excludedBonus?: number
+  /**
+   * Ticket #155: this player-gameweek row's probability of being a genuine
+   * appearance, read from components.fixtures[0].pAppears (identical across
+   * a player's fixtures within one gameweek — see the "Appearance-weighted
+   * projected side" section above). Optional so a row written before ticket
+   * #109/#148 added modelInputs — which has no pAppears to read — continues
+   * to pass unmodified: aggregateProjectedByPosition falls back to the
+   * pre-#155 unweighted construction for that one row when this is absent,
+   * rather than dropping the row or throwing.
+   */
+  pAppears?: number
 }
 
 export interface PositionProjectedAggregate {
@@ -593,14 +684,93 @@ export interface PositionProjectedAggregate {
   distinctPlayerCount: number
   totalExpectedMinutes: number
   totalExpectedPoints: number
+  /** Ticket #155: appearance-weighted (see appearanceWeightedPer90) — no longer the raw totalExpectedPoints / totalExpectedMinutes × 90 ratio. */
   meanPointsPer90: number | null
+  /** Ticket #155: every field appearance-weighted, same construction as meanPointsPer90 above, per component. */
   componentPer90: ComponentTotals | null
   /** Ticket #127 — total and per-90 bonus excluded from totalExpectedPoints above, for this position, printed alongside the projected total in the report. */
   totalExcludedBonus: number
+  /** Ticket #155: appearance-weighted, same construction as meanPointsPer90 above. */
   excludedBonusPer90: number | null
+  /** Ticket #155: rows in this position whose pAppears was present — contributed to the appearance-weighted estimate proper. */
+  rowsAppearanceWeighted: number
+  /** Ticket #155: rows in this position whose pAppears was absent — fell back to the pre-#155 unweighted construction for that row alone. Expected to be 0 for a live table; counted rather than assumed. */
+  rowsFallbackUnweighted: number
 }
 
-/** Aggregates stored player_projections rows by position — same per-90 shape as the actual side, so the two are directly comparable. */
+/**
+ * Ticket #155: appearance-weighted per-90 estimator for the projected side —
+ * see the "Appearance-weighted projected side" section near the top of this
+ * file for the full derivation of why this replaces a plain
+ * Σvalue / Σminutes × 90 ratio-of-sums.
+ *
+ * IMPORTANT — a simpler first design was tried and rejected before this one.
+ * The obvious reading of "weight by pAppears" is a MEAN OF RATIOS: compute
+ * each row's own local per-90 ratio (value_row / expectedMinutes_row × 90,
+ * which is already pAppears-independent — see the file header) and average
+ * those, weighted by pAppears_row. That construction was implemented,
+ * tested, and then DISPROVEN by hand: because expectedMinutes_row already
+ * equals avgMinutesGivenAppearing_row × pAppears_row, a mean-of-ratios
+ * weighted by pAppears_row ALONE removes the avgMinutes factor from the
+ * weight entirely — which makes a low-avgMinutes backup row's relative
+ * influence LARGER than the pre-#155 construction gave it, never smaller,
+ * regardless of how low that row's pAppears is set. Algebraically: its
+ * weight-share versus a nailed starter's is always exactly
+ * (avgMinutes_starter / avgMinutes_backup) times BIGGER than under the old
+ * ratio-of-sums. Verified numerically on a four-position constructed
+ * fixture before this ticket shipped: every position's ratio went UP, not
+ * down. That construction is not used here.
+ *
+ * What IS used: weight each row's contribution to BOTH the numerator and
+ * the denominator by its own pAppears, ON TOP of expectedMinutes (which
+ * already carries one pAppears factor) — i.e. an EXTRA appearance-confidence
+ * discount, not a replacement for the minutes-based weight:
+ *
+ *   Σ(pAppears_row × value_row) / Σ(pAppears_row × expectedMinutes_row) × 90
+ *
+ * This has the property the ticket asks for, PROVABLY: a row's weight-share
+ * versus a nailed starter's is now exactly (pAppears_row / pAppears_starter)
+ * times SMALLER than under the pre-#155 construction — for ANY avgMinutes
+ * values — so a row the model expects to rarely be a genuine appearance is
+ * discounted further than expectedMinutes alone already discounted it, and
+ * strictly more so than the mean-of-ratios attempt above. Verified on the
+ * same four-position fixture: every position's ratio fell.
+ *
+ * A row whose pAppears is absent (written before ticket #109/#148 added
+ * modelInputs) is treated as weight 1 — this row's raw value and raw
+ * expectedMinutes pass through unscaled, exactly the pre-#155 construction
+ * for that row alone (ticket Notes: "acceptable and probably right"). When
+ * EVERY row in the population lacks pAppears, this reduces EXACTLY to the
+ * pre-#155 Σvalue / Σminutes × 90 formula — which is why the tests written
+ * before this ticket, none of which set pAppears, still pass unmodified.
+ */
+export function appearanceWeightedPer90(
+  records: readonly ProjectedAggregationInput[],
+  valueOf: (record: ProjectedAggregationInput) => number,
+): number | null {
+  let weightedNumerator = 0
+  let weightedDenominator = 0
+
+  for (const record of records) {
+    const weight = record.pAppears ?? 1
+    weightedNumerator += weight * valueOf(record)
+    weightedDenominator += weight * record.expectedMinutes
+  }
+
+  return weightedDenominator > 0 ? (weightedNumerator / weightedDenominator) * 90 : null
+}
+
+const PROJECTED_COMPONENT_KEYS: ReadonlyArray<keyof ComponentTotals> = [
+  'appearancePoints',
+  'goalPoints',
+  'assistPoints',
+  'cleanSheetPoints',
+  'goalsConcededPoints',
+  'savePoints',
+  'defensiveContributionPoints',
+]
+
+/** Aggregates stored player_projections rows by position — same per-90 shape as the actual side, so the two are directly comparable. Ticket #155: every per-90 figure is appearance-weighted — see appearanceWeightedPer90. */
 export function aggregateProjectedByPosition(
   records: readonly ProjectedAggregationInput[],
 ): Record<Position, PositionProjectedAggregate> {
@@ -611,7 +781,15 @@ export function aggregateProjectedByPosition(
     const totalExpectedMinutes = forPosition.reduce((sum, r) => sum + r.expectedMinutes, 0)
     const totalExpectedPoints = forPosition.reduce((sum, r) => sum + r.expectedPoints, 0)
     const totalExcludedBonus = forPosition.reduce((sum, r) => sum + (r.excludedBonus ?? 0), 0)
-    const componentTotals = sumComponents(forPosition.map((r) => r.components))
+    const rowsAppearanceWeighted = forPosition.filter((r) => r.pAppears !== undefined).length
+
+    const componentPer90: ComponentTotals | null =
+      totalExpectedMinutes > 0
+        ? PROJECTED_COMPONENT_KEYS.reduce<ComponentTotals>(
+            (totals, key) => ({ ...totals, [key]: appearanceWeightedPer90(forPosition, (r) => r.components[key]) ?? 0 }),
+            emptyComponentTotals(),
+          )
+        : null
 
     result[position] = {
       position,
@@ -619,10 +797,13 @@ export function aggregateProjectedByPosition(
       distinctPlayerCount: new Set(forPosition.map((r) => r.playerId)).size,
       totalExpectedMinutes,
       totalExpectedPoints,
-      meanPointsPer90: totalExpectedMinutes > 0 ? (totalExpectedPoints / totalExpectedMinutes) * 90 : null,
-      componentPer90: componentsPer90(componentTotals, totalExpectedMinutes),
+      meanPointsPer90: totalExpectedMinutes > 0 ? appearanceWeightedPer90(forPosition, (r) => r.expectedPoints) : null,
+      componentPer90,
       totalExcludedBonus,
-      excludedBonusPer90: totalExpectedMinutes > 0 ? (totalExcludedBonus / totalExpectedMinutes) * 90 : null,
+      excludedBonusPer90:
+        totalExpectedMinutes > 0 ? appearanceWeightedPer90(forPosition, (r) => r.excludedBonus ?? 0) : null,
+      rowsAppearanceWeighted,
+      rowsFallbackUnweighted: forPosition.length - rowsAppearanceWeighted,
     }
   }
 
@@ -689,6 +870,62 @@ export function assertCleanSheetRatesPlausible(ratesByPosition: ReadonlyMap<Posi
           'outfielders not) already broke this report twice before (LEARNINGS-second-build-wave.md §2): a clean-sheet figure ' +
           'read from the wrong column.',
         'clean_sheet_rate_bound',
+      )
+    }
+  }
+}
+
+// ============================================================================
+// Appearance points per-90 bound — ticket #155. Pure, no I/O.
+// ============================================================================
+// The guard that would have caught the population-mismatch defect this
+// ticket fixes — see the "Appearance-weighted projected side" section near
+// the top of this file. Appearance points are capped at exactly 2 per
+// match and do not scale continuously with minutes the way a goal does; a
+// real position-level population, dominated by players who mostly play
+// close to a full match, sits at or slightly below 2.0 per 90 — a player
+// subbed before 60 minutes earns 1, not 2, which pulls the average down. A
+// bound that WARNS rather than FAILS would not have caught the 29 Aug 2026
+// run's 2.84 goalkeeper figure; this one throws, matching
+// assertCleanSheetRatesPlausible above.
+// ============================================================================
+
+/** The arithmetic ceiling: the maximum points a single appearance can ever earn. Not a guess — see pointValues.ts. */
+export const APPEARANCE_POINTS_ARITHMETIC_MAXIMUM = APPEARANCE_POINTS_60_PLUS
+
+/**
+ * The bound this report checks projected appearance pts/90 against, per
+ * position. JUDGEMENT CALL, marked as such per the ticket's own instruction:
+ * the UPPER end, 2.1, is close to APPEARANCE_POINTS_ARITHMETIC_MAXIMUM (2.0)
+ * with a small margin for players legitimately subbed between 60 and 89
+ * minutes more often than not (each such appearance earns the full 2 points
+ * for fewer than 90 minutes, which can push an individual per-90 figure
+ * slightly above 2.0) — the upper end is arithmetic, not a guess. The LOWER
+ * end, 1.5, is a guess at how far a real position-level population can
+ * plausibly sit below 2.0 from early (1–59 minute) substitutions — there is
+ * no arithmetic derivation for it.
+ */
+export const APPEARANCE_POINTS_PER_90_LOWER_BOUND = 1.5
+export const APPEARANCE_POINTS_PER_90_UPPER_BOUND = 2.1
+
+/**
+ * Throws — the report FAILS rather than printing an impossible figure — the
+ * moment any position's projected appearance pts/90 falls outside
+ * [APPEARANCE_POINTS_PER_90_LOWER_BOUND, APPEARANCE_POINTS_PER_90_UPPER_BOUND].
+ * Names both the position and the figure, so the failure is actionable from
+ * the job_runs message alone. A null figure (no data) is not a violation —
+ * there is nothing implausible about "no data".
+ */
+export function assertAppearancePointsPlausible(appearancePer90ByPosition: ReadonlyMap<Position, number | null>): void {
+  for (const [position, value] of appearancePer90ByPosition) {
+    if (value !== null && (value < APPEARANCE_POINTS_PER_90_LOWER_BOUND || value > APPEARANCE_POINTS_PER_90_UPPER_BOUND)) {
+      throw new CalibrationReportError(
+        `${POSITION_NAMES[position]}'s projected appearance points per 90 is ${value.toFixed(2)} — outside the plausible ` +
+          `[${APPEARANCE_POINTS_PER_90_LOWER_BOUND}, ${APPEARANCE_POINTS_PER_90_UPPER_BOUND}] range around the arithmetic ` +
+          `ceiling of ${APPEARANCE_POINTS_ARITHMETIC_MAXIMUM.toFixed(1)} points per appearance. This is impossible or ` +
+          'implausible, not a finding — refusing to print it (ticket #155, the population-mismatch defect this bound exists ' +
+          'to catch).',
+        'appearance_points_per_90_bound',
       )
     }
   }
@@ -804,12 +1041,24 @@ interface ProjectionPointsJson {
   bonusPoints?: number
 }
 
+/**
+ * Ticket #155: the subset of one element of stored components.fixtures[]
+ * this job reads — each element IS a FixtureModelInputs object directly
+ * (src/lib/projection/expectedPoints.ts), not nested under its own
+ * .modelInputs key. Only the two fields this report uses are typed here,
+ * matching ProjectionPointsJson's own pick-only-what's-used convention.
+ */
+interface ProjectionFixtureJson {
+  pAppears?: number
+  pSixtyPlus?: number
+}
+
 interface ProjectionRow {
   gameweek_id: number
   player_id: number
   expected_points: number
   expected_minutes: number
-  components: { points?: ProjectionPointsJson } | null
+  components: { points?: ProjectionPointsJson; fixtures?: ProjectionFixtureJson[] } | null
 }
 
 function pickProjectedComponents(points: ProjectionPointsJson | undefined): ComponentTotals {
@@ -906,6 +1155,10 @@ interface ReportData {
   excludedBonusBound: ExcludedBonusBoundCheck
   /** Ticket #132, defect 2: player_match_stats rows (within the season/competition sample above) whose team_goals_conceded was null — excluded from the clean-sheet and goals-conceded figures only, not from the rest of that row's components, and never read as zero conceded. Counted here, alongside the other sample sizes, per the ticket's own DoD. */
   matchStatsRowsNullTeamGoalsConceded: number
+  /** Ticket #155: player_projections rows whose pAppears was present — contributed to the appearance-weighted estimate proper. Summed across all four positions. */
+  projectionRowsAppearanceWeighted: number
+  /** Ticket #155: player_projections rows whose pAppears was absent — fell back to the pre-#155 unweighted construction for that row alone. Expected to be 0 for a live table; counted rather than assumed. Summed across all four positions. */
+  projectionRowsFallbackUnweighted: number
 }
 
 function averageBonusPerAppearance(): number {
@@ -1084,14 +1337,29 @@ function generateReportMarkdown(data: ReportData): string {
       'the total a player would actually see in-app, which is intentional: the comparison would otherwise be biased against ' +
       'the model by exactly the size of the bonus term, concentrated exactly where those tables look. ' +
       `${excludedBonusBoundNote(data.excludedBonusBound)}\n\n` +
-      'The **By point component** table below is unaffected by any of this: it omits bonus/cards entirely (see its own note).',
+      'The **By point component** table below is unaffected by any of this: it omits bonus/cards entirely (see its own note).\n\n' +
+      '5. **The two sides are drawn from different populations, and the projected side is now weighted to match (ticket #155).** ' +
+      'The actual side is a sample of real, realized player-matches — appearances that actually happened, drawn from ' +
+      '`player_match_stats`. The projected side is an expectation over every projected player-gameweek, weighted by `pAppears` ' +
+      '(the model\'s own probability that a given player-gameweek is a genuine appearance) so it estimates the same quantity — ' +
+      '"points and minutes conditional on the player appearing" — rather than diluting it with rows for players who rarely ' +
+      `feature. ${data.projectionRowsFallbackUnweighted} of ${data.projectionRowsAppearanceWeighted + data.projectionRowsFallbackUnweighted} ` +
+      'projected rows had no stored `pAppears` (written before ticket #109/#148) and fall back to the pre-#155 unweighted rate ' +
+      'for that row alone — see the provenance section below. A sanity bound on projected appearance points per 90 ' +
+      '(`assertAppearancePointsPlausible`) fails this report outright, per position, if a figure falls outside ' +
+      `[${APPEARANCE_POINTS_PER_90_LOWER_BOUND}, ${APPEARANCE_POINTS_PER_90_UPPER_BOUND}] — the range a real population can ` +
+      'plausibly sit in around the arithmetic ceiling of 2 points per appearance. This is the guard that would have caught the ' +
+      '29 Aug 2026 run\'s impossible 2.84 goalkeeper figure.',
   )
 
   sections.push('## Headline: are defenders over-projected?\n\n' + defenderHeadline(data.actualByPosition, data.projectedByPosition))
 
   sections.push(
     '## By position: totals\n\n' +
-      'Every figure carries its sample size in parentheses.\n\n' +
+      'Every figure carries its sample size in parentheses. **Projected pts/90 is appearance-weighted (ticket #155)** — ' +
+      'weighted by `pAppears`, the model\'s own probability that a projected player-gameweek is a genuine appearance, so it ' +
+      'estimates points and minutes conditional on the player appearing rather than the raw ratio of summed totals. See ' +
+      'caveat 5 above.\n\n' +
       buildPositionTable(data.actualByPosition, data.projectedByPosition),
   )
 
@@ -1111,7 +1379,8 @@ function generateReportMarkdown(data: ReportData): string {
   sections.push(
     '## By point component\n\n' +
       'Per-90 rates, actual vs projected, so a gap in the totals above is attributable to a specific component rather than only ' +
-      'visible in aggregate. Bonus and cards are omitted from this table: the actual side is fixed at exactly 0 for both (no data), ' +
+      'visible in aggregate. **Every projected component is appearance-weighted (ticket #155), same construction as the totals ' +
+      'table above.** Bonus and cards are omitted from this table: the actual side is fixed at exactly 0 for both (no data), ' +
       'and the projected side\'s bonus (non-zero since ticket #78) has no actual-side counterpart to compare it against here — see ' +
       'the caveats above for how the totals tables elsewhere in this report are affected instead.\n\n' +
       buildComponentTable(data.actualByPosition, data.projectedByPosition),
@@ -1154,7 +1423,9 @@ function generateReportMarkdown(data: ReportData): string {
       'excluded from the clean-sheet and goals-conceded figures only (see the Clean-sheet rate section above); every other ' +
       'component for these rows is still counted normally, never read as zero conceded\n' +
       `- player_projections rows fetched (model_version=${MODEL_VERSION}): ${data.projectionRowCount}\n` +
-      `- player_projections rows skipped (player_id not found in players): ${data.skippedProjectionsNoPosition}\n`,
+      `- player_projections rows skipped (player_id not found in players): ${data.skippedProjectionsNoPosition}\n` +
+      `- player_projections rows appearance-weighted, pAppears present (ticket #155): ${data.projectionRowsAppearanceWeighted}\n` +
+      `- player_projections rows using the pre-#155 unweighted fallback, pAppears absent (ticket #155): ${data.projectionRowsFallbackUnweighted}\n`,
   )
 
   return sections.join('\n\n') + '\n'
@@ -1467,6 +1738,14 @@ async function main(): Promise<void> {
       // only side this CAN be made comparable from. Nothing here writes back to player_projections.
       const { comparedPoints, excludedBonus } = excludeBonusFromProjection(row.expected_points, row.components?.points?.bonusPoints)
       allExcludedBonusValues.push(excludedBonus)
+      // Ticket #155: pAppears is identical across a player's fixtures within
+      // one gameweek (see the "Appearance-weighted projected side" section
+      // in the file header) — reading fixtures[0] is exact, not an
+      // approximation. undefined (no fixtures array, an empty one, or a
+      // fixture missing pAppears — every row from before ticket #109/#148)
+      // falls back to the pre-#155 unweighted construction for this one row,
+      // inside aggregateProjectedByPosition.
+      const pAppears = row.components?.fixtures?.[0]?.pAppears
       projectedInputs.push({
         position,
         playerId: row.player_id,
@@ -1474,6 +1753,7 @@ async function main(): Promise<void> {
         expectedMinutes: row.expected_minutes,
         components,
         excludedBonus,
+        pAppears,
       })
 
       const existing = projectedPlayerSums.get(row.player_id)
@@ -1494,6 +1774,27 @@ async function main(): Promise<void> {
 
     const projectedByPosition = aggregateProjectedByPosition(projectedInputs)
     const excludedBonusBound = checkExcludedBonusBound(allExcludedBonusValues)
+
+    // --------------------------------------------------------------------
+    // 6b. Ticket #155: the bound that would have caught the population-
+    //     mismatch defect (the 29 Aug 2026 run's 2.84 goalkeeper figure).
+    //     Runs BEFORE any report content is written — an impossible
+    //     appearance-points-per-90 figure must fail the job, never reach
+    //     the file on disk. Same pattern as step 5b's clean-sheet bound.
+    // --------------------------------------------------------------------
+    const appearancePer90ByPosition = new Map<Position, number | null>(
+      POSITIONS.map((position) => [position, projectedByPosition[position].componentPer90?.appearancePoints ?? null]),
+    )
+    assertAppearancePointsPlausible(appearancePer90ByPosition)
+
+    const projectionRowsAppearanceWeighted = POSITIONS.reduce(
+      (sum, position) => sum + projectedByPosition[position].rowsAppearanceWeighted,
+      0,
+    )
+    const projectionRowsFallbackUnweighted = POSITIONS.reduce(
+      (sum, position) => sum + projectedByPosition[position].rowsFallbackUnweighted,
+      0,
+    )
 
     // --------------------------------------------------------------------
     // 7. Top-N distribution tables.
@@ -1527,6 +1828,8 @@ async function main(): Promise<void> {
       matchStatsRowsExcludedNullCompetition: matchStatsRowsNullCompetition ?? 0,
       excludedBonusBound,
       matchStatsRowsNullTeamGoalsConceded,
+      projectionRowsAppearanceWeighted,
+      projectionRowsFallbackUnweighted,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
 
@@ -1570,6 +1873,10 @@ async function main(): Promise<void> {
       // Ticket #132, defect 2: rows excluded from the clean-sheet/goals-conceded figures only (see reportData above).
       matchStatsRowsNullTeamGoalsConceded,
       cleanSheetRatesByPosition: Object.fromEntries(cleanSheetRatesByPosition),
+      // Ticket #155: the appearance-weighting bound check and its inputs, plus how many projected rows fell back to the pre-#155 construction.
+      appearancePer90ByPosition: Object.fromEntries(appearancePer90ByPosition),
+      projectionRowsAppearanceWeighted,
+      projectionRowsFallbackUnweighted,
     }
 
     const bonusBoundNote = excludedBonusBound.withinBound

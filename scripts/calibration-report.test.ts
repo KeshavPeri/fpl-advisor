@@ -34,6 +34,11 @@ import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import {
   aggregateActualByPosition,
   aggregateProjectedByPosition,
+  APPEARANCE_POINTS_ARITHMETIC_MAXIMUM,
+  APPEARANCE_POINTS_PER_90_LOWER_BOUND,
+  APPEARANCE_POINTS_PER_90_UPPER_BOUND,
+  appearanceWeightedPer90,
+  assertAppearancePointsPlausible,
   assertCleanSheetRatesPlausible,
   checkExcludedBonusBound,
   CLEAN_SHEET_RATE_UPPER_BOUND,
@@ -377,6 +382,116 @@ describe('aggregateProjectedByPosition', () => {
   it('a position with no rows reports null, not zero', () => {
     const result = aggregateProjectedByPosition([])
     expect(result[FORWARD].meanPointsPer90).toBeNull()
+  })
+
+  it('a row with no pAppears falls back to the pre-#155 unweighted construction, tracked as rowsFallbackUnweighted', () => {
+    const records: ProjectedAggregationInput[] = [
+      { position: DEFENDER, playerId: 1, expectedPoints: 5, expectedMinutes: 90, components: emptyComponentTotals() },
+    ]
+    const result = aggregateProjectedByPosition(records)
+    expect(result[DEFENDER].rowsFallbackUnweighted).toBe(1)
+    expect(result[DEFENDER].rowsAppearanceWeighted).toBe(0)
+    // Falls back to the plain ratio: 5 / 90 * 90 = 5.
+    expect(result[DEFENDER].meanPointsPer90).toBeCloseTo(5, 6)
+  })
+
+  it('a row with pAppears is counted as rowsAppearanceWeighted, not fallback', () => {
+    const records: ProjectedAggregationInput[] = [
+      { position: DEFENDER, playerId: 1, expectedPoints: 5, expectedMinutes: 90, components: emptyComponentTotals(), pAppears: 0.9 },
+    ]
+    const result = aggregateProjectedByPosition(records)
+    expect(result[DEFENDER].rowsAppearanceWeighted).toBe(1)
+    expect(result[DEFENDER].rowsFallbackUnweighted).toBe(0)
+  })
+})
+
+// ============================================================================
+// appearanceWeightedPer90 / aggregateProjectedByPosition — appearance
+// weighting, ticket #155. The named test the ticket's DoD asks for: one
+// nailed starter and one substitute, proving BY HAND that the projected
+// appearance figure lands near 2.0 rather than being dragged upward by the
+// substitute. Passing case first (LEARNINGS-second-build-wave.md §10) — the
+// bound-failure reproduction of the 2.84 goalkeeper defect lives in its own
+// section further down this file, once the passing arithmetic is proven.
+// ============================================================================
+
+describe('appearanceWeightedPer90 / aggregateProjectedByPosition — nailed starter + substitute (ticket #155)', () => {
+  // Hand computation, matching src/lib/projection/minutes.ts's own
+  // definitions (expectedMinutes = avgMin × pAppears,
+  // pSixtyPlus = sixtyRate × pAppears) and pointValues.ts's
+  // expectedAppearancePoints (appearancePoints = pAppears × 1 + pSixtyPlus × 1
+  // at today's point values), and appearanceWeightedPer90's own formula
+  // (weight each row's contribution to BOTH numerator and denominator by
+  // its own pAppears, on top of expectedMinutes):
+  //
+  // Nailed starter: avgMin = 90, sixtyRate = 1.0, pAppears = 0.98.
+  //   pSixtyPlus       = 1.0 × 0.98 = 0.98
+  //   appearancePoints = 0.98 × 1 + 0.98 × 1 = 1.96
+  //   expectedMinutes  = 90 × 0.98 = 88.2
+  //   (local ratio, for reference only — 1.96 / 88.2 × 90 = 2.0 exactly,
+  //    matching the ticket's own reduction (1 + sixtyRate) / avgMin × 90)
+  //
+  // Substitute: avgMin = 20, sixtyRate = 0, pAppears = 0.02 (rarely expected
+  // to appear at all).
+  //   pSixtyPlus       = 0 × 0.02 = 0
+  //   appearancePoints = 0.02 × 1 + 0 × 1 = 0.02
+  //   expectedMinutes  = 20 × 0.02 = 0.4
+  //   (local ratio, for reference only — 0.02 / 0.4 × 90 = 4.5, matching the
+  //    ticket's own worked substitute example exactly)
+  //
+  // appearanceWeightedPer90:
+  //   numerator   = (0.98 × 1.96) + (0.02 × 0.02) = 1.9208 + 0.0004 = 1.9212
+  //   denominator = (0.98 × 88.2) + (0.02 × 0.4)  = 86.436 + 0.008  = 86.444
+  //   result      = 1.9212 / 86.444 × 90 = 2.00023... ≈ 2.0
+  //
+  // Contrast: a NAIVE unweighted mean of the two rows' own local ratios —
+  // treating the rare substitute as equally significant as the nailed
+  // starter, exactly the bug the ticket diagnoses ("the widest backup
+  // population relative to its starters") — gives (2.0 + 4.5) / 2 = 3.25,
+  // dragged well above the arithmetic ceiling of 2 points per appearance.
+  // appearanceWeightedPer90 keeps the estimate at ~2.0: essentially the
+  // starter's own local ratio, not pulled toward the substitute's 4.5 — see
+  // this file's calibration-report.ts header for why a naive mean-of-ratios
+  // weighted only by pAppears was tried and rejected in favour of this
+  // construction.
+  const starter: ProjectedAggregationInput = {
+    position: GOALKEEPER,
+    playerId: 1,
+    expectedPoints: 1.96,
+    expectedMinutes: 88.2,
+    components: { ...emptyComponentTotals(), appearancePoints: 1.96 },
+    pAppears: 0.98,
+  }
+  const substitute: ProjectedAggregationInput = {
+    position: GOALKEEPER,
+    playerId: 2,
+    expectedPoints: 0.02,
+    expectedMinutes: 0.4,
+    components: { ...emptyComponentTotals(), appearancePoints: 0.02 },
+    pAppears: 0.02,
+  }
+
+  it('lands near 2.0 (2.00023, hand-computed above) rather than being dragged toward the substitute\'s 4.5', () => {
+    const result = appearanceWeightedPer90([starter, substitute], (r) => r.components.appearancePoints)
+    expect(result).toBeCloseTo(2.00023136, 6)
+    // Sanity: comfortably inside the plausible bound this ticket also adds.
+    expect(result).toBeGreaterThanOrEqual(APPEARANCE_POINTS_PER_90_LOWER_BOUND)
+    expect(result).toBeLessThanOrEqual(APPEARANCE_POINTS_PER_90_UPPER_BOUND)
+  })
+
+  it('is far below the naive unweighted mean of the two rows\' own local ratios (3.25) — the drag this ticket removes', () => {
+    const result = appearanceWeightedPer90([starter, substitute], (r) => r.components.appearancePoints)
+    const naiveUnweightedMean = (2.0 + 4.5) / 2
+    expect(result).not.toBeNull()
+    expect(result as number).toBeLessThan(naiveUnweightedMean)
+  })
+
+  it('aggregateProjectedByPosition reports the same ~2.0 for both meanPointsPer90 and componentPer90.appearancePoints', () => {
+    const result = aggregateProjectedByPosition([starter, substitute])
+    expect(result[GOALKEEPER].meanPointsPer90).toBeCloseTo(2.00023136, 6)
+    expect(result[GOALKEEPER].componentPer90?.appearancePoints).toBeCloseTo(2.00023136, 6)
+    expect(result[GOALKEEPER].rowsAppearanceWeighted).toBe(2)
+    expect(result[GOALKEEPER].rowsFallbackUnweighted).toBe(0)
   })
 })
 
@@ -821,5 +936,114 @@ describe('calibration-report.ts — clean-sheet reads from team_goals_conceded, 
     expect(assertIndex).toBeGreaterThan(-1)
     expect(writeIndex).toBeGreaterThan(-1)
     expect(assertIndex).toBeLessThan(writeIndex)
+  })
+})
+
+// ============================================================================
+// Ticket #155 — appearance-weighted projected side, and the sanity bound
+// that would have caught the population-mismatch defect. Same technique as
+// every other ticket appended to this file: pure functions tested directly,
+// source invariants grepped for what only main()'s Supabase I/O wires up
+// (main() itself needs a live project this Builder's session does not have).
+// ============================================================================
+
+describe('assertAppearancePointsPlausible — the bound that would have caught the population-mismatch defect (ticket #155)', () => {
+  it(`passes exactly AT the lower bound, ${APPEARANCE_POINTS_PER_90_LOWER_BOUND}`, () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, APPEARANCE_POINTS_PER_90_LOWER_BOUND]]))).not.toThrow()
+  })
+
+  it(`passes exactly AT the upper bound, ${APPEARANCE_POINTS_PER_90_UPPER_BOUND}`, () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, APPEARANCE_POINTS_PER_90_UPPER_BOUND]]))).not.toThrow()
+  })
+
+  it('passes at the arithmetic ceiling itself, 2.0', () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[DEFENDER, APPEARANCE_POINTS_ARITHMETIC_MAXIMUM]]))).not.toThrow()
+  })
+
+  it('fails just BELOW the lower bound rather than silently passing', () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, APPEARANCE_POINTS_PER_90_LOWER_BOUND - 0.01]]))).toThrow(
+      CalibrationReportError,
+    )
+  })
+
+  it('fails just ABOVE the upper bound rather than silently passing', () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, APPEARANCE_POINTS_PER_90_UPPER_BOUND + 0.01]]))).toThrow(
+      CalibrationReportError,
+    )
+  })
+
+  it("reproduces and catches the 29 Aug 2026 run's impossible 2.84 goalkeeper figure — the exact defect this ticket fixes", () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, 2.84]]))).toThrow(CalibrationReportError)
+    try {
+      assertAppearancePointsPlausible(new Map([[GOALKEEPER, 2.84]]))
+      expect.unreachable('assertAppearancePointsPlausible should have thrown')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      expect(message).toContain('Goalkeeper')
+      expect(message).toContain('2.84')
+    }
+  })
+
+  it('a null figure (no data) never violates the bound', () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[FORWARD, null]]))).not.toThrow()
+  })
+
+  it('checks every position in the map, not just the first', () => {
+    expect(() =>
+      assertAppearancePointsPlausible(
+        new Map([
+          [GOALKEEPER, 2.0],
+          [DEFENDER, 1.9],
+          [MIDFIELDER, 2.59], // the impossible reading this ticket's own diagnosis names for defenders — reused here for midfielder
+          [FORWARD, null],
+        ]),
+      ),
+    ).toThrow(/Midfielder/)
+  })
+})
+
+describe('calibration-report.ts — appearance-weighted projected side (source invariants, ticket #155)', () => {
+  it('reads pAppears from components.fixtures[0], not components.fixtures[].modelInputs — the verified, not assumed, shape', () => {
+    expect(source).toMatch(/row\.components\?\.fixtures\?\.\[0\]\?\.pAppears/)
+  })
+
+  it('the appearance-points bound assertion runs before the report is written to disk', () => {
+    const assertIndex = source.indexOf('assertAppearancePointsPlausible(appearancePer90ByPosition)')
+    const writeIndex = source.indexOf('await writeFile(reportPath')
+    expect(assertIndex).toBeGreaterThan(-1)
+    expect(writeIndex).toBeGreaterThan(-1)
+    expect(assertIndex).toBeLessThan(writeIndex)
+  })
+
+  it('checks the bound per position, not only in aggregate', () => {
+    expect(source).toMatch(/POSITIONS\.map\(\s*\(position\)\s*=>\s*\[\s*position,\s*projectedByPosition\[position\]\.componentPer90\?\.appearancePoints/)
+  })
+
+  it('states in the report body that the projected side is appearance-weighted, where the totals and component tables print it', () => {
+    expect(source).toMatch(/Projected pts\/90 is appearance-weighted \(ticket #155\)/)
+    expect(source).toMatch(/Every projected component is appearance-weighted \(ticket #155\)/)
+  })
+
+  it('states which population each side is drawn from, in the caveats section', () => {
+    expect(source).toMatch(/actual side is a sample of real, realized player-matches/)
+    expect(source).toMatch(/projected side is an expectation over every projected player-gameweek/)
+  })
+
+  it('reports rowsAppearanceWeighted/rowsFallbackUnweighted counts in the provenance section', () => {
+    expect(source).toMatch(/rows appearance-weighted, pAppears present/)
+    expect(source).toMatch(/rows using the pre-#155 unweighted fallback/)
+  })
+
+  it('marks the bound range as a judgement call in its own code comment, distinguishing the arithmetic upper end from the guessed lower end', () => {
+    expect(source).toMatch(/JUDGEMENT CALL/)
+    expect(source).toMatch(/upper end is arithmetic, not a guess/)
+  })
+
+  it('never touches src/, only imports from it — no write, no edit of anything under src/', () => {
+    // This file already imports from src/lib/scoring and src/lib/projection
+    // (see the file header) — the invariant is that this ticket added no
+    // NEW import path outside scripts/calibration-report.ts and its test.
+    expect(source).not.toMatch(/from ['"]\.\.\/src\/lib\/projection\/minutes\.ts['"]/)
+    expect(source).not.toMatch(/from ['"]\.\.\/src\/lib\/projection\/expectedPoints\.ts['"]/)
   })
 })
