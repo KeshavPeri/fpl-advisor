@@ -1,4 +1,5 @@
-// Unit tests for scripts/run-backtest.ts's pure functions — ticket #133.
+// Unit tests for scripts/run-backtest.ts's pure functions — ticket #133,
+// extended by #140 and #147.
 //
 // No live Supabase project: every DoD item provable without a database is
 // proven here on constructed rows — the no-lookahead property (the most
@@ -15,6 +16,11 @@
 // grep-on-real-source technique as scripts/calibration-report.test.ts and
 // scripts/build-feature-history.test.ts — proving the shape of what actually
 // shipped, not re-deriving the same logic here in TypeScript.
+//
+// Ticket #147's ranking-skill tests are their own section, "RANKING SKILL",
+// near the end of this file — every hand-computed expectation is worked out
+// in that test's own comment (ticket text: "not copied from the failing
+// output"), never derived by running the code once and pasting its answer.
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -36,6 +42,7 @@ import {
   buildRateHistoryMatch,
   buildRecentMinutes,
   buildTeamSlugsByGameweek,
+  checkRankingSanityBounds,
   checkSanityBounds,
   classifyRow,
   CLEAN_SHEET_RATE_UPPER_BOUND,
@@ -56,16 +63,28 @@ import {
   parseMatchIdTeamSlugs,
   pickProjectedComponents,
   projectRow,
+  rankDescending,
   reconstructActualMatchPoints,
+  spearmanCorrelation,
+  SPEARMAN_LOWER_BOUND,
+  SPEARMAN_UPPER_BOUND,
   sumComponentTotals,
   summarizeByGameweek,
   summarizeByPosition,
   summarizeErrors,
+  summarizeRankingByGameweek,
+  summarizeRankingByPosition,
+  summarizeSeasonRanking,
+  toRankingPair,
+  TOP10_OVERLAP_UPPER_BOUND_FRACTION,
+  topNOverlap,
   totalExcluded,
   type ActualMatchStatsInput,
   type FeatureHistoryRow,
   type MeasuredRow,
   type PositionPrior,
+  type PositionRankingSummary,
+  type RankingPair,
 } from './run-backtest.ts'
 
 const zeroPrior = (position = FORWARD): PositionPrior => ({
@@ -909,6 +928,359 @@ describe('buildMeasuredRow', () => {
     const row = buildMeasuredRow(1, FORWARD, 10, sumComponentTotals([]), outcome)
     expect(row.signedError).toBe(10 - outcome.totalPoints)
     expect(row.absError).toBe(Math.abs(10 - outcome.totalPoints))
+  })
+})
+
+// ============================================================================
+// RANKING SKILL — ticket #147.
+// ============================================================================
+
+describe('rankDescending', () => {
+  it('rank 1 is the highest value, with no ties', () => {
+    expect(rankDescending([10, 30, 20])).toEqual([3, 1, 2])
+  })
+
+  it('tied values share the AVERAGE of the ranks they would occupy (ticket text: "average ranks is standard")', () => {
+    // Three players tied for the top value (positions/ranks 1,2,3 -> average 2), then two more distinct values.
+    expect(rankDescending([5, 5, 5, 3, 1])).toEqual([2, 2, 2, 4, 5])
+  })
+
+  it('all values tied gives every element the same average rank', () => {
+    // Four tied values occupy ranks 1..4; average = 2.5.
+    expect(rankDescending([7, 7, 7, 7])).toEqual([2.5, 2.5, 2.5, 2.5])
+  })
+
+  it('handles a tie in the middle of an otherwise distinct sequence', () => {
+    // Values 40,30,30,20 -> ranks 1, (2+3)/2=2.5, 2.5, 4.
+    expect(rankDescending([40, 30, 30, 20])).toEqual([1, 2.5, 2.5, 4])
+  })
+})
+
+describe('spearmanCorrelation — perfect agreement, perfect reversal, shuffled', () => {
+  const pairs = (projected: number[], actual: number[]): RankingPair[] => projected.map((p, i) => ({ projected: p, actual: actual[i] }))
+
+  it('perfect agreement (identical order on both sides) returns exactly 1', () => {
+    const result = spearmanCorrelation(pairs([10, 9, 8, 7, 6, 5], [50, 45, 40, 35, 30, 25]))
+    expect(result).not.toBeNull()
+    expect(result!).toBeCloseTo(1, 10)
+  })
+
+  it('perfect reversal (highest projected = lowest actual) returns exactly -1', () => {
+    const result = spearmanCorrelation(pairs([10, 9, 8, 7, 6, 5], [1, 2, 3, 4, 5, 6]))
+    expect(result).not.toBeNull()
+    expect(result!).toBeCloseTo(-1, 10)
+  })
+
+  it('a shuffled ranking returns near zero', () => {
+    // Hand-worked, no ties. Projected ranks (already in rank order 1..6):
+    // [1,2,3,4,5,6]. Actual VALUES are set to their own rank directly (1..6
+    // used as values, so actual rank == actual value), permuted to
+    // [4,1,6,3,5,2] — i.e. player 1 (projected rank 1) has actual rank 4,
+    // player 2 (projected rank 2) has actual rank 1, and so on.
+    //
+    // d_i = projectedRank_i - actualRank_i:
+    //   1-4=-3, 2-1=1, 3-6=-3, 4-3=1, 5-5=0, 6-2=4
+    // d_i^2: 9, 1, 9, 1, 0, 16 -> sum = 36
+    // No ties on either side, so the classic formula applies exactly:
+    //   rho = 1 - 6*sum(d^2) / (n*(n^2-1)) = 1 - 6*36/(6*35) = 1 - 216/210 = -0.028571...
+    const result = spearmanCorrelation(pairs([1, 2, 3, 4, 5, 6], [4, 1, 6, 3, 5, 2]))
+    expect(result).not.toBeNull()
+    expect(result!).toBeCloseTo(-0.0285714286, 6)
+    expect(Math.abs(result!)).toBeLessThan(0.1)
+  })
+})
+
+describe('spearmanCorrelation — hand-computed 6–8 player case (not copied from the failing output)', () => {
+  it('matches a coefficient worked out by hand for 7 players', () => {
+    // 7 players. Projected points are strictly decreasing, so projected
+    // ranks are exactly the position order [1,2,3,4,5,6,7] with no ties.
+    // Actual points are chosen so the actual ranks, in the SAME position
+    // order, are the permutation [2,1,4,3,6,5,7] (worked out first, then the
+    // point values below are picked to realise it: actual rank r <-> value
+    // 8-r, i.e. rank1=7, rank2=6, rank3=5, rank4=4, rank5=3, rank6=2, rank7=1):
+    //   position1 wants actual rank 2 -> value 6
+    //   position2 wants actual rank 1 -> value 7
+    //   position3 wants actual rank 4 -> value 4
+    //   position4 wants actual rank 3 -> value 5
+    //   position5 wants actual rank 6 -> value 2
+    //   position6 wants actual rank 5 -> value 3
+    //   position7 wants actual rank 7 -> value 1
+    // Check: sorting [6,7,4,5,2,3,1] descending gives 7(pos2),6(pos1),5(pos4),
+    // 4(pos3),3(pos6),2(pos5),1(pos7) -> ranks by position [2,1,4,3,6,5,7]. Matches.
+    //
+    // No ties on either side, so the classic no-tie formula applies exactly:
+    //   d_i = projectedRank_i - actualRank_i = 1-2,2-1,3-4,4-3,5-6,6-5,7-7
+    //       = -1, 1, -1, 1, -1, 1, 0
+    //   d_i^2 = 1,1,1,1,1,1,0 -> sum = 6
+    //   rho = 1 - 6*6 / (7*(49-1)) = 1 - 36/336 = 1 - 0.107142857... = 0.892857142857...
+    const projected = [7, 6, 5, 4, 3, 2, 1]
+    const actual = [6, 7, 4, 5, 2, 3, 1]
+    const result = spearmanCorrelation(projected.map((p, i) => ({ projected: p, actual: actual[i] })))
+    expect(result).not.toBeNull()
+    expect(result!).toBeCloseTo(0.8928571429, 6)
+  })
+})
+
+describe('spearmanCorrelation — ties (named test, three tied projections)', () => {
+  it('matches a coefficient worked out by hand for three players tied on projected points', () => {
+    // 5 players. Projected: [5,5,5,3,1] — three tied at the top value, so by
+    // rankDescending's average-rank rule their ranks are all (1+2+3)/3 = 2;
+    // the remaining two are distinct: rank 4, rank 5.
+    //   projectedRanks = [2,2,2,4,5]
+    // Actual: [4,5,3,2,1] — no ties. Sorted descending: 5(pos2),4(pos1),
+    // 3(pos3),2(pos4),1(pos5) -> actualRanks by position = [2,1,3,4,5].
+    //
+    // Pearson correlation of [2,2,2,4,5] and [2,1,3,4,5]:
+    //   meanP = 15/5 = 3, meanA = 15/5 = 3
+    //   dP = [-1,-1,-1,1,2], dA = [-1,-2,0,1,2]
+    //   covariance = (-1*-1)+(-1*-2)+(-1*0)+(1*1)+(2*2) = 1+2+0+1+4 = 8
+    //   varP = 1+1+1+1+4 = 8, varA = 1+4+0+1+4 = 10
+    //   rho = 8 / sqrt(8*10) = 8 / sqrt(80) = 8 / 8.94427... = 0.894427...
+    const result = spearmanCorrelation([
+      { projected: 5, actual: 4 },
+      { projected: 5, actual: 5 },
+      { projected: 5, actual: 3 },
+      { projected: 3, actual: 2 },
+      { projected: 1, actual: 1 },
+    ])
+    expect(result).not.toBeNull()
+    expect(result!).toBeCloseTo(0.894427191, 6)
+  })
+})
+
+describe('spearmanCorrelation — edge cases', () => {
+  it('returns null with fewer than 2 pairs', () => {
+    expect(spearmanCorrelation([])).toBeNull()
+    expect(spearmanCorrelation([{ projected: 5, actual: 5 }])).toBeNull()
+  })
+
+  it('returns null (never NaN) when every projected value is identical — undefined correlation, not zero', () => {
+    const result = spearmanCorrelation([
+      { projected: 4, actual: 1 },
+      { projected: 4, actual: 2 },
+      { projected: 4, actual: 3 },
+    ])
+    expect(result).toBeNull()
+  })
+})
+
+describe('toRankingPair', () => {
+  it('lifts projectedPoints/actualPoints off a MeasuredRow-shaped value', () => {
+    expect(toRankingPair({ projectedPoints: 4.5, actualPoints: 2 })).toEqual({ projected: 4.5, actual: 2 })
+  })
+})
+
+describe('topNOverlap', () => {
+  it('counts rows in both the top-N-by-projected and top-N-by-actual sets', () => {
+    // 5 rows, projected order (desc): idx0(10),idx1(8),idx2(6),idx3(4),idx4(2)
+    // actual order (desc):            idx4(9),idx1(7),idx0(5),idx3(3),idx2(1)
+    // top-3 by projected = {idx0,idx1,idx2}; top-3 by actual = {idx4,idx1,idx0}
+    // overlap = {idx0,idx1} -> 2
+    const rows: RankingPair[] = [
+      { projected: 10, actual: 5 },
+      { projected: 8, actual: 7 },
+      { projected: 6, actual: 1 },
+      { projected: 4, actual: 3 },
+      { projected: 2, actual: 9 },
+    ]
+    expect(topNOverlap(rows, 3)).toEqual({ overlap: 2, n: 3 })
+  })
+
+  it('perfect agreement gives full overlap', () => {
+    const rows: RankingPair[] = [
+      { projected: 10, actual: 100 },
+      { projected: 8, actual: 80 },
+      { projected: 6, actual: 60 },
+    ]
+    expect(topNOverlap(rows, 2)).toEqual({ overlap: 2, n: 2 })
+  })
+
+  it('caps N at the population size rather than claiming a top-10 out of 3', () => {
+    const rows: RankingPair[] = [
+      { projected: 3, actual: 3 },
+      { projected: 2, actual: 2 },
+      { projected: 1, actual: 1 },
+    ]
+    expect(topNOverlap(rows, 10)).toEqual({ overlap: 3, n: 3 })
+  })
+
+  it('is { overlap: 0, n: 0 } for an empty population', () => {
+    expect(topNOverlap([], 10)).toEqual({ overlap: 0, n: 0 })
+  })
+})
+
+describe('summarizeRankingByGameweek', () => {
+  const gwRow = (gameweekId: number, projectedPoints: number, actualPoints: number): MeasuredRow =>
+    measuredRow({ gameweekId, position: MIDFIELDER, projectedPoints, actualPoints })
+
+  it('labels a gameweek "too small to read" below MIN_BUCKET_SAMPLE_SIZE — never as a correlation', () => {
+    const rows = Array.from({ length: MIN_BUCKET_SAMPLE_SIZE - 1 }, (_, i) => gwRow(1, i, i))
+    const byGameweek = summarizeRankingByGameweek(rows)
+    const summary = byGameweek.get(1)!
+    expect(summary.n).toBe(MIN_BUCKET_SAMPLE_SIZE - 1)
+    expect(summary.tooSmallToRead).toBe(true)
+    expect(summary.spearman).toBeNull()
+    expect(summary.top10).toBeNull()
+    expect(summary.top20).toBeNull()
+  })
+
+  it('reports a real figure at exactly MIN_BUCKET_SAMPLE_SIZE rows', () => {
+    const rows = Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, (_, i) => gwRow(1, i, i)) // perfect agreement
+    const byGameweek = summarizeRankingByGameweek(rows)
+    const summary = byGameweek.get(1)!
+    expect(summary.n).toBe(MIN_BUCKET_SAMPLE_SIZE)
+    expect(summary.tooSmallToRead).toBe(false)
+    expect(summary.spearman).toBeCloseTo(1, 10)
+    expect(summary.top10).toEqual({ overlap: 10, n: 10 })
+    expect(summary.top20).toEqual({ overlap: 20, n: 20 })
+  })
+
+  it('partitions rows by gameweek, one summary per gameweek', () => {
+    const rows = [
+      ...Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, (_, i) => gwRow(1, i, i)),
+      ...Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, (_, i) => gwRow(2, i, MIN_BUCKET_SAMPLE_SIZE - 1 - i)), // gw2: perfect reversal
+    ]
+    const byGameweek = summarizeRankingByGameweek(rows)
+    expect([...byGameweek.keys()]).toEqual([1, 2])
+    expect(byGameweek.get(1)!.spearman).toBeCloseTo(1, 10)
+    expect(byGameweek.get(2)!.spearman).toBeCloseTo(-1, 10)
+  })
+})
+
+describe('summarizeSeasonRanking', () => {
+  it('pools every measured row for the season Spearman figure, mirroring how `overall` pools MAE', () => {
+    const rows = Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, (_, i) => measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: i, actualPoints: i }))
+    const byGameweek = summarizeRankingByGameweek(rows)
+    const season = summarizeSeasonRanking(rows, byGameweek)
+    expect(season.n).toBe(MIN_BUCKET_SAMPLE_SIZE)
+    expect(season.spearman).toBeCloseTo(1, 10)
+  })
+
+  it('sums top-N overlap across gameweeks, excluding any gameweek too small to read', () => {
+    const bigGw1 = Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, (_, i) => measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: i, actualPoints: i }))
+    const bigGw2 = Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, (_, i) => measuredRow({ gameweekId: 2, position: MIDFIELDER, projectedPoints: i, actualPoints: i }))
+    const tinyGw3 = Array.from({ length: 5 }, (_, i) => measuredRow({ gameweekId: 3, position: MIDFIELDER, projectedPoints: i, actualPoints: i }))
+    const rows = [...bigGw1, ...bigGw2, ...tinyGw3]
+    const byGameweek = summarizeRankingByGameweek(rows)
+    const season = summarizeSeasonRanking(rows, byGameweek)
+    // Two full gameweeks, each contributing overlap 10/n=10 and 20/n=20; the
+    // 5-row gameweek is too small to read and contributes nothing.
+    expect(season.top10).toEqual({ overlap: 20, n: 20 })
+    expect(season.top20).toEqual({ overlap: 40, n: 40 })
+  })
+})
+
+describe('summarizeRankingByPosition', () => {
+  it('reports all four positions, each with its own sample size', () => {
+    const rows = [
+      measuredRow({ gameweekId: 1, position: GOALKEEPER, projectedPoints: 5, actualPoints: 5 }),
+      measuredRow({ gameweekId: 1, position: DEFENDER, projectedPoints: 4, actualPoints: 2 }),
+      measuredRow({ gameweekId: 1, position: DEFENDER, projectedPoints: 2, actualPoints: 4 }),
+    ]
+    const byPosition = summarizeRankingByPosition(rows)
+    expect(byPosition[GOALKEEPER].n).toBe(1)
+    expect(byPosition[DEFENDER].n).toBe(2)
+    expect(byPosition[MIDFIELDER].n).toBe(0)
+    expect(byPosition[FORWARD].n).toBe(0)
+    // A single row cannot carry a correlation (n<2).
+    expect(byPosition[GOALKEEPER].spearman).toBeNull()
+  })
+
+  it('pools a position across the whole season for its Spearman figure, like the by-position MAE table', () => {
+    const rows = [
+      ...Array.from({ length: 20 }, (_, i) => measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: i, actualPoints: i })),
+      ...Array.from({ length: 20 }, (_, i) => measuredRow({ gameweekId: 2, position: FORWARD, projectedPoints: i, actualPoints: i })),
+    ]
+    const byPosition = summarizeRankingByPosition(rows)
+    expect(byPosition[FORWARD].n).toBe(40)
+    expect(byPosition[FORWARD].spearman).toBeCloseTo(1, 10)
+  })
+
+  it('sums top-N overlap per position across gameweeks WITHOUT the 50-row gameweek gate (a per-gameweek goalkeeper population is often under 50)', () => {
+    // Two gameweeks of 8 goalkeepers each — well under MIN_BUCKET_SAMPLE_SIZE,
+    // but summarizeRankingByPosition must still report a real figure.
+    const rows = [
+      ...Array.from({ length: 8 }, (_, i) => measuredRow({ gameweekId: 1, position: GOALKEEPER, projectedPoints: i, actualPoints: i })),
+      ...Array.from({ length: 8 }, (_, i) => measuredRow({ gameweekId: 2, position: GOALKEEPER, projectedPoints: i, actualPoints: i })),
+    ]
+    const byPosition = summarizeRankingByPosition(rows)
+    // Each gameweek: topNOverlap caps at population size 8, perfect agreement -> overlap 8 of 8.
+    expect(byPosition[GOALKEEPER].top10).toEqual({ overlap: 16, n: 16 })
+    expect(byPosition[GOALKEEPER].top20).toEqual({ overlap: 16, n: 16 })
+  })
+})
+
+describe('checkRankingSanityBounds — Spearman lower bound', () => {
+  const emptyByPosition = (): Record<string, PositionRankingSummary> =>
+    Object.fromEntries([GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [p, { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } }]))
+
+  it('fails, naming the figure, when season Spearman is below -0.2', () => {
+    const result = checkRankingSanityBounds(SPEARMAN_LOWER_BOUND - 0.01, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]).toMatch(/season/)
+    expect(result.failures[0]).toMatch(/Spearman/)
+    expect(result.failures[0]).toContain((SPEARMAN_LOWER_BOUND - 0.01).toFixed(3))
+  })
+
+  it('passes at exactly the lower bound', () => {
+    const result = checkRankingSanityBounds(SPEARMAN_LOWER_BOUND, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    expect(result.ok).toBe(true)
+  })
+})
+
+describe('checkRankingSanityBounds — Spearman upper bound', () => {
+  const emptyByPosition = (): Record<string, PositionRankingSummary> =>
+    Object.fromEntries([GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [p, { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } }]))
+
+  it('fails, naming the figure, when season Spearman is above 0.9 — the shape a lookahead leak takes', () => {
+    const result = checkRankingSanityBounds(SPEARMAN_UPPER_BOUND + 0.01, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]).toMatch(/season/)
+    expect(result.failures[0]).toContain((SPEARMAN_UPPER_BOUND + 0.01).toFixed(3))
+  })
+
+  it('passes at exactly the upper bound', () => {
+    const result = checkRankingSanityBounds(SPEARMAN_UPPER_BOUND, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    expect(result.ok).toBe(true)
+  })
+
+  it('fails on a position\'s Spearman too, naming that position', () => {
+    const byPosition = emptyByPosition()
+    byPosition[DEFENDER] = { position: DEFENDER, n: 100, spearman: 0.95, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } }
+    const result = checkRankingSanityBounds(0.5, { overlap: 0, n: 0 }, byPosition as never)
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]).toMatch(/Defender/)
+  })
+})
+
+describe('checkRankingSanityBounds — top-10 overlap bound', () => {
+  const emptyByPosition = (): Record<string, PositionRankingSummary> =>
+    Object.fromEntries([GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [p, { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } }]))
+
+  it('fails, naming the figure, when the season top-10 overlap exceeds 9 of 10', () => {
+    const result = checkRankingSanityBounds(0.5, { overlap: 10, n: 10 }, emptyByPosition() as never)
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]).toMatch(/top-10 overlap/)
+    expect(result.failures[0]).toMatch(/10 of 10/)
+  })
+
+  it('passes at exactly 9 of 10 (the bound, not past it)', () => {
+    const result = checkRankingSanityBounds(0.5, { overlap: 9, n: 10 }, emptyByPosition() as never)
+    expect(result.ok).toBe(true)
+  })
+
+  it('TOP10_OVERLAP_UPPER_BOUND_FRACTION is exactly 9/10', () => {
+    expect(TOP10_OVERLAP_UPPER_BOUND_FRACTION).toBeCloseTo(0.9, 10)
+  })
+
+  it('an empty population (n=0) never divides by zero and does not fail the bound', () => {
+    const result = checkRankingSanityBounds(0.5, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    expect(result.ok).toBe(true)
+  })
+
+  it('a null season Spearman and the top-10 bound can both be checked independently — a null Spearman never fails on its own', () => {
+    const result = checkRankingSanityBounds(null, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    expect(result.ok).toBe(true)
   })
 })
 
