@@ -629,15 +629,22 @@ export function buildSolverConfig(params: { horizon: number; datasource: string;
 export type RebuildVariant = 'wc' | 'fh'
 
 /**
- * bb and tc are pinned to the literal 0 — this ticket is Wildcard/Free Hit
- * only, #114/#126 own bb/tc. wc and fh are individually 0|1, but the ONLY
- * way to set either to 1 is `buildRebuildSolverConfig`'s own required
- * `variant: RebuildVariant` parameter, a single required 'wc'|'fh' union —
- * not two independent optional booleans — so "both together" is not even a
- * representable value of this type, let alone a value this function can
- * produce. See the ticket's own Notes: "Never wc: 1 and fh: 1 together."
+ * Ticket #160 (see docs/solver-notes.md's dated addendum to the ticket #134 section for the
+ * full "because"). ALL FOUR fields are now pinned to the literal `0`, not merely defaulted to
+ * it — `wc` and `fh` used to be individually `0 | 1`, settable by `buildRebuildSolverConfig`'s
+ * own `variant` parameter, but that let the solve rebuild the squad TWICE: once for free via
+ * `preseason: true` (which already discards the current squad and rebuilds within budget), and
+ * a second time via the granted chip, at zero transfer cost, later in the horizon. The first real
+ * dispatch (30 Aug 2026) proved it: `CHIP WC` at GW5, seven more transfers, on top of the GW3
+ * preseason rebuild — see docs/solver-notes.md for the log's own evidence. `preseason: true`
+ * alone is the one rebuild this probe is meant to measure, so no chip is granted on top of it,
+ * for either variant. This is a TYPE-level guarantee, not just a runtime default: no object
+ * literal can satisfy `RebuildChipLimits` with `wc` or `fh` set to `1` any more, so a future edit
+ * cannot reintroduce the double rebuild without `tsc -b` failing — see
+ * scripts/build-solver-input.test.ts's own `@ts-expect-error` proof of that, matching the style
+ * of buildSolverConfig's own "no `variant` field" proof above.
  */
-export type RebuildChipLimits = { bb: 0; wc: 0 | 1; fh: 0 | 1; tc: 0 }
+export type RebuildChipLimits = { bb: 0; wc: 0; fh: 0; tc: 0 }
 
 export interface RebuildSolverConfig extends Omit<SolverConfig, 'preseason' | 'chip_limits'> {
   preseason: true
@@ -658,6 +665,14 @@ export interface RebuildSolverConfig extends Omit<SolverConfig, 'preseason' | 'c
  * and it is safe here ONLY because this probe's own solve output never reaches
  * solver_picks/recommendations/notifications — see scripts/store-squad-advisory.ts's file header,
  * docs/solver-notes.md, and .github/workflows/squad-rebuild-probe.yml's own safety-case comment.
+ *
+ * `variant` stays REQUIRED even though it no longer changes `chip_limits` (ticket #160) — it
+ * still selects which advisory `scripts/store-squad-advisory.ts` produces and what it writes to
+ * `chip_advisories.chip_code` (`CHIP_CODE_BY_VARIANT`). It is deliberately not destructured out
+ * of `params` before the call to `buildSolverConfig` below, since `buildSolverConfig`'s own
+ * parameter type has no `variant` field to accept (see that function's own `@ts-expect-error`
+ * proof) — passing the individual fields it does accept keeps that boundary explicit rather than
+ * relying on structural typing to quietly drop the extra field.
  */
 export function buildRebuildSolverConfig(params: {
   horizon: number
@@ -665,17 +680,11 @@ export function buildRebuildSolverConfig(params: {
   secs?: number
   variant: RebuildVariant
 }): RebuildSolverConfig {
-  const { variant, ...rest } = params
-  const base = buildSolverConfig(rest)
+  const base = buildSolverConfig({ horizon: params.horizon, datasource: params.datasource, secs: params.secs })
   return {
     ...base,
     preseason: true,
-    chip_limits: {
-      bb: 0,
-      wc: variant === 'wc' ? 1 : 0,
-      fh: variant === 'fh' ? 1 : 0,
-      tc: 0,
-    },
+    chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
   }
 }
 

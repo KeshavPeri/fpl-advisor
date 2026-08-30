@@ -29,6 +29,8 @@ import {
   buildWideningJobRunDetails,
   deriveDatasource,
   failNoSquad,
+  type RebuildChipLimits,
+  type RebuildSolverConfig,
   type TeamJsonPickInput,
 } from './build-solver-input.js'
 
@@ -377,12 +379,17 @@ describe('buildSolverConfig', () => {
 
 // ============================================================================
 // buildRebuildSolverConfig — ticket #134 (feature-list item 28). The ONLY
-// function in this file that can return preseason: true, and the ONLY place
-// chip_limits.wc or chip_limits.fh can become 1.
+// function in this file that can return preseason: true. Ticket #160: no
+// longer the place chip_limits.wc or chip_limits.fh can become 1 either —
+// granting a chip ON TOP of preseason: true let the solve rebuild the squad
+// a second time (see docs/solver-notes.md's dated addendum for the 30 Aug
+// 2026 dispatch that proved it). chip_limits is now all zero for both
+// variants; `variant` survives only to select chip_advisories.chip_code
+// downstream in scripts/store-squad-advisory.ts.
 // ============================================================================
 
 describe('buildRebuildSolverConfig', () => {
-  it('wc variant: full-object equality — preseason true, chip_limits { bb:0, wc:1, fh:0, tc:0 }, every other key matches buildSolverConfig\'s own output for the same params', () => {
+  it('wc variant: full-object equality — preseason true, chip_limits all zero (ticket #160), every other key matches buildSolverConfig\'s own output for the same params', () => {
     const config = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300, variant: 'wc' })
     expect(config).toEqual({
       horizon: 3,
@@ -395,7 +402,7 @@ describe('buildRebuildSolverConfig', () => {
       decay_base: 0.9,
       ft_value_list: { '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 },
       datasource: 'fpladvisor',
-      chip_limits: { bb: 0, wc: 1, fh: 0, tc: 0 },
+      chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
       secs: 300,
       solver: 'highs',
       num_iterations: 3,
@@ -407,7 +414,7 @@ describe('buildRebuildSolverConfig', () => {
     })
   })
 
-  it('fh variant: full-object equality — preseason true, chip_limits { bb:0, wc:0, fh:1, tc:0 }, every other key matches buildSolverConfig\'s own output for the same params', () => {
+  it('fh variant: full-object equality — preseason true, chip_limits all zero (ticket #160), every other key matches buildSolverConfig\'s own output for the same params', () => {
     const config = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', secs: 300, variant: 'fh' })
     expect(config).toEqual({
       horizon: 3,
@@ -420,7 +427,7 @@ describe('buildRebuildSolverConfig', () => {
       decay_base: 0.9,
       ft_value_list: { '2': 2, '3': 1.6, '4': 1.3, '5': 1.1 },
       datasource: 'fpladvisor',
-      chip_limits: { bb: 0, wc: 0, fh: 1, tc: 0 },
+      chip_limits: { bb: 0, wc: 0, fh: 0, tc: 0 },
       secs: 300,
       solver: 'highs',
       num_iterations: 3,
@@ -439,23 +446,54 @@ describe('buildRebuildSolverConfig', () => {
     expect(fh.ft_value_list).toEqual(FT_VALUE_LIST)
   })
 
-  it('never sets both wc and fh — each variant produces exactly one of them at 1, the other pinned to 0', () => {
+  it('ticket #160 — never sets wc or fh to 1 for EITHER variant: chip_limits is the literal { bb:0, wc:0, fh:0, tc:0 } regardless of which variant is requested', () => {
     const wc = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'wc' })
     const fh = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'fh' })
-    expect(wc.chip_limits.wc).toBe(1)
-    expect(wc.chip_limits.fh).toBe(0)
-    expect(fh.chip_limits.wc).toBe(0)
-    expect(fh.chip_limits.fh).toBe(1)
+    expect(wc.chip_limits).toEqual({ bb: 0, wc: 0, fh: 0, tc: 0 })
+    expect(fh.chip_limits).toEqual({ bb: 0, wc: 0, fh: 0, tc: 0 })
   })
 
-  it('every non-chip_limits, non-preseason key is IDENTICAL between the two variants — they differ only in which chip is on', () => {
+  it('ticket #160 — grep-checkable: no `1` appears anywhere in the chip_limits object literal buildRebuildSolverConfig returns', () => {
+    const wc = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'wc' })
+    const fh = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor', variant: 'fh' })
+    for (const value of Object.values(wc.chip_limits)) expect(value).toBe(0)
+    for (const value of Object.values(fh.chip_limits)) expect(value).toBe(0)
+  })
+
+  it('ticket #160 — the two variants now produce a BYTE-IDENTICAL config: variant no longer changes chip_limits, only chip_advisories.chip_code downstream (scripts/store-squad-advisory.ts)', () => {
     const wc = buildRebuildSolverConfig({ horizon: 4, datasource: 'x', secs: 120, variant: 'wc' })
     const fh = buildRebuildSolverConfig({ horizon: 4, datasource: 'x', secs: 120, variant: 'fh' })
-    const { chip_limits: wcLimits, ...wcRest } = wc
-    const { chip_limits: fhLimits, ...fhRest } = fh
-    expect(wcRest).toEqual(fhRest)
-    expect(wcLimits).not.toEqual(fhLimits)
+    expect(wc).toEqual(fh)
   })
+
+  it(
+    "ticket #160 — RebuildChipLimits makes a non-zero wc or fh UNREPRESENTABLE, not merely unused: a future edit granting a chip back " +
+      'on top of preseason: true cannot compile, the same style of proof as buildSolverConfig\'s own "no `variant` field" test above',
+    () => {
+      // RebuildChipLimits is now the literal type `{ bb: 0; wc: 0; fh: 0; tc: 0 }` — no field
+      // can hold anything but 0. If a future edit widens wc/fh back to `0 | 1`, reopening the
+      // double-rebuild path ticket #160 closes, the two lines below stop being type errors and
+      // their @ts-expect-error directives become "unused @ts-expect-error" errors, failing
+      // `tsc -b` (npm run build) either way the drift could happen. Type-level assertions only —
+      // they prove nothing to vitest at run time and need no runtime infrastructure.
+      // @ts-expect-error — wc must be exactly 0 in RebuildChipLimits; see comment above.
+      const withWcGranted: RebuildChipLimits = { bb: 0, wc: 1, fh: 0, tc: 0 }
+      // @ts-expect-error — fh must be exactly 0 in RebuildChipLimits; see comment above.
+      const withFhGranted: RebuildChipLimits = { bb: 0, wc: 0, fh: 1, tc: 0 }
+      void withWcGranted
+      void withFhGranted
+    },
+  )
+
+  it(
+    "ticket #160 — buildRebuildSolverConfig's own `variant` parameter stays REQUIRED: omitting it is a TypeScript compile error, " +
+      'not a runtime possibility a test fixture could forget to try',
+    () => {
+      // @ts-expect-error — `variant` is required; see comment above.
+      const config: RebuildSolverConfig = buildRebuildSolverConfig({ horizon: 3, datasource: 'fpladvisor' })
+      void config
+    },
+  )
 
   it('reuses buildSolverConfig\'s own horizon validation — throws above 5, same as the production path', () => {
     expect(() => buildRebuildSolverConfig({ horizon: 6, datasource: 'fpladvisor', variant: 'wc' })).toThrow(BuildInputError)

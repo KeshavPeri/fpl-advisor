@@ -245,9 +245,14 @@ by recommendations/solver_picks/the Telegram message").
    rebuild solve picked — only the two solves' own Results-table scores. The rebuilt squad's
    fifteen players exist only in the workflow's own uploaded artefacts (the results CSV, `if:
    always()`), never in any table.
-5. **Wildcard and Free Hit are mutually exclusive within one run.** `chip_limits` carries `wc: 1`
-   or `fh: 1`, never both — `buildRebuildSolverConfig`'s `variant` parameter is a single required
-   `'wc' | 'fh'` union, not two independent flags, so "both" is not a representable value.
+5. **Wildcard and Free Hit are mutually exclusive within one run.** Before ticket #160,
+   `chip_limits` carried `wc: 1` or `fh: 1`, never both — `buildRebuildSolverConfig`'s `variant`
+   parameter is a single required `'wc' | 'fh'` union, not two independent flags, so "both" is not
+   a representable value. **Since ticket #160 (see the dated addendum below), `chip_limits` is the
+   literal `{ bb: 0, wc: 0, fh: 0, tc: 0 }` for both variants** — neither is ever granted at all,
+   so "never both" now holds trivially. `variant` still stays a single required `'wc' | 'fh'`
+   union; it now selects only which advisory `scripts/store-squad-advisory.ts` produces
+   (`chip_advisories.chip_code`), never a `chip_limits` value.
 
 **What this ticket reports, and what it deliberately does not.** The advisory is a single
 number — the rebuild solve's objective minus the chip-free baseline's, both solved fresh against
@@ -274,3 +279,44 @@ run in this project — `squad-rebuild-probe.yml` cannot run until it is on the 
 solver behaves sanely in that mode, only that the config sent to it is correctly isolated. The
 first real dispatch after merge is the first time this app has ever asked `dev/solver.py` to
 build a squad from nothing.
+
+### Update, 30 Aug 2026 — ticket #160: the first real dispatch found a double rebuild
+
+`squad-rebuild-probe.yml` was dispatched for the first time on 30 Aug 2026 (`preseason: true`,
+`variant: 'wc'`). It solved cleanly (proven optimum, gap 0%) and every one of the five guard
+rails above held: nothing reached `solver_picks`, `recommendations`, or Telegram. **The defect
+was in what was measured, not in the safety case.**
+
+Before this ticket, `buildRebuildSolverConfig` set BOTH `preseason: true` AND `chip_limits: { bb:
+0, wc: variant === 'wc' ? 1 : 0, fh: ..., tc: 0 }`. `preseason: true` already discards the current
+squad and rebuilds a new fifteen within budget — that is the one rebuild this probe exists to
+measure. Granting the requested variant's chip ON TOP of that let the same solve rebuild a
+**second** time, at zero transfer cost, later in the horizon. The dispatch log is the evidence,
+quoted verbatim, not paraphrased:
+
+- **GW3** — `ITB=100.0->2.3`, fifteen `Buy` lines, no `Sell`: the preseason rebuild itself.
+- **GW5** — `CHIP WC`, `NT=7`: seven *more* players in and out, on top of the GW3 rebuild.
+- **Results table** — `chip WC5` on all three solutions.
+
+The stored delta was therefore the rebuild objective **295.54** against the chip-free baseline's
+**260.21** — **+35.3** — of which an unknown share was a second, unintended free squad overhaul
+two gameweeks after the first. A real wildcard is one event; this measured something closer to
+two. The fix: `chip_limits` is now the literal `{ bb: 0, wc: 0, fh: 0, tc: 0 }` for both variants
+(`RebuildChipLimits` makes any other value a type error, not just a runtime default — see
+`scripts/build-solver-input.ts`'s own comment on it) — `preseason: true` alone is the rebuild
+being measured, and no chip is granted on top of it. The human check after the ticket #160 merge
+is a re-dispatch confirming the rebuild log contains no `CHIP` line in any gameweek and the
+results table's chip column is empty for every solution; the stored delta is expected to fall
+from +35.3 as a result of the fix working, not as a regression.
+
+**Second observation, 30 Aug 2026 (reported, not fixed): the three solutions are one solution.**
+All three of the rebuild solve's iterations (Plan A/B/C) reported the **same** objective,
+**295.54**, differing only in which bench goalkeeper was picked (Petrović / Verbruggen /
+Tzolakis). `ITERATION_CRITERION`'s `this_gw_transfer_in` (`scripts/build-solver-input.ts`) has
+nothing to vary when `preseason: true` makes the whole squad unconstrained and every "transfer" is
+a buy, so Plan A/B/C is cosmetic in this mode. Ticket #160 does not attempt to make it meaningful
+in rebuild mode — that needs a different `iteration_criteria` and is a separate question — but it
+does add a counter, `rebuildDistinctObjectiveCount` in this run's `job_runs.details`
+(`scripts/store-squad-advisory.ts`'s `countDistinctObjectiveValues`), so "three solutions, one
+answer" is visible on every future run rather than something a human has to spot in a log by
+eye. On the 30 Aug 2026 dispatch that counter would have read `1`.
