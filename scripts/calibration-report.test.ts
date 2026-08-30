@@ -34,9 +34,8 @@ import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import {
   aggregateActualByPosition,
   aggregateProjectedByPosition,
-  APPEARANCE_POINTS_ARITHMETIC_MAXIMUM,
-  APPEARANCE_POINTS_PER_90_LOWER_BOUND,
-  APPEARANCE_POINTS_PER_90_UPPER_BOUND,
+  APPEARANCE_POINTS_PER_90_RATIO_LOWER_BOUND,
+  APPEARANCE_POINTS_PER_90_RATIO_UPPER_BOUND,
   appearanceWeightedPer90,
   assertAppearancePointsPlausible,
   assertCleanSheetRatesPlausible,
@@ -489,11 +488,9 @@ describe('appearanceWeightedPer90 / aggregateProjectedByPosition — single heal
   it('lands at exactly 2.0 (hand-computed above), not the pre-#155 2.571428...', () => {
     const result = appearanceWeightedPer90([starter, substitute], (r) => r.components.appearancePoints)
     expect(result).toBeCloseTo(2.0, 9)
-    expect(result).toBeGreaterThanOrEqual(APPEARANCE_POINTS_PER_90_LOWER_BOUND)
-    expect(result).toBeLessThanOrEqual(APPEARANCE_POINTS_PER_90_UPPER_BOUND)
   })
 
-  it('the pre-#155 ratio-of-sums on the SAME two rows is 2.571428..., already outside the plausible upper bound', () => {
+  it('the pre-#155 ratio-of-sums on the SAME two rows is 2.571428..., a meaningfully different figure from the fixed 2.0', () => {
     // Reproduces the pre-#155 construction by omitting pSixtyPlus, which
     // falls every row back to weight 1 — see appearanceWeightedPer90's own
     // fallback rule, exercised deliberately here rather than duplicating
@@ -506,7 +503,6 @@ describe('appearanceWeightedPer90 / aggregateProjectedByPosition — single heal
       (r) => r.components.appearancePoints,
     )
     expect(unweighted).toBeCloseTo(2.571428571, 6)
-    expect(unweighted as number).toBeGreaterThan(APPEARANCE_POINTS_PER_90_UPPER_BOUND)
   })
 
   it('aggregateProjectedByPosition reports exactly 2.0 for both meanPointsPer90 and componentPer90.appearancePoints', () => {
@@ -565,14 +561,11 @@ describe('appearanceWeightedPer90 — realistic ~68-goalkeeper population (ticke
       (r) => r.components.appearancePoints,
     )
     expect(unweighted).toBeCloseTo(22 / 7, 9)
-    expect(unweighted as number).toBeGreaterThan(APPEARANCE_POINTS_PER_90_UPPER_BOUND)
   })
 
   it('this revision brings the SAME population to exactly 2.0 — every backup row has pSixtyPlus=0, contributing nothing', () => {
     const weighted = appearanceWeightedPer90(qaTemplateRecords, (r) => r.components.appearancePoints)
     expect(weighted).toBeCloseTo(2.0, 9)
-    expect(weighted).toBeGreaterThanOrEqual(APPEARANCE_POINTS_PER_90_LOWER_BOUND)
-    expect(weighted).toBeLessThanOrEqual(APPEARANCE_POINTS_PER_90_UPPER_BOUND)
   })
 
   it('a graded population (most backups never reach 60, a few occasionally start) is also suppressed within bound — not just the all-zero edge case', () => {
@@ -598,11 +591,9 @@ describe('appearanceWeightedPer90 — realistic ~68-goalkeeper population (ticke
     //   43.2 / 1900.8 × 90 = 3888 / 1900.8 = 45/22 = 2.045454545...
     const weighted = appearanceWeightedPer90(graded, (r) => r.components.appearancePoints)
     expect(weighted).toBeCloseTo(45 / 22, 6)
-    expect(weighted).toBeGreaterThanOrEqual(APPEARANCE_POINTS_PER_90_LOWER_BOUND)
-    expect(weighted).toBeLessThanOrEqual(APPEARANCE_POINTS_PER_90_UPPER_BOUND)
 
-    // And the pre-#155 construction on this SAME graded population is well
-    // above the upper bound — hand derivation:
+    // And the pre-#155 construction on this SAME graded population is a
+    // meaningfully different, inflated figure — hand derivation:
     //   starters: 20×2.0=40 / 20×90=1800
     //   deep bench: 20×1.0=20 (avgMin=5) + 20×1.0=20 (avgMin=25) = 40 /
     //     20×5=100 + 20×25=500 = 600
@@ -614,7 +605,6 @@ describe('appearanceWeightedPer90 — realistic ~68-goalkeeper population (ticke
       (r) => r.components.appearancePoints,
     )
     expect(unweighted).toBeCloseTo(678 / 227, 6)
-    expect(unweighted as number).toBeGreaterThan(APPEARANCE_POINTS_PER_90_UPPER_BOUND)
   })
 })
 
@@ -1070,55 +1060,66 @@ describe('calibration-report.ts — clean-sheet reads from team_goals_conceded, 
 // (main() itself needs a live project this Builder's session does not have).
 // ============================================================================
 
-describe('assertAppearancePointsPlausible — the bound that would have caught the population-mismatch defect (ticket #155)', () => {
-  it(`passes exactly AT the lower bound, ${APPEARANCE_POINTS_PER_90_LOWER_BOUND}`, () => {
-    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, APPEARANCE_POINTS_PER_90_LOWER_BOUND]]))).not.toThrow()
+describe('assertAppearancePointsPlausible — the ratio bound that would have caught the population-mismatch defect (ticket #155 follow-up)', () => {
+  it(`passes exactly AT the lower ratio bound, ${APPEARANCE_POINTS_PER_90_RATIO_LOWER_BOUND}x`, () => {
+    expect(() =>
+      assertAppearancePointsPlausible(new Map([[GOALKEEPER, { projected: 1.6, actual: 2.0 }]])),
+    ).not.toThrow()
   })
 
-  it(`passes exactly AT the upper bound, ${APPEARANCE_POINTS_PER_90_UPPER_BOUND}`, () => {
-    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, APPEARANCE_POINTS_PER_90_UPPER_BOUND]]))).not.toThrow()
+  it(`passes exactly AT the upper ratio bound, ${APPEARANCE_POINTS_PER_90_RATIO_UPPER_BOUND}x`, () => {
+    expect(() =>
+      assertAppearancePointsPlausible(new Map([[GOALKEEPER, { projected: 2.5, actual: 2.0 }]])),
+    ).not.toThrow()
   })
 
-  it('passes at the arithmetic ceiling itself, 2.0', () => {
-    expect(() => assertAppearancePointsPlausible(new Map([[DEFENDER, APPEARANCE_POINTS_ARITHMETIC_MAXIMUM]]))).not.toThrow()
+  it('passes at a real post-#155 figure well above the old absolute 2.0/2.3 range (GK 2.01 proj vs 2.01 actual)', () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, { projected: 2.01, actual: 2.01 }]]))).not.toThrow()
   })
 
-  it('fails just BELOW the lower bound rather than silently passing', () => {
-    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, APPEARANCE_POINTS_PER_90_LOWER_BOUND - 0.01]]))).toThrow(
-      CalibrationReportError,
-    )
+  it('passes at the highest real post-#155 figure (FWD 2.63 proj vs 2.63 actual) — the old absolute bound would have failed this', () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[FORWARD, { projected: 2.63, actual: 2.63 }]]))).not.toThrow()
   })
 
-  it('fails just ABOVE the upper bound rather than silently passing', () => {
-    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, APPEARANCE_POINTS_PER_90_UPPER_BOUND + 0.01]]))).toThrow(
-      CalibrationReportError,
-    )
+  it('fails just BELOW the lower ratio bound rather than silently passing', () => {
+    expect(() =>
+      assertAppearancePointsPlausible(new Map([[GOALKEEPER, { projected: 1.59, actual: 2.0 }]])),
+    ).toThrow(CalibrationReportError)
   })
 
-  it("reproduces and catches the 29 Aug 2026 run's impossible 2.84 goalkeeper figure — the exact defect this ticket fixes", () => {
-    expect(() => assertAppearancePointsPlausible(new Map([[GOALKEEPER, 2.84]]))).toThrow(CalibrationReportError)
+  it('fails just ABOVE the upper ratio bound rather than silently passing', () => {
+    expect(() =>
+      assertAppearancePointsPlausible(new Map([[GOALKEEPER, { projected: 2.51, actual: 2.0 }]])),
+    ).toThrow(CalibrationReportError)
+  })
+
+  it("reproduces and catches the pre-#155 run's 1.42x goalkeeper ratio — the exact defect this bound exists to catch", () => {
+    const figures = new Map([[GOALKEEPER, { projected: 2.84, actual: 2.0 }]])
+    expect(() => assertAppearancePointsPlausible(figures)).toThrow(CalibrationReportError)
     try {
-      assertAppearancePointsPlausible(new Map([[GOALKEEPER, 2.84]]))
+      assertAppearancePointsPlausible(figures)
       expect.unreachable('assertAppearancePointsPlausible should have thrown')
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       expect(message).toContain('Goalkeeper')
-      expect(message).toContain('2.84')
+      expect(message).toContain('1.42')
     }
   })
 
-  it('a null figure (no data) never violates the bound', () => {
-    expect(() => assertAppearancePointsPlausible(new Map([[FORWARD, null]]))).not.toThrow()
+  it('a null projected or actual figure (no data on either side) never violates the bound', () => {
+    expect(() => assertAppearancePointsPlausible(new Map([[FORWARD, { projected: null, actual: 2.0 }]])) ).not.toThrow()
+    expect(() => assertAppearancePointsPlausible(new Map([[FORWARD, { projected: 2.0, actual: null }]])) ).not.toThrow()
+    expect(() => assertAppearancePointsPlausible(new Map([[FORWARD, { projected: null, actual: null }]])) ).not.toThrow()
   })
 
   it('checks every position in the map, not just the first', () => {
     expect(() =>
       assertAppearancePointsPlausible(
         new Map([
-          [GOALKEEPER, 2.0],
-          [DEFENDER, 1.9],
-          [MIDFIELDER, 2.59], // the impossible reading this ticket's own diagnosis names for defenders — reused here for midfielder
-          [FORWARD, null],
+          [GOALKEEPER, { projected: 2.0, actual: 2.0 }],
+          [DEFENDER, { projected: 1.9, actual: 1.9 }],
+          [MIDFIELDER, { projected: 2.9, actual: 2.0 }], // 1.45x — outside the range, reused here for midfielder
+          [FORWARD, { projected: null, actual: null }],
         ]),
       ),
     ).toThrow(/Midfielder/)
@@ -1143,8 +1144,9 @@ describe('calibration-report.ts — appearance-weighted projected side (source i
     expect(assertIndex).toBeLessThan(writeIndex)
   })
 
-  it('checks the bound per position, not only in aggregate', () => {
-    expect(source).toMatch(/POSITIONS\.map\(\s*\(position\)\s*=>\s*\[\s*position,\s*projectedByPosition\[position\]\.componentPer90\?\.appearancePoints/)
+  it('checks the bound per position, not only in aggregate, using both the projected and actual sides', () => {
+    expect(source).toMatch(/projected:\s*projectedByPosition\[position\]\.componentPer90\?\.appearancePoints/)
+    expect(source).toMatch(/actual:\s*actualByPosition\[position\]\.componentPer90\?\.appearancePoints/)
   })
 
   it('states in the report body that the projected side is appearance-weighted, where the totals and component tables print it', () => {
@@ -1162,9 +1164,9 @@ describe('calibration-report.ts — appearance-weighted projected side (source i
     expect(source).toMatch(/rows using the pre-#155 unweighted fallback/)
   })
 
-  it('marks the bound range as a judgement call in its own code comment, distinguishing the arithmetic upper end from the guessed lower end', () => {
+  it('marks the ratio bound range as a judgement call, and notes that a ratio bound cannot catch an error that moves both sides the same way', () => {
     expect(source).toMatch(/JUDGEMENT CALL/)
-    expect(source).toMatch(/upper end is arithmetic, not a guess/)
+    expect(source).toMatch(/cannot catch an error that moves both sides/)
   })
 
   it('never touches src/, only imports from it — no write, no edit of anything under src/', () => {
