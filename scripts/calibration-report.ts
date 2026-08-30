@@ -980,17 +980,24 @@ export const APPEARANCE_POINTS_ARITHMETIC_MAXIMUM = APPEARANCE_POINTS_60_PLUS
 /**
  * The bound this report checks projected appearance pts/90 against, per
  * position. JUDGEMENT CALL, marked as such per the ticket's own instruction:
- * the UPPER end, 2.1, is close to APPEARANCE_POINTS_ARITHMETIC_MAXIMUM (2.0)
- * with a small margin for players legitimately subbed between 60 and 89
- * minutes more often than not (each such appearance earns the full 2 points
- * for fewer than 90 minutes, which can push an individual per-90 figure
- * slightly above 2.0) — the upper end is arithmetic, not a guess. The LOWER
- * end, 1.5, is a guess at how far a real position-level population can
- * plausibly sit below 2.0 from early (1–59 minute) substitutions — there is
- * no arithmetic derivation for it.
+ * the upper end is arithmetic, not a guess, and the lower end is not.
+ *
+ * The UPPER end, 2.3, follows from the fact that appearance points cap at
+ * exactly 2 per appearance (APPEARANCE_POINTS_ARITHMETIC_MAXIMUM), but the
+ * per-90 figure is 2 × 90 / average-minutes-given-appearing, not 2 flat —
+ * every appearance that earns the full 2 points for fewer than 90 minutes
+ * (any 60-89 minute sub) pushes the per-90 rate above 2.0. 2.3 is that
+ * formula's ceiling for an average-minutes-given-appearing floor of 78
+ * (2 × 90 / 78 ≈ 2.31): a realistic worst case across a position's
+ * population, where subs cluster in the 60-89 minute window rather than
+ * right at 60, not a single extreme row.
+ *
+ * The LOWER end, 1.5, is a guess at how far a real position-level population
+ * can plausibly sit below 2.0 from early (1-59 minute) substitutions — there
+ * is no arithmetic derivation for it.
  */
 export const APPEARANCE_POINTS_PER_90_LOWER_BOUND = 1.5
-export const APPEARANCE_POINTS_PER_90_UPPER_BOUND = 2.1
+export const APPEARANCE_POINTS_PER_90_UPPER_BOUND = 2.3
 
 /**
  * Throws — the report FAILS rather than printing an impossible figure — the

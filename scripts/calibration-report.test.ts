@@ -456,7 +456,7 @@ describe('appearanceWeightedPer90 / aggregateProjectedByPosition — single heal
   //
   // Pre-#155 ratio-of-sums (both rows weighted equally by expectedMinutes):
   //   (2.0 + 1.0) / (90 + 15) × 90 = 3.0 / 105 × 90 = 2.571428... — ALREADY
-  //   above APPEARANCE_POINTS_PER_90_UPPER_BOUND (2.1) from just ONE healthy
+  //   above APPEARANCE_POINTS_PER_90_UPPER_BOUND (2.3) from just ONE healthy
   //   backup row. This is the defect ticket #155 exists to fix.
   //
   // Round-1 (pAppears-weighted) construction, on these REALISTIC pAppears
