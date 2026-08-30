@@ -26,8 +26,9 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../src/lib/scoring/types.ts'
+import { defensiveContributionPoints } from '../src/lib/scoring/defensiveContribution.ts'
 import { positionPriorRates } from '../src/lib/projection/rates.ts'
-import { positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
+import { estimateDefconHitRate, positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
 import { projectPlayerGameweek } from '../src/lib/projection/expectedPoints.ts'
 import { LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
 import {
@@ -36,6 +37,7 @@ import {
   averageMinutesPerMatch,
   bucketByPriorMatches,
   buildDefconMatches,
+  buildDefconMatchesFromCounts,
   buildMeasuredRow,
   buildMultiFixtureDiagnostic,
   buildPlayerRateHistory,
@@ -44,6 +46,7 @@ import {
   buildTeamSlugsByGameweek,
   checkRankingSanityBounds,
   checkSanityBounds,
+  classifyDefconSource,
   classifyRow,
   CLEAN_SHEET_RATE_UPPER_BOUND,
   computePositionPriors,
@@ -52,9 +55,14 @@ import {
   defconSignedError,
   derivedCleanSheetRate,
   describeSignedError,
+  emptyDefconSourceCounts,
   emptyExclusionCounts,
+  emptyPositionResolutionCounts,
   formatExclusionPercentage,
+  hasDefconCounters,
+  incrementDefconSource,
   incrementExclusion,
+  incrementPositionResolution,
   inferTeamSlug,
   MAE_LOWER_BOUND,
   MAE_UPPER_BOUND,
@@ -65,6 +73,7 @@ import {
   projectRow,
   rankDescending,
   reconstructActualMatchPoints,
+  resolveRowPosition,
   spearmanCorrelation,
   SPEARMAN_LOWER_BOUND,
   SPEARMAN_UPPER_BOUND,
@@ -92,8 +101,15 @@ const zeroPrior = (position = FORWARD): PositionPrior => ({
   defconHitRate: positionPriorHitRate(position, []),
 })
 
+// Ticket #154: element_type, prior_defcon_qualifying_matches and
+// prior_defcon_hits all default to null — "never computed" (a row predating
+// the #146 migration), the same default a real pre-migration row carries.
+// Every test that needs the new columns passes them explicitly via
+// overrides; every test that does not is exercising the pre-#154 fallback
+// paths, unmodified.
 function featureRow(overrides: Partial<FeatureHistoryRow> & Pick<FeatureHistoryRow, 'gameweek_id' | 'player_code'>): FeatureHistoryRow {
   return {
+    element_type: null,
     prior_matches: 0,
     prior_minutes: 0,
     prior_xg: 0,
@@ -104,6 +120,8 @@ function featureRow(overrides: Partial<FeatureHistoryRow> & Pick<FeatureHistoryR
     prior_interceptions: 0,
     prior_tackles: 0,
     prior_recoveries: 0,
+    prior_defcon_qualifying_matches: null,
+    prior_defcon_hits: null,
     ...overrides,
   }
 }
@@ -509,6 +527,165 @@ describe('classifyRow — other reasons', () => {
     const row = featureRow({ gameweek_id: 5, player_code: 45, prior_matches: 3, prior_minutes: 270 })
     const result = classifyRow(row, FORWARD, [actualRow({ minutesPlayed: 90, teamGoalsConceded: 1 })])
     expect(result.kind).toBe('measured')
+  })
+})
+
+// ============================================================================
+// resolveRowPosition (ticket #154, Defect 1) — feature_history.element_type
+// is the primary source, the `players` fallback map only applies when it is
+// null, and a row resolves to neither only when both are unavailable. All
+// three named paths, each proven independently.
+// ============================================================================
+
+describe('resolveRowPosition — the three named paths (ticket #154)', () => {
+  it('path 1: element_type is used when non-null, even when the players fallback map disagrees', () => {
+    const row = featureRow({ gameweek_id: 1, player_code: 900, element_type: MIDFIELDER })
+    const codeToPosition = new Map<number, typeof FORWARD>([[900, FORWARD]]) // deliberately disagrees
+    const result = resolveRowPosition(row, codeToPosition)
+    expect(result).toEqual({ position: MIDFIELDER, source: 'elementType' })
+  })
+
+  it('path 2: falls back to the players map when element_type is null', () => {
+    const row = featureRow({ gameweek_id: 1, player_code: 901, element_type: null })
+    const codeToPosition = new Map<number, typeof DEFENDER>([[901, DEFENDER]])
+    const result = resolveRowPosition(row, codeToPosition)
+    expect(result).toEqual({ position: DEFENDER, source: 'playersFallback' })
+  })
+
+  it('path 3: unresolved when element_type is null and the code has no players row either — the 23% this ticket fixes', () => {
+    const row = featureRow({ gameweek_id: 1, player_code: 902, element_type: null })
+    const codeToPosition = new Map<number, typeof DEFENDER>() // player_code 902 not present -- a player who has left the league
+    const result = resolveRowPosition(row, codeToPosition)
+    expect(result).toEqual({ position: undefined, source: 'unresolved' })
+  })
+})
+
+describe('PositionResolutionCounts — emptyPositionResolutionCounts / incrementPositionResolution (ticket #154)', () => {
+  it('tallies each of the three sources independently', () => {
+    const counts = emptyPositionResolutionCounts()
+    incrementPositionResolution(counts, 'elementType')
+    incrementPositionResolution(counts, 'elementType')
+    incrementPositionResolution(counts, 'playersFallback')
+    incrementPositionResolution(counts, 'unresolved')
+    expect(counts).toEqual({ fromElementType: 2, fromPlayersFallback: 1, unresolved: 1 })
+  })
+})
+
+// ============================================================================
+// Defensive-contribution counters (ticket #154, Defect 2) — the real
+// per-match qualifying/hit counts feed estimateDefconHitRate directly
+// (via buildDefconMatchesFromCounts), replacing the single-averaged-match
+// approximation that could never carry more than 1/6 weight regardless of
+// how much real history a player had.
+// ============================================================================
+
+describe('hasDefconCounters / classifyDefconSource (ticket #154)', () => {
+  it('is false, and classifies as averagedFallback, when either counter is null', () => {
+    expect(hasDefconCounters({ prior_defcon_qualifying_matches: null, prior_defcon_hits: null })).toBe(false)
+    expect(hasDefconCounters({ prior_defcon_qualifying_matches: 5, prior_defcon_hits: null })).toBe(false)
+    expect(hasDefconCounters({ prior_defcon_qualifying_matches: null, prior_defcon_hits: 0 })).toBe(false)
+    expect(classifyDefconSource({ prior_defcon_qualifying_matches: null, prior_defcon_hits: null })).toBe('averagedFallback')
+  })
+
+  it('is true, and classifies as storedCounters, when both counters are non-null — including the real zero case', () => {
+    expect(hasDefconCounters({ prior_defcon_qualifying_matches: 0, prior_defcon_hits: 0 })).toBe(true)
+    expect(hasDefconCounters({ prior_defcon_qualifying_matches: 20, prior_defcon_hits: 5 })).toBe(true)
+    expect(classifyDefconSource({ prior_defcon_qualifying_matches: 20, prior_defcon_hits: 5 })).toBe('storedCounters')
+  })
+})
+
+describe('DefconSourceCounts — emptyDefconSourceCounts / incrementDefconSource (ticket #154)', () => {
+  it('tallies each of the two sources independently', () => {
+    const counts = emptyDefconSourceCounts()
+    incrementDefconSource(counts, 'storedCounters')
+    incrementDefconSource(counts, 'storedCounters')
+    incrementDefconSource(counts, 'averagedFallback')
+    expect(counts).toEqual({ fromStoredCounters: 2, fromAveragedFallback: 1 })
+  })
+})
+
+describe('buildDefconMatchesFromCounts — reproduces the real qualifying/hit counts exactly (ticket #154)', () => {
+  it('builds exactly `hits` qualifying matches that reach the threshold and `qualifyingMatches - hits` that miss it', () => {
+    const matches = buildDefconMatchesFromCounts(20, 5)
+    expect(matches).toHaveLength(20)
+    // Every match is qualifying (90 minutes, well over the 60-minute gate).
+    expect(matches.every((m) => m.minutesPlayed >= 60)).toBe(true)
+    // Exactly 5 reach even the stricter mid/forward 12-CBIRT threshold, the
+    // other 15 register nothing at all — the two extremes buildDefconMatchesFromCounts
+    // is documented to build, checked here via the real threshold function
+    // rather than assumed.
+    const hits = matches.filter((m) => defensiveContributionPoints(FORWARD, m) > 0)
+    expect(hits).toHaveLength(5)
+  })
+
+  it('is empty for zero qualifying matches, never a phantom entry', () => {
+    expect(buildDefconMatchesFromCounts(0, 0)).toEqual([])
+  })
+
+  it('clamps a corrupt hits count to the qualifying-matches count, defensively', () => {
+    expect(buildDefconMatchesFromCounts(3, 99)).toHaveLength(3)
+    expect(buildDefconMatchesFromCounts(3, 99).every((m) => defensiveContributionPoints(DEFENDER, m) > 0)).toBe(true)
+  })
+})
+
+describe('buildDefconMatches + estimateDefconHitRate — the ticket #154 hand-computed arithmetic', () => {
+  it('prior_defcon_qualifying_matches=20, prior_defcon_hits=5, position prior=0.2 gives exactly 0.24', () => {
+    // By hand: estimate = (hits + SHRINKAGE_K x positionPrior) / (qualifyingMatches + SHRINKAGE_K)
+    //                    = (5 + 5 x 0.2) / (20 + 5)
+    //                    = (5 + 1) / 25
+    //                    = 6 / 25
+    //                    = 0.24
+    const row = featureRow({
+      gameweek_id: 9,
+      player_code: 910,
+      prior_matches: 20,
+      prior_defcon_qualifying_matches: 20,
+      prior_defcon_hits: 5,
+    })
+    const estimate = estimateDefconHitRate(DEFENDER, buildDefconMatches(row), 0.2)
+    expect(estimate).toBeCloseTo(0.24, 10)
+  })
+
+  it('the OLD single-synthetic-match path on the SAME evidence yields a materially different, more heavily shrunk value — proving the old behaviour was the defect', () => {
+    // Same underlying story as above (20 qualifying matches, 5 of them
+    // hits -- a 25% hit rate) but WITHOUT the #146 counters, forcing the
+    // pre-#154 fallback: one averaged synthetic match. Averaging 20 real
+    // matches where only 5 crossed the defender's 10-CBIT threshold pulls
+    // the per-match AVERAGE well under 10 (here: 1 CBIT/match), so the one
+    // synthetic match this path builds is itself a miss.
+    const oldRow = featureRow({
+      gameweek_id: 9,
+      player_code: 911,
+      prior_matches: 20,
+      prior_minutes: 1800, // averages to 90 min/match -- comfortably qualifying (60+)
+      prior_clearances: 20, // averages to 1 CBIT/match -- far under the 10 threshold, a clear miss
+      // prior_defcon_qualifying_matches / prior_defcon_hits left null (default) -- the pre-#146 case.
+    })
+    const oldMatches = buildDefconMatches(oldRow)
+    expect(oldMatches).toHaveLength(1) // the pre-#154 defect: always <= 1 match, regardless of real history
+    const oldEstimate = estimateDefconHitRate(DEFENDER, oldMatches, 0.2)
+    // By hand: one miss, n=1, hits=0: estimate = (0 + 5 x 0.2) / (1 + 5) = 1 / 6 = 0.1666...
+    expect(oldEstimate).toBeCloseTo(1 / 6, 10)
+    expect(oldEstimate).not.toBeCloseTo(0.24, 2) // materially different from the new, counters-driven 0.24
+  })
+
+  it('a row with null defcon counters falls back to the averaged-match path rather than throwing or being treated as excluded', () => {
+    const row = featureRow({ gameweek_id: 2, player_code: 912, prior_matches: 5, prior_minutes: 450, prior_clearances: 20 })
+    expect(hasDefconCounters(row)).toBe(false)
+    expect(() => buildDefconMatches(row)).not.toThrow()
+    expect(buildDefconMatches(row)).toHaveLength(1) // the existing averaged-match path, unchanged
+    expect(classifyDefconSource(row)).toBe('averagedFallback')
+  })
+
+  it('goalkeepers still return exactly 0 defensive contribution, even with real stored counters', () => {
+    const row = featureRow({
+      gameweek_id: 9,
+      player_code: 913,
+      prior_matches: 20,
+      prior_defcon_qualifying_matches: 20,
+      prior_defcon_hits: 15, // a high hit rate -- must still be irrelevant for a goalkeeper
+    })
+    expect(estimateDefconHitRate(GOALKEEPER, buildDefconMatches(row), 0.5)).toBe(0)
   })
 })
 
