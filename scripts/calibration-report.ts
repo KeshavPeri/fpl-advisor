@@ -233,13 +233,15 @@
 // populations per position; the report states both counts in its
 // provenance section.
 //
-// A sanity bound (assertAppearancePointsPlausible, below) checks projected
-// appearance pts/90 against a plausible range around the arithmetic ceiling
-// of 2 points per appearance, per position, and FAILS the report — never
-// merely warns — when a position falls outside it. This is the guard that
-// would have caught the 29 Aug run's 2.84 goalkeeper figure; see this file's
-// test for that exact reproduction. This bound and its range are UNCHANGED
-// by this revision.
+// A sanity bound (assertAppearancePointsPlausible, below) checks the RATIO
+// of projected to actual appearance pts/90, per position, and FAILS the
+// report — never merely warns — when a position's ratio falls outside a
+// plausible range. This is the guard that would have caught the pre-#155
+// run's 1.42x goalkeeper ratio; see this file's test for that exact
+// reproduction. This bound was originally an absolute range around the
+// arithmetic ceiling of 2 points per appearance, but that premise was wrong
+// — see the ticket #155 follow-up note where the bound itself is defined,
+// below, for why.
 // ============================================================================
 
 // ============================================================================
@@ -960,62 +962,69 @@ export function assertCleanSheetRatesPlausible(ratesByPosition: ReadonlyMap<Posi
 }
 
 // ============================================================================
-// Appearance points per-90 bound — ticket #155. Pure, no I/O.
+// Appearance points per-90 RATIO bound — ticket #155 follow-up. Pure, no I/O.
 // ============================================================================
-// The guard that would have caught the population-mismatch defect this
-// ticket fixes — see the "Appearance-weighted projected side" section near
-// the top of this file. Appearance points are capped at exactly 2 per
-// match and do not scale continuously with minutes the way a goal does; a
-// real position-level population, dominated by players who mostly play
-// close to a full match, sits at or slightly below 2.0 per 90 — a player
-// subbed before 60 minutes earns 1, not 2, which pulls the average down. A
-// bound that WARNS rather than FAILS would not have caught the 29 Aug 2026
-// run's 2.84 goalkeeper figure; this one throws, matching
-// assertCleanSheetRatesPlausible above.
+// The original version of this bound (ticket #155) checked projected
+// appearance pts/90 against an ABSOLUTE range built around "2 points per
+// appearance is the arithmetic ceiling." That premise was wrong: appearance
+// points scale with the FRACTION of a match played, not with whether a
+// match was played at all — a player subbed off after 30 minutes earns 1
+// point for a third of a match, which alone pushes a per-90 rate to 3.0,
+// nowhere near a fixed ceiling. Confirming this: the report's own actual
+// side, once the appearance-weighting fix (ticket #155) landed, reads GK
+// 2.01, DEF 2.18, MID 2.41, FWD 2.63 — every position legitimately AT OR
+// ABOVE the "2.3 ceiling" the old bound treated as implausible. See
+// decisions/ticket-155-followup.md.
+//
+// This bound checks the RATIO of projected to actual appearance pts/90 per
+// position instead, since a healthy model should track its own realized
+// outcome even though neither side is capped at any fixed value. The range
+// below is a JUDGEMENT CALL, not an arithmetic derivation — there is no
+// formula for "how close should projected and actual be." It is chosen wide
+// enough to admit real report ratios (close to 1.0x after the #155 fix)
+// while still catching the population-mismatch defect this bound exists to
+// catch: the pre-#155 run's goalkeeper ratio was 1.42x (proj/actual),
+// comfortably outside this range.
+//
+// A bound on a RATIO cannot catch an error that moves both sides — projected
+// and actual — the same way. If a future defect scaled both per-90 figures
+// by the same factor, their ratio would stay ~1.0 and this bound would stay
+// silent; it only catches divergence BETWEEN the two sides, not a shared
+// error in both.
 // ============================================================================
-
-/** The arithmetic ceiling: the maximum points a single appearance can ever earn. Not a guess — see pointValues.ts. */
-export const APPEARANCE_POINTS_ARITHMETIC_MAXIMUM = APPEARANCE_POINTS_60_PLUS
 
 /**
- * The bound this report checks projected appearance pts/90 against, per
- * position. JUDGEMENT CALL, marked as such per the ticket's own instruction:
- * the upper end is arithmetic, not a guess, and the lower end is not.
- *
- * The UPPER end, 2.3, follows from the fact that appearance points cap at
- * exactly 2 per appearance (APPEARANCE_POINTS_ARITHMETIC_MAXIMUM), but the
- * per-90 figure is 2 × 90 / average-minutes-given-appearing, not 2 flat —
- * every appearance that earns the full 2 points for fewer than 90 minutes
- * (any 60-89 minute sub) pushes the per-90 rate above 2.0. 2.3 is that
- * formula's ceiling for an average-minutes-given-appearing floor of 78
- * (2 × 90 / 78 ≈ 2.31): a realistic worst case across a position's
- * population, where subs cluster in the 60-89 minute window rather than
- * right at 60, not a single extreme row.
- *
- * The LOWER end, 1.5, is a guess at how far a real position-level population
- * can plausibly sit below 2.0 from early (1-59 minute) substitutions — there
- * is no arithmetic derivation for it.
+ * The bound this report checks the projected/actual appearance pts/90 RATIO
+ * against, per position. JUDGEMENT CALL — see the section comment above.
  */
-export const APPEARANCE_POINTS_PER_90_LOWER_BOUND = 1.5
-export const APPEARANCE_POINTS_PER_90_UPPER_BOUND = 2.3
+export const APPEARANCE_POINTS_PER_90_RATIO_LOWER_BOUND = 0.8
+export const APPEARANCE_POINTS_PER_90_RATIO_UPPER_BOUND = 1.25
 
 /**
  * Throws — the report FAILS rather than printing an impossible figure — the
- * moment any position's projected appearance pts/90 falls outside
- * [APPEARANCE_POINTS_PER_90_LOWER_BOUND, APPEARANCE_POINTS_PER_90_UPPER_BOUND].
- * Names both the position and the figure, so the failure is actionable from
- * the job_runs message alone. A null figure (no data) is not a violation —
- * there is nothing implausible about "no data".
+ * moment any position's projected/actual appearance pts/90 ratio falls
+ * outside [APPEARANCE_POINTS_PER_90_RATIO_LOWER_BOUND,
+ * APPEARANCE_POINTS_PER_90_RATIO_UPPER_BOUND]. Names the position and both
+ * the ratio and the two raw figures behind it, so the failure is actionable
+ * from the job_runs message alone. A ratio of null (either side has no
+ * data) is not a violation — there is nothing implausible about "no data".
  */
-export function assertAppearancePointsPlausible(appearancePer90ByPosition: ReadonlyMap<Position, number | null>): void {
-  for (const [position, value] of appearancePer90ByPosition) {
-    if (value !== null && (value < APPEARANCE_POINTS_PER_90_LOWER_BOUND || value > APPEARANCE_POINTS_PER_90_UPPER_BOUND)) {
+export function assertAppearancePointsPlausible(
+  appearancePer90ByPosition: ReadonlyMap<Position, { projected: number | null; actual: number | null }>,
+): void {
+  for (const [position, { projected, actual }] of appearancePer90ByPosition) {
+    const projectedToActualRatio = ratio(projected, actual)
+    if (
+      projectedToActualRatio !== null &&
+      (projectedToActualRatio < APPEARANCE_POINTS_PER_90_RATIO_LOWER_BOUND ||
+        projectedToActualRatio > APPEARANCE_POINTS_PER_90_RATIO_UPPER_BOUND)
+    ) {
       throw new CalibrationReportError(
-        `${POSITION_NAMES[position]}'s projected appearance points per 90 is ${value.toFixed(2)} — outside the plausible ` +
-          `[${APPEARANCE_POINTS_PER_90_LOWER_BOUND}, ${APPEARANCE_POINTS_PER_90_UPPER_BOUND}] range around the arithmetic ` +
-          `ceiling of ${APPEARANCE_POINTS_ARITHMETIC_MAXIMUM.toFixed(1)} points per appearance. This is impossible or ` +
-          'implausible, not a finding — refusing to print it (ticket #155, the population-mismatch defect this bound exists ' +
-          'to catch).',
+        `${POSITION_NAMES[position]}'s projected/actual appearance points per 90 ratio is ` +
+          `${projectedToActualRatio.toFixed(2)}x (projected ${projected!.toFixed(2)}, actual ${actual!.toFixed(2)}) — ` +
+          `outside the plausible [${APPEARANCE_POINTS_PER_90_RATIO_LOWER_BOUND}, ${APPEARANCE_POINTS_PER_90_RATIO_UPPER_BOUND}] ` +
+          'ratio range. This is implausible, not a finding — refusing to print it (ticket #155 follow-up, the ' +
+          'population-mismatch defect this bound exists to catch).',
         'appearance_points_per_90_bound',
       )
     }
@@ -1441,11 +1450,13 @@ function generateReportMarkdown(data: ReportData): string {
       'rarely-selected backup apart from a nailed starter — `pSixtyPlus` can, because it is built from the same recent-minutes ' +
       `history as avgMinutes. ${data.projectionRowsFallbackUnweighted} of ${data.projectionRowsAppearanceWeighted + data.projectionRowsFallbackUnweighted} ` +
       'projected rows had no stored `pSixtyPlus` (written before ticket #109/#148) and fall back to the pre-#155 unweighted rate ' +
-      'for that row alone — see the provenance section below. A sanity bound on projected appearance points per 90 ' +
-      '(`assertAppearancePointsPlausible`) fails this report outright, per position, if a figure falls outside ' +
-      `[${APPEARANCE_POINTS_PER_90_LOWER_BOUND}, ${APPEARANCE_POINTS_PER_90_UPPER_BOUND}] — the range a real population can ` +
-      'plausibly sit in around the arithmetic ceiling of 2 points per appearance. This is the guard that would have caught the ' +
-      '29 Aug 2026 run\'s impossible 2.84 goalkeeper figure.',
+      'for that row alone — see the provenance section below. A sanity bound on the RATIO of projected to actual appearance ' +
+      'points per 90 (`assertAppearancePointsPlausible`) fails this report outright, per position, if that ratio falls ' +
+      `outside [${APPEARANCE_POINTS_PER_90_RATIO_LOWER_BOUND}, ${APPEARANCE_POINTS_PER_90_RATIO_UPPER_BOUND}] — a judgement ` +
+      'range, not an arithmetic one (ticket #155 follow-up; the earlier absolute bound around a 2-points-per-appearance ' +
+      '"ceiling" was wrong, since a sub earning 1 point for a third of a match alone pushes a per-90 rate well past 2.0). ' +
+      'This is the guard that would have caught the pre-#155 run\'s 1.42x goalkeeper ratio. A ratio bound cannot catch an ' +
+      'error that moves both sides the same way.',
   )
 
   sections.push('## Headline: are defenders over-projected?\n\n' + defenderHeadline(data.actualByPosition, data.projectedByPosition))
@@ -1874,14 +1885,21 @@ async function main(): Promise<void> {
     const excludedBonusBound = checkExcludedBonusBound(allExcludedBonusValues)
 
     // --------------------------------------------------------------------
-    // 6b. Ticket #155: the bound that would have caught the population-
-    //     mismatch defect (the 29 Aug 2026 run's 2.84 goalkeeper figure).
-    //     Runs BEFORE any report content is written — an impossible
-    //     appearance-points-per-90 figure must fail the job, never reach
-    //     the file on disk. Same pattern as step 5b's clean-sheet bound.
+    // 6b. Ticket #155 follow-up: the ratio bound that would have caught the
+    //     population-mismatch defect (the pre-#155 run's 1.42x goalkeeper
+    //     ratio). Runs BEFORE any report content is written — an implausible
+    //     projected/actual appearance-points-per-90 ratio must fail the job,
+    //     never reach the file on disk. Same pattern as step 5b's clean-sheet
+    //     bound.
     // --------------------------------------------------------------------
-    const appearancePer90ByPosition = new Map<Position, number | null>(
-      POSITIONS.map((position) => [position, projectedByPosition[position].componentPer90?.appearancePoints ?? null]),
+    const appearancePer90ByPosition = new Map<Position, { projected: number | null; actual: number | null }>(
+      POSITIONS.map((position) => [
+        position,
+        {
+          projected: projectedByPosition[position].componentPer90?.appearancePoints ?? null,
+          actual: actualByPosition[position].componentPer90?.appearancePoints ?? null,
+        },
+      ]),
     )
     assertAppearancePointsPlausible(appearancePer90ByPosition)
 
