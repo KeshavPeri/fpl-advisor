@@ -5,6 +5,20 @@
    destinations now live in the persistent <AppBar> (App.tsx). See
    HomeScreen.tsx's own header comment for the full because. */
 
+/* F39 (should-fix) — AppShell's own flex `gap` (--shell-gap, F18) is one
+   constant value between every pair of siblings on every screen; these
+   two margins add ON TOP of it so the verdict card and the closing
+   accuracy line each get a bigger break (--space-6 gap + --space-2 margin
+   = --space-8 total) than the calm --space-6 rhythm everything else on
+   this screen keeps. */
+.home-verdict {
+  margin-top: var(--space-2);
+}
+
+.home-accuracy {
+  margin-top: var(--space-2);
+}
+
 .home-status-text {
   font: var(--text-body);
   color: var(--text-secondary);

@@ -169,8 +169,16 @@ function HomeScreen() {
     <AppShell escalated={escalated}>
       <DeadlineCountdown state={countdownState} onEscalatedChange={setEscalated} />
 
+      {/* F39 (should-fix) — AppShell's own `--shell-gap` (F18) is one
+          constant value shared by every sibling on every screen; it can't
+          by itself express "countdown to verdict is a bigger break than
+          verdict to pitch." This wrapper's own margin-top adds ON TOP of
+          that constant gap, giving the verdict card a real break above it
+          (--space-8 total) without changing AppShell.css (out of scope). */}
       {targetGameweek && (
-        <VerdictCard gameweekId={targetGameweek.id} gameweekName={targetGameweek.name} />
+        <div className="home-verdict">
+          <VerdictCard gameweekId={targetGameweek.id} gameweekName={targetGameweek.name} />
+        </div>
       )}
 
       {loadState.status === 'loading' && <PitchSkeleton />}
@@ -235,8 +243,14 @@ function HomeScreen() {
           quiet line (no Surface, no 36px figure) so it stops competing
           with VerdictCard for the one --text-display figure a screen is
           allowed (F30). The full breakdown moves to /reasoning via the
-          same component's `variant="full"` (see ReasoningScreen.tsx). */}
-      <AccuracyCard variant="summary" />
+          same component's `variant="full"` (see ReasoningScreen.tsx).
+
+          F39 — wrapped for the same reason as .home-verdict above: a
+          bigger break (--space-8 total) before this quiet closing line
+          than between the pitch and the bench above it. */}
+      <div className="home-accuracy">
+        <AccuracyCard variant="summary" />
+      </div>
     </AppShell>
   )
 }
