@@ -10,6 +10,15 @@ interface PlayerShirtProps {
   price: number
   captaincy: Captaincy
   availability: Availability
+  /**
+   * F26/F28 (docs/ui-audit-2026-08-31.md, must-fix) — 'starting' (default)
+   * is the eleven: 56px, price shown. 'bench' is smaller (40px) and drops
+   * the price line entirely — "bench price is not a decision input"
+   * (F28's own wording) — which, together with Pitch.css's own
+   * separation, is what makes the bench read as subordinate to the eleven
+   * without relying on the "Bench" text label alone.
+   */
+  size?: 'starting' | 'bench'
 }
 
 const RING_CLASS: Record<Availability['ring'], string> = {
@@ -23,13 +32,20 @@ const RING_CLASS: Record<Availability['ring'], string> = {
  * things (design-reference.md, ticket #38 DoD). Captaincy and the
  * availability ring both render *on* the shirt badge rather than as
  * separate lines, so neither counts as a fourth element.
+ *
+ * Ticket #169 / docs/ui-audit-2026-08-31.md F26 (must-fix) — the starting
+ * badge/shirt grew from 48px to 56px (PlayerShirt.css); F29 (should-fix)
+ * — the badge is now a recess and the shirt a lift off it, so the
+ * silhouette reads as a garment sitting on the badge rather than as an
+ * outline barely distinguishable from its own background.
  */
-function PlayerShirt({ name, price, captaincy, availability }: PlayerShirtProps) {
+function PlayerShirt({ name, price, captaincy, availability, size = 'starting' }: PlayerShirtProps) {
   const ringClass = RING_CLASS[availability.ring]
+  const rootClass = size === 'bench' ? 'player-shirt player-shirt--bench' : 'player-shirt'
   const badgeClass = ['player-shirt__badge', ringClass].filter(Boolean).join(' ')
 
   return (
-    <div className="player-shirt">
+    <div className={rootClass}>
       <div className={badgeClass}>
         <div className="player-shirt__shirt" />
         {captaincy && (
@@ -51,7 +67,7 @@ function PlayerShirt({ name, price, captaincy, availability }: PlayerShirtProps)
         )}
       </div>
       <p className="player-shirt__name">{name}</p>
-      <p className="player-shirt__price num">{formatMoney(price)}</p>
+      {size === 'starting' && <p className="player-shirt__price num">{formatMoney(price)}</p>}
     </div>
   )
 }

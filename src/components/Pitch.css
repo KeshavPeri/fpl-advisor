@@ -1,21 +1,36 @@
 /*
   The pitch itself: no green, no pitch texture, no team colours — an
-  abstract domain form built from the app's existing translucent surfaces
-  (design-reference.md, References item 5 — "the pitch layout is the one
-  convention worth keeping"). Every value below is a var(--…) token.
+  abstract domain form (design-reference.md, References item 5 — "the
+  pitch layout is the one convention worth keeping"). Every value below is
+  a var(--…) token, or a calc() composed from two of them (F26/F27 — see
+  the comment on .pitch__row below for why: this ticket's scope forbids
+  adding a new token to src/index.css, and 56px/40px/40px have no single
+  existing token).
+
+  Ticket #169 / docs/ui-audit-2026-08-31.md — F25 (must-fix): the field is
+  no longer a `<Surface>` (Pitch.tsx runs it full-bleed via `.bleed`
+  instead), so `.pitch__field` carries no panel styling of its own any
+  more — just the row layout. F28 (must-fix): the bench is no longer a
+  `<Surface>` either.
 */
 
 .pitch {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-8);
 }
 
 .pitch__field {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: var(--space-6);
+  /* F27 (must-fix) — was var(--space-6) (24px) against a ~105px shirt
+     block, 23% of the row height: four rows read as a centred stack, not
+     a formation. calc(var(--space-6) + var(--space-4)) = 40px (24 + 16),
+     the audit's exact proposed value — composed from two existing tokens
+     rather than a new one (see the file header). */
+  gap: calc(var(--space-6) + var(--space-4));
+  padding: var(--space-4) 0;
 }
 
 .pitch__row {
@@ -23,20 +38,24 @@
   justify-content: center;
   align-items: flex-start;
   flex-wrap: wrap;
-  gap: var(--space-3);
+  /* F26 (must-fix) — was var(--space-3) (12px); --space-4 (16px) is the
+     audit's exact proposed value and already an existing token, no calc()
+     needed here. */
+  gap: var(--space-4);
 }
 
-/* Ticket #44, finding 6 — the pitch has exactly two Surface panels
-   (field, bench), so the shared arrival animation isn't the "page
-   assembling itself" risk the ticket flags in the general case. A small
-   stagger still reads better than both panels arriving in lockstep: it
-   communicates the field-then-bench hierarchy instead of two unrelated
-   things popping in together. Applies to both the real Pitch and
-   PitchSkeleton, which share this class. prefers-reduced-motion is
-   still handled by Surface.css — with the animation disabled there, this
-   delay is simply inert. */
+/* F28 (must-fix) — the bench is no longer a panel: it sits on the base
+   ink directly below the field, separated by --space-8 (32px, up from the
+   16px that used to sit between two competing panels) — a real break, on
+   top of the smaller PlayerShirt size="bench" shirts below, so hierarchy
+   is carried by size, material and space rather than by the "Bench" label
+   alone. */
 .pitch__bench {
-  animation-delay: 90ms;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
 }
 
 .pitch__bench-title {
@@ -45,7 +64,6 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-tertiary);
-  margin-bottom: var(--space-4);
 }
 
 .pitch__bench-row {
