@@ -49,6 +49,23 @@ import './HomeScreen.css'
  * Ticket #103 adds the "Decisions →" link beside "Chips →" in the same mark
  * row, through to the new /decisions screen — that screen owns its own read
  * entirely (src/lib/decisions/api.ts), independent of everything above.
+ *
+ * Ticket #169 / docs/ui-audit-2026-08-31.md F38 (must-fix, HIGH-IMPACT —
+ * see decisions/ticket-169.md) — the wordmark `<header>` and its
+ * "Decisions →" / "Chips →" link row are deleted outright, not shrunk.
+ * Both destinations are now reachable from the persistent `<AppBar>`
+ * (App.tsx, the foundations ticket), which also fixes the accessibility
+ * defect the old header caused: a bare `<header>` whose only content was
+ * the app's own name declared a banner landmark with nothing in it worth
+ * navigating to, and the app had zero real headings anywhere.
+ * DeadlineCountdown's gameweek name is now the app's first `<h1>` (F21).
+ *
+ * F39 (should-fix, not reached this ticket — see decisions/ticket-169.md)
+ * — the audit's proposed final order (countdown, verdict, pitch, bench,
+ * accuracy) is already this screen's order and is unchanged. Varying the
+ * RHYTHM between sections (a bigger break before the verdict than between
+ * the pitch and the accuracy line) is not done here; every section still
+ * sits at AppShell's one constant `--shell-gap`.
  */
 
 type LoadState =
@@ -63,6 +80,11 @@ function HomeScreen() {
   const [countdownState, setCountdownState] = useState<DeadlineCountdownState>({
     status: 'loading',
   })
+  // F19/F22 — reported up by DeadlineCountdown (the component that owns
+  // the live clock) whenever the 24-hour escalation boolean changes, and
+  // passed straight through to AppShell's own `escalated` prop so the
+  // ambient wash "leans forward" alongside the countdown figure.
+  const [escalated, setEscalated] = useState(false)
   // VerdictCard needs the gameweek id (countdownState only carries the name
   // and the deadline) — see the file header comment.
   const [targetGameweek, setTargetGameweek] = useState<TargetGameweek | null>(null)
@@ -144,19 +166,8 @@ function HomeScreen() {
   }, [])
 
   return (
-    <AppShell>
-      <DeadlineCountdown state={countdownState} />
-      <div className="home-header">
-        <header className="home-mark">FPL Advisor</header>
-        <div className="home-header-links">
-          <Link className="home-chips-link" to="/decisions">
-            Decisions →
-          </Link>
-          <Link className="home-chips-link" to="/chips">
-            Chips →
-          </Link>
-        </div>
-      </div>
+    <AppShell escalated={escalated}>
+      <DeadlineCountdown state={countdownState} onEscalatedChange={setEscalated} />
 
       {targetGameweek && (
         <VerdictCard gameweekId={targetGameweek.id} gameweekName={targetGameweek.name} />
@@ -218,8 +229,14 @@ function HomeScreen() {
           state above (loadState, countdownState, VerdictCard's own fetch)
           — same "a failed or slow read here must never block or blank
           something else" principle those already follow, so it renders
-          unconditionally regardless of whether a squad is saved. */}
-      <AccuracyCard />
+          unconditionally regardless of whether a squad is saved.
+
+          F34 (must-fix) — `variant="summary"` collapses this to a single
+          quiet line (no Surface, no 36px figure) so it stops competing
+          with VerdictCard for the one --text-display figure a screen is
+          allowed (F30). The full breakdown moves to /reasoning via the
+          same component's `variant="full"` (see ReasoningScreen.tsx). */}
+      <AccuracyCard variant="summary" />
     </AppShell>
   )
 }

@@ -1,34 +1,9 @@
-/* Ticket #85: the mark now sits in a row with the link through to /chips,
-   the only change this ticket makes to the home screen's own content. */
-.home-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.home-mark {
-  font: var(--text-label);
-  font-weight: 550;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
-
-/* Ticket #103: the mark row now holds two links through — Decisions and
-   Chips, side by side — rather than growing the single-link layout ticket
-   #85 left in place. */
-.home-header-links {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-4);
-}
-
-.home-chips-link {
-  font: var(--text-label);
-  font-weight: 550;
-  color: var(--accent-cyan);
-}
+/* Ticket #169 / docs/ui-audit-2026-08-31.md F38 (must-fix, HIGH-IMPACT) —
+   .home-header / .home-mark / .home-header-links / .home-chips-link
+   deleted along with the markup in HomeScreen.tsx: the wordmark and its
+   "Decisions →" / "Chips →" link row are gone, not shrunk. Both
+   destinations now live in the persistent <AppBar> (App.tsx). See
+   HomeScreen.tsx's own header comment for the full because. */
 
 .home-status-text {
   font: var(--text-body);

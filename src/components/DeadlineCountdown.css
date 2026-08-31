@@ -4,13 +4,17 @@
   pitch"). Deliberately not a Surface — no translucent panel, no blur, no
   border — this is a quiet inline strip, not a card.
 
-  Understated by default (small quiet label, body-weight value). Inside the
-  24h escalation threshold the remaining-time figure alone grows larger and
-  picks up --accent-coral — chosen over --accent-cyan because this is a
-  time-pressure signal, matching the warning/risk role coral already carries
-  elsewhere in the app (e.g. .home-incomplete), not a positive/recommended
-  one. Never a colour transition that flashes or pulses — see
-  decisions/ticket-42.md.
+  F21 (docs/ui-audit-2026-08-31.md, must-fix) — was a caption (three lines,
+  13-15px, ~40px total). Now a Revolut/Apple Weather treatment: the
+  gameweek name is a small uppercase label (the app's first heading, see
+  DeadlineCountdown.tsx), the remaining-time figure is the single largest
+  type on the screen (--text-figure, F10's own token), and the calendar
+  instant drops to a quiet line below it. This is the audit's resolution of
+  "the countdown is understated by default" vs "one large, calm, tabular
+  figure that owns its space" — SIZE and LOUDNESS are different axes here:
+  the figure is the largest thing on the screen, the verdict card stays the
+  loudest (VerdictCard.css). Never a colour transition that flashes or
+  pulses — see decisions/ticket-42.md.
 */
 .deadline-countdown {
   display: flex;
@@ -20,31 +24,57 @@
 
 .deadline-countdown__label {
   font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
-.deadline-countdown__value {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: var(--space-2);
-  row-gap: var(--space-1);
+/* F21/F10 — the largest figure in the app, mono, tabular (.num). Kept the
+   pre-existing `__remaining` class name (not renamed alongside the visual
+   redesign) — src/index.css.test.ts (out of this ticket's scope, F1's own
+   regression coverage) pins this exact selector, on this exact class name,
+   using a `font:` shorthand with no `!important`, as its proof that a
+   2-class specificity tie would have defeated a naive `.num.num`-only fix.
+   F24 (should-fix) deliberately carries NO transition: the 24-hour
+   escalation crossing happens once per gameweek, almost certainly while
+   the app is closed (see the audit's motion-rejection list) — a
+   transition here would essentially never play, so the escalated state
+   simply renders on next open rather than animating into it. */
+.deadline-countdown__remaining {
+  font: var(--text-figure);
+  letter-spacing: var(--tracking-figure);
+  color: var(--text-primary);
+}
+
+/* F22 (must-fix) — escalation used to be a 2px font-size step
+   (--text-body -> --text-title) plus a colour change; that was the whole
+   "leaning forward" and the audit is explicit it doesn't read as one. Now:
+   the figure's own format switches to a ticking hh:mm:ss clock
+   (formatRemainingPadded, DeadlineCountdown.tsx) — a ticking clock reads
+   as more urgent on its own — AND it steps up a full size (48px -> 56px)
+   and recolours to coral, the app's risk/time-pressure accent (matching
+   .home-incomplete elsewhere), not cyan (positive/recommended). The
+   ambient wash's own escalation (AppShell's `escalated` prop, F19) is
+   wired from HomeScreen via DeadlineCountdown's onEscalatedChange.
+   `font:` shorthand kept (re-applying --text-figure) rather than a bare
+   font-size override, for the same index.css.test.ts reason as the
+   comment above — this rule must keep using the shorthand. */
+.deadline-countdown--escalated .deadline-countdown__remaining {
+  font: var(--text-figure);
+  font-size: 3.5rem;
+  color: var(--accent-coral);
+}
+
+/* The "deadline passed" sentence and the loading/unavailable messages all
+   share this treatment — body text, not a figure, since none of them are
+   numbers. */
+.deadline-countdown__message {
   font: var(--text-body);
   color: var(--text-secondary);
 }
 
-.deadline-countdown__remaining {
-  color: var(--text-primary);
-  transition:
-    color 0.2s ease,
-    font-size 0.2s ease;
-}
-
-/* prefers-reduced-motion is already handled globally in src/index.css,
-   which zeroes every element's transition-duration — no local override
-   needed here. */
-
-.deadline-countdown--escalated .deadline-countdown__remaining {
-  font: var(--text-title);
-  color: var(--accent-coral);
+.deadline-countdown__deadline-line {
+  font: var(--text-label);
+  color: var(--text-tertiary);
 }

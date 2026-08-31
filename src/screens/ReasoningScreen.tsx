@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
+import AccuracyCard from '../components/AccuracyCard'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { toErrorMessage } from '../lib/format'
@@ -264,6 +265,15 @@ function ReasoningContent({ data }: { data: ReasoningRecommendationData | null }
           {view.computedAtLabel && <> · Computed {view.computedAtLabel}</>}
         </p>
       </Surface>
+
+      {/* Ticket #169 / docs/ui-audit-2026-08-31.md F34 (must-fix) — the
+          rolling-accuracy panel (figure, bias line, per-gameweek
+          breakdown) moves here from the home screen, which now shows only
+          AccuracyCard's one-line `variant="summary"`. This is the one
+          screen design-reference.md names as correct for this density
+          (reference 4, Linear), and removing the nested scroll region the
+          home-screen card used to need (F36) is easiest on a full page. */}
+      <AccuracyCard variant="full" />
     </>
   )
 }

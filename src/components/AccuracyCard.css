@@ -1,15 +1,33 @@
 /*
-  The rolling accuracy card (ticket #96) — product-brief.md §2's "rolling
-  figure in-app", below the pitch on the home screen (design-reference.md's
-  home-screen order). Built entirely from Surface, same as every other panel
-  in this app — no new token introduced here, everything below draws from
-  src/index.css.
+  The rolling accuracy display (ticket #96) — product-brief.md §2's
+  "rolling figure in-app". Two variants as of ticket #169
+  (docs/ui-audit-2026-08-31.md F34): `.accuracy-card-summary` is the home
+  screen's single quiet line (no Surface, no panel, no --text-display
+  figure — the accuracy card no longer competes with the verdict card for
+  the one loudest figure a screen is allowed). `.accuracy-card` is the full
+  panel — the rolling figure, the bias line, the per-gameweek breakdown —
+  used only on /reasoning now (ReasoningScreen.tsx).
 
-  This card is a measurement, not a projection: unlike the verdict card's
+  This is a measurement, not a projection: unlike the verdict card's
   projected points, decimals ARE permitted here (see derive.ts's own
   header) — .num still carries every figure so digits stay tabular and
   never jitter.
 */
+
+/* F34 — the home screen's whole footprint for this feature. No panel: it
+   sits directly on the base ink, the quietest thing on the screen. */
+.accuracy-card-summary {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.accuracy-card-summary--loading {
+  color: var(--text-tertiary);
+}
+
+.accuracy-card-summary--error {
+  color: var(--accent-coral);
+}
 
 .accuracy-card {
   display: flex;
@@ -45,9 +63,13 @@
   color: var(--text-tertiary);
 }
 
+/* F35 (should-fix) — was --accent-cyan, this app's own "recommended /
+   positive" colour. MAE is a measurement where LOWER is better; cyan told
+   the eye "good news" regardless of the value. --text-primary: neutral,
+   still the loudest thing on this panel by size, never by colour. */
 .accuracy-card__figure-value {
   font: var(--text-display);
-  color: var(--accent-cyan);
+  color: var(--text-primary);
   letter-spacing: 0.01em;
 }
 
@@ -85,8 +107,13 @@
 
 /* Per-gameweek breakdown — a quiet list, not a table or a chart (ticket's
    own Scope OUT: no charts, no graphing library, figures and words only).
-   Scrolls its own axis if the rolling history grows long rather than
-   letting the card (or the page) grow unbounded. */
+   F36 (must-fix) — used to cap at 220px with its own overflow-y: auto, a
+   nested vertical scroll region inside the page's own vertical scroll. iOS
+   arbitrates that badly (a drag starting inside the inner region doesn't
+   hand off to the page until the inner region hits its end). Now unbounded
+   — this list only ever renders on /reasoning (a full page, not a card
+   competing for home-screen space), so there is nothing left to cap it
+   against. */
 .accuracy-card__gw-list {
   display: flex;
   flex-direction: column;
@@ -94,8 +121,6 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  max-height: 220px;
-  overflow-y: auto;
 }
 
 .accuracy-card__gw-row {
@@ -118,9 +143,11 @@
   color: var(--text-secondary);
 }
 
+/* F35 — same reasoning as .accuracy-card__figure-value above: this is a
+   measurement, not a recommendation, so it stays neutral. */
 .accuracy-card__gw-value {
   font: var(--text-label);
-  color: var(--accent-cyan);
+  color: var(--text-primary);
   text-align: right;
 }
 
