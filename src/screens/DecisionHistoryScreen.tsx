@@ -171,6 +171,20 @@ function DecisionEntryRow({ entry }: { entry: DecisionEntryView }) {
           <dt>Hit cost</dt>
           <dd>{entry.recorded.hitCostText}</dd>
         </div>
+        {/* F45 (should-fix, docs/ui-audit-2026-08-31.md) — a defined,
+            labelled slot for how the decision turned out. The audit's own
+            table found this honestly computable for a transfer or a
+            captaincy pick (prediction_log joined to squad_picks) but NOT
+            for a gameweek total or rank (nothing ingests FPL entry
+            history) — "a data/feature ticket, not a UI fix." This ticket
+            computes nothing and joins nothing (out of scope per the
+            audit's own instruction and CLAUDE.md's src/lib boundary): the
+            slot always renders "Not settled yet" so the screen is shaped
+            for the answer without inventing one. */}
+        <div className="decisions-entry__field">
+          <dt>Outcome</dt>
+          <dd>Not settled yet</dd>
+        </div>
       </dl>
 
       {/* Ticket #107: exactly one of the two notes below ever renders for an

@@ -160,17 +160,34 @@
   margin: 0;
 }
 
-/* Both kinds share the exact same visual treatment — a commit and an
-   override are two equally legitimate decisions, never good/bad. */
+/* F44 (must-fix, docs/ui-audit-2026-08-31.md) — both kinds stay cyan (the
+   rule being honoured is "an override is not a failure", which forbids
+   COLOUR, not distinction — product-brief.md/design-reference.md never say
+   a commit and an override must look identical, only that neither may be
+   painted as a mistake). Distinguished by FORM instead, the app's own
+   established solid/hollow idiom (PlayerShirt.css's captain/vice-captain
+   badges, and its availability ring): a filled pill for "Committed", an
+   outline pill for "Registered override." Was 13px of label text as the
+   only signal — the DoD's "distinguishable at a glance without reading the
+   label" is now true. */
 .decisions-entry__kind {
+  display: inline-flex;
+  align-items: center;
   font: var(--text-label);
   font-weight: 550;
-  color: var(--accent-cyan);
   white-space: nowrap;
+  padding: var(--space-1) var(--space-3);
+  border-radius: 999px;
 }
 
-.decisions-entry__kind--commit,
+.decisions-entry__kind--commit {
+  background: var(--accent-cyan);
+  color: var(--surface-0);
+}
+
 .decisions-entry__kind--override {
+  background: transparent;
+  border: 1px solid var(--accent-cyan-line);
   color: var(--accent-cyan);
 }
 
