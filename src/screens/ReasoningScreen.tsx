@@ -124,7 +124,13 @@ function ReasoningContent({ data }: { data: ReasoningRecommendationData | null }
         )}
       </Surface>
 
-      <Surface className="reasoning-totals">
+      {/* F46 (should-fix, docs/ui-audit-2026-08-31.md) — was three separate
+          panels (totals, captain, one per player — up to five siblings at
+          the same weight). Now one L2 section holding the whole decision
+          detail, with each sub-block recessed (level={1}) inside it —
+          "more information per panel", per design-reference.md's own
+          naming of this screen as the one place density is correct. */}
+      <Surface className="reasoning-detail">
         <div className="reasoning-total">
           <p className="reasoning-total__label">{view.horizonLabel}</p>
           <p className="reasoning-total__value num">
@@ -146,125 +152,135 @@ function ReasoningContent({ data }: { data: ReasoningRecommendationData | null }
         <div className="reasoning-confidence">
           <p className="reasoning-confidence__label">Confidence: {view.confidenceWord}</p>
         </div>
-      </Surface>
 
-      {view.captainBand !== null && (
-        <Surface
-          className={`reasoning-captain reasoning-captain--${view.captainBand}`}
-          role={view.captainBand === 'coin-flip' ? 'status' : undefined}
-        >
-          <p className="reasoning-captain__label">Captain confidence: {view.captainBand}</p>
-          {view.captainNote && <p className="reasoning-captain__note">{view.captainNote}</p>}
-        </Surface>
-      )}
-
-      {view.captainBand === null && (
-        <Surface className="reasoning-captain">
-          <p className="reasoning-captain__label">Captain confidence unavailable</p>
-          <p className="reasoning-captain__note">
-            The starting XI for this gameweek couldn't be read, so the captain gap can't be
-            compared.
-          </p>
-        </Surface>
-      )}
-
-      <div className="reasoning-players">
-        {view.players.map((player) => (
-          <Surface key={player.role} className="reasoning-player" raised>
-            <p className="reasoning-player__role">{player.role}</p>
-            <p className="reasoning-player__name">{player.name}</p>
-            <p className="reasoning-player__coverage">{player.coverageNote}</p>
-
-            {player.hasProjection ? (
-              <table className="reasoning-player__table">
-                <tbody>
-                  {player.components.map((component) => (
-                    <tr key={component.key}>
-                      <td className="reasoning-player__component-label">{component.label}</td>
-                      <td className="reasoning-player__component-value num">
-                        {component.value.toFixed(2)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="reasoning-player__unavailable">
-                No stored projection for this player this gameweek.
-              </p>
-            )}
+        {view.captainBand !== null ? (
+          <Surface
+            className={`reasoning-captain reasoning-captain--${view.captainBand}`}
+            level={1}
+            padding="compact"
+            role={view.captainBand === 'coin-flip' ? 'status' : undefined}
+          >
+            <p className="reasoning-captain__label">Captain confidence: {view.captainBand}</p>
+            {view.captainNote && <p className="reasoning-captain__note">{view.captainNote}</p>}
           </Surface>
-        ))}
-      </div>
+        ) : (
+          <Surface className="reasoning-captain" level={1} padding="compact">
+            <p className="reasoning-captain__label">Captain confidence unavailable</p>
+            <p className="reasoning-captain__note">
+              The starting XI for this gameweek couldn't be read, so the captain gap can't be
+              compared.
+            </p>
+          </Surface>
+        )}
+
+        <div className="reasoning-players">
+          {view.players.map((player) => (
+            <Surface key={player.role} className="reasoning-player" level={1} padding="compact">
+              <p className="reasoning-player__role">{player.role}</p>
+              <p className="reasoning-player__name">{player.name}</p>
+              <p className="reasoning-player__coverage">{player.coverageNote}</p>
+
+              {player.hasProjection ? (
+                <table className="reasoning-player__table">
+                  <tbody>
+                    {player.components.map((component) => (
+                      <tr key={component.key}>
+                        <td className="reasoning-player__component-label">{component.label}</td>
+                        <td className="reasoning-player__component-value num">
+                          {component.value.toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="reasoning-player__unavailable">
+                  No stored projection for this player this gameweek.
+                </p>
+              )}
+            </Surface>
+          ))}
+        </div>
+      </Surface>
 
       {/* Alternatives (ticket #102) — deliberately the quietest section on
           the screen: smaller labels, no --text-display figures, no accent
           headline. Plan A already had its say above; this section exists
-          only to show how close the call was, per product-brief.md §8. */}
-      <section className="reasoning-alternatives" aria-label="Alternative plans">
-        <p className="reasoning-alternatives__heading">Alternatives considered</p>
+          only to show how close the call was, per product-brief.md §8.
+          F46 — one L1 recessed panel instead of one Surface per
+          alternative (each alternative is now a plain block inside it,
+          separated by a rule), matching the quieter register the section
+          already asked for. */}
+      {(view.coinFlipNote || view.alternativesEmptyNote || view.alternatives.length > 0) && (
+        <Surface
+          className="reasoning-alternatives"
+          level={1}
+          role="region"
+          aria-label="Alternative plans"
+        >
+          <p className="reasoning-alternatives__heading">Alternatives considered</p>
 
-        {view.coinFlipNote && (
-          <Surface className="reasoning-alternatives-coinflip" role="status">
-            <p className="reasoning-alternatives-coinflip__note">{view.coinFlipNote}</p>
-          </Surface>
-        )}
+          {view.coinFlipNote && (
+            <p className="reasoning-alternatives-coinflip__note" role="status">
+              {view.coinFlipNote}
+            </p>
+          )}
 
-        {view.alternativesEmptyNote && (
-          <Surface className="reasoning-alternatives-empty">
+          {view.alternativesEmptyNote && (
             <p className="reasoning-alternatives-empty__note">{view.alternativesEmptyNote}</p>
-          </Surface>
-        )}
+          )}
 
-        {view.alternatives.map((alternative) => (
-          <Surface key={alternative.label} className="reasoning-alternative">
-            <div className="reasoning-alternative__header">
-              <p className="reasoning-alternative__label">{alternative.label}</p>
-              <p className="reasoning-alternative__gap">
-                <span className="num">
-                  {alternative.pointsGap > 0 ? `+${alternative.pointsGap}` : alternative.pointsGap}
-                </span>{' '}
-                <span className="reasoning-alternative__gap-text">pts vs Plan A</span>
-              </p>
-            </div>
+          {view.alternatives.map((alternative) => (
+            <div key={alternative.label} className="reasoning-alternative">
+              <div className="reasoning-alternative__header">
+                <p className="reasoning-alternative__label">{alternative.label}</p>
+                <p className="reasoning-alternative__gap">
+                  <span className="num">
+                    {alternative.pointsGap > 0 ? `+${alternative.pointsGap}` : alternative.pointsGap}
+                  </span>{' '}
+                  <span className="reasoning-alternative__gap-text">pts vs Plan A</span>
+                </p>
+              </div>
 
-            <p className="reasoning-alternative__diff">{alternative.differenceText}</p>
+              <p className="reasoning-alternative__diff">{alternative.differenceText}</p>
 
-            {alternative.reasonHeadline && (
-              <p className="reasoning-alternative__reason">{alternative.reasonHeadline}</p>
-            )}
-
-            <div className="reasoning-alternative__meta">
-              <span className="reasoning-alternative__confidence">
-                Confidence: {alternative.confidenceWord}
-              </span>
-              {alternative.hit && (
-                <span className="reasoning-alternative__hit">
-                  <span className="num">−{alternative.hit.cost}</span> hit ·{' '}
-                  <span className="num">{alternative.hit.net}</span> net
-                </span>
+              {alternative.reasonHeadline && (
+                <p className="reasoning-alternative__reason">{alternative.reasonHeadline}</p>
               )}
+
+              <div className="reasoning-alternative__meta">
+                <span className="reasoning-alternative__confidence">
+                  Confidence: {alternative.confidenceWord}
+                </span>
+                {alternative.hit && (
+                  <span className="reasoning-alternative__hit">
+                    <span className="num">−{alternative.hit.cost}</span> hit ·{' '}
+                    <span className="num">{alternative.hit.net}</span> net
+                  </span>
+                )}
+              </div>
+
+              <ul className="reasoning-alternative__players">
+                {alternative.players.map((player) => (
+                  <li key={player.role} className="reasoning-alternative__player">
+                    <span className="reasoning-alternative__player-role">{player.role}</span>
+                    <span className="reasoning-alternative__player-name">{player.name}</span>
+                    <span className="reasoning-alternative__player-coverage">{player.coverageNote}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
+          ))}
+        </Surface>
+      )}
 
-            <ul className="reasoning-alternative__players">
-              {alternative.players.map((player) => (
-                <li key={player.role} className="reasoning-alternative__player">
-                  <span className="reasoning-alternative__player-role">{player.role}</span>
-                  <span className="reasoning-alternative__player-name">{player.name}</span>
-                  <span className="reasoning-alternative__player-coverage">{player.coverageNote}</span>
-                </li>
-              ))}
-            </ul>
-          </Surface>
-        ))}
-      </section>
-
-      <Surface className="reasoning-meta">
-        <p className="reasoning-meta__line">
-          Model: {view.modelVersion ?? 'Unavailable'}
-          {view.computedAtLabel && <> · Computed {view.computedAtLabel}</>}
-        </p>
-      </Surface>
+      {/* F46 — the model/computed-at footer is now a plain quiet line, not
+          its own panel: a one-sentence footnote never needed material
+          under it. */}
+      <p className="reasoning-meta__line">
+        Model: {view.modelVersion ?? 'Unavailable'}
+        {view.computedAtLabel && <> · Computed {view.computedAtLabel}</>}
+      </p>
 
       {/* Ticket #169 / docs/ui-audit-2026-08-31.md F34 (must-fix) — the
           rolling-accuracy panel (figure, bias line, per-gameweek
