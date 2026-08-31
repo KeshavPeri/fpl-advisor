@@ -349,6 +349,88 @@ export function goalConversionFactor(position: Position): number {
 }
 
 // ============================================================================
+// Ticket #168, 31 Aug 2026 -- DIAGNOSED, NO FIX SHIPPED BELOW THIS LINE.
+//
+// Forward assists were the last component outside +/-10% on either
+// instrument (calibration report, 31 Aug 2026: actual 0.40 pts/90, projected
+// 0.27 pts/90, 0.67x) after #148 already applied the directly-measured
+// ASSIST_CONVERSION_FORWARD = 2.12 correction above. This ticket's job was to
+// choose between two candidate mechanisms upstream of that conversion by
+// MEASURING, not arguing (docs/projection-model-backlog.md G7/G8's "do not
+// act from argument alone" precedent) -- and it is recorded here, rather
+// than only in decisions/ticket-168.md, because the next ticket to touch
+// this file needs the finding, not just the outcome.
+//
+// METHOD. Fetched FPL-Core-Insights' player-match CSVs directly over plain
+// HTTPS (both ingested seasons, Premier League matches only via the same
+// match_id-prefix filter scripts/lib/competition.ts uses) and reconstructed,
+// independently, exactly what scripts/project-points.ts computes: the
+// forward position prior (positionPriorRates over every match row of a
+// CURRENTLY-ROSTERED forward, both seasons combined -- the same
+// player_match_stats.player_code = players.code join project-points.ts
+// uses), and the two-stage shrunk rate for the highest-minutes current-season
+// forwards. This reproduced the calibration report's own population sizes
+// exactly (73 distinct forward codes on the current 2026/27 roster; 46 of
+// them found with real 2025/26 minutes, against the report's stated 48) --
+// strong independent confirmation the reconstruction matches the live join.
+//
+// FINDING 1 -- "population mismatch, not fully corrected by
+// appearance-weighting" (the ticket's second candidate) is RULED OUT, not
+// merely unmeasured. Forwards with under 5 nineties of combined history
+// across both seasons carry only 4.3% of the position prior's
+// minutes-weighted total (29 of 677 nineties), and their own xA/90 (0.052)
+// is only 11% below the established (>=5 nineties) group's (0.059) --
+// nowhere near enough dilution to produce a 33-point gap. More decisively:
+// ticket #155 (calibration-report.ts) already applies the IDENTICAL
+// pSixtyPlus appearance-weighted formula to every projected component, goals
+// included, over this SAME 73-forward population. If population dilution
+// were the driver, goals would show a comparable bias. They do not (0.97x,
+// clean, ticket #162).
+//
+// FINDING 2 -- "the position prior is dragging forwards down" (the ticket's
+// first candidate) has only weak, and the wrong-shaped, support as
+// originally framed. The position prior (xaPer90 = 0.0586) sits close to the
+// MEDIAN of the established-forward per-player distribution (~p54, n=35,
+// median 0.0538), not far below it, and the highest-minutes 15 forwards' own
+// combined-history xA/90 (0.053, minutes-weighted) sits slightly BELOW the
+// prior, not above it -- shrinkage pulls their rate UP toward the prior on
+// this evidence, the opposite of what "recommended players sit far above a
+// low prior" predicts. The same top-15 group's xG/90 (0.463) sits almost
+// exactly AT the prior (0.455, ratio 1.02) -- consistent with goals
+// projecting correctly and unhelpful for explaining why assists do not.
+//
+// FINDING 3 -- a real, measured, ASYMMETRIC effect exists that has exactly
+// the right shape to explain the goals/assists divergence, but its cause
+// sits in a file this ticket's scope does not permit touching.
+// scripts/project-points.ts's codeToPlayer join drops every historical row
+// for a player no longer on the current roster (relegation, transfer out,
+// retirement) before it ever reaches positionPriorRates. Measured directly:
+// the 44 forwards that join drops had a HIGHER historical xA/90 (0.073) than
+// the 51 who remain (0.055) -- but a LOWER xG/90 (0.277 vs 0.459). The
+// Premier League's survivorship selects for forwards who score; it does not
+// select for forwards who create -- and #148's ASSIST_CONVERSION_FORWARD /
+// #162's GOAL_CONVERSION_FORWARD were both measured against the FULL,
+// un-survivorship-filtered 2025/26 forward population, not the
+// currently-rostered subset positionPriorRates actually runs on today. This
+// is a real, directional finding, but fixing it means changing WHICH rows
+// feed the position prior (scripts/project-points.ts, out of this ticket's
+// scope) -- and correcting for it here, at the rate or conversion level,
+// would be architecturally indistinguishable from a second, undocumented
+// assist conversion factor, which this ticket's scope explicitly forbids.
+//
+// CONCLUSION. No change below this line. On direct measurement, the
+// shrinkage/position-prior code in THIS file and rates.ts is reasonably
+// calibrated for forwards, on both xG and xA -- it is not the primary driver
+// of the measured gap, and a correction fitted here on top of a mechanism
+// this diagnostic could not confirm at the required magnitude would be
+// exactly the "second blind correction... fitting noise" #148 already
+// warned against. Finding 3 is the strongest lead for a follow-up ticket
+// scoped to touch scripts/project-points.ts instead. Full workings, sample
+// sizes, and the population-validation check against the live report's own
+// 73/48 counts: decisions/ticket-168.md.
+// ============================================================================
+
+// ============================================================================
 // Player + fixture inputs
 // ============================================================================
 

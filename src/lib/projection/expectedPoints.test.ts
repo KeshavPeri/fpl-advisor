@@ -817,6 +817,79 @@ describe('ticket #162: every component other than goalPoints (and expectedGoals)
   })
 })
 
+describe('ticket #168: diagnosed the forward-assist calibration gap, shipped no model change -- every component, forward assistPoints included, matches the pre-ticket (#162) formula exactly, for a fixed input, across every position', () => {
+  // Same fixed input as the #148/#162 byte-identical tests above, reused
+  // deliberately so all three tickets' effects (or, here, the deliberate lack
+  // of one) can be cross-checked against each other. See this file's "Ticket
+  // #168" comment (above the "Player + fixture inputs" section) for the full
+  // diagnosis of why no fix ships: the measured gap is not primarily a
+  // shrinkage/position-prior defect in this file or rates.ts.
+  const rateHistory = { minutesPlayed: 900, totalXg: 3.0, totalXa: 3.6, totalSaves: 20, totalCbi: 0, totalRecoveries: 0 }
+  const ratePositionPrior = { xgPer90: 0.3, xaPer90: 0.36, savesPer90: 2, cbiPer90: 0, recoveriesPer90: 0 }
+  const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 3, leagueBaselineGoals: 1.4 })
+  const teamLambdaConceded = 1.4
+  const pCleanSheet = cleanSheetProbability(teamLambdaConceded)
+  const expectedGoalsRawHand = 0.3
+  const expectedAssistsRawHand = 0.36
+  const expectedSavesHand = 2
+
+  it.each([
+    [GOALKEEPER, 4, ASSIST_CONVERSION_GOALKEEPER, GOAL_CONVERSION_GOALKEEPER],
+    [DEFENDER, 4, ASSIST_CONVERSION_DEFENDER, GOAL_CONVERSION_DEFENDER],
+    [MIDFIELDER, 1, ASSIST_CONVERSION_MIDFIELDER, GOAL_CONVERSION_MIDFIELDER],
+    [FORWARD, 0, ASSIST_CONVERSION_FORWARD, GOAL_CONVERSION_FORWARD],
+  ] as const)(
+    '%s: every component, including assistPoints, matches the pre-ticket formula exactly',
+    (position, expectedCleanSheetPointsValue, assistFactor, goalFactor) => {
+      const p = player({ position, rateHistory, ratePositionPrior, defconPositionPrior: 0, defconMatches: [] })
+      const projection = projectPlayerFixture(p, f)
+
+      expect(projection.components.appearancePoints).toBeCloseTo(2, 12)
+      expect(projection.components.goalPoints).toBeCloseTo(
+        expectedGoalsRawHand * goalFactor * goalPointsForAssistTest(position),
+        10,
+      )
+      // assistPoints -- the term this ticket investigated -- is UNCHANGED: still
+      // xaPer90 x minutesFraction x attackMultiplier x this position's EXISTING,
+      // untouched assistConversionFactor x ASSIST_POINTS, forward included.
+      expect(projection.components.assistPoints).toBeCloseTo(expectedAssistsRawHand * assistFactor * ASSIST_POINTS, 10)
+      expect(projection.components.cleanSheetPoints).toBeCloseTo(pCleanSheet * 1 * expectedCleanSheetPointsValue, 12)
+      expect(projection.components.goalsConcededPoints).toBeCloseTo(
+        expectedGoalsConcededPoints(teamLambdaConceded, position),
+        12,
+      )
+      expect(projection.components.savePoints).toBeCloseTo(expectedSavePoints(expectedSavesHand, position), 10)
+      expect(projection.components.defensiveContributionPoints).toBe(0)
+      expect(projection.components.bonusPoints).toBe(0)
+    },
+  )
+
+  it('FORWARD assistPoints specifically still uses the unmodified ASSIST_CONVERSION_FORWARD -- no second, forward-specific correction was introduced by this ticket', () => {
+    const p = player({ position: FORWARD, rateHistory, ratePositionPrior, defconPositionPrior: 0, defconMatches: [] })
+    const projection = projectPlayerFixture(p, f)
+    expect(ASSIST_CONVERSION_FORWARD).toBe(2.12) // unchanged by ticket #168
+    expect(projection.components.assistPoints).toBeCloseTo(0.36 * 2.12 * ASSIST_POINTS, 10)
+  })
+
+  it('goalkeeper, defender and midfielder assist output is unchanged for a fixed input -- named test, per the DoD', () => {
+    const gk = projectPlayerFixture(
+      player({ position: GOALKEEPER, rateHistory, ratePositionPrior, defconPositionPrior: 0, defconMatches: [] }),
+      f,
+    )
+    const def = projectPlayerFixture(
+      player({ position: DEFENDER, rateHistory, ratePositionPrior, defconPositionPrior: 0, defconMatches: [] }),
+      f,
+    )
+    const mid = projectPlayerFixture(
+      player({ position: MIDFIELDER, rateHistory, ratePositionPrior, defconPositionPrior: 0, defconMatches: [] }),
+      f,
+    )
+    expect(gk.components.assistPoints).toBeCloseTo(0.36 * ASSIST_CONVERSION_GOALKEEPER * ASSIST_POINTS, 10)
+    expect(def.components.assistPoints).toBeCloseTo(0.36 * ASSIST_CONVERSION_DEFENDER * ASSIST_POINTS, 10)
+    expect(mid.components.assistPoints).toBeCloseTo(0.36 * ASSIST_CONVERSION_MIDFIELDER * ASSIST_POINTS, 10)
+  })
+})
+
 describe('expectedEvents: expectedCbi and expectedRecoveries (ticket #78, unaffected by ticket #148)', () => {
   it('expectedCbi and expectedRecoveries scale with minutesFraction only -- no fixture attacking multiplier applied', () => {
     // A heavily favoured fixture (high expectedScore) inflates expectedGoals/expectedAssists via the
