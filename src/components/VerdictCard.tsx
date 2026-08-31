@@ -339,7 +339,10 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
   const view = deriveVerdictView(state.data, gameweekId)
 
   return (
-    <Surface className="verdict-card">
+    // F12/F39 — the one `focal` (cyan glow) panel on the home screen: the
+    // verdict is what the app is for, so it is also the one element the
+    // audit's demoted, opt-in glow (Surface.tsx) is reserved for here.
+    <Surface className="verdict-card" focal>
       {view.isStale && (
         <p className="verdict-card__stale">
           Stale
@@ -392,11 +395,19 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
         hitCost={state.data.hitCost}
       />
 
-      <OverrideLink gameweekId={state.data.gameweekId} planIndex={0} />
-
-      <Link className="verdict-card__reasoning-link" to="/reasoning">
-        Full reasoning →
-      </Link>
+      {/* F31 (should-fix) — was a vertical stack of three actions (Commit,
+          then two visually-identical underlined links): three things
+          competing for the same weight. Now one quiet row beneath the
+          primary button, both entries at --text-label with a 44px hit
+          target (apple-design §16: "direct, specific labels beat safe
+          generic ones" — "Full reasoning" renamed to "Why this", which
+          names what's being asked rather than what the screen contains). */}
+      <div className="verdict-card__links">
+        <Link className="verdict-card__reasoning-link" to="/reasoning">
+          Why this →
+        </Link>
+        <OverrideLink gameweekId={state.data.gameweekId} planIndex={0} />
+      </div>
     </Surface>
   )
 }

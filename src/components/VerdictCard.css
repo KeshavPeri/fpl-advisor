@@ -33,11 +33,19 @@
   color: var(--accent-coral);
 }
 
-/* The decision — largest text on the card by construction (--text-display
-   is the largest token in src/index.css), sourced verbatim from
-   recommendation_reasons order_index 0 (see src/lib/verdict/derive.ts). */
+/* F30 (must-fix, docs/ui-audit-2026-08-31.md) — was --text-display (36px),
+   tied with .verdict-card__points-value below for the single loudest
+   figure on the home screen (P1's DoD: "one element per screen should be
+   unmistakably the loudest"). --text-headline (F10's own 24px step,
+   between --text-title and --text-display) makes the headline the loudest
+   STATEMENT while the points figure stays the loudest NUMBER and the
+   countdown above stays the largest FIGURE on the screen — three
+   registers, no ties (the audit's own resolution of size vs loudness).
+   Sourced verbatim from recommendation_reasons order_index 0 (see
+   src/lib/verdict/derive.ts). */
 .verdict-card__headline {
-  font: var(--text-display);
+  font: var(--text-headline);
+  letter-spacing: var(--tracking-headline);
   color: var(--text-primary);
 }
 
@@ -148,12 +156,19 @@
 .verdict-card__commit {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   gap: var(--space-2);
   margin-top: var(--space-2);
 }
 
+/* F31 (should-fix) — full-width, min-height 48px: the app's one primary
+   action shouldn't be sized to its own label when it sits above a row of
+   secondary links (see .verdict-card__links below). Curve corrected from
+   `ease` to the app's own strong ease-out token (F49/M1's own
+   consolidation note, audit Part 3). */
 .verdict-card__commit-button {
+  width: 100%;
+  min-height: 3rem;
   border: none;
   border-radius: var(--radius-control);
   padding: var(--space-3) var(--space-6);
@@ -163,8 +178,8 @@
   font-weight: 600;
   cursor: pointer;
   transition:
-    transform 0.15s ease,
-    opacity 0.15s ease;
+    transform var(--dur-press) var(--ease-out),
+    opacity var(--dur-press) ease;
 }
 
 .verdict-card__commit-button:active {
@@ -185,7 +200,7 @@
 .verdict-card__commit-badge {
   font: var(--text-title);
   color: var(--accent-cyan);
-  animation: verdict-card-commit-in 0.22s ease-out;
+  animation: verdict-card-commit-in var(--dur-state) var(--ease-out);
 }
 
 @keyframes verdict-card-commit-in {
@@ -210,30 +225,44 @@
   color: var(--accent-coral);
 }
 
+/* F31 (should-fix) — the single quiet row beneath the primary Commit
+   button: "Why this" on the left, "Override" on the right (when it
+   applies), both at --text-label rather than --text-body so neither reads
+   as a second button competing with Commit above. */
+.verdict-card__links {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+}
+
 /* Ticket #91 — the card's doorway into override registration
    (design-reference.md: "Registering an override carries deliberate
-   friction"). Same quiet link treatment as .verdict-card__reasoning-link
-   below — cyan, text-body, no button chrome, because the friction this
-   design decision commits to belongs entirely on /override itself, not on
-   the doorway to it. Hidden outright when this gameweek is already
-   committed (OverrideLink in VerdictCard.tsx renders nothing in that case),
-   so its mere presence never contradicts the one-decision-per-gameweek
-   rule. */
+   friction"). Cyan, no button chrome — the friction this design decision
+   commits to belongs entirely on /override itself, not on the doorway to
+   it. Hidden outright when this gameweek is already committed (OverrideLink
+   in VerdictCard.tsx renders nothing in that case), so its mere presence
+   never contradicts the one-decision-per-gameweek rule. F31 — 44px of
+   vertical hit padding (iOS's own tap-target floor), text-label instead of
+   text-body so this reads as a quiet row, not a second action. */
 .verdict-card__override-link {
-  align-self: flex-start;
-  font: var(--text-body);
+  display: flex;
+  align-items: center;
+  padding: var(--space-3) 0;
+  font: var(--text-label);
   font-weight: 550;
   color: var(--accent-cyan);
 }
 
 /* Ticket #79 — the card's one way through to the full reasoning screen
-   (design-reference.md: "a bare number is never the whole story"). Same
-   link treatment as home-invitation__link (HomeScreen.css): cyan,
-   text-body, no underline chrome — a quiet way forward, not a button. */
+   (design-reference.md: "a bare number is never the whole story"). F31 —
+   same treatment as .verdict-card__override-link above, in the same row. */
 .verdict-card__reasoning-link {
-  align-self: flex-start;
-  margin-top: var(--space-1);
-  font: var(--text-body);
+  display: flex;
+  align-items: center;
+  padding: var(--space-3) 0;
+  font: var(--text-label);
   font-weight: 550;
   color: var(--accent-cyan);
 }
