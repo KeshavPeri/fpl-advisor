@@ -43,6 +43,41 @@
     var(--surface-0);
 }
 
+/* F19 — a second, always-present wash layer carrying the escalated
+   (inside 24 hours) state, crossfaded in via opacity rather than
+   interpolating the gradient's own custom-property values directly:
+   unregistered custom properties are not animatable, so two full layers
+   plus a transition is the reliable mechanism, not one layer whose
+   gradient stops change. See AppShell.tsx for the `escalated` prop this
+   responds to — false everywhere today, so this stays at opacity: 0 on
+   every current screen. 600ms (--dur-ambient) is deliberately over the
+   ~300ms UI-feedback budget: this is ambient material state, not
+   interactive chrome, and it fires at most once per gameweek, almost
+   certainly while the app is closed — a one-way threshold crossing, not
+   a loop, so it stays clear of the caution against slow oscillating
+   motion. */
+.app-shell__backdrop--escalated {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-ambient) ease;
+  background:
+    radial-gradient(ellipse 130% 55% at 50% -8%, var(--accent-coral-ambient), transparent 60%),
+    radial-gradient(ellipse 90% 40% at 85% 30%, var(--accent-cyan-ambient), transparent 65%);
+}
+
+.app-shell--escalated .app-shell__backdrop--escalated {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell__backdrop--escalated {
+    transition: opacity var(--dur-enter) ease;
+  }
+}
+
 /* Single column, iPhone-first. Widens gently on larger viewports but
    never chases a desktop layout — this app is read on one device. */
 .app-shell__column {
@@ -53,8 +88,35 @@
   display: flex;
   flex-direction: column;
   padding-top: calc(env(safe-area-inset-top) + var(--space-6));
-  padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-6));
+  /* F17 — room for the floating bar (~52px) plus its own gap above the
+     safe area, so the last panel on every screen is never covered by it.
+     Was `calc(env(safe-area-inset-bottom) + var(--space-6))`; +4rem is
+     the bar's reserved height. */
+  padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-6) + 4rem);
   padding-left: calc(env(safe-area-inset-left) + var(--space-4));
   padding-right: calc(env(safe-area-inset-right) + var(--space-4));
-  gap: var(--space-6);
+  /* F18 — this was a flat var(--space-6) applied identically between
+     every pair of siblings on every screen, which the audit ties
+     directly to the slide-deck read: a constant gap asserts that
+     everything is equally related to everything else. A flex `gap` can
+     only ever hold one uniform value, though — expressing "countdown to
+     verdict is a bigger break than verdict to pitch" needs each screen
+     to own its own spacing between elements, via margins on the
+     children themselves, which means editing the six screen files this
+     ticket's scope does not allow (CLAUDE.md). --shell-gap is the seam
+     for that: it defaults to the unchanged var(--space-6), so no
+     screen's spacing changes today, and the follow-up ticket can
+     override it per screen (or drop it once every screen supplies its
+     own rhythm) without touching this file again. */
+  gap: var(--shell-gap, var(--space-6));
+}
+
+/* F20 — lets a child cancel the column's own horizontal padding and
+   safe-area inset, reaching the viewport edge. Nothing in this ticket's
+   scope consumes it yet; the pitch (audit F25, follow-up ticket) is the
+   intended first user. Documented here because the follow-up ticket's
+   full-bleed pitch depends on this utility already existing. */
+.bleed {
+  margin-left: calc(-1 * (env(safe-area-inset-left) + var(--space-4)));
+  margin-right: calc(-1 * (env(safe-area-inset-right) + var(--space-4)));
 }

@@ -1,4 +1,5 @@
 import { Route, Routes } from 'react-router'
+import AppBar from './components/AppBar'
 import ChipsScreen from './screens/ChipsScreen'
 import DecisionHistoryScreen from './screens/DecisionHistoryScreen'
 import HomeScreen from './screens/HomeScreen'
@@ -18,17 +19,27 @@ import SquadEntryScreen from './screens/SquadEntryScreen'
  * the append-only ledger of what was actually committed or overridden,
  * reached from the home screen's mark row alongside the existing `/chips`
  * link. <BrowserRouter> is provided by main.tsx.
+ *
+ * Ticket #166 / docs/ui-audit-2026-08-31.md F17 — <AppBar> renders here,
+ * as a sibling of <Routes> rather than inside any one screen, so it is a
+ * single persistent DOM node across every navigation instead of
+ * unmounting and remounting with each screen. Each screen still wraps
+ * its own content in <AppShell>, which reserves the bottom space the bar
+ * needs (AppShell.css) so nothing is ever covered by it.
  */
 function App() {
   return (
-    <Routes>
-      <Route path="/" element={<HomeScreen />} />
-      <Route path="/squad" element={<SquadEntryScreen />} />
-      <Route path="/reasoning" element={<ReasoningScreen />} />
-      <Route path="/chips" element={<ChipsScreen />} />
-      <Route path="/override" element={<OverrideScreen />} />
-      <Route path="/decisions" element={<DecisionHistoryScreen />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/" element={<HomeScreen />} />
+        <Route path="/squad" element={<SquadEntryScreen />} />
+        <Route path="/reasoning" element={<ReasoningScreen />} />
+        <Route path="/chips" element={<ChipsScreen />} />
+        <Route path="/override" element={<OverrideScreen />} />
+        <Route path="/decisions" element={<DecisionHistoryScreen />} />
+      </Routes>
+      <AppBar />
+    </>
   )
 }
 
