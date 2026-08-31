@@ -2,11 +2,22 @@
 // (feature-list item 28, first slice). Runs after BOTH solves in
 // .github/workflows/squad-rebuild-probe.yml (workflow_dispatch only, never
 // part of the nightly chain): a normal chip-free solve as a baseline, and a
-// preseason: true, single-chip-variant (wc OR fh, never both) rebuild solve
-// that replaces the whole squad. See scripts/build-solver-input.ts's
-// buildRebuildSolverConfig for how that config is built, and
-// docs/solver-notes.md for the full write-up of what preseason: true does
-// and why it is safe only here.
+// preseason: true rebuild solve that replaces the whole squad. See
+// scripts/build-solver-input.ts's buildRebuildSolverConfig for how that
+// config is built, and docs/solver-notes.md for the full write-up of what
+// preseason: true does and why it is safe only here.
+//
+// TICKET #160: the rebuild solve is ALSO chip-free now. Before #160,
+// buildRebuildSolverConfig granted the requested variant's chip (wc: 1 or
+// fh: 1) ON TOP OF preseason: true, which let the solve rebuild the squad a
+// second time — the first real dispatch (30 Aug 2026) showed a `CHIP WC`
+// line and seven more transfers at GW5, on top of the GW3 preseason
+// rebuild (docs/solver-notes.md has the log's own evidence). `chip_limits`
+// is now the literal `{ bb: 0, wc: 0, fh: 0, tc: 0 }` for BOTH variants — the
+// `REBUILD_VARIANT` this script reads still selects which advisory is
+// produced (`chip_code` below), it just no longer implies the rebuild
+// solve's own Results table will ever show that chip as played. See
+// buildSquadAdvisoryRow's own comment below for what changed as a result.
 //
 // ============================================================================
 // THE SAFETY CASE — read this before touching anything below.
@@ -227,12 +238,29 @@ function formatChips(chips: SolverSolution['chips']): string {
  * effectively iteration 0's score" — see scripts/store-chip-advisory.ts's own header), so this
  * advisory reflects the solver's single best rebuild, not one of up to three alternates.
  *
+ * TICKET #160: the rebuild solve is now chip-free too (buildRebuildSolverConfig's chip_limits is
+ * `{ bb: 0, wc: 0, fh: 0, tc: 0 }` for both variants — see that function's own comment). Before
+ * #160 this function required the rebuild solution to have actually played the REQUESTED
+ * variant's chip, and read `chip_gameweek_id` off that chip's own token (e.g. the "5" in "WC5").
+ * Neither is possible any more — the chip is never granted, so it can never appear in the
+ * Results table — so:
+ *   - `chip_code` is still `CHIP_CODE_BY_VARIANT[variant]`, exactly as before: it labels WHICH
+ *     advisory this run produced, independent of what the (now chip-free) rebuild solve's own
+ *     Results table shows. `variant` is the only source of truth for it.
+ *   - `chip_gameweek_id` is now `gameweekId` — the target gameweek the whole rebuild was solved
+ *     for — rather than a chip token's own gameweek. There is no longer a distinct "the chip
+ *     plays later in the horizon" gameweek to read: preseason: true rebuilds the squad
+ *     immediately, for the gameweek this run was dispatched for.
+ *   - The rebuild solution playing ANY chip is now the anomaly (guard 2 below), mirroring the
+ *     baseline's own "must be chip-free" guard (3) — chip_limits forbids it for the rebuild too,
+ *     so a chip appearing there means the solver played something it was never granted.
+ *
  * Throws — never guesses — on any of three things that would otherwise silently mislabel or
  * misvalue the row:
  *   1. Either solve's Results table has no solution_index 0 at all.
- *   2. The rebuild solution's own chips did not include the REQUESTED variant's code — a rebuild
- *      solve that didn't actually play the chip it was configured to play is a solver anomaly
- *      worth surfacing, not an advisory worth storing.
+ *   2. The rebuild solution played ANY chip — chip_limits is all zero for the rebuild solve
+ *      (ticket #160), so a chip appearing in its Results table is a solver anomaly worth
+ *      surfacing, not an advisory worth storing.
  *   3. The baseline solution played ANY chip — the whole point of the baseline is that it is
  *      chip-free; a baseline that isn't is not a valid comparison.
  */
@@ -259,6 +287,15 @@ export function buildSquadAdvisoryRow(params: {
     )
   }
 
+  if (rebuildPrimary.chips.length > 0) {
+    throw new SquadAdvisoryBuildError(
+      `the rebuild solve's own solution_index 0 played chip(s) [${formatChips(rebuildPrimary.chips)}] — since ticket ` +
+        '#160, chip_limits is all zero for the rebuild solve too (preseason: true alone is the rebuild being measured; ' +
+        'see scripts/build-solver-input.ts\'s buildRebuildSolverConfig). Refusing to store an advisory for a chip the ' +
+        'solve was never granted permission to play.',
+    )
+  }
+
   if (baselinePrimary.chips.length > 0) {
     throw new SquadAdvisoryBuildError(
       `the baseline solve's own solution_index 0 played chip(s) [${formatChips(baselinePrimary.chips)}] — expected a ` +
@@ -266,24 +303,36 @@ export function buildSquadAdvisoryRow(params: {
     )
   }
 
-  const chip = rebuildPrimary.chips.find((c) => c.chipCode === chipCode)
-  if (!chip) {
-    throw new SquadAdvisoryBuildError(
-      `the rebuild solve (variant "${variant}") did not play ${chipCode} in its own solution_index 0 — Results table ` +
-        `chips were [${formatChips(rebuildPrimary.chips)}]. Refusing to store an advisory for a chip that was never ` +
-        'actually played.',
-    )
-  }
-
   return {
     gameweek_id: gameweekId,
     solution_index: 0,
     chip_code: chipCode,
-    chip_gameweek_id: chip.gameweekId,
+    chip_gameweek_id: gameweekId,
     chip_enabled_objective: rebuildPrimary.score,
     chip_free_objective: baselinePrimary.score,
     solver_run_id: solverRunId,
   }
+}
+
+/**
+ * Ticket #160's "counter proving 'three solutions, one answer' is visible on every future run".
+ * Pure — no I/O, same pattern as buildSquadAdvisoryRow above — so it is unit-testable directly
+ * against SolverSolution fixtures with no database.
+ *
+ * The first real dispatch (30 Aug 2026) found all three of the rebuild solve's iterations
+ * (Plan A/B/C) reported the SAME objective value, 295.54, differing only in which bench
+ * goalkeeper was picked: `ITERATION_CRITERION`'s `this_gw_transfer_in` (scripts/build-solver-input.ts)
+ * has nothing to vary when preseason: true makes the whole squad unconstrained and every "transfer"
+ * is a buy. This ticket reports that finding via a counter in job_runs.details — it does not
+ * attempt to fix it (see docs/solver-notes.md and the ticket's own Notes: "no attempt to make
+ * Plan A/B/C meaningful in rebuild mode").
+ *
+ * Counts DISTINCT objective values, not distinct solutions — three solutions with the same score
+ * but different bench picks (exactly what was observed) count as 1, not 3, which is the whole
+ * point: this is a proxy for "did the alternates actually differ", not a row count.
+ */
+export function countDistinctObjectiveValues(solutions: readonly SolverSolution[]): number {
+  return new Set(solutions.map((s) => s.score)).size
 }
 
 // ============================================================================
@@ -446,6 +495,10 @@ async function main(): Promise<void> {
         chipFreeObjective: row.chip_free_objective,
         baselinePoolSizeAfter: baselineParsed.poolSizeAfter,
         rebuildPoolSizeAfter: rebuildParsed.poolSizeAfter,
+        // Ticket #160: how many DISTINCT objective values the rebuild solve's own solutions
+        // (up to 3, Plan A/B/C) carried — see countDistinctObjectiveValues' own comment above.
+        // The first real dispatch (30 Aug 2026) found this was 1, not 3.
+        rebuildDistinctObjectiveCount: countDistinctObjectiveValues(rebuildParsed.solutions),
       },
       startedAt,
     })
