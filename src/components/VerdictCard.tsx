@@ -148,28 +148,43 @@ function CommitControl(target: CommitControlTarget) {
     }
   }
 
+  // F32/M1 (should-fix, accepted motion — docs/ui-audit-2026-08-31.md
+  // Part 3) — was two elements: the button unmounted and a <p> badge
+  // mounted in its place, so only the arriving half ever animated; the
+  // departing half hard-cut. Now one persistent <button>, whose CONTENTS
+  // cross-fade with a blur bridge (emil-design-eng's crossfade-masking
+  // technique) instead of the element itself being replaced — "the
+  // control settles rather than being replaced." `disabled` once
+  // committed (never actionable again); `data-committed` drives the CSS
+  // settle (VerdictCard.css) separately from the transient `disabled`
+  // while `writing` is in flight, so the two states don't look identical.
   return (
     <div className="verdict-card__commit">
-      {view.isCommitted ? (
-        <p className="verdict-card__commit-badge">
-          Committed
-          {decision && (
+      <button
+        type="button"
+        className="verdict-card__commit-button verdict-card__commit-control"
+        data-committed={view.isCommitted ? 'true' : undefined}
+        onClick={() => void handleCommit()}
+        disabled={writing || view.isCommitted}
+      >
+        <span className="verdict-card__commit-label" data-swapping={writing ? 'true' : undefined}>
+          {view.isCommitted ? (
             <>
-              {' · '}
-              <span className="num">{formatSyncTimestamp(decision.decidedAt)}</span>
+              Committed
+              {decision && (
+                <>
+                  {' · '}
+                  <span className="num">{formatSyncTimestamp(decision.decidedAt)}</span>
+                </>
+              )}
             </>
+          ) : writing ? (
+            'Committing…'
+          ) : (
+            view.buttonLabel
           )}
-        </p>
-      ) : (
-        <button
-          type="button"
-          className="verdict-card__commit-button"
-          onClick={() => void handleCommit()}
-          disabled={writing}
-        >
-          {writing ? 'Committing…' : view.buttonLabel}
-        </button>
-      )}
+        </span>
+      </button>
       {view.errorMessage && (
         <p className="verdict-card__commit-error" role="alert">
           {view.errorMessage}
@@ -339,7 +354,10 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
   const view = deriveVerdictView(state.data, gameweekId)
 
   return (
-    <Surface className="verdict-card">
+    // F12/F39 — the one `focal` (cyan glow) panel on the home screen: the
+    // verdict is what the app is for, so it is also the one element the
+    // audit's demoted, opt-in glow (Surface.tsx) is reserved for here.
+    <Surface className="verdict-card" focal>
       {view.isStale && (
         <p className="verdict-card__stale">
           Stale
@@ -392,11 +410,19 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
         hitCost={state.data.hitCost}
       />
 
-      <OverrideLink gameweekId={state.data.gameweekId} planIndex={0} />
-
-      <Link className="verdict-card__reasoning-link" to="/reasoning">
-        Full reasoning →
-      </Link>
+      {/* F31 (should-fix) — was a vertical stack of three actions (Commit,
+          then two visually-identical underlined links): three things
+          competing for the same weight. Now one quiet row beneath the
+          primary button, both entries at --text-label with a 44px hit
+          target (apple-design §16: "direct, specific labels beat safe
+          generic ones" — "Full reasoning" renamed to "Why this", which
+          names what's being asked rather than what the screen contains). */}
+      <div className="verdict-card__links">
+        <Link className="verdict-card__reasoning-link" to="/reasoning">
+          Why this →
+        </Link>
+        <OverrideLink gameweekId={state.data.gameweekId} planIndex={0} />
+      </div>
     </Surface>
   )
 }

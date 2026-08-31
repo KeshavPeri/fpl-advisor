@@ -126,13 +126,20 @@
   background: var(--accent-cyan);
 }
 
-/* ---- Totals: the horizon figure, the hit block, the confidence word ---- */
+/* ---- F46 (should-fix, docs/ui-audit-2026-08-31.md) — the decision
+   detail: was three separate panels (totals, captain, one per player).
+   Now one L2 section; captain and each player are L1-recessed blocks
+   inside it (Surface level={1} padding="compact" in ReasoningScreen.tsx),
+   so density comes from more information per panel rather than more
+   panels. ---- */
 
-.reasoning-totals {
+.reasoning-detail {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
+
+/* ---- Totals: the horizon figure, the hit block, the confidence word ---- */
 
 .reasoning-total__label {
   font: var(--text-label);
@@ -206,11 +213,9 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  /* Tighter than the default Surface padding (--space-6) — this is the one
-     place density is correct; four to eight of these stack on one screen
-     and the default panel padding would push the last one off-screen on an
-     iPhone. */
-  padding: var(--space-4);
+  /* Padding comes from Surface's own padding="compact" (ReasoningScreen.tsx)
+     now — F46 recessed these to level={1} inside .reasoning-detail rather
+     than leaving them as their own top-level panels. */
 }
 
 .reasoning-player__role {
@@ -263,9 +268,15 @@
 /* ---- Alternatives (Plan B / Plan C) — ticket #102 ----
    Deliberately the quietest section on the screen: no --text-display
    figure anywhere here (that size is Plan A's alone, above), smaller
-   heading than reasoning-headline, and a tighter Surface than
-   .reasoning-player so a stack of these still reads as "context for Plan A"
-   rather than a second recommendation. */
+   heading than reasoning-headline. Plan A already had its say above; this
+   section exists only to show how close the call was, per
+   product-brief.md §8.
+
+   F46 (should-fix) — was one Surface per alternative (plus one each for
+   the coin-flip and empty notes). Now one recessed L1 panel (Surface
+   level={1} in ReasoningScreen.tsx) holding every alternative as a plain
+   block, separated by a rule — the section was already the quietest one
+   on the screen; this makes it one panel instead of several. */
 
 .reasoning-alternatives {
   display: flex;
@@ -281,17 +292,9 @@
   color: var(--text-tertiary);
 }
 
-.reasoning-alternatives-coinflip {
-  padding: var(--space-3) var(--space-4);
-}
-
 .reasoning-alternatives-coinflip__note {
   font: var(--text-body);
   color: var(--text-primary);
-}
-
-.reasoning-alternatives-empty {
-  padding: var(--space-3) var(--space-4);
 }
 
 .reasoning-alternatives-empty__note {
@@ -303,7 +306,8 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--panel-border);
 }
 
 .reasoning-alternative__header {
@@ -384,11 +388,9 @@
   color: var(--text-secondary);
 }
 
-/* ---- Model version / computed-at footer ---- */
-
-.reasoning-meta {
-  padding: var(--space-3) var(--space-4);
-}
+/* ---- Model version / computed-at footer ----
+   F46 — no longer its own Surface: a one-sentence footnote never needed
+   material under it. */
 
 .reasoning-meta__line {
   font: var(--text-label);

@@ -11,11 +11,20 @@ type AccuracyState =
   | { status: 'error'; message: string }
   | { status: 'ready'; view: AccuracyView }
 
+// F37 (should-fix) — was two separate strings for the same state
+// ("Too small to read yet" on the card figure, "Too small to read" on a
+// per-gameweek row), neither of which said what was actually missing.
+// design-reference.md's interface-writing rules apply to every state, not
+// only the populated one.
+const TOO_SMALL_MESSAGE = 'Not enough gameweeks yet.'
+
 /**
  * One figure with its sample size beside it (DoD: "Every figure rendered
- * with its sample size beside it"). Renders "Too small to read" instead of
- * a number when the underlying sample is below MIN_SAMPLE_SIZE
- * (src/lib/accuracy/derive.ts) — never a number built on noise.
+ * with its sample size beside it"). Renders TOO_SMALL_MESSAGE instead of a
+ * number when the underlying sample is below MIN_SAMPLE_SIZE
+ * (src/lib/accuracy/derive.ts) — never a number built on noise. Only used
+ * by the 'full' variant (ReasoningScreen) — the home screen's 'summary'
+ * variant never shows a bare figure at all (F34).
  */
 function AccuracyFigure({
   label,
@@ -33,7 +42,7 @@ function AccuracyFigure({
       <p className="accuracy-card__figure-label">{label}</p>
       {tooSmall || value === null ? (
         <p className="accuracy-card__figure-value accuracy-card__figure-value--small">
-          Too small to read yet
+          {TOO_SMALL_MESSAGE}
         </p>
       ) : (
         <p className="accuracy-card__figure-value num">{value}</p>
@@ -43,12 +52,31 @@ function AccuracyFigure({
   )
 }
 
-function sampleLabel(measuredCount: number, nonAppearanceCount: number): string {
-  const measuredWord = measuredCount === 1 ? 'player-gameweek' : 'player-gameweeks'
-  const base = `${measuredCount} ${measuredWord} measured`
-  if (nonAppearanceCount === 0) return base
-  const naWord = nonAppearanceCount === 1 ? 'non-appearance' : 'non-appearances'
-  return `${base} · ${nonAppearanceCount} correctly-predicted ${naWord} (not counted above)`
+// F37 — was "N player-gameweek(s) measured" plus an optional parenthetical
+// non-appearance clause: an invented unit ("player-gameweek") and a
+// three-clause sentence at 13px. "Over N gameweeks and M projections."
+// says the same thing the reader actually needs in four words fewer than
+// the old measured-count clause alone, dropping the non-appearance detail
+// (it already appears, unabridged, on each per-gameweek row below).
+function sampleLabel(gameweeksSettled: number, measuredCount: number): string {
+  const gwWord = gameweeksSettled === 1 ? 'gameweek' : 'gameweeks'
+  return `Over ${gameweeksSettled} ${gwWord} and ${measuredCount} projections.`
+}
+
+// F37/F34 — the home screen's single-line summary. Composed from the
+// already-pure biasWord/meanSignedError fields on AccuracyView (not from
+// derive.ts's own pre-built `biasSentence` string, which this ticket's
+// scope does not permit editing — see this ticket's report) so the wording
+// can be tightened without touching src/lib/accuracy/derive.ts:
+// "The model is under-projecting by an average of 2 points per
+// player-gameweek." (30 words across the two source sentences it draws
+// from) becomes "It runs 2 points low per player." (F37's own proposed
+// replacement, verbatim).
+function biasLine(view: AccuracyView): string | null {
+  if (!view.biasWord || !view.rolling || view.rolling.meanSignedError === null) return null
+  const magnitude = Math.abs(view.rolling.meanSignedError)
+  const direction = view.biasWord === 'under-projecting' ? 'low' : 'high'
+  return `It runs ${magnitude} points ${direction} per player.`
 }
 
 function GameweekRow({ figure }: { figure: GameweekAccuracyFigure }) {
@@ -57,7 +85,7 @@ function GameweekRow({ figure }: { figure: GameweekAccuracyFigure }) {
       <span className="accuracy-card__gw-label">{figure.gameweekLabel}</span>
       {figure.tooSmall || figure.mae === null ? (
         <span className="accuracy-card__gw-value accuracy-card__gw-value--small">
-          Too small to read
+          {TOO_SMALL_MESSAGE}
         </span>
       ) : (
         <span className="accuracy-card__gw-value num">{figure.mae} MAE</span>
@@ -70,25 +98,42 @@ function GameweekRow({ figure }: { figure: GameweekAccuracyFigure }) {
   )
 }
 
+interface AccuracyCardProps {
+  /**
+   * F34 (must-fix, docs/ui-audit-2026-08-31.md) — 'summary' (the home
+   * screen) collapses the whole card to one quiet line: no Surface, no
+   * --text-display figure, --text-body/--text-secondary throughout. It
+   * existed on the home screen at the same 36px/cyan/labelled-card
+   * treatment as VerdictCard's own points figure — two elements claiming
+   * the loudest role on one screen (F30's DoD: "exactly one element on the
+   * home screen carries the display type size"). 'full' keeps the panel,
+   * the rolling figure, the bias line and the per-gameweek breakdown, for
+   * /reasoning — the one screen design-reference.md names as correct for
+   * this density. Defaults to 'full' so an unspecified call site never
+   * silently loses detail.
+   */
+  variant?: 'summary' | 'full'
+}
+
 /**
  * The rolling accuracy display (ticket #96). product-brief.md §2: "every
  * projection stored, scored against actuals after gameweek lockdown, and
- * shown as a rolling figure in-app." Sits below the pitch on the home
- * screen (design-reference.md's home-screen order: countdown, verdict,
- * pitch, then this card — see HomeScreen.tsx).
+ * shown as a rolling figure in-app."
  *
- * Owns its own read, independent of the verdict card's and the pitch's own
- * loading/error state — same "a failed or slow read here must never block
- * or blank something else" principle VerdictCard's own header states. Not
- * filtered to any particular gameweek: `fetchPredictionLog` reads every
- * settled row across the whole rolling history at the current model_version
- * (src/lib/accuracy/derive.ts's `selectCurrentModelVersion`).
+ * Owns its own read regardless of `variant` — same "a failed or slow read
+ * here must never block or blank something else" principle every other
+ * card in this app follows. The two variants are two independent mounts
+ * (home + reasoning), each fetching for itself; ticket #169 chose this
+ * over threading the data through a shared parent because every other
+ * card/screen in this codebase already owns its own fetch the same way,
+ * and `fetchPredictionLog` is a single indexed read, not an expensive one
+ * (Tier 3 — see decisions/ticket-169.md).
  *
- * Renders figures and words only — no chart, no sparkline, no per-player
- * table (ticket's own Scope OUT). The empty state names what it's waiting
- * for rather than showing a spinner or a bare zero, per the DoD.
+ * Renders figures and words only — no chart, no sparkline (ticket's own
+ * Scope OUT). The empty state names what it's waiting for rather than
+ * showing a spinner or a bare zero, per the DoD.
  */
-function AccuracyCard() {
+function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
   const [state, setState] = useState<AccuracyState>({ status: 'loading' })
 
   useEffect(() => {
@@ -113,6 +158,9 @@ function AccuracyCard() {
   }, [])
 
   if (state.status === 'loading') {
+    if (variant === 'summary') {
+      return <p className="accuracy-card-summary accuracy-card-summary--loading">Checking model accuracy…</p>
+    }
     return (
       <Surface className="accuracy-card accuracy-card--loading" aria-hidden="true">
         <div className="accuracy-card__skeleton-line accuracy-card__skeleton-line--title" />
@@ -123,6 +171,13 @@ function AccuracyCard() {
   }
 
   if (state.status === 'error') {
+    if (variant === 'summary') {
+      return (
+        <p className="accuracy-card-summary accuracy-card-summary--error" role="alert">
+          Couldn't load model accuracy: {state.message}.
+        </p>
+      )
+    }
     return (
       <Surface className="accuracy-card" role="alert">
         <p className="accuracy-card__title">Prediction accuracy</p>
@@ -136,6 +191,13 @@ function AccuracyCard() {
   const { view } = state
 
   if (!view.hasData) {
+    if (variant === 'summary') {
+      return (
+        <p className="accuracy-card-summary" role="status">
+          {view.emptyStateMessage}
+        </p>
+      )
+    }
     return (
       <Surface className="accuracy-card" role="status">
         <p className="accuracy-card__title">Prediction accuracy</p>
@@ -147,6 +209,23 @@ function AccuracyCard() {
   const rolling = view.rolling
   if (!rolling) return null // hasData: true always carries a rolling figure — defensive only.
 
+  if (variant === 'summary') {
+    const bias = biasLine(view)
+    return (
+      <p className="accuracy-card-summary" role="status">
+        {rolling.tooSmall || rolling.mae === null ? (
+          TOO_SMALL_MESSAGE
+        ) : (
+          <>
+            Model accuracy: <span className="num">{rolling.mae}</span> points average error over{' '}
+            <span className="num">{rolling.gameweeksSettled}</span>{' '}
+            {rolling.gameweeksSettled === 1 ? 'gameweek' : 'gameweeks'}.{bias ? ` ${bias}` : ''}
+          </>
+        )}
+      </p>
+    )
+  }
+
   return (
     <Surface className="accuracy-card">
       <p className="accuracy-card__title">
@@ -156,16 +235,14 @@ function AccuracyCard() {
 
       <div className="accuracy-card__rolling">
         <AccuracyFigure
-          label="Mean absolute error, rolling"
+          label="Average error"
           value={rolling.mae}
-          sampleLabel={`${rolling.gameweeksSettled} gameweek${
-            rolling.gameweeksSettled === 1 ? '' : 's'
-          } settled · ${sampleLabel(rolling.measuredCount, rolling.nonAppearanceCount)}`}
+          sampleLabel={sampleLabel(rolling.gameweeksSettled, rolling.measuredCount)}
           tooSmall={rolling.tooSmall}
         />
       </div>
 
-      {view.biasSentence && <p className="accuracy-card__bias">{view.biasSentence}</p>}
+      {biasLine(view) && <p className="accuracy-card__bias">{biasLine(view)}</p>}
 
       {view.perGameweek.length > 0 && (
         <ul className="accuracy-card__gw-list">

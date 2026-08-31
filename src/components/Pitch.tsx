@@ -1,7 +1,6 @@
 import { POSITION_LABEL } from '../lib/squad/positions'
 import PlayerShirt, { type Captaincy } from './PlayerShirt'
 import { buildPitchLayout, type PitchPlayer } from './pitchLayout'
-import Surface from './Surface'
 import './Pitch.css'
 export type { PitchPlayer } from './pitchLayout'
 
@@ -22,13 +21,30 @@ function captaincyFor(player: PitchPlayer): Captaincy {
  * squad, bench visually separated below, sorted by benchOrder. No fetching,
  * no editing, no tap-through; see HomeScreen.tsx for how the picks in
  * `players` were composed and decisions/ticket-38.md for the read path.
+ *
+ * Ticket #169 / docs/ui-audit-2026-08-31.md — F25 (must-fix): the field is
+ * no longer a `<Surface>` and runs full-bleed via the `.bleed` utility
+ * (AppShell.css), recovering the 82px of column-padding + border +
+ * panel-padding chrome the audit measured at 21% of a 393px viewport. F28
+ * (must-fix): the bench is no longer a `<Surface>` either — it sits
+ * directly on the base ink, visually subordinate to the eleven through
+ * smaller shirts (PlayerShirt's `size="bench"`) and a full `--space-8`
+ * break, not through the "Bench" label alone. See Pitch.css and
+ * PlayerShirt.css for the exact values (F26/F27/F29).
  */
 function Pitch({ players }: PitchProps) {
   const { rows, bench } = buildPitchLayout(players)
 
   return (
-    <div className="pitch">
-      <Surface className="pitch__field">
+    // F25 (must-fix) — the field used to render inside <Surface>, which
+    // cost 82px of chrome (column padding + border + panel padding) on a
+    // 393px viewport, 21% of the screen, before a single shirt was drawn.
+    // `bleed` (AppShell.css's own escape hatch, built by the foundations
+    // ticket for exactly this) cancels the column's own horizontal padding
+    // so the pitch reaches the viewport edge; the field no longer has a
+    // panel behind it at all.
+    <div className="pitch bleed">
+      <div className="pitch__field" role="group" aria-label="Starting XI">
         {rows.map((row) => (
           <div
             className="pitch__row"
@@ -47,10 +63,18 @@ function Pitch({ players }: PitchProps) {
             ))}
           </div>
         ))}
-      </Surface>
+      </div>
 
+      {/* F28 (must-fix) — the bench used to be a second <Surface raised>:
+          the same panel material as the field above it (`raised` measured
+          1.067:1 against the unraised fill — a no-op), the same 48px
+          shirts, only 16px of separation. It now sits directly on the base
+          ink — no panel at all — with smaller shirts (PlayerShirt's own
+          `size="bench"`, PlayerShirt.css) and a full --space-8 break above
+          it, so the hierarchy is carried by size, material and space, not
+          by the word "Bench" being the only signal. */}
       {bench.length > 0 && (
-        <Surface className="pitch__bench" raised aria-label="Bench">
+        <div className="pitch__bench" aria-label="Bench">
           <p className="pitch__bench-title">Bench</p>
           <div className="pitch__bench-row">
             {bench.map((player) => (
@@ -60,10 +84,11 @@ function Pitch({ players }: PitchProps) {
                 price={player.price}
                 captaincy={captaincyFor(player)}
                 availability={player.availability}
+                size="bench"
               />
             ))}
           </div>
-        </Surface>
+        </div>
       )}
     </div>
   )

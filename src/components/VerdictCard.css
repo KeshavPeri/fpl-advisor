@@ -33,11 +33,19 @@
   color: var(--accent-coral);
 }
 
-/* The decision — largest text on the card by construction (--text-display
-   is the largest token in src/index.css), sourced verbatim from
-   recommendation_reasons order_index 0 (see src/lib/verdict/derive.ts). */
+/* F30 (must-fix, docs/ui-audit-2026-08-31.md) — was --text-display (36px),
+   tied with .verdict-card__points-value below for the single loudest
+   figure on the home screen (P1's DoD: "one element per screen should be
+   unmistakably the loudest"). --text-headline (F10's own 24px step,
+   between --text-title and --text-display) makes the headline the loudest
+   STATEMENT while the points figure stays the loudest NUMBER and the
+   countdown above stays the largest FIGURE on the screen — three
+   registers, no ties (the audit's own resolution of size vs loudness).
+   Sourced verbatim from recommendation_reasons order_index 0 (see
+   src/lib/verdict/derive.ts). */
 .verdict-card__headline {
-  font: var(--text-display);
+  font: var(--text-headline);
+  letter-spacing: var(--tracking-headline);
   color: var(--text-primary);
 }
 
@@ -148,12 +156,19 @@
 .verdict-card__commit {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   gap: var(--space-2);
   margin-top: var(--space-2);
 }
 
+/* F31 (should-fix) — full-width, min-height 48px: the app's one primary
+   action shouldn't be sized to its own label when it sits above a row of
+   secondary links (see .verdict-card__links below). Curve corrected from
+   `ease` to the app's own strong ease-out token (F49/M1's own
+   consolidation note, audit Part 3). */
 .verdict-card__commit-button {
+  width: 100%;
+  min-height: 3rem;
   border: none;
   border-radius: var(--radius-control);
   padding: var(--space-3) var(--space-6);
@@ -162,41 +177,62 @@
   font: var(--text-title);
   font-weight: 600;
   cursor: pointer;
-  transition:
-    transform 0.15s ease,
-    opacity 0.15s ease;
+  transition: transform var(--dur-press) var(--ease-out);
 }
 
 .verdict-card__commit-button:active {
   transform: scale(0.97);
 }
 
-.verdict-card__commit-button:disabled {
+/* Only the TRANSIENT disabled state (mid-write) dims — once committed,
+   :disabled is still true (VerdictCard.tsx) but [data-committed] below
+   takes over the button's whole look, so it must not also be dimmed to
+   0.6 opacity as though it were unavailable rather than confirmed. */
+.verdict-card__commit-button:disabled:not([data-committed='true']) {
   opacity: 0.6;
   cursor: default;
 }
 
-/* The committed state — a quiet confirmation, not a second button, so the
-   control can never be mistaken for still-actionable. Fades and settles in
-   rather than snapping, the same "orientation and state change" motion
-   design-reference.md scopes animation to; prefers-reduced-motion is
-   already handled globally in src/index.css (zeroes every
-   animation-duration), so no local override is needed here. */
-.verdict-card__commit-badge {
-  font: var(--text-title);
-  color: var(--accent-cyan);
-  animation: verdict-card-commit-in 0.22s ease-out;
+/* F32/M1 (should-fix, accepted motion — docs/ui-audit-2026-08-31.md Part
+   3) — was two elements (a <button> that unmounted, a <p> badge that
+   mounted in its place), so only the arriving half ever animated and the
+   departing half hard-cut. Now ONE persistent control
+   (.verdict-card__commit-control, on the same element as
+   .verdict-card__commit-button above): it settles from the filled cyan
+   button into a quiet confirmed state via a colour transition,
+   [data-committed='true'] set once VerdictCard.tsx knows the write
+   succeeded. --dur-state/--ease-out, the foundations ticket's own tokens —
+   no hand-typed duration or curve. */
+.verdict-card__commit-control {
+  transition:
+    background-color var(--dur-state) ease,
+    color var(--dur-state) ease;
 }
 
-@keyframes verdict-card-commit-in {
-  from {
-    opacity: 0;
-    transform: translateY(2px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
+.verdict-card__commit-control[data-committed='true'] {
+  background: transparent;
+  color: var(--accent-cyan);
+  cursor: default;
+}
+
+/* The label itself cross-fades between "Commit" / "Committing…" /
+   "Committed · <timestamp>" with a blur bridge (emil-design-eng's
+   crossfade-masking technique) rather than the control's contents simply
+   snapping — [data-swapping='true'] is set for the brief writing window
+   only (VerdictCard.tsx). prefers-reduced-motion is already handled
+   globally in src/index.css (collapses every transition-duration to
+   150ms and drops filter from the surviving property list), so no local
+   override is needed here. */
+.verdict-card__commit-label {
+  display: inline-block;
+  transition:
+    opacity var(--dur-press) ease,
+    filter var(--dur-press) ease;
+}
+
+.verdict-card__commit-label[data-swapping='true'] {
+  opacity: 0;
+  filter: blur(2px);
 }
 
 /* A failed write (or a failed check for whether this gameweek is already
@@ -210,30 +246,44 @@
   color: var(--accent-coral);
 }
 
+/* F31 (should-fix) — the single quiet row beneath the primary Commit
+   button: "Why this" on the left, "Override" on the right (when it
+   applies), both at --text-label rather than --text-body so neither reads
+   as a second button competing with Commit above. */
+.verdict-card__links {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+}
+
 /* Ticket #91 — the card's doorway into override registration
    (design-reference.md: "Registering an override carries deliberate
-   friction"). Same quiet link treatment as .verdict-card__reasoning-link
-   below — cyan, text-body, no button chrome, because the friction this
-   design decision commits to belongs entirely on /override itself, not on
-   the doorway to it. Hidden outright when this gameweek is already
-   committed (OverrideLink in VerdictCard.tsx renders nothing in that case),
-   so its mere presence never contradicts the one-decision-per-gameweek
-   rule. */
+   friction"). Cyan, no button chrome — the friction this design decision
+   commits to belongs entirely on /override itself, not on the doorway to
+   it. Hidden outright when this gameweek is already committed (OverrideLink
+   in VerdictCard.tsx renders nothing in that case), so its mere presence
+   never contradicts the one-decision-per-gameweek rule. F31 — 44px of
+   vertical hit padding (iOS's own tap-target floor), text-label instead of
+   text-body so this reads as a quiet row, not a second action. */
 .verdict-card__override-link {
-  align-self: flex-start;
-  font: var(--text-body);
+  display: flex;
+  align-items: center;
+  padding: var(--space-3) 0;
+  font: var(--text-label);
   font-weight: 550;
   color: var(--accent-cyan);
 }
 
 /* Ticket #79 — the card's one way through to the full reasoning screen
-   (design-reference.md: "a bare number is never the whole story"). Same
-   link treatment as home-invitation__link (HomeScreen.css): cyan,
-   text-body, no underline chrome — a quiet way forward, not a button. */
+   (design-reference.md: "a bare number is never the whole story"). F31 —
+   same treatment as .verdict-card__override-link above, in the same row. */
 .verdict-card__reasoning-link {
-  align-self: flex-start;
-  margin-top: var(--space-1);
-  font: var(--text-body);
+  display: flex;
+  align-items: center;
+  padding: var(--space-3) 0;
+  font: var(--text-label);
   font-weight: 550;
   color: var(--accent-cyan);
 }

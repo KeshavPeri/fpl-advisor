@@ -3,8 +3,12 @@
   kit (design-reference.md: "shirt as an abstract shape in the app's
   neutral palette with tonal lift"). No club crest, no team colour, no
   green. Every colour/spacing/radius value below is a var(--…) token from
-  src/index.css; border-width is the one place a literal px is used, which
-  design-reference.md's execution rules permit.
+  src/index.css, or a calc() composed from two of them — F26/F28 need 56px
+  and 40px badges, neither of which has a single existing token, and this
+  ticket's scope forbids adding one to src/index.css (consume only); see
+  the size rules below for the exact composition. border-width is the one
+  place a literal px is used, which design-reference.md's execution rules
+  permit.
 */
 
 .player-shirt {
@@ -12,33 +16,53 @@
   flex-direction: column;
   align-items: center;
   gap: var(--space-1);
-  width: var(--space-12);
+  /* F26 (must-fix) — was var(--space-12) (48px), sized to survive the old
+     boxed-in field rather than to read. calc(var(--space-12) + var
+     (--space-2)) = 56px (48 + 8), the audit's exact proposed value. */
+  width: calc(var(--space-12) + var(--space-2));
   /* Ticket #44, finding 4 — the actual cause of the horizontal-scroll
      bug: without this, a flex item's automatic minimum width is its
      content's min-content size, not its explicit `width` above. Before
      this ticket, `.player-shirt__name` used `white-space: nowrap`, so
      a long name's full unwrapped width became this column's real
-     minimum — wider than var(--space-12) — and a full row of them
-     forced the whole page wider than the viewport. The name now wraps
-     (see `.player-shirt__name` below), which already shrinks that
-     min-content size back down; `min-width: 0` is the standard,
-     belt-and-suspenders flex fix for this exact failure mode. */
+     minimum — wider than the badge width. The name now wraps (see
+     `.player-shirt__name` below), which already shrinks that min-content
+     size back down; `min-width: 0` is the standard, belt-and-suspenders
+     flex fix for this exact failure mode. */
   min-width: 0;
+}
+
+/* F28 (must-fix) — the bench's own, smaller footprint. 40px = calc(
+   var(--space-8) + var(--space-2)) = 32 + 8, the audit's exact proposed
+   value, again composed rather than a new token. */
+.player-shirt--bench {
+  width: calc(var(--space-8) + var(--space-2));
 }
 
 /* The badge is the ring's own element: a rounded square holding the shirt
    shape, sized so the ring never touches the shirt directly — it reads as
-   a halo around the player, not an outline traced on the jersey. */
+   a halo around the player, not an outline traced on the jersey.
+
+   F29 (should-fix) — was a flat --panel-fill-raised fill, measuring
+   ~1.02:1 against the shirt sitting on it: barely distinguishable from its
+   own background. Recast as a genuine RECESS (--material-1, this app's own
+   "sits at 1.06:1 over base, present, never a card" tier — src/index.css)
+   so the shirt below can read as a LIFT off it instead, the way a real
+   object sitting on a surface reads. */
 .player-shirt__badge {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: var(--space-12);
-  height: var(--space-12);
+  width: 100%;
+  height: calc(var(--space-12) + var(--space-2));
   border-radius: var(--radius-control);
-  background: var(--panel-fill-raised);
+  background: var(--material-1);
   border: 2px solid transparent;
+}
+
+.player-shirt--bench .player-shirt__badge {
+  height: calc(var(--space-8) + var(--space-2));
 }
 
 .player-shirt__badge--ring-solid {
@@ -50,23 +74,22 @@
 }
 
 /* The shirt silhouette itself — a simple V-neck jersey shape cut with
-   clip-path, tonally lifted one step above the badge behind it so it
-   reads as a distinct object rather than a flat square.
+   clip-path, tonally lifted above the recessed badge behind it (F29) so it
+   reads as a distinct, raised object rather than a flat square.
 
-   Ticket #44, finding 1: a flat `--surface-2` fill on a `--panel-fill-
-   raised` badge — both from the same low-chroma ink family — read as
-   barely-there at phone size, especially once the badge itself sits on
-   blurred glass over the backdrop. Fixed with three token-only moves,
-   no new hue: a two-stop gradient for a little dimension instead of a
-   flat fill, a defined edge using --panel-border-strong (a stronger
-   line than the whisper-thin --panel-border), and a small collar notch
-   (::after below) so the shape reads as a garment, not a badge icon. */
+   F29 — the gradient's two stops are --material-3 (this app's own
+   "loudest surface" tier, 1.55:1 over base) into --surface-2, and the edge
+   is --panel-border-strong (a defined line, not a whisper) — three
+   token-only moves, no new hue, adapted from the audit's own proposal to
+   this app's corrected elevation scale (ticket #79's follow-up, which
+   post-dates the audit). The collar notch (::after below) then finishes
+   the read as a garment, not a badge icon. */
 .player-shirt__shirt {
   position: relative;
   width: 74%;
   height: 74%;
-  background: linear-gradient(165deg, var(--surface-2) 0%, var(--panel-fill-raised) 100%);
-  border: 1.5px solid var(--panel-border-strong);
+  background: linear-gradient(165deg, var(--material-3) 0%, var(--surface-2) 100%);
+  border: 1px solid var(--panel-border-strong);
   clip-path: polygon(
     30% 0%,
     70% 0%,
@@ -115,6 +138,12 @@
   line-height: 1;
 }
 
+.player-shirt--bench .player-shirt__captaincy {
+  width: var(--space-4);
+  height: var(--space-4);
+  font-size: 0.625rem;
+}
+
 .player-shirt__captaincy--captain {
   background: var(--accent-cyan);
   color: var(--surface-0);
@@ -128,17 +157,25 @@
 
 /* Ticket #44, finding 2 — `name` is already FPL's own `web_name`
    (src/lib/squad/api.ts), the domain's own short form; this ticket does
-   not touch what's displayed, only how. At var(--space-12) (48px) wide,
-   single-line-plus-ellipsis truncation still cut some real names
-   mid-word ("Bruno…", "Pedro…"). Replaced with up to two lines instead
-   of a single truncated one: `-webkit-line-clamp` (not
-   `text-overflow: ellipsis`) is the only overflow mechanism now, so a
-   mid-word ellipsis is structurally impossible, not just unlikely.
-   `min-height: var(--space-8)` reserves the same two-line height for
-   every player regardless of whether their own name needs one line or
-   two, which is what keeps all 15 slots' row height uniform. See
-   PlayerShirt.truncation.test.ts for the check against the longest
-   realistic name this needs to survive. */
+   not touch what's displayed, only how. At the previous 48px width,
+   single-line-plus-ellipsis truncation still cut some real names mid-word
+   ("Bruno…", "Pedro…"). Replaced with up to two lines instead of a single
+   truncated one: `-webkit-line-clamp` (not `text-overflow: ellipsis`) is
+   the only overflow mechanism, so a mid-word ellipsis is structurally
+   impossible, not just unlikely. `min-height: var(--space-8)` reserves the
+   same two-line height for every player regardless of whether their own
+   name needs one line or two, which is what keeps all 15 slots' row
+   height uniform. See PlayerShirt.truncation.test.ts for the check against
+   the longest realistic name this needs to survive.
+
+   Ticket #169 — font-size stays --text-label-tight (11px) rather than
+   moving back to the audit's suggested --text-label (13px): F26 flags
+   that move as needing re-verification against real long web_names at the
+   new 56px width, and this ticket has no browser harness available to
+   redo ticket #44's own empirical check (see that ticket's own comment on
+   PlayerShirt.truncation.test.ts for why it isn't automated). Left as a
+   Tier 3 judgement call, reported to the orchestrator rather than guessed
+   past — see this ticket's report. */
 .player-shirt__name {
   width: 100%;
   min-height: var(--space-8);
@@ -161,7 +198,9 @@
    the "generously spaced" half of that reference, layered on top the
    same way `.pitch__bench-title` layers weight onto `--text-label`
    elsewhere in this app. Explicitly not made bigger — the DoD is
-   explicit that name-fit is never solved by shrinking the number. */
+   explicit that name-fit is never solved by shrinking the number. Never
+   rendered on a bench shirt (size="bench") — F28: bench price is not a
+   decision input. */
 .player-shirt__price {
   font: var(--text-label);
   font-weight: 500;

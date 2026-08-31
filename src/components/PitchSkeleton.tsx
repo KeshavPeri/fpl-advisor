@@ -1,5 +1,4 @@
 import { BENCH_SIZE } from '../lib/squad/positions'
-import Surface from './Surface'
 import './Pitch.css'
 import './PitchSkeleton.css'
 
@@ -10,13 +9,17 @@ import './PitchSkeleton.css'
  * the same height instead of causing a jump (DoD: "no layout shift when
  * data arrives"). The bench row always uses BENCH_SIZE, which is fixed
  * regardless of formation.
+ *
+ * Ticket #169 / docs/ui-audit-2026-08-31.md F25/F28 — matches Pitch.tsx's
+ * own structure exactly: no `<Surface>` on either the field or the bench,
+ * `bleed` full-bleed, bench-sized placeholder shirts on the bench row.
  */
 const ROW_SHIRT_COUNTS = [1, 4, 4, 2] as const
 
 function PitchSkeleton() {
   return (
-    <div className="pitch" aria-hidden="true">
-      <Surface className="pitch__field">
+    <div className="pitch bleed" aria-hidden="true">
+      <div className="pitch__field">
         {ROW_SHIRT_COUNTS.map((count, rowIndex) => (
           <div className="pitch__row" key={rowIndex}>
             {Array.from({ length: count }).map((_, shirtIndex) => (
@@ -24,15 +27,15 @@ function PitchSkeleton() {
             ))}
           </div>
         ))}
-      </Surface>
-      <Surface className="pitch__bench" raised>
+      </div>
+      <div className="pitch__bench">
         <p className="pitch__bench-title">Bench</p>
         <div className="pitch__bench-row">
           {Array.from({ length: BENCH_SIZE }).map((_, shirtIndex) => (
-            <div className="pitch-skeleton__shirt" key={shirtIndex} />
+            <div className="pitch-skeleton__shirt pitch-skeleton__shirt--bench" key={shirtIndex} />
           ))}
         </div>
-      </Surface>
+      </div>
     </div>
   )
 }

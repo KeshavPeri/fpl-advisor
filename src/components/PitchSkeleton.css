@@ -3,16 +3,23 @@
   Pitch (Pitch.css's .pitch/.pitch__field/.pitch__row/.pitch__bench* classes
   are reused directly) so the real content replaces it without a layout
   jump. The shirt-shaped placeholders are sized identically to
-  PlayerShirt's own badge, just filled and dimmed rather than drawn.
+  PlayerShirt's own badge (F26/F28's 56px starting / 40px bench sizes —
+  see PlayerShirt.css for why these are calc()s of two existing tokens
+  rather than a new one), just filled and dimmed rather than drawn.
 */
 
 .pitch-skeleton__shirt {
-  width: var(--space-12);
-  height: calc(var(--space-12) + var(--space-6));
+  width: calc(var(--space-12) + var(--space-2));
+  height: calc(var(--space-12) + var(--space-2) + var(--space-6));
   border-radius: var(--radius-control);
   background: var(--panel-fill-raised);
   opacity: 0.5;
   animation: pitch-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.pitch-skeleton__shirt--bench {
+  width: calc(var(--space-8) + var(--space-2));
+  height: calc(var(--space-8) + var(--space-2) + var(--space-4));
 }
 
 @keyframes pitch-skeleton-pulse {
