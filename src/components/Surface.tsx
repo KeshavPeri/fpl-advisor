@@ -12,9 +12,11 @@ interface SurfaceProps extends ComponentPropsWithoutRef<'div'> {
    * F15 — this used to resolve to a --panel-fill-raised that measured
    * 1.067:1 against the unraised fill: a no-op, worse than no prop at all
    * because it read as though hierarchy were expressed when it wasn't. It
-   * now resolves to --material-3, genuinely distinct — 1.24:1 against
+   * now resolves to --material-3, genuinely distinct — 1.240:1 against
    * level 2 (docs/ui-audit-2026-08-31.md F5) — with no change to either
-   * call site's code.
+   * call site's code. The ticket-79 follow-up keeps that number and takes
+   * the alpha back out of it: all three levels now share one 0.55 fill
+   * alpha and separate on colour and top-edge light instead.
    */
   raised?: boolean
   /**
@@ -53,7 +55,7 @@ interface SurfaceProps extends ComponentPropsWithoutRef<'div'> {
 /**
  * The elevated translucent-material surface. Every panel in this app —
  * the verdict card, the pitch, the reasoning screen — is built from this:
- * a tonal lift off the base ink, blurred over whatever sits behind it,
+ * a tonal lift off the base ink that the ambient wash tints through,
  * not a flat card with a border. See design-reference.md, "References,
  * item 1" (Apple Music) and "Committed decisions, Colour", and
  * docs/ui-audit-2026-08-31.md F5/F12/F14/F15/F16 for what changed here in
@@ -96,8 +98,8 @@ function Surface({
 
   // F12 — the glow renders as a sibling *before* the panel, inside a
   // relatively-positioned wrapper, so it paints behind the panel in DOM
-  // order and the panel's own backdrop-filter genuinely blurs it. See
-  // Surface.css for why a ::before on `.surface` itself cannot do this.
+  // order rather than on top of its fill. See Surface.css for why a
+  // ::before on `.surface` itself cannot do this.
   return (
     <div className="surface__focal-wrap">
       <div className="surface__glow" aria-hidden="true" />

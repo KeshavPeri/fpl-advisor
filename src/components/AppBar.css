@@ -1,30 +1,22 @@
 /*
-  F17 — the floating navigation bar. See AppBar.tsx for the component
-  doc; docs/ui-audit-2026-08-31.md F17 and F13 for the finding numbers
-  and the "why" behind blur(28px) here specifically.
+  F17 — the floating navigation bar, and the only real glass in this app.
+  See AppBar.tsx for the component doc, NavIcons.tsx for the icon set,
+  docs/ui-audit-2026-08-31.md F17/F13 for the finding numbers, and
+  decisions/ticket-79-followup.md for the ticket-79 follow-up corrections
+  applied here (the scrim no longer erases the bar's own backdrop; the
+  bar is now measurably the most translucent surface in the app).
 */
-.app-bar__scrim {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  /* Bar height (~52px incl. padding) + its own gap above the safe area +
-     a margin of extra fade so the transition reads as gradual rather
-     than as a second hard edge. Approximate on purpose — a decorative
-     fade, not a measurement anything else depends on. */
-  height: calc(env(safe-area-inset-bottom) + 6rem);
-  z-index: 9;
-  pointer-events: none;
-  /* Fades toward flat --surface-0 rather than sampling the ambient
-     wash's actual radial-gradient colour at this exact position — a
-     Tier 3 simplification. The wash's colours are low-alpha and diffuse
-     enough that the seam this could in principle leave is not expected
-     to read at the sizes/positions here; worth a real device check
-     rather than a simulator one (see this ticket's report). */
-  background: linear-gradient(to bottom, transparent, var(--surface-0) 78%);
-}
-
 .app-bar {
+  /* Icon geometry, kept here rather than in NavIcons.tsx so one grid and
+     one stroke weight are enforced in one place for all three glyphs —
+     and so the active state can thicken the stroke without the component
+     knowing anything about state. 22px on a 24 viewBox with a 1.5 stroke
+     renders a ~1.4px line, which sits with the app's hairline borders and
+     Geist's own stems rather than above them. */
+  --nav-icon-size: 22px;
+  --nav-stroke: 1.5;
+  --nav-stroke-active: 2;
+
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
@@ -38,25 +30,82 @@
   max-width: 22rem;
 
   border-radius: 22px;
+  /* The glass. --material-bar is 0.50 alpha — deliberately LOWER than
+     the 0.55 every panel shares, making this the most translucent
+     surface in the app; it carries the only backdrop blur; it saturates
+     hardest (180% vs the panels' 150%); and it takes the brightest
+     light-catching edge (--material-edge-3). Those four together are
+     what make the bar read as a different, more material substance than
+     the panels rather than as another panel that happens to float. The
+     blur is real here and only here: content scrolls behind this
+     element, so there is genuine high-frequency detail for it to soften
+     (F13/P10). */
   background: var(--material-bar);
-  -webkit-backdrop-filter: blur(var(--material-bar-blur)) saturate(180%);
-  backdrop-filter: blur(var(--material-bar-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--material-bar-blur)) saturate(var(--material-bar-saturate));
+  backdrop-filter: blur(var(--material-bar-blur)) saturate(var(--material-bar-saturate));
   border: 1px solid var(--panel-border);
-  border-top-color: var(--material-edge);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  border-top-color: var(--material-edge-3);
+  box-shadow:
+    inset 0 1px 0 0 var(--material-sheen-3),
+    0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+/* The scroll-edge scrim. It fades content toward the base ink as it
+   approaches the bar, instead of a hairline divider (apple-design §12).
+
+   Ticket-79 follow-up: it now stops at --scrim-strength (0.7) rather
+   than reaching fully opaque --surface-0. The previous gradient hit
+   solid ink well above the bar's top edge, which meant the one surface
+   in this app with something worth blurring behind it had nothing
+   behind it — the bar was performing glass over a flat field, exactly
+   the F13 defect the bar exists to avoid. Applying the ceiling as
+   `opacity` on the element, rather than as an alpha inside the gradient,
+   keeps --surface-0 referenced by token instead of restating #0b0f19 as
+   an rgba() triple. 30% of the content survives to be blurred, which is
+   plenty of signal at blur(28px) and still leaves the bar's quietest
+   label above WCAG AA against the worst case (src/index.css). */
+.app-bar__scrim {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* Bar height (~59px incl. padding) + its own gap above the safe area +
+     a margin of extra fade so the transition reads as gradual rather
+     than as a second hard edge. Approximate on purpose — a decorative
+     fade, not a measurement anything else depends on. */
+  height: calc(env(safe-area-inset-bottom) + 6.5rem);
+  z-index: 9;
+  pointer-events: none;
+  opacity: var(--scrim-strength);
+  /* Fades toward flat --surface-0 rather than sampling the ambient
+     wash's actual radial-gradient colour at this exact position — a
+     Tier 3 simplification. The wash's colours are low-alpha and diffuse
+     enough that the seam this could in principle leave is not expected
+     to read at the sizes/positions here; worth a real device check
+     rather than a simulator one. */
+  background: linear-gradient(to bottom, transparent, var(--surface-0) 70%);
 }
 
 .app-bar__item {
   flex: 1;
   min-height: 44px;
   display: flex;
+  /* Icon over label. The stack is what earns the icons their space: at
+     22px + 13px the item still clears the 44px iOS floor on its own
+     content, so nothing is padded out to fake a tap target. */
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 2px;
+  padding: var(--space-1) 0;
   border-radius: 18px;
-  font: var(--text-label);
-  font-weight: 550;
-  letter-spacing: var(--tracking-label);
-  color: var(--text-tertiary);
+  /* Raised from --text-tertiary. The bar is the one surface with live
+     content behind it, so its own worst case is "solid --text-primary
+     scrolling directly under the glass": --text-tertiary measures
+     3.84:1 there and fails WCAG AA, --text-secondary measures 4.67:1
+     and holds (see --scrim-strength in src/index.css). It also gives
+     the inactive icons enough line to be recognised at 22px. */
+  color: var(--text-secondary);
   text-align: center;
   transition:
     transform var(--dur-press) var(--ease-out),
@@ -64,9 +113,39 @@
     background-color var(--dur-press) ease;
 }
 
+.app-bar__label {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: var(--tracking-label);
+}
+
+.app-bar__icon {
+  width: var(--nav-icon-size);
+  height: var(--nav-icon-size);
+  /* Stroke weight lives here, not on the SVG elements, so the active
+     state below can change it (NavIcons.tsx). `stroke` itself stays
+     currentColor, inherited from .app-bar__item's own colour — active
+     and inactive icons take the existing --text-* tokens, and no icon
+     introduces a colour of its own. */
+  stroke-width: var(--nav-stroke);
+  flex-shrink: 0;
+}
+
+/* The current destination, marked three ways so it never depends on
+   colour alone: a heavier stroke, a heavier label, and (the colour one)
+   primary text on a dim cyan pill. Desaturate the whole app and the
+   active item is still the one drawn in bolder line. */
 .app-bar__item[aria-current='page'] {
   color: var(--text-primary);
   background: var(--accent-cyan-dim);
+}
+
+.app-bar__item[aria-current='page'] .app-bar__icon {
+  stroke-width: var(--nav-stroke-active);
+}
+
+.app-bar__item[aria-current='page'] .app-bar__label {
+  font-weight: 620;
 }
 
 .app-bar__item:active {
