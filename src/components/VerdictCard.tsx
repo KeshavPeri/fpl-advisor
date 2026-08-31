@@ -148,28 +148,43 @@ function CommitControl(target: CommitControlTarget) {
     }
   }
 
+  // F32/M1 (should-fix, accepted motion — docs/ui-audit-2026-08-31.md
+  // Part 3) — was two elements: the button unmounted and a <p> badge
+  // mounted in its place, so only the arriving half ever animated; the
+  // departing half hard-cut. Now one persistent <button>, whose CONTENTS
+  // cross-fade with a blur bridge (emil-design-eng's crossfade-masking
+  // technique) instead of the element itself being replaced — "the
+  // control settles rather than being replaced." `disabled` once
+  // committed (never actionable again); `data-committed` drives the CSS
+  // settle (VerdictCard.css) separately from the transient `disabled`
+  // while `writing` is in flight, so the two states don't look identical.
   return (
     <div className="verdict-card__commit">
-      {view.isCommitted ? (
-        <p className="verdict-card__commit-badge">
-          Committed
-          {decision && (
+      <button
+        type="button"
+        className="verdict-card__commit-button verdict-card__commit-control"
+        data-committed={view.isCommitted ? 'true' : undefined}
+        onClick={() => void handleCommit()}
+        disabled={writing || view.isCommitted}
+      >
+        <span className="verdict-card__commit-label" data-swapping={writing ? 'true' : undefined}>
+          {view.isCommitted ? (
             <>
-              {' · '}
-              <span className="num">{formatSyncTimestamp(decision.decidedAt)}</span>
+              Committed
+              {decision && (
+                <>
+                  {' · '}
+                  <span className="num">{formatSyncTimestamp(decision.decidedAt)}</span>
+                </>
+              )}
             </>
+          ) : writing ? (
+            'Committing…'
+          ) : (
+            view.buttonLabel
           )}
-        </p>
-      ) : (
-        <button
-          type="button"
-          className="verdict-card__commit-button"
-          onClick={() => void handleCommit()}
-          disabled={writing}
-        >
-          {writing ? 'Committing…' : view.buttonLabel}
-        </button>
-      )}
+        </span>
+      </button>
       {view.errorMessage && (
         <p className="verdict-card__commit-error" role="alert">
           {view.errorMessage}

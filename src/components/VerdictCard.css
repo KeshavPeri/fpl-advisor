@@ -177,41 +177,62 @@
   font: var(--text-title);
   font-weight: 600;
   cursor: pointer;
-  transition:
-    transform var(--dur-press) var(--ease-out),
-    opacity var(--dur-press) ease;
+  transition: transform var(--dur-press) var(--ease-out);
 }
 
 .verdict-card__commit-button:active {
   transform: scale(0.97);
 }
 
-.verdict-card__commit-button:disabled {
+/* Only the TRANSIENT disabled state (mid-write) dims — once committed,
+   :disabled is still true (VerdictCard.tsx) but [data-committed] below
+   takes over the button's whole look, so it must not also be dimmed to
+   0.6 opacity as though it were unavailable rather than confirmed. */
+.verdict-card__commit-button:disabled:not([data-committed='true']) {
   opacity: 0.6;
   cursor: default;
 }
 
-/* The committed state — a quiet confirmation, not a second button, so the
-   control can never be mistaken for still-actionable. Fades and settles in
-   rather than snapping, the same "orientation and state change" motion
-   design-reference.md scopes animation to; prefers-reduced-motion is
-   already handled globally in src/index.css (zeroes every
-   animation-duration), so no local override is needed here. */
-.verdict-card__commit-badge {
-  font: var(--text-title);
-  color: var(--accent-cyan);
-  animation: verdict-card-commit-in var(--dur-state) var(--ease-out);
+/* F32/M1 (should-fix, accepted motion — docs/ui-audit-2026-08-31.md Part
+   3) — was two elements (a <button> that unmounted, a <p> badge that
+   mounted in its place), so only the arriving half ever animated and the
+   departing half hard-cut. Now ONE persistent control
+   (.verdict-card__commit-control, on the same element as
+   .verdict-card__commit-button above): it settles from the filled cyan
+   button into a quiet confirmed state via a colour transition,
+   [data-committed='true'] set once VerdictCard.tsx knows the write
+   succeeded. --dur-state/--ease-out, the foundations ticket's own tokens —
+   no hand-typed duration or curve. */
+.verdict-card__commit-control {
+  transition:
+    background-color var(--dur-state) ease,
+    color var(--dur-state) ease;
 }
 
-@keyframes verdict-card-commit-in {
-  from {
-    opacity: 0;
-    transform: translateY(2px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
+.verdict-card__commit-control[data-committed='true'] {
+  background: transparent;
+  color: var(--accent-cyan);
+  cursor: default;
+}
+
+/* The label itself cross-fades between "Commit" / "Committing…" /
+   "Committed · <timestamp>" with a blur bridge (emil-design-eng's
+   crossfade-masking technique) rather than the control's contents simply
+   snapping — [data-swapping='true'] is set for the brief writing window
+   only (VerdictCard.tsx). prefers-reduced-motion is already handled
+   globally in src/index.css (collapses every transition-duration to
+   150ms and drops filter from the surviving property list), so no local
+   override is needed here. */
+.verdict-card__commit-label {
+  display: inline-block;
+  transition:
+    opacity var(--dur-press) ease,
+    filter var(--dur-press) ease;
+}
+
+.verdict-card__commit-label[data-swapping='true'] {
+  opacity: 0;
+  filter: blur(2px);
 }
 
 /* A failed write (or a failed check for whether this gameweek is already
