@@ -224,9 +224,128 @@ export function assistConversionFactor(position: Position): number {
   }
 }
 
-/** Unreachable at runtime for a valid `Position` -- exists only so TypeScript can verify the switch above is exhaustive without a `default:` case that would silently swallow an unrecognised position code. */
+/** Unreachable at runtime for a valid `Position` -- exists only so TypeScript can verify a position switch is exhaustive without a `default:` case that would silently swallow an unrecognised position code. Shared by `assistConversionFactor` and `goalConversionFactor` below -- both switches are exhaustive over the same four-case `Position` union, so one unreachable-guard suffices for both. */
 function assertNeverPosition(position: never): never {
-  throw new Error(`assistConversionFactor: unhandled position code ${String(position)}`)
+  throw new Error(`unhandled position code ${String(position)}`)
+}
+
+// ============================================================================
+// Goal conversion -- ticket #162 (reproduces #148's measurement exactly for
+// defenders: 137/180.862900 = 0.757480, matching #148's own comment above).
+//
+// MECHANISM. `expectedGoals = xgPer90 x minutesFraction x attackMultiplier`
+// measures the QUALITY/QUANTITY of chances a player gets (xG), not whether
+// they actually convert them. Real conversion differs from the population
+// average xG models are trained on, and it differs BY POSITION: a
+// defender's xG is dominated by set-piece headers and scrambles in crowded
+// boxes -- exactly the chance types a population-average finisher (which is
+// what an xG model implicitly assumes) converts worse than a striker
+// running onto an open chance. Midfielders and forwards convert close to
+// 1:1 with their xG; defenders measurably do not. This is the calibration
+// report's largest single position-specific error (30 Aug 2026: defender
+// goals projected 1.38x actual pts/90), and it is specific to defenders --
+// midfielders and forwards both measure within ~2% of 1.0x on the same
+// report.
+//
+// MEASUREMENT (30 Aug 2026, ticket #162): actual goals / sum(xG), by
+// position, computed directly from FPL-Core-Insights' published per-gameweek
+// player-match CSVs -- the same source and method as #148's assist
+// measurement above (season 2025-2026, Premier League matches only,
+// position resolved via that season's own players.csv).
+//
+//   Position   | actual goals | sum(xG)    | ratio (actual/xG) | sample
+//   Goalkeeper |            0 |   0.160000 |  undefined        | n=1026 player-matches, 56 players (0 goals -- not a measurement, see below)
+//   Defender   |          137 | 180.862900 |  0.757480          | n=4450 player-matches, 189 players
+//   Midfielder |          533 | 542.257100 |  0.982929          | n=5763 player-matches, 254 players
+//   Forward    |          335 | 343.627900 |  0.974892          | n=1515 player-matches, 66 players
+//
+// Goalkeepers scored zero goals league-wide on 0.16 sum(xG) -- 0/0.16 is not
+// a measurable ratio (any value divided by a near-zero denominator is noise,
+// and zero goals from any number of chances says nothing about a
+// hypothetical goalkeeper conversion rate). GOAL_CONVERSION_GOALKEEPER below
+// is 1.0 explicitly labelled NO-INFORMATION, not measured -- it applies no
+// correction at all, rather than pretending 0/0.16 is a real signal.
+//
+// This is a per-position table, not one flat factor, because the gap is not
+// flat: defenders under-convert by ~24%, while midfielders/forwards sit
+// within ~2% of 1.0 -- correcting all three by the same amount would
+// under-correct defenders and introduce a needless wobble into
+// midfielder/forward projections that the data does not support. Had the
+// three (four, with goalkeeper's no-information case) measured close
+// together, a single flat factor would have been the right, simpler call;
+// they did not.
+// ============================================================================
+
+/**
+ * Clamp range for the goal conversion factors below. A calibration constant
+ * derived from one season on one data source is a reasonable correction and
+ * a poor law -- a future re-measurement on a thinner sample must not be
+ * able to swing `expectedGoals` by an arbitrary amount. The clamp is
+ * applied at the point of use (see `goalConversionFactor` below), not baked
+ * into the constants themselves, so it protects a future edit to those
+ * constants too, not only today's values.
+ *
+ * MIN = 0.5 and MAX = 1.5 are a judgement call, not a derived bound -- unlike
+ * the assist conversion clamp above (whose MIN = 1.0 follows directly from a
+ * one-directional mechanism), goal conversion can plausibly run either side
+ * of 1.0: a position dominated by low-quality chances (defenders, per the
+ * mechanism above) can under-convert, and a position of clinical finishers
+ * could genuinely out-convert its xG (the upper bound is NOT fixed at 1.0 --
+ * that would assume away a real possibility the data does not rule out).
+ * 0.5 sits comfortably below the lowest measured ratio (defender, 0.757)
+ * without permitting a thin future sample to collapse a position's goal
+ * output near zero; 1.5 sits comfortably above every measured ratio
+ * (including the goalkeeper no-information case of 1.0) without permitting
+ * an unbounded multiplier from a thin future sample -- the same shape of
+ * protection #148's MAX = 2.5 gives the assist factor, scaled to this
+ * factor's much narrower measured range.
+ */
+export const GOAL_CONVERSION_MIN = 0.5
+export const GOAL_CONVERSION_MAX = 1.5
+
+/** Goalkeepers scored 0 goals on 0.16 sum(xG) league-wide -- 0/0.16 is not a measurable ratio (see the section header above). NO-INFORMATION, not measured: applies no correction. */
+export const GOAL_CONVERSION_GOALKEEPER = 1.0
+/** Measured actual/xG ratio, defenders, rounded to two decimals. Raw measurement: 137 / 180.862900 = 0.757480 (n=4450 player-matches, 189 players) -- see the section header above. */
+export const GOAL_CONVERSION_DEFENDER = 0.76
+/** Measured actual/xG ratio, midfielders, rounded to two decimals. Raw measurement: 533 / 542.257100 = 0.982929 (n=5763 player-matches, 254 players) -- see the section header above. */
+export const GOAL_CONVERSION_MIDFIELDER = 0.98
+/** Measured actual/xG ratio, forwards, rounded to two decimals. Raw measurement: 335 / 343.627900 = 0.974892 (n=1515 player-matches, 66 players) -- see the section header above. */
+export const GOAL_CONVERSION_FORWARD = 0.97
+
+/** Clamps a raw goal conversion factor into [GOAL_CONVERSION_MIN, GOAL_CONVERSION_MAX]. See the clamp comment above for why this exists and why the bounds sit where they do. */
+export function clampGoalConversionFactor(factor: number): number {
+  return Math.min(GOAL_CONVERSION_MAX, Math.max(GOAL_CONVERSION_MIN, factor))
+}
+
+/**
+ * This position's goal conversion factor, clamped. A `switch` with one
+ * explicit, named case per position -- goalkeeper gets its own named case
+ * and its own (no-information) constant, exactly like every outfield
+ * position, rather than silently inheriting a shared fallback. The only
+ * `default:` is `assertNeverPosition` above, which every valid `Position`
+ * value is guaranteed by the four cases below never to reach -- it exists
+ * so an invalid position code fails loudly instead of one of the four real
+ * cases quietly acting as an unlabelled default for it.
+ *
+ * Cased on the plain position codes (1 GK, 2 DEF, 3 MID, 4 FWD), same
+ * reasoning as `assistConversionFactor` above (see its own comment on the
+ * point) -- the imported GOALKEEPER/DEFENDER/... constants are typed as the
+ * widened `Position` union, not literal types, so TypeScript cannot narrow
+ * `position` to `never` after them.
+ */
+export function goalConversionFactor(position: Position): number {
+  switch (position) {
+    case 1: // goalkeeper
+      return clampGoalConversionFactor(GOAL_CONVERSION_GOALKEEPER)
+    case 2: // defender
+      return clampGoalConversionFactor(GOAL_CONVERSION_DEFENDER)
+    case 3: // midfielder
+      return clampGoalConversionFactor(GOAL_CONVERSION_MIDFIELDER)
+    case 4: // forward
+      return clampGoalConversionFactor(GOAL_CONVERSION_FORWARD)
+    default:
+      return assertNeverPosition(position)
+  }
 }
 
 // ============================================================================
@@ -305,6 +424,8 @@ export interface FixtureModelInputs {
   defconHitRate: number
   /** xaPer90 x minutesFraction x attackMultiplier x this position's assistConversionFactor -- ticket #148. The same value assistPoints is derived from; surfaced here (alongside the existing per-fixture inputs) as well as on expectedEvents so the reasoning screen and any future calibration work can see the adjusted figure, not only the resulting points. */
   expectedAssists: number
+  /** xgPer90 x minutesFraction x attackMultiplier x this position's goalConversionFactor -- ticket #162. The same value goalPoints is derived from; surfaced here (alongside expectedAssists above) as well as on expectedEvents so the reasoning screen and any future calibration work can see the adjusted figure, not only the resulting points. */
+  expectedGoals: number
   expectedScore: number
   expectedGoalsConceded: number
   /** The defensive multiplier applied to savesPer90 for this fixture -- see fixture.ts's defensiveMultiplier. Ticket #109. */
@@ -350,7 +471,13 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
   const savesMultiplier = defensiveMultiplier(expectedScoreValue)
   const teamLambdaConceded = expectedGoalsConceded(fixture.leagueBaselineGoals, expectedScoreValue)
 
-  const expectedGoals = playerRates.xgPer90 * minutesFraction * attackMultiplier
+  // Ticket #162: xG measures chance quality/quantity, not conversion -- see
+  // this file's "Goal conversion" section above for the mechanism, the
+  // measurement and why it is per-position rather than one flat factor.
+  // Nothing upstream of this line (xgPer90, minutesFraction,
+  // attackMultiplier) is touched by that ticket.
+  const expectedGoals =
+    playerRates.xgPer90 * minutesFraction * attackMultiplier * goalConversionFactor(player.position)
   // Ticket #148: xA measures chance quality, not conversion -- see this
   // file's "Assist conversion" section above for the mechanism, the
   // measurement and why it is per-position rather than one flat factor.
@@ -411,6 +538,7 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
       savesPer90: playerRates.savesPer90,
       defconHitRate,
       expectedAssists,
+      expectedGoals,
       expectedScore: expectedScoreValue,
       expectedGoalsConceded: teamLambdaConceded,
       savesMultiplier,
