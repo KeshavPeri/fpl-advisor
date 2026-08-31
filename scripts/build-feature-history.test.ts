@@ -26,15 +26,17 @@ const COMPUTED_AT = '2026-08-27T09:00:00.000Z'
 /**
  * A fully-specified contributing (Premier League, player_code-resolved) match
  * row, with every stat distinguishable so a test can tell which matches were
- * folded in. element_type defaults to null (unresolved position) — the
- * pre-#146 describe blocks below never set a position and must keep behaving
- * exactly as before regardless of the (now-computed-but-unasserted) defcon
- * fields; only the ticket #146 section below sets element_type explicitly.
+ * folded in. element_type and team_code default to null (unresolved) — the
+ * pre-#146/#167 describe blocks below never set either and must keep
+ * behaving exactly as before regardless of the (now-computed-but-unasserted)
+ * defcon fields or team_code; only the ticket #146 section sets element_type
+ * explicitly, and only the ticket #167 section sets team_code explicitly.
  */
 function premMatch(playerCode: number, gameweek: number, overrides: Partial<SourceMatchRow> = {}): SourceMatchRow {
   return {
     player_code: playerCode,
     element_type: null,
+    team_code: null,
     competition: PREMIER_LEAGUE_COMPETITION,
     gameweek,
     minutes_played: 90,
@@ -396,6 +398,7 @@ function defconMatch(
   return {
     player_code: playerCode,
     element_type: elementType,
+    team_code: null,
     competition: PREMIER_LEAGUE_COMPETITION,
     gameweek,
     minutes_played: 90,

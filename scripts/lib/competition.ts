@@ -95,3 +95,66 @@ export function parseCompetition(matchId: string): CompetitionToken {
 
   throw new UnknownCompetitionError(matchId, withoutSeason)
 }
+
+// ============================================================================
+// Club slugs — ticket #167. Belongs beside parseCompetition() because it
+// parses the SAME match_id slug, one segment further in: once the season
+// prefix and competition token are stripped, what remains is exactly two
+// club-name slugs joined by "-vs-", e.g. "manchester-united-vs-arsenal" or
+// "brighton-hove-albion-vs-fulham". This is structural parsing only — it
+// never decides which club is "home", which is the player's own club, or
+// resolves a slug to a team code; that is
+// scripts/ingest-core-insights.ts's resolveOpponentTeamCode, since it needs
+// data (a season's teams.csv) this module has no business reading.
+// ============================================================================
+
+export class UnknownMatchSlugError extends Error {
+  matchId: string
+  remainder: string
+  constructor(matchId: string, remainder: string) {
+    super(
+      `match_id "${matchId}" does not split into exactly two club slugs joined by "-vs-" after its season and ` +
+        `competition prefix — remainder was "${remainder}". This is a new or unexpected match_id shape and must ` +
+        'be investigated deliberately, not defaulted past.',
+    )
+    this.name = 'UnknownMatchSlugError'
+    this.matchId = matchId
+    this.remainder = remainder
+  }
+}
+
+/**
+ * Splits the two club-name slugs out of a match_id, given its
+ * already-parsed competition token (from parseCompetition() — never
+ * re-derived here, so this can never disagree with parseCompetition about
+ * where the club segment begins):
+ *   parseMatchClubSlugs("25-26-prem-manchester-united-vs-arsenal", "prem")
+ *     -> ["manchester-united", "arsenal"]
+ *   parseMatchClubSlugs("25-26-prem-brighton-hove-albion-vs-fulham", "prem")
+ *     -> ["brighton-hove-albion", "fulham"]
+ *
+ * Splits on "-vs-", never on "-" — club slugs themselves contain hyphens
+ * (Brighton & Hove Albion, Wolverhampton Wanderers, ...), so splitting on
+ * every hyphen would shred a multi-word club name into nonsense fragments.
+ *
+ * Throws UnknownMatchSlugError — never returns a guessed pair, never
+ * silently returns one or three+ segments — when the remainder after the
+ * season+competition prefix does not split into exactly two non-empty
+ * "-vs-" segments. This is a genuine SHAPE failure (the source's match_id
+ * format itself changed), and this module's own discipline (see file
+ * header) is to fail loudly on that rather than default past it — the same
+ * treatment parseCompetition gives an unrecognized competition token. It is
+ * a different, rarer failure from a club slug that parses fine here but
+ * names a club this app does not otherwise recognize: that semantic case is
+ * the caller's concern (resolveOpponentTeamCode), not this function's — see
+ * that function's own "counted and reported, never guessed" handling.
+ */
+export function parseMatchClubSlugs(matchId: string, competition: CompetitionToken): [string, string] {
+  const withoutSeason = matchId.replace(SEASON_PREFIX_RE, '')
+  const remainder = withoutSeason === competition ? '' : withoutSeason.slice(competition.length + 1)
+  const parts = remainder.split('-vs-')
+  if (parts.length !== 2 || parts[0] === '' || parts[1] === '') {
+    throw new UnknownMatchSlugError(matchId, remainder)
+  }
+  return [parts[0], parts[1]]
+}

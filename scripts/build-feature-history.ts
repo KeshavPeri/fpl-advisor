@@ -126,6 +126,7 @@ const JOB_NAME = 'build-feature-history'
 const PLAYER_MATCH_STATS_MIGRATION = 'supabase/migrations/20260811170000_player_match_stats.sql'
 const FEATURE_HISTORY_MIGRATION = 'supabase/migrations/20260827090000_feature_history.sql'
 const POSITION_AND_DEFCON_MIGRATION = 'supabase/migrations/20260829090000_feature_history_position_and_defcon.sql'
+const TEAM_AND_OPPONENT_MIGRATION = 'supabase/migrations/20260831090000_team_and_opponent.sql'
 
 /** The four FPL position codes this job ever sees on a resolved element_type — see src/lib/scoring/types.ts. Guards the cast into `Position` below without reimplementing what a valid code is. */
 function isPosition(value: number): value is Position {
@@ -253,6 +254,11 @@ export interface SourceMatchRow {
   // player's own dense rows (see resolveElementType). NULL is a real, expected
   // value (see player_match_stats.element_type's own COMMENT ON COLUMN).
   element_type: number | null
+  // Ticket #167. Same treatment as element_type immediately above — a
+  // single value per player per season, copied as-is (see resolveTeamCode),
+  // never summed. NULL is a real, expected value (see
+  // player_match_stats.team_code's own COMMENT ON COLUMN).
+  team_code: number | null
   competition: string | null
   gameweek: number
   minutes_played: number | null
@@ -307,6 +313,11 @@ export interface FeatureHistoryRow extends FeatureTotals {
   // player's position could not be resolved at ingest time (see
   // player_match_stats.element_type's own COMMENT ON COLUMN).
   element_type: number | null
+  // Ticket #167. Same "single value per player per season" treatment as
+  // element_type immediately above (see resolveTeamCode). NULL when this
+  // player's team_code could not be resolved at ingest time (see
+  // player_match_stats.team_code's own COMMENT ON COLUMN).
+  team_code: number | null
   // Ticket #146. Raw per-match counts, strictly before gameweek_id — see
   // this file's header. Always real numbers, never null, exactly like every
   // prior_* total above: a player's first gameweek carries 0 for both, not
@@ -360,6 +371,23 @@ function addMatch(totals: FeatureTotals, row: SourceMatchRow): FeatureTotals {
 function resolveElementType(matches: readonly SourceMatchRow[]): number | null {
   for (const match of matches) {
     if (match.element_type !== null && match.element_type !== undefined) return match.element_type
+  }
+  return null
+}
+
+/**
+ * A player's team_code for the whole season — same "first non-null value
+ * across his contributing matches" lookup as resolveElementType above, and
+ * for the same reason: team_code is stamped once per ingest run from that
+ * run's single players.csv snapshot (ticket #167), so every one of a
+ * player's rows carries the identical value in practice. Returns null only
+ * when none of the player's matches carry a resolved team_code (the same
+ * "small, expected gap" — see player_match_stats.team_code's COMMENT ON
+ * COLUMN).
+ */
+function resolveTeamCode(matches: readonly SourceMatchRow[]): number | null {
+  for (const match of matches) {
+    if (match.team_code !== null && match.team_code !== undefined) return match.team_code
   }
   return null
 }
@@ -420,6 +448,12 @@ export interface BuildFeatureHistoryResult {
   // so this is expected to equal rows.length on every run; computed
   // independently rather than assumed, same reasoning as rowsWithElementType.
   rowsWithDefconCounters: number
+  // Ticket #167 — surfaced in job_runs.details. Count of `rows` carrying a
+  // non-null team_code. Same "not assumed equal to rows.length" caveat as
+  // rowsWithElementType above — a season whose player_match_stats rows have
+  // no resolved team_code yet (predates the #167 ingest change, or a re-run
+  // has not happened) reports this honestly below rows.length.
+  rowsWithTeamCode: number
 }
 
 /**
@@ -471,6 +505,7 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
     const sorted = [...matches].sort((a, b) => a.gameweek - b.gameweek)
     const firstGameweek = sorted[0].gameweek
     const elementType = resolveElementType(sorted)
+    const teamCode = resolveTeamCode(sorted)
 
     let runningTotals: FeatureTotals = ZERO_TOTALS
     let matchIndex = 0
@@ -503,6 +538,7 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
         gameweek_id: gameweekId,
         player_code: playerCode,
         element_type: elementType,
+        team_code: teamCode,
         prior_defcon_qualifying_matches: defconQualifyingMatches,
         prior_defcon_hits: defconHits,
         ...runningTotals,
@@ -515,6 +551,7 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
   const rowsWithDefconCounters = outputRows.filter(
     (r) => r.prior_defcon_qualifying_matches !== null && r.prior_defcon_hits !== null,
   ).length
+  const rowsWithTeamCode = outputRows.filter((r) => r.team_code !== null).length
 
   return {
     rows: outputRows,
@@ -524,6 +561,7 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
     playersCovered: matchesByPlayerCode.size,
     gameweeksCovered: gameweeksSeen.size,
     lastGameweekInData,
+    rowsWithTeamCode,
     rowsWithElementType,
     rowsWithDefconCounters,
   }
@@ -560,7 +598,7 @@ async function main(): Promise<void> {
       supabase
         .from('player_match_stats')
         .select(
-          'player_code, element_type, competition, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, team_goals_conceded',
+          'player_code, element_type, team_code, competition, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, team_goals_conceded',
         )
         .eq('season', season)
         .order('player_id', { ascending: true })
@@ -589,6 +627,13 @@ async function main(): Promise<void> {
         throw new FeatureHistoryError(
           'player_match_stats.element_type does not exist in this database yet. This job requires it ' +
             `(see this file's header). Apply ${POSITION_AND_DEFCON_MIGRATION} (ticket #146) before running this job.`,
+          'player_match_stats',
+        )
+      }
+      if (isMissingColumn(sourceError, 'team_code')) {
+        throw new FeatureHistoryError(
+          'player_match_stats.team_code does not exist in this database yet. This job requires it ' +
+            `(see this file's header). Apply ${TEAM_AND_OPPONENT_MIGRATION} (ticket #167) before running this job.`,
           'player_match_stats',
         )
       }
@@ -636,6 +681,13 @@ async function main(): Promise<void> {
             'feature_history',
           )
         }
+        if (isMissingColumn(error, 'team_code')) {
+          throw new FeatureHistoryError(
+            `feature_history is missing team_code. Apply ${TEAM_AND_OPPONENT_MIGRATION} (ticket #167) before ` +
+              'running this job.',
+            'feature_history',
+          )
+        }
         throw new FeatureHistoryError(`upsert into "feature_history" failed: ${error.message}`, 'feature_history')
       }
     }
@@ -650,6 +702,7 @@ async function main(): Promise<void> {
       rowsWritten: result.rows.length,
       rowsWithElementType: result.rowsWithElementType,
       rowsWithDefconCounters: result.rowsWithDefconCounters,
+      rowsWithTeamCode: result.rowsWithTeamCode,
       playersCovered: result.playersCovered,
       gameweeksCovered: result.gameweeksCovered,
       lastGameweekInData: result.lastGameweekInData,
@@ -660,7 +713,8 @@ async function main(): Promise<void> {
       `${result.nonPremierLeagueRowsExcluded} row(s) excluded), ${result.rows.length} dense feature_history row(s) ` +
       `written across ${result.playersCovered} player(s), through gameweek ${result.lastGameweekInData} ` +
       `(${result.rowsWithElementType} carrying a non-null element_type, ` +
-      `${result.rowsWithDefconCounters} carrying non-null defcon counters).`
+      `${result.rowsWithDefconCounters} carrying non-null defcon counters, ` +
+      `${result.rowsWithTeamCode} carrying a non-null team_code).`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {
