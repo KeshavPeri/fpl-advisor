@@ -191,6 +191,14 @@
   color: var(--text-secondary);
 }
 
+/* F48 (must-fix, docs/ui-audit-2026-08-31.md; *physical iPhone* — see this
+   ticket's report) — was font: var(--text-body) alone (0.9375rem = 15px).
+   iOS Safari auto-zooms the whole page on focus for any form control below
+   16px, and does not zoom back out on blur; every field on this form did
+   that. font-size overridden to exactly 1rem (16px) after the shorthand,
+   keeping --text-body's family/weight/line-height — the fix must not be
+   `maximum-scale=1` (index.html, out of this ticket's scope regardless),
+   since that would break pinch-zoom accessibility instead. */
 .override-field__input {
   background: var(--surface-1);
   border: 1px solid var(--panel-border);
@@ -198,6 +206,7 @@
   padding: var(--space-3);
   color: var(--text-primary);
   font: var(--text-body);
+  font-size: 1rem;
 }
 
 .override-field__input:disabled {
@@ -238,6 +247,11 @@
   color: var(--accent-coral);
 }
 
+/* F49 (should-fix) — two of the app's four buttons (this one and
+   .override-back-button below) had no press feedback at all. Same
+   treatment as the other two (.verdict-card__commit-button,
+   .override-register-button), using the foundations ticket's own motion
+   tokens rather than a hand-typed duration/curve. */
 .override-continue-button {
   align-self: flex-start;
   border: none;
@@ -248,6 +262,11 @@
   font: var(--text-title);
   font-weight: 600;
   cursor: pointer;
+  transition: transform var(--dur-press) var(--ease-out);
+}
+
+.override-continue-button:active {
+  transform: scale(0.97);
 }
 
 .override-continue-button:disabled {
@@ -257,10 +276,30 @@
 
 /* ---- Step two: confirm — the friction (design-reference.md) ---- */
 
+/* F50/M4 (should-fix, accepted motion — docs/ui-audit-2026-08-31.md Part
+   3) — the entry panel used to unmount and this one appear in its place
+   with no bridge, reading as a page reload rather than a step forward in
+   the app's own deliberate-friction flow. Same values as M2 (screen
+   transitions): --dur-enter/--ease-out, since it's the same kind of event.
+   No local prefers-reduced-motion override needed — src/index.css's global
+   rule already collapses animation-duration to 0.01ms, same pattern as
+   VerdictCard.css's own commit-badge entrance. */
 .override-confirm {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  animation: override-confirm-in var(--dur-enter) var(--ease-out);
+}
+
+@keyframes override-confirm-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--space-2));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .override-confirm__title {
@@ -336,6 +375,11 @@
   font: var(--text-body);
   font-weight: 550;
   cursor: pointer;
+  transition: transform var(--dur-press) var(--ease-out);
+}
+
+.override-back-button:active {
+  transform: scale(0.97);
 }
 
 .override-register-button {
@@ -348,8 +392,8 @@
   font-weight: 600;
   cursor: pointer;
   transition:
-    transform 0.15s ease,
-    opacity 0.15s ease;
+    transform var(--dur-press) var(--ease-out),
+    opacity var(--dur-press) ease;
 }
 
 .override-register-button:active {
