@@ -2,7 +2,9 @@
   Design tokens — FPL Advisor
   "The late-night team sheet." Dark only. No toggle, no light variant.
   See design-reference.md (repo root) for the committed decisions this
-  file implements.
+  file implements, and docs/ui-audit-2026-08-31.md ("the audit") for the
+  measured contrast ratios and finding numbers (F1-F51) cited throughout
+  ticket #166, which produced the changes below.
 */
 
 @import '@fontsource-variable/geist/wght.css';
@@ -17,17 +19,61 @@
   --surface-1: #131a2c;
   --surface-2: #1a2338;
 
-  /* Translucent panel fills — used with backdrop-filter: blur(), never
-     as a flat, opaque card colour. This pairing is the elevation system. */
-  --panel-fill: rgba(23, 31, 51, 0.55);
-  --panel-fill-raised: rgba(29, 39, 63, 0.62);
-  --panel-border: rgba(148, 163, 194, 0.14);
-  /* A stronger line than --panel-border, same ink hue at higher alpha.
-     --panel-border is tuned to whisper against a panel's own translucent
-     fill; small details sitting on already-lifted material (the shirt
-     outline) need more definition to read at all. Added ticket #44. */
+  /* ---- Elevation — F5, must-fix, the highest-severity finding in the
+     audit. The old two-value scale (--panel-fill at 0.55 alpha,
+     --panel-fill-raised at 0.62) measured 1.079:1 and 1.067:1 against
+     what sits behind them — both effectively invisible — while the 1px
+     border painted on top of them measured 1.260:1: the border was
+     3.3x more visible than the elevation it was supposed to whisper
+     next to. Three genuinely separable materials replace it.
+
+     Computed WCAG contrast (relative-luminance formula, alpha-composited
+     over --surface-0; verified in index.css.test.ts):
+       L1 vs base    1.06:1
+       L2 vs base    1.25:1    L2 vs L1   1.18:1
+       L3 vs base    1.55:1    L3 vs L2   1.24:1
+       --panel-border vs L2 (its default use, Surface.css)  ~1.14:1
+     That border figure was 1.260:1 before this ticket (F5's own
+     measurement) and is now demoted below every adjacent elevation step
+     (1.18:1, 1.24:1) — the elevation is the most visible thing on a
+     panel again, not the least. */
+  --material-1: rgba(24, 32, 52, 0.42);
+  --material-1-blur: 12px;
+  --material-2: rgba(33, 45, 73, 0.72);
+  --material-2-blur: 24px;
+  --material-3: rgba(44, 59, 94, 0.84);
+  --material-3-blur: 32px;
+  /* F13/F17 — the floating navigation bar is the one surface in this app
+     with real content (shirts, text) scrolling behind it, so it is the
+     one place backdrop-filter does visible work and the one place a
+     stronger blur is worth its compositing cost. Every other panel's
+     blur was, until this ticket, spent on a static gradient. */
+  --material-bar: rgba(20, 27, 45, 0.72);
+  --material-bar-blur: 28px;
+  /* F14 — light catching the top edge only; see the border-top-color
+     override in Surface.css and AppBar.css. */
+  --material-edge: rgba(190, 205, 235, 0.1);
+
+  /* --panel-fill / --panel-fill-raised now alias the L2/L3 materials
+     above rather than carrying their own values, so the component
+     stylesheets that reference them directly — PlayerShirt.css,
+     VerdictCard.css, AccuracyCard.css, PitchSkeleton.css and four
+     screens' .css files, all out of ticket #166's scope (CLAUDE.md) —
+     inherit the fixed elevation scale with no edits of their own.
+     Renaming those files' own usages to --material-2/-3 by name is the
+     follow-up ticket's job; this alias is what makes that safe to defer
+     without leaving the rest of the app on the broken 1.079:1 scale in
+     the meantime. */
+  --panel-fill: var(--material-2);
+  --panel-fill-raised: var(--material-3);
+  /* F5 — demoted from 0.14 to a true whisper, so it no longer out-shouts
+     the fill it sits on (see the boundary numbers above). */
+  --panel-border: rgba(148, 163, 194, 0.08);
+  /* Unchanged by this ticket — same ink hue at higher alpha, for small
+     details on already-lifted material (the shirt outline) that need
+     more definition than a whisper. */
   --panel-border-strong: rgba(148, 163, 194, 0.34);
-  --panel-blur: 22px;
+  --panel-blur: var(--material-2-blur);
   --panel-saturate: 150%;
 
   /* ---- Accent ----
@@ -56,7 +102,14 @@
   /* ---- Text ---- */
   --text-primary: #e7eaf2;
   --text-secondary: #9aa4bd;
-  --text-tertiary: #6b7590;
+  /* F2 — #6b7590 measured 3.86:1 on a panel (4.17:1 on base ink),
+     failing WCAG AA's 4.5:1 floor for normal text; raising the panel
+     fills for F5 would have made it worse still (3.34:1 on the new L2).
+     #8a94ad is the same low-chroma hue family, still visibly quieter
+     than --text-secondary (6.14:1), and measures 5.05:1 on the new L2
+     panel / 6.31:1 on base ink (index.css.test.ts). This was the only
+     WCAG AA failure found anywhere in the app. */
+  --text-tertiary: #8a94ad;
 
   /* ---- Type ---- */
   --font-sans: 'Geist Variable', sans-serif;
@@ -64,11 +117,53 @@
 
   /* A quiet type scale — size and weight carry hierarchy, not rules or
      borders (design-reference.md, Typography). Named by role, not by
-     t-shirt size, so later screens reach for the right one on purpose. */
+     t-shirt size, so later screens reach for the right one on purpose.
+
+     F6 — these stay `font` shorthands (weight/size/line-height/family)
+     on purpose: every current consumer applies them as
+     `font: var(--text-X)`, and letter-spacing is not a sub-property of
+     the `font` shorthand, so it cannot live inside these tokens without
+     breaking every existing usage. The --tracking-* tokens below carry
+     F6's corrected values as standalone properties instead. Pairing
+     `letter-spacing: var(--tracking-X)` alongside each `font: var(--text-X)`
+     — and deleting the five hand-typed *positive* letter-spacing values
+     on display-size text (VerdictCard.css, AccuracyCard.css,
+     ChipsScreen.css, DecisionHistoryScreen.css, PlayerShirt.css), which
+     is backwards per the audit — touches component stylesheets outside
+     ticket #166's scope (CLAUDE.md), the same boundary F1 draws. That
+     application is the follow-up ticket's job; this ticket defines the
+     corrected values so it has something correct to apply. */
   --text-label: 400 0.8125rem/1.3 var(--font-sans);
   --text-body: 400 0.9375rem/1.5 var(--font-sans);
   --text-title: 550 1.0625rem/1.3 var(--font-sans);
+  /* F10 — a step between --text-title (17px) and --text-display (36px),
+     so "important but not the loudest" has somewhere to live. 24px is
+     the verdict headline's new size once the follow-up ticket applies it
+     (audit F30). */
+  --text-headline: 550 1.5rem/1.2 var(--font-sans);
   --text-display: 600 2.25rem/1.1 var(--font-sans);
+  /* F10 — the one figure allowed to be larger than --text-display: the
+     deadline countdown, Revolut/Weather-style (audit F21, follow-up
+     ticket). Mono, not sans — every mono figure still needs the .num
+     class alongside it for tabular-nums (F1); this token only supplies
+     size/weight/line-height/family. */
+  --text-figure: 400 3rem/1 var(--font-mono);
+
+  /* F6 — corrected tracking, standalone (see the note above): negative
+     on large text (letters read too far apart as size grows), slightly
+     positive on small text — the audit's values, inverted from what
+     shipped. --tracking-headline and --tracking-figure are this
+     ticket's own interpolation for the two new F10 steps: headline sits
+     between title's -0.006em and display's -0.022em; figure is 0em
+     because a tabular mono countdown must not drift from .num's own
+     letter-spacing: 0. */
+  --tracking-display: -0.022em;
+  --tracking-headline: -0.01em;
+  --tracking-title: -0.006em;
+  --tracking-body: 0em;
+  --tracking-label: 0.006em;
+  --tracking-figure: 0em;
+
   /* A tighter label variant, same role as --text-label but for
      width-constrained contexts. Currently only the pitch shirt's player
      name, whose column is fixed at var(--space-12) wide and must never
@@ -93,7 +188,24 @@
      hairline, zero-radius broadsheet grid is one of the three default
      AI looks and is explicitly not this app. ---- */
   --radius-panel: 28px;
+  /* F7 — for L1 recessed surfaces and list rows (Surface's
+     padding="compact", F16); a 28px radius reads as a bubble at that
+     size, 20px reads as material. No current call site opts in yet
+     (see Surface.tsx) — extending screens to use it is the follow-up
+     ticket's job. */
+  --radius-panel-sm: 20px;
   --radius-control: 14px;
+
+  /* ---- Motion — consolidation (audit Part 3, F6/F8/F11). Two
+     hand-typed cubic-beziers and no duration ever lived as a token
+     before this ticket. Every duration and easing in the files this
+     ticket touches (Surface.css, AppShell.css, AppBar.css) uses these —
+     no hand-typed cubic-bezier survives in them. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-press: 160ms;
+  --dur-enter: 200ms;
+  --dur-state: 220ms;
+  --dur-ambient: 600ms;
 
   color-scheme: dark;
   background: var(--surface-0);
@@ -157,13 +269,53 @@ p {
   margin: 0;
 }
 
+/* F3 — no CSS reset previously existed and src/index.css never set
+   text-decoration, so every <a> in the app rendered with the UA default
+   underline — the most literal possible contributor to "a pile of
+   underlined text links" (audit P3), despite two source comments
+   elsewhere asserting the opposite. Underlines are reintroduced
+   deliberately only where a link sits inside running prose — currently
+   nowhere in this app. */
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
 /* Numeric token — every price, projection, countdown and accuracy
    figure in the app renders through this class. Geist Mono, tabular,
-   so digits never jitter as a value ticks. */
+   so digits never jitter as a value ticks.
+
+   F1 — .num was defeated on 13 of the app's 14 combined-class numbers.
+   A component rule using the `font` shorthand (e.g.
+   `.verdict-card__points-value { font: var(--text-display); }`) resets
+   font-family, font-variant-numeric and font-feature-settings to their
+   initial values per spec. Most offending rules tie .num on specificity
+   ((0,1,0) vs (0,1,0)), so source order decided the winner — every
+   component stylesheet loads after this file, so the component rule
+   always won. But not every offender is single-class: the escalated
+   countdown figure is set by
+   `.deadline-countdown--escalated .deadline-countdown__remaining`
+   (DeadlineCountdown.css), a *two*-class descendant selector — (0,2,0).
+   A same-file fix that only repeats `.num` (`.num.num`, also (0,2,0))
+   would tie that one, and a tie is broken by source order again, which
+   a later-loaded component sheet still wins. Raising the repeat count
+   only chases whatever the highest class count anywhere happens to be,
+   forever a moving target. `!important` sidesteps the chase entirely:
+   it wins regardless of the other rule's specificity, as long as
+   nothing else in the app also marks a font property `!important` on a
+   conflicting rule — verified true, generically, in index.css.test.ts.
+
+   The single most important number in the app (the verdict's
+   projected-points figure) rendered in Geist Sans, non-tabular; the
+   countdown's escalated figure — the moment tabular digits matter
+   most — silently switched out of mono the instant it started ticking.
+   Fix must live here, not in the 13+ component stylesheets carrying the
+   offending `font:` shorthand (that edit belongs to the follow-up
+   ticket — see docs/ui-audit-2026-08-31.md F1's "why"). */
 .num {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-feature-settings: 'tnum' 1;
+  font-family: var(--font-mono) !important;
+  font-variant-numeric: tabular-nums !important;
+  font-feature-settings: 'tnum' 1 !important;
   letter-spacing: 0;
 }
 
@@ -173,13 +325,24 @@ p {
   border-radius: var(--radius-control);
 }
 
+/* F8 — the previous rule zeroed animation-duration AND
+   transition-duration for every property on every element, which
+   removes all acknowledgement of a state change for a
+   prefers-reduced-motion user, not just the movement — the reduced-
+   motion implementation the accessibility playbooks warn against.
+   Movement (transform-driven animation and any transition not listed
+   below) still collapses to effectively nothing; opacity, colour and
+   background/border-colour transitions survive at a short, deliberate
+   duration so a commit, an active state or a navigation still reads as
+   having happened. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    transition-property: opacity, color, background-color, border-color !important;
+    transition-duration: 150ms !important;
     scroll-behavior: auto !important;
   }
 }

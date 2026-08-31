@@ -2,51 +2,91 @@
   The translucent-material surface. Elevation comes from a translucent
   tonal fill plus backdrop-filter: blur() — the "frosted panel floating
   over the base ink" read that separates this app from a default flat
-  card with a border. The hairline border below is a whisper, not the
-  elevation mechanism; delete it and the panel would still read as
-  raised because of the fill + blur. Delete the blur and it would not.
+  card with a border.
+
+  Ticket #166 / docs/ui-audit-2026-08-31.md F5: the previous single fill
+  and its border measured 1.079:1 and 1.260:1 against what sat behind
+  them — the border was the most visible thing on the panel, exactly
+  backwards from "the hairline border is a whisper, not the elevation
+  mechanism" this file used to claim here. It's true now: three
+  --material-* levels (src/index.css) carry the elevation, and
+  --panel-border is demoted to a real whisper (0.08 alpha, was 0.14).
 */
 .surface {
   position: relative;
-  isolation: isolate;
   border-radius: var(--radius-panel);
   padding: var(--space-6);
 
-  background: var(--panel-fill);
-  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(var(--panel-saturate));
-  backdrop-filter: blur(var(--panel-blur)) saturate(var(--panel-saturate));
   border: 1px solid var(--panel-border);
-
-  opacity: 0;
-  transform: translateY(6px);
-  animation: surface-arrive 0.5s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  /* F14 — a light-catching top edge instead of a uniform-alpha stroke
+     around all four sides, which is the definition of "a flat card with
+     a 1px border" the audit names. Only the top edge gets the brighter
+     --material-edge value, so the border reads as light falling on an
+     object rather than as a ruled line drawn around one. */
+  border-top-color: var(--material-edge);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
 }
 
-.surface--raised {
-  background: var(--panel-fill-raised);
+/* F16 — padding="compact" pairs with the smaller radius step (F7); both
+   read as "this is a dense row", not "this is a large panel". No
+   existing call site opts in yet (this ticket cannot edit them — see
+   Surface.tsx); the follow-up ticket wires the reasoning screen's nested
+   cards to it. */
+.surface--compact {
+  padding: var(--space-4);
+  border-radius: var(--radius-panel-sm);
 }
 
-/* Ambient glow bleeding from behind the panel — a low-opacity wash of
-   the recommended-action accent, not a bright fill. This is the
-   signature move: light behind glass, the way a phone screen reads in
-   a dark room, rather than a bordered box sitting on a dark page.
+/* F5/F15 — three genuinely separable materials. See src/index.css for
+   the token values and the computed contrast ratios at every boundary
+   (verified in index.css.test.ts): L1 1.06:1 over base; L2 1.25:1 over
+   base, 1.18:1 over L1; L3 1.55:1 over base, 1.24:1 over L2. Every
+   adjacent pair is more visible than --panel-border's own contrast
+   against a panel (~1.14:1 at its default use below) — the elevation is
+   the most visible thing on a panel again, not the least. */
+.surface--level-1 {
+  background: var(--material-1);
+  -webkit-backdrop-filter: blur(var(--material-1-blur)) saturate(var(--panel-saturate));
+  backdrop-filter: blur(var(--material-1-blur)) saturate(var(--panel-saturate));
+}
 
-   Ticket #44, finding 3 — reworked. The previous version sized the
-   glow's box with `height: 70%`, which put the box's own bottom edge
-   *inside* the panel rather than below it. The radial-gradient's
-   default "farthest-corner" sizing measures its fade against the
-   diagonal to that box's corners, which is longer than the distance
-   straight down to the box's bottom-centre — so at that bottom edge the
-   gradient hadn't actually finished fading yet, and blur() turned that
-   still-live edge into a visible seam: the "thick fixed line low on the
-   panel". Fixed by giving the ellipse an explicit size (not
-   farthest-corner) and making the box itself generously larger than
-   that ellipse, so by the time the *box's own edge* is reached the
-   gradient has been sitting at true `transparent` — not just a low
-   value — for a wide margin already. No mask, no second gradient:
-   the fix is entirely "let the fade finish before the box ends". */
-.surface::before {
-  content: '';
+.surface--level-2 {
+  background: var(--material-2);
+  -webkit-backdrop-filter: blur(var(--material-2-blur)) saturate(var(--panel-saturate));
+  backdrop-filter: blur(var(--material-2-blur)) saturate(var(--panel-saturate));
+}
+
+.surface--level-3 {
+  background: var(--material-3);
+  -webkit-backdrop-filter: blur(var(--material-3-blur)) saturate(var(--panel-saturate));
+  backdrop-filter: blur(var(--material-3-blur)) saturate(var(--panel-saturate));
+}
+
+/* F12 — the "signature" cyan glow, demoted from every panel to an
+   explicit opt-in (Surface's `focal` prop) reserved for exactly one
+   element per screen. It used to be `.surface::before` with
+   `z-index: -1`, inside a `.surface` that also set `isolation: isolate`.
+   That never actually worked: `backdrop-filter` on a value other than
+   `none` establishes its own stacking context regardless of
+   `isolation: isolate` (CSS Filter Effects), and within any stacking
+   context the root's own background and border are always its
+   bottommost layer, painted before any descendant — negative z-index
+   included (CSS2.1 Appendix E). So the glow, described as "light behind
+   glass," was in fact painted on top of the panel's own fill: a cyan
+   haze on the glass, not a light source behind it.
+
+   A real DOM sibling, rendered before the panel and left at the default
+   auto z-index, sits genuinely behind the panel in paint order — and the
+   panel's own backdrop-filter then blurs it, which is the one real way
+   to get a lit-from-behind material read. See Surface.tsx for the
+   markup. `isolation: isolate` is dropped from `.surface` entirely: it
+   was doing nothing (backdrop-filter already isolates), and keeping it
+   invited the same misreading again. */
+.surface__focal-wrap {
+  position: relative;
+}
+
+.surface__glow {
   position: absolute;
   inset: -60% -35% 0 -35%;
   background: radial-gradient(
@@ -55,21 +95,5 @@
     transparent 100%
   );
   filter: blur(20px);
-  z-index: -1;
   pointer-events: none;
-}
-
-@keyframes surface-arrive {
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .surface {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
 }

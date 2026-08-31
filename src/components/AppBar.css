@@ -1,0 +1,86 @@
+/*
+  F17 — the floating navigation bar. See AppBar.tsx for the component
+  doc; docs/ui-audit-2026-08-31.md F17 and F13 for the finding numbers
+  and the "why" behind blur(28px) here specifically.
+*/
+.app-bar__scrim {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* Bar height (~52px incl. padding) + its own gap above the safe area +
+     a margin of extra fade so the transition reads as gradual rather
+     than as a second hard edge. Approximate on purpose — a decorative
+     fade, not a measurement anything else depends on. */
+  height: calc(env(safe-area-inset-bottom) + 6rem);
+  z-index: 9;
+  pointer-events: none;
+  /* Fades toward flat --surface-0 rather than sampling the ambient
+     wash's actual radial-gradient colour at this exact position — a
+     Tier 3 simplification. The wash's colours are low-alpha and diffuse
+     enough that the seam this could in principle leave is not expected
+     to read at the sizes/positions here; worth a real device check
+     rather than a simulator one (see this ticket's report). */
+  background: linear-gradient(to bottom, transparent, var(--surface-0) 78%);
+}
+
+.app-bar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom) + var(--space-3));
+  z-index: 10;
+
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  width: calc(100% - var(--space-8));
+  max-width: 22rem;
+
+  border-radius: 22px;
+  background: var(--material-bar);
+  -webkit-backdrop-filter: blur(var(--material-bar-blur)) saturate(180%);
+  backdrop-filter: blur(var(--material-bar-blur)) saturate(180%);
+  border: 1px solid var(--panel-border);
+  border-top-color: var(--material-edge);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+.app-bar__item {
+  flex: 1;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 18px;
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-tertiary);
+  text-align: center;
+  transition:
+    transform var(--dur-press) var(--ease-out),
+    color var(--dur-press) ease,
+    background-color var(--dur-press) ease;
+}
+
+.app-bar__item[aria-current='page'] {
+  color: var(--text-primary);
+  background: var(--accent-cyan-dim);
+}
+
+.app-bar__item:active {
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-bar__item {
+    transition:
+      color var(--dur-press) ease,
+      background-color var(--dur-press) ease;
+  }
+
+  .app-bar__item:active {
+    transform: none;
+  }
+}
