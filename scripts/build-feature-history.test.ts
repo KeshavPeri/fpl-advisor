@@ -842,4 +842,108 @@ describe('supabase/README.md', () => {
     expect(rowMatch).not.toBeNull()
     expect(rowMatch![0]).toMatch(/not yet applied/i)
   })
+
+  // Ticket #167's own new migration row. The migration's own content is
+  // asserted in ingest-core-insights.test.ts (which owns
+  // 20260831090000_team_and_opponent.sql, since it also touches
+  // player_match_stats); this file only needs to confirm the README lists it.
+  it('lists the new team_and_opponent migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260831090000_team_and_opponent\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260831090000_team_and_opponent\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
+  })
+})
+
+// ============================================================================
+// team_code (ticket #167) — buildFeatureHistory carries it through the same
+// way element_type is carried through (ticket #146): a single value per
+// player per season, resolved from the first non-null value across his
+// contributing matches, never recomputed per gameweek.
+// ============================================================================
+
+describe('buildFeatureHistory — team_code (ticket #167)', () => {
+  it('a player entirely absent from any players/teams table still receives a team_code, because none is ever consulted', () => {
+    const matches = [
+      { ...defconMatch(930, 1, DEFENDER), team_code: 3 },
+      { ...defconMatch(930, 2, DEFENDER), team_code: 3 },
+    ]
+    const result = buildFeatureHistory(matches, SEASON, COMPUTED_AT)
+    for (const row of result.rows) {
+      expect(row.team_code).toBe(3)
+    }
+    expect(Object.keys(matches[0])).not.toContain('teams')
+  })
+
+  it('is null when the player’s team_code could not be resolved at ingest time — never defaulted to a guess', () => {
+    const result = buildFeatureHistory(
+      [defconMatch(931, 1, DEFENDER), defconMatch(931, 2, DEFENDER)],
+      SEASON,
+      COMPUTED_AT,
+    )
+    for (const row of result.rows) {
+      expect(row.team_code).toBeNull()
+    }
+    expect(result.rowsWithTeamCode).toBe(0)
+  })
+
+  it('rowsWithTeamCode counts rows with a resolved team_code, distinct per player', () => {
+    const result = buildFeatureHistory(
+      [
+        { ...defconMatch(932, 1, MIDFIELDER), team_code: 8 },
+        { ...defconMatch(932, 2, MIDFIELDER), team_code: 8 },
+        defconMatch(933, 1, null),
+      ],
+      SEASON,
+      COMPUTED_AT,
+    )
+    expect(result.rows).toHaveLength(4)
+    expect(result.rowsWithTeamCode).toBe(2)
+    expect(result.rows.filter((r) => r.player_code === 933)).toHaveLength(2)
+  })
+
+  it('team_code and element_type resolve independently — a player can have one resolved and not the other', () => {
+    const result = buildFeatureHistory(
+      [{ ...defconMatch(934, 1, null), team_code: 43 }],
+      SEASON,
+      COMPUTED_AT,
+    )
+    expect(result.rows[0].element_type).toBeNull()
+    expect(result.rows[0].team_code).toBe(43)
+  })
+})
+
+// ============================================================================
+// supabase/migrations/20260831090000_team_and_opponent.sql — the
+// feature_history-side column (ticket #167). The player_match_stats side
+// (team_code, opponent_team_code) is asserted in
+// ingest-core-insights.test.ts, which owns that job.
+// ============================================================================
+
+const teamAndOpponentMigrationPath = fileURLToPath(
+  new URL('../supabase/migrations/20260831090000_team_and_opponent.sql', import.meta.url),
+)
+const teamAndOpponentMigrationSource = readFileSync(teamAndOpponentMigrationPath, 'utf8')
+
+describe('supabase/migrations/20260831090000_team_and_opponent.sql — feature_history side', () => {
+  it('adds feature_history.team_code as a nullable integer with no default', () => {
+    const statementLine = teamAndOpponentMigrationSource
+      .split('\n')
+      .find((line) => line.includes('ALTER TABLE public.feature_history ADD COLUMN IF NOT EXISTS team_code integer;'))
+    expect(statementLine).toBeDefined()
+    expect(statementLine).not.toMatch(/NOT NULL/)
+    expect(statementLine).not.toMatch(/DEFAULT/)
+  })
+
+  it('carries a COMMENT ON COLUMN for feature_history.team_code', () => {
+    expect(teamAndOpponentMigrationSource).toMatch(/COMMENT ON COLUMN public\.feature_history\.team_code IS/)
+  })
+
+  it('issues no GRANT statement — table-level grants already cover both tables (see file header)', () => {
+    const codeOnly = teamAndOpponentMigrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
 })

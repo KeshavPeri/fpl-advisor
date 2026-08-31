@@ -155,7 +155,14 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { parse } from 'csv-parse/sync'
-import { parseCompetition, parseMatchClubSlugs, type CompetitionToken } from './lib/competition.js'
+import { parseCompetition } from './lib/competition.js'
+// Ticket #167. Kept as a SEPARATE import statement from parseCompetition's
+// own line above, deliberately — this file's own tests grep that exact line
+// (`import { parseCompetition } from './lib/competition.js'`) to prove
+// parseCompetition is imported from the shared module rather than
+// pattern-matched locally; widening that one import to a multi-name list
+// would still be correct code but would break that grep for no real benefit.
+import { parseMatchClubSlugs, type CompetitionToken } from './lib/competition.js'
 
 const JOB_NAME = 'ingest-core-insights'
 
@@ -594,7 +601,9 @@ async function applyTeamEloNulls(supabase: SupabaseClient, nulls: Array<{ id: nu
 // player_match_stats
 // ============================================================================
 
-interface MatchStatRow {
+// Exported (ticket #167) alongside toMatchStatRow so tallyOpponentResolution
+// below is directly unit-testable on constructed rows.
+export interface MatchStatRow {
   player_id: number
   player_code: number | null
   // Ticket #146: the FPL position code as it was in this ingested season,
@@ -810,6 +819,40 @@ interface PlayerMatchStatsUpsertResult {
   opponentUnresolvedByReason: Record<string, number>
 }
 
+export interface OpponentResolutionTally {
+  withOpponentTeamCode: number
+  opponentUnresolvedByReason: Record<string, number>
+}
+
+/**
+ * Reconciliation tally over an already-built batch of MatchStatRow's own
+ * opponent_team_code column: how many resolved, and — for the rest — a
+ * named-reason breakdown (ticket #167's own "counted and reported, never
+ * guessed" requirement). By construction, withOpponentTeamCode + the sum of
+ * every value in opponentUnresolvedByReason always equals rows.length: every
+ * row falls into the resolved branch or exactly one reason bucket, never
+ * both, never neither.
+ *
+ * resolveOpponentTeamCode is recomputed here (cheap, pure, deterministic)
+ * rather than threaded out of toMatchStatRow's own return value, which only
+ * carries the columns actually upserted. This never re-triggers a shape
+ * throw: every row here already came back successfully from toMatchStatRow,
+ * which means parseMatchClubSlugs already succeeded for its match_id (see
+ * resolveOpponentTeamCode's own doc comment for why a shape failure
+ * propagates before a row ever reaches this point).
+ */
+export function tallyOpponentResolution(rows: readonly MatchStatRow[], codeBySlug: ReadonlyMap<string, number>): OpponentResolutionTally {
+  const withOpponentTeamCode = rows.filter((r) => r.opponent_team_code !== null).length
+  const opponentUnresolvedByReason: Record<string, number> = {}
+  for (const row of rows) {
+    if (row.opponent_team_code !== null) continue
+    const { reason } = resolveOpponentTeamCode(row.match_id, row.competition as CompetitionToken, row.team_code, codeBySlug)
+    const key = reason ?? 'unknown'
+    opponentUnresolvedByReason[key] = (opponentUnresolvedByReason[key] ?? 0) + 1
+  }
+  return { withOpponentTeamCode, opponentUnresolvedByReason }
+}
+
 async function upsertPlayerMatchStats(
   supabase: SupabaseClient,
   url: string,
@@ -839,22 +882,7 @@ async function upsertPlayerMatchStats(
   const withTeamGoalsConceded = rows.filter((r) => r.team_goals_conceded !== null).length
   const withElementType = rows.filter((r) => r.element_type !== null).length
   const withTeamCode = rows.filter((r) => r.team_code !== null).length
-  const withOpponentTeamCode = rows.filter((r) => r.opponent_team_code !== null).length
-  // Reason tally for every row that did NOT resolve an opponent.
-  // resolveOpponentTeamCode is recomputed here (cheap, pure, deterministic)
-  // rather than threaded out of toMatchStatRow's return value, which only
-  // carries the columns actually upserted — never re-parses a slug that
-  // would throw: toMatchStatRow already returned successfully for this row,
-  // which means parseMatchClubSlugs already succeeded for its match_id (see
-  // resolveOpponentTeamCode's own doc comment for why a shape failure
-  // propagates before a row ever reaches this point).
-  const opponentUnresolvedByReason: Record<string, number> = {}
-  for (const row of rows) {
-    if (row.opponent_team_code !== null) continue
-    const { reason } = resolveOpponentTeamCode(row.match_id, row.competition as CompetitionToken, row.team_code, codeBySlug)
-    const key = reason ?? 'unknown'
-    opponentUnresolvedByReason[key] = (opponentUnresolvedByReason[key] ?? 0) + 1
-  }
+  const { withOpponentTeamCode, opponentUnresolvedByReason } = tallyOpponentResolution(rows, codeBySlug)
   if (rows.length === 0) {
     return {
       written: 0,
