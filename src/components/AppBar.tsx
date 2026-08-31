@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router'
+import { ChipsIcon, RecordIcon, ThisWeekIcon } from './NavIcons.tsx'
 import './AppBar.css'
 
 /**
@@ -20,10 +21,23 @@ import './AppBar.css'
  * surfaces they belong to (the verdict card, the pitch, the incomplete
  * banner) rather than from here.
  *
- * Text labels, not icons: design-reference.md forbids emoji as icons
- * anywhere, and this app draws no icon set at all — inventing one here
- * would be a larger, less reversible decision than this ticket should
- * make (Tier 2/3 boundary, see the ticket's decision log).
+ * ICONS — correction B to #166, which shipped this bar text-only. The
+ * audit's reasoning for text alone (the app draws no icons, so inventing
+ * a set is a bigger decision than F17 should make) held for the audit
+ * and does not hold for a navigation bar: a bar of three text labels is
+ * still the pile of text links P3 objected to, just pinned to the
+ * bottom. NavIcons.tsx draws the three glyphs in this repo — no library,
+ * no dependency, no emoji — on one grid at one stroke weight, in
+ * currentColor. See that file's header for the full set of rules.
+ *
+ * ACCESSIBLE NAME AND THE ACTIVE STATE. Each destination keeps its
+ * visible text label, so its accessible name is unchanged from the
+ * text-only bar and the icons are decorative (aria-hidden) additions
+ * rather than the sole carrier of meaning. The current destination is
+ * marked three ways, only one of which is colour: a heavier icon stroke
+ * (--nav-stroke-active), a heavier label weight, and — the colour one —
+ * --text-primary on a --accent-cyan-dim pill. Remove colour entirely and
+ * the active item is still the one drawn in bolder line.
  *
  * Rendered once in App.tsx, outside <Routes>, so it is a single
  * persistent DOM node across every navigation instead of remounting per
@@ -45,19 +59,29 @@ function AppBar() {
           documented iOS Safari unreliability (see AppShell.css's own
           comment on why the ambient wash uses a fixed *element*, not
           that CSS value), so this uses the mechanism this codebase
-          already trusts instead. Purely decorative: pointer-events: none
-          so it never intercepts a tap either for content beneath it or
-          for the bar itself, which paints above it (z-index 10 vs 9). */}
+          already trusts instead.
+
+          It no longer fades to FULL opacity, though: see AppBar.css and
+          --scrim-strength. A scrim that reaches opaque --surface-0
+          before the bar's top edge leaves the bar as glass over nothing,
+          which is the exact defect F13 found on the panels.
+
+          Purely decorative: pointer-events: none so it never intercepts
+          a tap either for content beneath it or for the bar itself,
+          which paints above it (z-index 10 vs 9). */}
       <div className="app-bar__scrim" aria-hidden="true" />
       <nav className="app-bar" aria-label="Primary">
         <NavLink to="/" end className="app-bar__item">
-          This week
+          <ThisWeekIcon className="app-bar__icon" />
+          <span className="app-bar__label">This week</span>
         </NavLink>
         <NavLink to="/chips" className="app-bar__item">
-          Chips
+          <ChipsIcon className="app-bar__icon" />
+          <span className="app-bar__label">Chips</span>
         </NavLink>
         <NavLink to="/decisions" className="app-bar__item">
-          Record
+          <RecordIcon className="app-bar__icon" />
+          <span className="app-bar__label">Record</span>
         </NavLink>
       </nav>
     </>

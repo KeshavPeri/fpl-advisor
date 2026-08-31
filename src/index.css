@@ -14,56 +14,136 @@
   /* ---- Surface — Deep Ink and its tonal lifts ----
      #0b0f19 is the fixed anchor. Elevated surfaces are not a different
      colour, they are the same ink lifted a little and made translucent,
-     then blurred over whatever sits behind them. */
+     so what is behind them tints them. */
   --surface-0: #0b0f19;
   --surface-1: #131a2c;
   --surface-2: #1a2338;
 
-  /* ---- Elevation — F5, must-fix, the highest-severity finding in the
-     audit. The old two-value scale (--panel-fill at 0.55 alpha,
-     --panel-fill-raised at 0.62) measured 1.079:1 and 1.067:1 against
-     what sits behind them — both effectively invisible — while the 1px
-     border painted on top of them measured 1.260:1: the border was
-     3.3x more visible than the elevation it was supposed to whisper
-     next to. Three genuinely separable materials replace it.
+  /* ---- Elevation — F5, and the ticket-79 follow-up correction to it.
+
+     F5 (must-fix) was right that the old two-value scale was invisible:
+     --panel-fill at 0.55 alpha measured 1.079:1 against the base ink,
+     --panel-fill-raised 1.067:1 against it, while the 1px border painted
+     on top measured 1.260:1 — the border was more visible than the
+     elevation it was supposed to whisper next to.
+
+     Ticket #166 bought that contrast back with ALPHA: 0.55 -> 0.72 for
+     the standard panel, 0.62 -> 0.84 for the raised one. That worked as
+     a measurement and failed as a design. There are exactly two ways to
+     make a panel read as raised — shift its tint and luminosity, or
+     raise its opacity — and only the first is compatible with
+     translucency. Raising alpha buys elevation by SPENDING THE MATERIAL:
+     every panel got more opaque, the ambient wash stopped showing
+     through, and the app read as frosted rather than as glass. F5 asked
+     for visible elevation and F13 asked for real material; solving F5
+     with alpha defeats F13.
+
+     The correction: ALPHA IS HELD CONSTANT AT 0.55 ACROSS ALL THREE
+     LEVELS and the entire elevation scale is carried by the fills' own
+     hue and luminosity instead. 0.55 is the pre-#166 --panel-fill value,
+     and it is a CEILING, not a target — no panel fill in this app may
+     exceed it, and the raised level (which is allowed up to 0.62) sits
+     under it too rather than using its headroom.
+
+     This is not a trade: each new fill is the exact colour that
+     composites over --surface-0 to the SAME result its higher-alpha
+     predecessor did, so every boundary ratio survives to within 0.003
+     while 0.17-0.29 of alpha is handed back to the material. Over the
+     base ink the elevation is identical; over the ambient wash
+     (AppShell.css) the panels now pass 45% of the cyan/coral gradient
+     instead of 28%/16%, which is the whole point — that transmitted
+     tint is what "material" means here, and it is what #166 spent.
 
      Computed WCAG contrast (relative-luminance formula, alpha-composited
-     over --surface-0; verified in index.css.test.ts):
-       L1 vs base    1.06:1
-       L2 vs base    1.25:1    L2 vs L1   1.18:1
-       L3 vs base    1.55:1    L3 vs L2   1.24:1
-       --panel-border vs L2 (its default use, Surface.css)  ~1.14:1
-     That border figure was 1.260:1 before this ticket (F5's own
-     measurement) and is now demoted below every adjacent elevation step
-     (1.18:1, 1.24:1) — the elevation is the most visible thing on a
-     panel again, not the least. */
-  --material-1: rgba(24, 32, 52, 0.42);
-  --material-1-blur: 12px;
-  --material-2: rgba(33, 45, 73, 0.72);
-  --material-2-blur: 24px;
-  --material-3: rgba(44, 59, 94, 0.84);
-  --material-3-blur: 32px;
-  /* F13/F17 — the floating navigation bar is the one surface in this app
-     with real content (shirts, text) scrolling behind it, so it is the
-     one place backdrop-filter does visible work and the one place a
-     stronger blur is worth its compositing cost. Every other panel's
-     blur was, until this ticket, spent on a static gradient. */
-  --material-bar: rgba(20, 27, 45, 0.72);
-  --material-bar-blur: 28px;
-  /* F14 — light catching the top edge only; see the border-top-color
-     override in Surface.css and AppBar.css. */
-  --material-edge: rgba(190, 205, 235, 0.1);
+     over --surface-0; verified in index.css.test.ts), before (#166) and
+     after (this ticket):
+                       fill alpha        contrast
+       L1 vs base      0.42 -> 0.55      1.062 -> 1.062
+       L2 vs base      0.72 -> 0.55      1.250 -> 1.248
+       L2 vs L1        —                 1.177 -> 1.175
+       L3 vs base      0.84 -> 0.55      1.551 -> 1.548
+       L3 vs L2        —                 1.241 -> 1.240
+       --panel-border vs L2 (its default use, Surface.css)  1.145 -> 1.145
+     Both required properties hold simultaneously: every adjacent
+     elevation step (1.175, 1.240) is still more visible than the border
+     between the levels (1.145), and no fill alpha exceeds its ceiling.
+     See decisions/ticket-79-followup.md. */
+  --material-1: rgba(21, 28, 46, 0.55);
+  --material-2: rgba(40, 54, 88, 0.55);
+  --material-3: rgba(61, 82, 130, 0.55);
 
-  /* --panel-fill / --panel-fill-raised now alias the L2/L3 materials
-     above rather than carrying their own values, so the component
-     stylesheets that reference them directly — PlayerShirt.css,
-     VerdictCard.css, AccuracyCard.css, PitchSkeleton.css and four
-     screens' .css files, all out of ticket #166's scope (CLAUDE.md) —
-     inherit the fixed elevation scale with no edits of their own.
-     Renaming those files' own usages to --material-2/-3 by name is the
-     follow-up ticket's job; this alias is what makes that safe to defer
-     without leaving the rest of the app on the broken 1.079:1 scale in
-     the meantime. */
+  /* The second non-alpha elevation mechanism, per F14: light catching
+     the top edge. #166 gave all three levels the same 0.10 edge, which
+     makes an edge a constant and therefore carries no elevation. A
+     higher surface catches more light, so the edge now brightens with
+     the level — 1.123:1 / 1.261:1 / 1.453:1 against each level's own
+     fill. Only the TOP border side takes this value (Surface.css); the
+     other three keep --panel-border. That asymmetry is what separates a
+     lit object from a ruled box, and it is why the edge being brighter
+     than an elevation step is not the inversion F5 named: the "border
+     between two levels" the audit measured is --panel-border, unchanged
+     at 1.145:1 and still quieter than every step. */
+  --material-edge-1: rgba(190, 205, 235, 0.06);
+  --material-edge-2: rgba(190, 205, 235, 0.1);
+  --material-edge-3: rgba(190, 205, 235, 0.16);
+  /* The inner highlight that softens each top edge into its fill, so the
+     edge reads as a gradient of light rather than as a drawn hairline.
+     Scales with the level for the same reason the edge does; was a
+     single hard-typed rgba(255,255,255,0.04) in Surface.css. */
+  --material-sheen-1: rgba(255, 255, 255, 0.03);
+  --material-sheen-2: rgba(255, 255, 255, 0.045);
+  --material-sheen-3: rgba(255, 255, 255, 0.07);
+
+  /* NO --material-*-blur TOKENS ANY MORE, AND NO BLUR ON PANELS. F13
+     established the mechanism: the entire backdrop of every panel in
+     this app is .app-shell__backdrop, a static two-radial-gradient wash,
+     and a Gaussian blur of a smooth gradient returns the same gradient.
+     #166 responded by reducing the blur (22px -> 24/32px per level,
+     i.e. not reducing it) and keeping saturate(150%) — which, over a
+     flat backdrop, is exactly the recipe for fog. Panels now carry
+     saturate() and NO blur at all: saturate does real work (it amplifies
+     the chroma of the wash transmitted through the now-lower alpha),
+     blur does none, and dropping it also removes the edge-sampling halo
+     a backdrop blur leaves at a panel's own boundary. Blur belongs where
+     content passes behind glass, which in this app is one surface only.
+     See decisions/ticket-79-followup.md. */
+  --panel-saturate: 150%;
+
+  /* ---- The floating navigation bar — the one real glass in the app.
+     It is the only surface with live content (shirts, text, figures)
+     scrolling behind it, so it is the only place backdrop-filter does
+     visible work, and it is deliberately the glassiest thing here: the
+     LOWEST alpha of any surface (0.50, under the panels' 0.55), the only
+     blur, the strongest saturation, and the brightest light-catching
+     edge. If the bar and the panels ever read as the same substance,
+     that is the bug this ticket exists to prevent. Its fill is the same
+     re-derivation as the materials above — 0.72 -> 0.50 alpha at a
+     compensating luminosity, so its 1.077:1 lift off the base ink is
+     unchanged while it transmits 50% of what is behind it instead of
+     28%. ---- */
+  --material-bar: rgba(24, 32, 54, 0.5);
+  --material-bar-blur: 28px;
+  --material-bar-saturate: 180%;
+  /* How much of the scrolling content survives under the bar's scroll-
+     edge scrim (AppBar.css). #166's scrim faded content to FULLY opaque
+     --surface-0 before it ever reached the bar, which erased the one
+     backdrop in the app worth blurring — the bar was glass over nothing,
+     the same defect F13 found on the panels. 0.7 keeps the scrim doing
+     its real job (content must not collide illegibly with the bar) while
+     leaving 30% of the content behind the bar for the blur to act on.
+     It is the floor that keeps the bar's own quietest label legible at
+     the worst case: --text-secondary measures 4.67:1 against the bar
+     with solid --text-primary content directly behind it, still
+     over WCAG AA's 4.5:1, and 7.13:1 with nothing behind it. */
+  --scrim-strength: 0.7;
+
+  /* --panel-fill / --panel-fill-raised alias the L2/L3 materials rather
+     than carrying their own values, so the component stylesheets that
+     reference them directly — PlayerShirt.css, VerdictCard.css,
+     AccuracyCard.css, PitchSkeleton.css and four screens' .css files,
+     all outside this ticket's scope — inherit the corrected scale with
+     no edits of their own. They are the reason the alpha correction
+     reaches the whole app and not just <Surface>. */
   --panel-fill: var(--material-2);
   --panel-fill-raised: var(--material-3);
   /* F5 — demoted from 0.14 to a true whisper, so it no longer out-shouts
@@ -73,8 +153,6 @@
      details on already-lifted material (the shirt outline) that need
      more definition than a whisper. */
   --panel-border-strong: rgba(148, 163, 194, 0.34);
-  --panel-blur: var(--material-2-blur);
-  --panel-saturate: 150%;
 
   /* ---- Accent ----
      Cool blue-cyan for recommended/positive, coral for risk/warning.

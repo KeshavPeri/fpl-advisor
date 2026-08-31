@@ -88,6 +88,31 @@ describe('F12 — the glow is opt-in and structurally behind the panel', () => {
   })
 })
 
+describe('ticket-79 follow-up — panels are material, not fog', () => {
+  it('no panel carries a backdrop blur: blur() over the static wash returns the wash (F13)', () => {
+    expect(css).not.toMatch(/backdrop-filter:[^;]*blur\(/)
+    expect(css).not.toMatch(/--material-\d-blur/)
+  })
+
+  it('panels keep saturate(), which acts on the wash transmitted through the fill', () => {
+    expect(css).toMatch(/backdrop-filter:\s*saturate\(var\(--panel-saturate\)\)/)
+  })
+
+  it('each level takes its own light-catching top edge and sheen — the non-alpha elevation mechanism', () => {
+    for (const level of [1, 2, 3]) {
+      const rule = new RegExp(
+        `\\.surface--level-${level}\\s*\\{[^}]*border-top-color:\\s*var\\(--material-edge-${level}\\)[^}]*` +
+          `box-shadow:\\s*inset 0 1px 0 0 var\\(--material-sheen-${level}\\)`
+      )
+      expect(css).toMatch(rule)
+    }
+  })
+
+  it('no fill alpha is hard-typed in the component stylesheet — every level reads its token', () => {
+    expect(css).not.toMatch(/background:\s*rgba\(/)
+  })
+})
+
 describe('backward compatibility with every existing call site', () => {
   it('forwards standard div attributes (role, aria-label) unchanged', () => {
     const html = renderToStaticMarkup(createElement(Surface, { role: 'alert', 'aria-label': 'x' }, 'x'))

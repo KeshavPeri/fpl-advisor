@@ -1,16 +1,18 @@
 /*
   The translucent-material surface. Elevation comes from a translucent
-  tonal fill plus backdrop-filter: blur() — the "frosted panel floating
-  over the base ink" read that separates this app from a default flat
-  card with a border.
+  tonal fill whose HUE AND LUMINOSITY carry the level, plus a
+  light-catching top edge — never from opacity. See src/index.css's
+  elevation block for the token values, the before/after alpha and the
+  computed boundary contrast, and decisions/ticket-79-followup.md for
+  why the alpha route was taken away.
 
   Ticket #166 / docs/ui-audit-2026-08-31.md F5: the previous single fill
   and its border measured 1.079:1 and 1.260:1 against what sat behind
   them — the border was the most visible thing on the panel, exactly
   backwards from "the hairline border is a whisper, not the elevation
-  mechanism" this file used to claim here. It's true now: three
-  --material-* levels (src/index.css) carry the elevation, and
-  --panel-border is demoted to a real whisper (0.08 alpha, was 0.14).
+  mechanism". Ticket-79 follow-up: that is still true (the steps are
+  1.175:1 and 1.240:1, --panel-border is 1.145:1), but it is now paid
+  for out of the fills' colour rather than out of their translucency.
 */
 .surface {
   position: relative;
@@ -21,10 +23,27 @@
   /* F14 — a light-catching top edge instead of a uniform-alpha stroke
      around all four sides, which is the definition of "a flat card with
      a 1px border" the audit names. Only the top edge gets the brighter
-     --material-edge value, so the border reads as light falling on an
-     object rather than as a ruled line drawn around one. */
-  border-top-color: var(--material-edge);
-  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+     --material-edge-* value, so the border reads as light falling on an
+     object rather than as a ruled line drawn around one. The value now
+     brightens with the level (see the per-level rules below): a higher
+     surface catches more light, which is the second of the two non-alpha
+     elevation mechanisms this app is allowed to use. */
+  border-top-color: var(--material-edge-2);
+  box-shadow: inset 0 1px 0 0 var(--material-sheen-2);
+
+  /* THE ONE FILTER PANELS KEEP, AND IT IS NOT BLUR (F13, corrected by
+     the ticket-79 follow-up). A panel's entire backdrop is the static
+     two-radial-gradient wash in AppShell.css; blurring a smooth gradient
+     returns the same gradient, so a panel blur has never produced a
+     single visible pixel of difference — it only cost a compositor pass
+     on 60 panels and left a sampling halo at each panel's own edge.
+     saturate() is the opposite case: it acts on the wash's cyan/coral
+     chroma transmitted through the fill, and now that the fill passes
+     45% instead of 28%, it has appreciably more to act on. Blur lives on
+     .app-bar (AppBar.css) alone, the one surface with content moving
+     behind it. */
+  -webkit-backdrop-filter: saturate(var(--panel-saturate));
+  backdrop-filter: saturate(var(--panel-saturate));
 }
 
 /* F16 — padding="compact" pairs with the smaller radius step (F7); both
@@ -37,29 +56,31 @@
   border-radius: var(--radius-panel-sm);
 }
 
-/* F5/F15 — three genuinely separable materials. See src/index.css for
-   the token values and the computed contrast ratios at every boundary
-   (verified in index.css.test.ts): L1 1.06:1 over base; L2 1.25:1 over
-   base, 1.18:1 over L1; L3 1.55:1 over base, 1.24:1 over L2. Every
+/* F5/F15 — three genuinely separable materials, at ONE CONSTANT FILL
+   ALPHA (0.55). Every level differs only in the fill's own colour and in
+   how much light its top edge catches; none of them differ in opacity.
+   See src/index.css for the computed contrast at every boundary
+   (verified in index.css.test.ts): L1 1.062:1 over base; L2 1.248:1 over
+   base, 1.175:1 over L1; L3 1.548:1 over base, 1.240:1 over L2. Every
    adjacent pair is more visible than --panel-border's own contrast
-   against a panel (~1.14:1 at its default use below) — the elevation is
-   the most visible thing on a panel again, not the least. */
+   against a panel (1.145:1) — the elevation is the most visible thing on
+   a panel, not the least. */
 .surface--level-1 {
   background: var(--material-1);
-  -webkit-backdrop-filter: blur(var(--material-1-blur)) saturate(var(--panel-saturate));
-  backdrop-filter: blur(var(--material-1-blur)) saturate(var(--panel-saturate));
+  border-top-color: var(--material-edge-1);
+  box-shadow: inset 0 1px 0 0 var(--material-sheen-1);
 }
 
 .surface--level-2 {
   background: var(--material-2);
-  -webkit-backdrop-filter: blur(var(--material-2-blur)) saturate(var(--panel-saturate));
-  backdrop-filter: blur(var(--material-2-blur)) saturate(var(--panel-saturate));
+  border-top-color: var(--material-edge-2);
+  box-shadow: inset 0 1px 0 0 var(--material-sheen-2);
 }
 
 .surface--level-3 {
   background: var(--material-3);
-  -webkit-backdrop-filter: blur(var(--material-3-blur)) saturate(var(--panel-saturate));
-  backdrop-filter: blur(var(--material-3-blur)) saturate(var(--panel-saturate));
+  border-top-color: var(--material-edge-3);
+  box-shadow: inset 0 1px 0 0 var(--material-sheen-3);
 }
 
 /* F12 — the "signature" cyan glow, demoted from every panel to an
@@ -76,12 +97,12 @@
    haze on the glass, not a light source behind it.
 
    A real DOM sibling, rendered before the panel and left at the default
-   auto z-index, sits genuinely behind the panel in paint order — and the
-   panel's own backdrop-filter then blurs it, which is the one real way
-   to get a lit-from-behind material read. See Surface.tsx for the
-   markup. `isolation: isolate` is dropped from `.surface` entirely: it
-   was doing nothing (backdrop-filter already isolates), and keeping it
-   invited the same misreading again. */
+   auto z-index, sits genuinely behind the panel in paint order. Both
+   elements are positioned with z-index: auto, so DOM order decides —
+   this holds whether or not `.surface` carries a backdrop-filter, which
+   matters now that the panel's filter is saturate() alone (the panel's
+   saturation acts on the glow's cyan rather than blurring it, which is
+   the more useful of the two anyway). See Surface.tsx for the markup. */
 .surface__focal-wrap {
   position: relative;
 }

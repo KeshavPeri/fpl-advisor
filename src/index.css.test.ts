@@ -263,6 +263,73 @@ describe('F5 — the elevation scale is genuinely separable (computed WCAG contr
   })
 })
 
+/**
+ * The ticket-79 follow-up correction. Ticket #166 bought F5's elevation
+ * contrast with alpha (0.55 -> 0.72 on the standard panel, 0.62 -> 0.84
+ * on the raised one), which is the one currency it could not spend: more
+ * opacity is less material, and the app read as frosted rather than as
+ * glass. The two properties below have to hold AT THE SAME TIME — the
+ * elevation must survive (asserted in the F5 block above, unchanged) and
+ * no fill may exceed its pre-#166 alpha.
+ */
+describe('ticket-79 follow-up — elevation is carried by colour, never by opacity', () => {
+  const base = parseColor(extractToken('surface-0'))
+
+  // The ceilings. --panel-fill's pre-#166 value, and --panel-fill-raised's.
+  const PANEL_FILL_ALPHA_CEILING = 0.55
+  const PANEL_FILL_RAISED_ALPHA_CEILING = 0.62
+
+  it('no panel fill exceeds the pre-foundations alpha ceilings', () => {
+    expect(parseColor(extractToken('material-1')).a).toBeLessThanOrEqual(PANEL_FILL_ALPHA_CEILING)
+    expect(parseColor(extractToken('material-2')).a).toBeLessThanOrEqual(PANEL_FILL_ALPHA_CEILING)
+    expect(parseColor(extractToken('material-3')).a).toBeLessThanOrEqual(PANEL_FILL_RAISED_ALPHA_CEILING)
+  })
+
+  it('the three levels are distinguishable with alpha held CONSTANT — every fill shares one alpha', () => {
+    const alphas = ['material-1', 'material-2', 'material-3'].map((t) => parseColor(extractToken(t)).a)
+    expect(new Set(alphas).size).toBe(1)
+    // ...and they are still separable, so the elevation is provably a
+    // function of colour alone rather than of opacity.
+    const [c1, c2, c3] = ['material-1', 'material-2', 'material-3'].map((t) =>
+      relativeLuminance(over(parseColor(extractToken(t)), base))
+    )
+    expect(contrast(c2, c1)).toBeGreaterThan(1.1)
+    expect(contrast(c3, c2)).toBeGreaterThan(1.1)
+  })
+
+  it('the floating bar is the most translucent surface in the app — strictly below the panels', () => {
+    const barAlpha = parseColor(extractToken('material-bar')).a
+    const panelAlpha = parseColor(extractToken('material-2')).a
+    expect(barAlpha).toBeLessThan(panelAlpha)
+  })
+
+  it('the light-catching edge brightens with the level — the non-alpha mechanism that replaces the opacity step', () => {
+    const edges = ['material-edge-1', 'material-edge-2', 'material-edge-3'].map(
+      (t) => parseColor(extractToken(t)).a
+    )
+    expect(edges[0]).toBeLessThan(edges[1])
+    expect(edges[1]).toBeLessThan(edges[2])
+    const sheens = ['material-sheen-1', 'material-sheen-2', 'material-sheen-3'].map(
+      (t) => parseColor(extractToken(t)).a
+    )
+    expect(sheens[0]).toBeLessThan(sheens[1])
+    expect(sheens[1]).toBeLessThan(sheens[2])
+  })
+
+  it("the bar's quietest label clears WCAG AA against the worst backdrop the scrim allows", () => {
+    // Worst case: solid --text-primary content scrolling directly under
+    // the bar, muted only by the scrim (--scrim-strength of --surface-0)
+    // and then by the bar's own fill.
+    const scrimStrength = Number(extractToken('scrim-strength'))
+    expect(scrimStrength).toBeLessThan(1) // a fully opaque scrim = glass over nothing (F13)
+    const bright = parseColor(extractToken('text-primary'))
+    const scrimmed = over({ ...base, a: scrimStrength }, bright)
+    const seenThroughBar = over(parseColor(extractToken('material-bar')), scrimmed)
+    const label = relativeLuminance(parseColor(extractToken('text-secondary')))
+    expect(contrast(label, relativeLuminance(seenThroughBar))).toBeGreaterThanOrEqual(4.5)
+  })
+})
+
 describe('F2 — --text-tertiary meets WCAG AA (4.5:1) at its smallest used size', () => {
   const base = parseColor(extractToken('surface-0'))
   const baseL = relativeLuminance(base)
