@@ -115,7 +115,11 @@ function DecisionHistoryScreen() {
 function HeadlineSummary({ view }: { view: DecisionHistoryView }) {
   const { headline } = view
   return (
-    <Surface className="decisions-summary">
+    // F12 (Surface.tsx's own comment names this screen's season summary as
+    // one of the three intended `focal` panels — home's verdict card and
+    // chips' remaining-chips summary are the other two, both wired in this
+    // ticket) — the one glowing panel on this screen.
+    <Surface className="decisions-summary" focal>
       <p className="decisions-summary__label">This season</p>
       <div className="decisions-summary__grid">
         <div className="decisions-summary__figure">
