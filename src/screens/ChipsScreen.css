@@ -7,6 +7,12 @@
   warning colour); a locked/not-yet-available slot stays in the quiet
   tertiary text tone rather than reaching for either accent — nothing here
   is a warning yet, per the ticket's own Scope OUT (no escalation, no nag).
+
+  Ticket #169 / docs/ui-audit-2026-08-31.md F40/F41/F42 — reordered to the
+  owner's own three questions (what's left, when do I lose it, is now a
+  good time), with the "already used/lost" history collapsed into one
+  panel at the bottom. See ChipsScreen.tsx's own header comment for the
+  full because.
 */
 
 .chips-header {
@@ -70,7 +76,8 @@
   color: var(--accent-coral);
 }
 
-/* ---- Summary ---- */
+/* ---- F40/F42 — "what's left" / "when do I lose it": the one focal
+   panel on this screen. ---- */
 
 .chips-summary {
   display: flex;
@@ -86,22 +93,166 @@
 .chips-summary__headline {
   font: var(--text-display);
   color: var(--text-primary);
-  letter-spacing: 0.01em;
+  letter-spacing: var(--tracking-display);
 }
 
-/* ---- One set (first / second) ---- */
+.chips-summary__closes {
+  margin-top: var(--space-2);
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
 
-.chips-set {
+.chips-summary__closes--unavailable {
+  color: var(--text-tertiary);
+}
+
+/* ---- Expiry warning (ticket #97) — now lives on the summary panel above,
+   not inside a set's own history block (F40). Understated by default,
+   escalating — the same posture design-reference.md sets for the deadline
+   countdown, applied here in gameweeks rather than hours. No icon, no
+   exclamation point; the escalation is carried entirely by weight, size
+   and how much coral is present, never by louder copy. ---- */
+
+.chips-expiry {
+  margin: 0;
+  margin-top: var(--space-2);
+}
+
+.chips-expiry--noted {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.chips-expiry--pressing {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-coral);
+}
+
+.chips-expiry--final {
+  font: var(--text-title);
+  font-weight: 550;
+  color: var(--accent-coral);
+  padding: var(--space-3);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--accent-coral-line);
+  background: var(--accent-coral-dim);
+}
+
+/* ---- F41/F42 — "is now a good time?" A deliberately quieter, recessed
+   register (Surface level={1} padding="compact" in ChipsScreen.tsx) —
+   never an accent colour, since this is information, not an instruction
+   (product-brief.md §6a). ---- */
+
+.chips-advisory {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
 }
 
+.chips-advisory__heading {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--text-secondary);
+}
+
+.chips-advisory__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--panel-border);
+}
+
+.chips-advisory__heading + .chips-advisory__section {
+  padding-top: 0;
+  border-top: none;
+}
+
+.chips-advisory__label {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* F41 (must-fix) — the caveat now sits directly under its section's own
+   label, ABOVE the figure/plan it qualifies, not below it. */
+.chips-advisory__note {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.chips-advisory__plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.chips-advisory__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.chips-advisory__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.chips-advisory__list .chips-advisory__row:first-child {
+  border-top: none;
+}
+
+.chips-advisory__name {
+  font: var(--text-body);
+  color: var(--text-primary);
+}
+
+.chips-advisory__meta {
+  font: var(--text-label);
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.chips-advisory__delta {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--text-primary);
+}
+
+/* ---- F40/F42 — "what's already gone": both sets' used/lost history in
+   one panel, separated by a rule rather than two identical panels. ---- */
+
+.chips-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.chips-history__set {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--panel-border);
+}
+
+.chips-history__set:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
 /* The set that hasn't opened yet reads as quietly deferred, not broken or
    greyed-out-disabled — it will look exactly like the other set once it's
-   available. Only the panel dims very slightly; every number and label
+   available. Only the block dims very slightly; every number and label
    inside stays fully legible. */
-.chips-set--locked {
+.chips-history__set--locked {
   opacity: 0.86;
 }
 
@@ -174,131 +325,7 @@
   color: var(--text-tertiary);
 }
 
-.chips-set__time {
-  font: var(--text-label);
-  color: var(--text-secondary);
-}
-
-.chips-set__time--unavailable {
-  color: var(--text-tertiary);
-}
-
-/* ---- Expiry warning (ticket #97) ----
-   Understated by default, escalating — the same posture design-reference.md
-   sets for the deadline countdown, applied here in gameweeks rather than
-   hours. No icon, no exclamation point; the escalation is carried entirely
-   by weight, size and how much coral is present, never by louder copy. */
-
-.chips-expiry {
-  margin: 0;
-}
-
-.chips-expiry--noted {
-  font: var(--text-label);
-  color: var(--text-secondary);
-}
-
-.chips-expiry--pressing {
-  font: var(--text-body);
-  font-weight: 550;
-  color: var(--accent-coral);
-}
-
-.chips-expiry--final {
-  font: var(--text-title);
-  font-weight: 550;
-  color: var(--accent-coral);
-  padding: var(--space-3);
-  border-radius: var(--radius-control);
-  border: 1px solid var(--accent-coral-line);
-  background: var(--accent-coral-dim);
-}
-
 .chips-set__unknown {
-  font: var(--text-label);
-  color: var(--text-tertiary);
-}
-
-/* ---- Chip advisory (ticket #126, collapsed for display by #141) ----
-   The difference a chip-enabled solve would make, not a recommendation.
-   Deliberately no accent colour here (unlike the used/lost slot colours
-   above) — an accent would read as "this is the answer", and
-   product-brief.md §6a forbids exactly that framing. Numbers use the same
-   tabular `.num` token as every other figure on this screen.
-
-   One `.chips-advisory__plan` per DISTINCT set of chip decisions the
-   solver's stored solutions propose (ticket #141) — usually exactly one.
-   Its decisions list names each chip once, with no delta on the row; the
-   plan's single points figure sits below the list, stated once for the
-   whole set rather than repeated per chip. A second plan (solutions
-   genuinely disagreeing) gets its own block, separated by a rule — the
-   same "no border on the first item" pattern chips-advisory__row already
-   uses for its own rows. */
-
-.chips-advisory {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.chips-advisory__label {
-  font: var(--text-label);
-  color: var(--text-tertiary);
-}
-
-.chips-advisory__plan {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--panel-border);
-}
-
-.chips-advisory__label + .chips-advisory__plan {
-  padding-top: 0;
-  border-top: none;
-}
-
-.chips-advisory__list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.chips-advisory__row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-2) 0;
-  border-top: 1px solid var(--panel-border);
-}
-
-.chips-advisory__list .chips-advisory__row:first-child {
-  border-top: none;
-}
-
-.chips-advisory__name {
-  font: var(--text-body);
-  color: var(--text-primary);
-}
-
-.chips-advisory__meta {
-  font: var(--text-label);
-  color: var(--text-secondary);
-  text-align: right;
-}
-
-.chips-advisory__delta {
-  font: var(--text-body);
-  font-weight: 550;
-  color: var(--text-primary);
-}
-
-.chips-advisory__note {
   font: var(--text-label);
   color: var(--text-tertiary);
 }
