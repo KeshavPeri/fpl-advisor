@@ -245,11 +245,97 @@
 //    entirely rather than reporting an honestly smaller sample size).
 //
 //  - Sanity bounds (ticket text, pre-answered): a Spearman correlation
-//    outside [-0.2, 0.9], or a top-10 overlap fraction above 9/10, fails the
+//    outside [-0.2, 0.9], or a top-10 OR top-20 overlap fraction above 9/10
+//    (ticket #159 extended this from top-10-only — see below), fails the
 //    report — checked on the season aggregate and on each position,
 //    mirroring checkSanityBounds' own overall-plus-by-position shape. The
 //    upper bound matters more: a suspiciously good correlation is the shape
 //    a lookahead leak takes.
+//
+// ============================================================================
+// NAIVE RANKING BASELINES, TOP-N REFUSAL, AND THE WIDER LEAK BOUND — ticket
+// #159, three defects LEARNINGS-second-build-wave.md §13/§14 recorded against
+// #147's ranking-skill slice above, reproduced by the 30 Aug backtest run.
+// ============================================================================
+//
+//  - DEFECT 1 (§13) — the headline season Spearman (0.305, n=10,474) has no
+//    comparator. #147's ticket TEXT (not the SPEARMAN_LOWER_BOUND/
+//    SPEARMAN_UPPER_BOUND harness-sanity bounds above, a different check for
+//    a different purpose — those exist to catch the harness being WRONG, not
+//    to say whether a value is GOOD) separately asserted an absolute band of
+//    0.3–0.6 for "is this good", invented from general intuition and not
+//    derived from anything about weekly FPL scoring, so a reader has no way
+//    to tell "0.305" apart from "a naive rule would have scored just as
+//    well". Fixed by three baseline rankings —
+//    computed over the IDENTICAL `measured: MeasuredRow[]` population the
+//    model's own Spearman above uses (no separate population, no second
+//    Supabase read, no `players.now_cost` — see the ticket's own explicit
+//    exclusion, a 2026/27 price would be both a cross-season mismatch and a
+//    lookahead against 2025/26 gameweeks):
+//      - prior minutes per match (`prior_minutes / prior_matches`) —
+//        computeBaselineMinutesPerMatch.
+//      - prior xG+xA per match (`(prior_xg + prior_xa) / prior_matches`) —
+//        computeBaselineXgXaPerMatch.
+//      - a constant ranking — every row assigned the identical raw value
+//        (CONSTANT_BASELINE_VALUE), the zero-skill floor. A literally
+//        constant value has zero variance, so spearmanCorrelation correctly
+//        returns null there (proven by this file's own "identical values"
+//        test) rather than a numeric 0 — computeConstantBaselineSpearman
+//        asserts that null (throwing if it is ever anything else — the
+//        self-test: an implementation that finds a SPURIOUS signal in an
+//        input that carries none is broken) and reports it as exactly 0.
+//    Both real baselines carry prior_matches > 0 by construction (a
+//    feature_history row with prior_matches = 0 is already excluded before
+//    ever reaching the measured population — see classifyRow's
+//    `noPriorMatches` reason) — computeBaselineMinutesPerMatch/
+//    computeBaselineXgXaPerMatch ASSERT this (throw if violated) rather than
+//    guarding it defensively with a `?? 0`, so a future change that admits a
+//    zero-prior-matches row into the measured population fails loudly here,
+//    unlike averageMinutesPerMatch above (used for the recentMinutes
+//    approximation), which IS called on excluded rows too via
+//    computePositionPriors and must default safely. The report states, per
+//    baseline, at the season aggregate: model's Spearman MINUS that
+//    baseline's — a DIFFERENCE, never checked against an asserted threshold
+//    (buildBaselineVerdicts).
+//
+//  - DEFECT 2 (§14) — a top-N metric is meaningless when N approaches the
+//    population it is drawn from. Goalkeeper top-20 overlap read 696/698
+//    (99.7%) over a per-gameweek goalkeeper population of ~19 — topNOverlap
+//    already caps N at the population correctly (min(20, 19) = 19), but a
+//    top-19-of-19 "overlap" is close to automatic (select nearly the whole
+//    population, count how much of it overlaps with itself), not a ranking
+//    signal. Fixed by topNIsMeaningful/TOP_N_MAX_POPULATION_FRACTION: a
+//    JUDGEMENT threshold (not derived from anything about FPL scoring, and
+//    deliberately given a DIFFERENT value from TOP10_OVERLAP_UPPER_BOUND_
+//    FRACTION above so the two are never confused — that one asks "is the
+//    overlap suspiciously GOOD", this one asks "is N close enough to the
+//    population that any overlap would be uninteresting regardless of
+//    value") — applied per (gameweek, position) slice, the same "too small
+//    to read" discipline #147 already applies to gameweeks under
+//    MIN_BUCKET_SAMPLE_SIZE rows, but keyed on a FRACTION of that slice's
+//    own population rather than an absolute row count (50 is not a
+//    meaningful floor for something whose natural weekly population is ~19,
+//    as opposed to ~250 for every position pooled). A refused slice
+//    contributes NOTHING to summarizeRankingByPosition's season-position
+//    sum — Defect 2's 696/698 becomes an honest "too small to read" rather
+//    than a misleadingly precise percentage.
+//
+//  - DEFECT 3 (§14) — the leak-alarm sanity bound (checkRankingSanityBounds,
+//    #147: fails the report on a top-10 overlap above 9/10) was applied only
+//    to the season aggregate and each position's TOP-10 — the 99.7% figure
+//    above was a TOP-20 and sailed straight through, because the guard never
+//    looked there. Fixed by applying the SAME TOP10_OVERLAP_UPPER_BOUND_
+//    FRACTION bound to top-20 too, at every level checkRankingSanityBounds
+//    already checks (season aggregate, each position) — not a new bound,
+//    the existing one applied to the place the leak shape actually appeared.
+//    A separate, unverified observation from the same 30 Aug run — Defender
+//    and Midfielder report byte-identical overlaps (75/370, 226/740) on
+//    populations of 3,632/4,860, where the SAME two figures differed in the
+//    29 Aug run (DEF 75/231, MID 82/239) — is NOT asserted as a bug here
+//    (`summarizeRankingByPosition` looks correct on inspection); this ticket
+//    only adds the per-gameweek × per-position breakdown
+//    (summarizeRankingByGameweekAndPosition) that makes it distinguishable
+//    on the next run.
 //
 // ============================================================================
 // Wiring.
@@ -347,8 +433,38 @@ export const CLEAN_SHEET_RATE_UPPER_BOUND = 0.6
  */
 export const SPEARMAN_LOWER_BOUND = -0.2
 export const SPEARMAN_UPPER_BOUND = 0.9
-/** "a top-10 overlap above 9 of 10" — expressed as the fraction 9/10 so it applies regardless of the exact denominator an aggregate figure carries. */
+/** "a top-10 overlap above 9 of 10" — expressed as the fraction 9/10 so it applies regardless of the exact denominator an aggregate figure carries. Ticket #159: also applied to top-20 now (Defect 3) — same fraction, same meaning, just checked in more places. */
 export const TOP10_OVERLAP_UPPER_BOUND_FRACTION = 0.9
+
+/**
+ * Ticket #159, Defect 2. A top-N figure is refused ("too small to read"),
+ * not printed, when the N actually used (after topNOverlap's own population
+ * cap) exceeds this fraction of the population it was drawn from — see
+ * topNIsMeaningful. A JUDGEMENT threshold, not derived from anything about
+ * FPL scoring, and deliberately a DIFFERENT number from
+ * TOP10_OVERLAP_UPPER_BOUND_FRACTION above so the two are never confused:
+ * that one asks "is the overlap suspiciously GOOD" (a leak-shaped RESULT);
+ * this one asks "is N close enough to the population that ANY overlap would
+ * be uninteresting, regardless of its value" (a meaningless QUESTION). At
+ * 0.75, a top-10-of-19 request (10/19 ≈ 52.6%) is still reported; a
+ * top-20-of-19 request (19/19 = 100%) — the exact shape LEARNINGS §14
+ * found — is refused.
+ */
+export const TOP_N_MAX_POPULATION_FRACTION = 0.75
+
+/**
+ * Ticket #159, Defect 1, naive baseline 3 ("constant ranking"). The single
+ * raw value every row is assigned for the zero-skill-floor baseline — see
+ * computeConstantBaselineSpearman. Its exact numeric value is arbitrary
+ * (every row gets the SAME one, so spearmanCorrelation's rank computation
+ * cannot see it at all); kept as a named constant rather than an inline
+ * literal so it reads as a deliberate choice, not a stray number.
+ */
+export const CONSTANT_BASELINE_VALUE = 0
+
+export const PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL = 'Prior minutes per match'
+export const PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL = 'Prior xG+xA per match'
+export const CONSTANT_BASELINE_LABEL = 'Constant (zero-skill floor)'
 
 /** A clean sheet requires 60+ minutes, same gate pointValues.ts's appearance-points split uses. */
 const CLEAN_SHEET_QUALIFYING_MINUTES = 60
@@ -581,6 +697,39 @@ export function buildRateHistoryMatch(row: FeatureHistoryPriorFields): RateHisto
 /** A player's average minutes per prior match — 0 with no prior matches (never divides by zero). */
 export function averageMinutesPerMatch(row: Pick<FeatureHistoryPriorFields, 'prior_matches' | 'prior_minutes'>): number {
   return row.prior_matches > 0 ? row.prior_minutes / row.prior_matches : 0
+}
+
+/**
+ * Ticket #159, naive baseline 1: prior minutes per prior match. Every row
+ * that reaches the measured population already has prior_matches > 0 (rows
+ * with prior_matches <= 0 are excluded as `noPriorMatches` before ever
+ * reaching classifyRow's `measured` outcome) — this ASSERTS that invariant
+ * (throws if violated) rather than defaulting defensively to 0, so a future
+ * change that admits a zero-prior-matches row into the measured population
+ * fails loudly here instead of silently producing a wrong or hidden number.
+ * Unlike averageMinutesPerMatch above, which IS called on excluded rows too
+ * (via computePositionPriors, for the position-prior computation, not the
+ * baseline) and must default safely to 0.
+ */
+export function computeBaselineMinutesPerMatch(row: Pick<FeatureHistoryPriorFields, 'prior_matches' | 'prior_minutes'>): number {
+  if (row.prior_matches <= 0) {
+    throw new BacktestError(
+      'computeBaselineMinutesPerMatch called on a row with prior_matches <= 0 — the measured population should never contain one (see classifyRow)',
+      'baseline',
+    )
+  }
+  return row.prior_minutes / row.prior_matches
+}
+
+/** Ticket #159, naive baseline 2: prior xG + prior xA, per prior match. Same assertion as computeBaselineMinutesPerMatch — see its comment. */
+export function computeBaselineXgXaPerMatch(row: Pick<FeatureHistoryPriorFields, 'prior_matches' | 'prior_xg' | 'prior_xa'>): number {
+  if (row.prior_matches <= 0) {
+    throw new BacktestError(
+      'computeBaselineXgXaPerMatch called on a row with prior_matches <= 0 — the measured population should never contain one (see classifyRow)',
+      'baseline',
+    )
+  }
+  return (row.prior_xg + row.prior_xa) / row.prior_matches
 }
 
 /**
@@ -1071,6 +1220,10 @@ export interface MeasuredRow {
   fixtureCount: number
   /** Ticket #140. `feature_history.prior_matches` at classification time — the bucketing key for the defcon and overall signed-error diagnostics. */
   priorMatches: number
+  /** Ticket #159, naive baseline 1 — see computeBaselineMinutesPerMatch. */
+  baselineMinutesPerMatch: number
+  /** Ticket #159, naive baseline 2 — see computeBaselineXgXaPerMatch. */
+  baselineXgXaPerMatch: number
 }
 
 export function buildMeasuredRow(
@@ -1080,6 +1233,8 @@ export function buildMeasuredRow(
   projectedComponents: ComponentTotals,
   actual: ActualGameweekOutcome,
   priorMatches = 0,
+  baselineMinutesPerMatch = 0,
+  baselineXgXaPerMatch = 0,
 ): MeasuredRow {
   const signedError = projectedPoints - actual.totalPoints
   return {
@@ -1094,6 +1249,8 @@ export function buildMeasuredRow(
     actualMinutes: actual.minutes,
     fixtureCount: actual.matchesFound,
     priorMatches,
+    baselineMinutesPerMatch,
+    baselineXgXaPerMatch,
   }
 }
 
@@ -1533,6 +1690,25 @@ export function topNOverlap(pairs: readonly RankingPair[], topN: number): TopNOv
   return { overlap, n }
 }
 
+/**
+ * Ticket #159, Defect 2. Whether one topNOverlap result is worth printing at
+ * all: false when `result.n` (the N actually used, already capped at the
+ * population by topNOverlap itself) is more than TOP_N_MAX_POPULATION_
+ * FRACTION of `population` — the case a top-20 request over a ~19-person
+ * weekly goalkeeper population produces (n capped to ~19, ~19/19 ≈ 100%),
+ * where "overlap" is close to automatic (select nearly the whole
+ * population, count how much of it overlaps with itself) rather than a real
+ * ranking signal. `population <= 0` is always refused (nothing to rank).
+ * Deliberately does NOT special-case `result.n === 0` as "meaningful" —
+ * callers that want to distinguish "no data at all" from "refused" do so
+ * themselves (see summarizeRankingByGameweekAndPosition), because this
+ * function only knows the ratio, not why it is what it is.
+ */
+export function topNIsMeaningful(result: TopNOverlap, population: number): boolean {
+  if (population <= 0) return false
+  return result.n / population <= TOP_N_MAX_POPULATION_FRACTION
+}
+
 export interface GameweekRankingSummary {
   gameweekId: number
   n: number
@@ -1603,9 +1779,25 @@ export interface PositionRankingSummary {
    * reporting an honestly smaller sample size. topNOverlap already caps N at
    * the population size, so a thin gameweek just contributes a smaller N,
    * never a wrong one.
+   *
+   * Ticket #159, Defect 2: a gameweek whose capped N is a large fraction of
+   * ITS OWN population (topNIsMeaningful) contributes NOTHING to this sum —
+   * see top10Refused/top20Refused below for when that empties the figure
+   * entirely.
    */
   top10: TopNOverlap
   top20: TopNOverlap
+  /**
+   * Ticket #159, Defect 2. True when this position had measured rows in at
+   * least one gameweek, but EVERY one of those gameweeks' top-10 slices was
+   * refused by topNIsMeaningful — so top10 above is {overlap: 0, n: 0} not
+   * because there was no data, but because none of it was meaningful at
+   * top-10 (the exact goalkeeper/top-20 shape LEARNINGS §14 found, extended
+   * defensively to top-10 too). The report prints "too small to read" for
+   * this case, distinct from "n/a" (no data at all).
+   */
+  top10Refused: boolean
+  top20Refused: boolean
 }
 
 export function summarizeRankingByPosition(rows: readonly MeasuredRow[]): Record<Position, PositionRankingSummary> {
@@ -1621,13 +1813,23 @@ export function summarizeRankingByPosition(rows: readonly MeasuredRow[]): Record
     let n20 = 0
     for (const gameweekId of gameweekIds) {
       const pairs = positionRows.filter((r) => r.gameweekId === gameweekId).map(toRankingPair)
+      const population = pairs.length
       const t10 = topNOverlap(pairs, 10)
       const t20 = topNOverlap(pairs, 20)
-      overlap10 += t10.overlap
-      n10 += t10.n
-      overlap20 += t20.overlap
-      n20 += t20.n
+      // Ticket #159, Defect 2: a slice whose capped N is too large a
+      // fraction of ITS OWN gameweek population contributes nothing to the
+      // season-position sum — see topNIsMeaningful.
+      if (topNIsMeaningful(t10, population)) {
+        overlap10 += t10.overlap
+        n10 += t10.n
+      }
+      if (topNIsMeaningful(t20, population)) {
+        overlap20 += t20.overlap
+        n20 += t20.n
+      }
     }
+
+    const hadAnyGameweekWithRows = gameweekIds.length > 0
 
     result[position] = {
       position,
@@ -1635,6 +1837,52 @@ export function summarizeRankingByPosition(rows: readonly MeasuredRow[]): Record
       spearman,
       top10: { overlap: overlap10, n: n10 },
       top20: { overlap: overlap20, n: n20 },
+      top10Refused: hadAnyGameweekWithRows && n10 === 0,
+      top20Refused: hadAnyGameweekWithRows && n20 === 0,
+    }
+  }
+  return result
+}
+
+/**
+ * Ticket #159, Defect 3. The finest grain this report prints: one summary
+ * per (gameweek, position) pair that actually has measured rows for it —
+ * the only place the unverified Defender/Midfielder identical-overlap
+ * observation (see file header) is distinguishable on the next run, and
+ * where Defect 2's near-100% goalkeeper top-20 shape is visible cell by
+ * cell rather than only after being summed away in summarizeRankingByPosition
+ * above. NOT gated by MIN_BUCKET_SAMPLE_SIZE, same reasoning as
+ * summarizeRankingByPosition; IS gated by topNIsMeaningful per cell.
+ */
+export interface GameweekPositionRankingSummary {
+  gameweekId: number
+  position: Position
+  n: number
+  top10: TopNOverlap
+  top20: TopNOverlap
+  /** Ticket #159. True when n > 0 but topNIsMeaningful rejects this cell's top-10 — refused, not "no data" (n === 0 is never refused, see topNIsMeaningful's own comment on that distinction). */
+  top10Refused: boolean
+  top20Refused: boolean
+}
+
+export function summarizeRankingByGameweekAndPosition(rows: readonly MeasuredRow[]): GameweekPositionRankingSummary[] {
+  const gameweekIds = [...new Set(rows.map((r) => r.gameweekId))].sort((a, b) => a - b)
+  const result: GameweekPositionRankingSummary[] = []
+  for (const gameweekId of gameweekIds) {
+    for (const position of POSITIONS) {
+      const pairs = rows.filter((r) => r.gameweekId === gameweekId && r.position === position).map(toRankingPair)
+      const n = pairs.length
+      const top10 = topNOverlap(pairs, 10)
+      const top20 = topNOverlap(pairs, 20)
+      result.push({
+        gameweekId,
+        position,
+        n,
+        top10,
+        top20,
+        top10Refused: n > 0 && !topNIsMeaningful(top10, n),
+        top20Refused: n > 0 && !topNIsMeaningful(top20, n),
+      })
     }
   }
   return result
@@ -1649,13 +1897,21 @@ export interface RankingSanityCheckResult {
  * The report FAILS, naming the figure, rather than printing a number nobody
  * checked (ticket text) — mirrors checkSanityBounds' own shape exactly
  * (overall, then each position). Checked here: the season aggregate and each
- * position's Spearman correlation and top-10 overlap fraction. The upper
- * bound matters more than the lower one: a suspiciously good correlation is
- * the shape a lookahead leak takes.
+ * position's Spearman correlation and top-10 AND top-20 overlap fraction.
+ * The upper bound matters more than the lower one: a suspiciously good
+ * correlation is the shape a lookahead leak takes.
+ *
+ * Ticket #159, Defect 3: `seasonTop20` (and each position's `.top20`) is a
+ * new required check — LEARNINGS §14's 99.7% figure was a TOP-20, not a
+ * top-10, and the original bound (ticket #147) only ever checked
+ * `seasonTop10`/`.top10`, so that exact shape sailed through. Existing
+ * callers must now pass a `seasonTop20` argument too — see this file's own
+ * tests for the hand-verified updates.
  */
 export function checkRankingSanityBounds(
   seasonSpearman: number | null,
   seasonTop10: TopNOverlap,
+  seasonTop20: TopNOverlap,
   byPosition: Record<Position, PositionRankingSummary>,
 ): RankingSanityCheckResult {
   const failures: string[] = []
@@ -1667,22 +1923,118 @@ export function checkRankingSanityBounds(
       )
     }
   }
-  const checkTop10 = (label: string, top10: TopNOverlap): void => {
-    if (top10.n > 0 && top10.overlap / top10.n > TOP10_OVERLAP_UPPER_BOUND_FRACTION) {
+  // Ticket #159: generalized from the #147 checkTop10 so the SAME bound
+  // (TOP10_OVERLAP_UPPER_BOUND_FRACTION, still 9/10 regardless of whether N
+  // was 10 or 20) applies to top-20 too — never a second, invented bound.
+  const checkTopN = (label: string, topLabel: 'top-10' | 'top-20', topN: TopNOverlap): void => {
+    if (topN.n > 0 && topN.overlap / topN.n > TOP10_OVERLAP_UPPER_BOUND_FRACTION) {
       failures.push(
-        `${label} top-10 overlap ${top10.overlap} of ${top10.n} (${((top10.overlap / top10.n) * 100).toFixed(1)}%) exceeds the sane bound of 9 of 10 (90%)`,
+        `${label} ${topLabel} overlap ${topN.overlap} of ${topN.n} (${((topN.overlap / topN.n) * 100).toFixed(1)}%) exceeds the sane bound of 9 of 10 (90%)`,
       )
     }
   }
 
   checkSpearman('season', seasonSpearman)
-  checkTop10('season', seasonTop10)
+  checkTopN('season', 'top-10', seasonTop10)
+  checkTopN('season', 'top-20', seasonTop20)
   for (const position of POSITIONS) {
     checkSpearman(POSITION_NAMES[position], byPosition[position].spearman)
-    checkTop10(POSITION_NAMES[position], byPosition[position].top10)
+    checkTopN(POSITION_NAMES[position], 'top-10', byPosition[position].top10)
+    checkTopN(POSITION_NAMES[position], 'top-20', byPosition[position].top20)
   }
 
   return { ok: failures.length === 0, failures }
+}
+
+// ============================================================================
+// NAIVE RANKING BASELINES — ticket #159, Defect 1. Pure, over the SAME
+// `measured: MeasuredRow[]` population every ranking figure above uses. No
+// I/O, no new Supabase read.
+// ============================================================================
+
+export interface BaselineSummary {
+  label: string
+  /** Pooled across the whole season — mirrors SeasonRankingSummary.spearman. */
+  seasonSpearman: number | null
+  /** Pooled per position across the whole season — mirrors PositionRankingSummary.spearman. */
+  byPosition: Record<Position, number | null>
+}
+
+function baselineRankingPairs(rows: readonly MeasuredRow[], valueOf: (row: MeasuredRow) => number): RankingPair[] {
+  return rows.map((r) => ({ projected: valueOf(r), actual: r.actualPoints }))
+}
+
+/** One real (non-constant) baseline's Spearman, at the season aggregate and per position — shared by both computeBaselineMinutesPerMatch and computeBaselineXgXaPerMatch's own MeasuredRow fields. */
+export function summarizeBaselineSpearman(label: string, rows: readonly MeasuredRow[], valueOf: (row: MeasuredRow) => number): BaselineSummary {
+  const seasonSpearman = spearmanCorrelation(baselineRankingPairs(rows, valueOf))
+  const byPosition = {} as Record<Position, number | null>
+  for (const position of POSITIONS) {
+    byPosition[position] = spearmanCorrelation(baselineRankingPairs(rows.filter((r) => r.position === position), valueOf))
+  }
+  return { label, seasonSpearman, byPosition }
+}
+
+/**
+ * Ticket #159, naive baseline 3 ("constant ranking"), the zero-skill floor
+ * AND a self-test of the correlation code. Every row is assigned the
+ * IDENTICAL raw value (CONSTANT_BASELINE_VALUE) — zero variance, so
+ * spearmanCorrelation correctly returns null there (proven by this file's
+ * own "returns null ... when every projected value is identical" test
+ * above), never a numeric value, because a Pearson/Spearman correlation is
+ * mathematically UNDEFINED for a constant input, not zero. This function
+ * ASSERTS that null (throws if spearmanCorrelation ever returns anything
+ * else here) and reports it as exactly 0 for display and for the verdict
+ * line below — a baseline that discriminates NOTHING has, by definition,
+ * zero rank-correlation skill. The throw IS the self-test the ticket asks
+ * for: "a correlation implementation that scores a constant ranking well is
+ * broken" — one that found a spurious non-null signal in an input carrying
+ * none would trip it.
+ */
+export function computeConstantBaselineSpearman(rows: readonly MeasuredRow[]): number {
+  const raw = spearmanCorrelation(rows.map((r) => ({ projected: CONSTANT_BASELINE_VALUE, actual: r.actualPoints })))
+  if (raw !== null) {
+    throw new BacktestError(
+      `constant-ranking baseline unexpectedly produced a non-null Spearman correlation (${raw.toFixed(6)}) — a genuinely constant value has zero variance, so spearmanCorrelation must return null; a non-null result here means the correlation implementation found a spurious signal in an input that carries none`,
+      'baseline',
+    )
+  }
+  return 0
+}
+
+function summarizeConstantBaseline(rows: readonly MeasuredRow[]): BaselineSummary {
+  const seasonSpearman = computeConstantBaselineSpearman(rows)
+  const byPosition = {} as Record<Position, number | null>
+  for (const position of POSITIONS) {
+    byPosition[position] = computeConstantBaselineSpearman(rows.filter((r) => r.position === position))
+  }
+  return { label: CONSTANT_BASELINE_LABEL, seasonSpearman, byPosition }
+}
+
+/** The three naive baselines, in report order — ticket text verbatim (minutes, then xG+xA, then the constant floor). */
+export function summarizeBaselines(rows: readonly MeasuredRow[]): BaselineSummary[] {
+  return [
+    summarizeBaselineSpearman(PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL, rows, (r) => r.baselineMinutesPerMatch),
+    summarizeBaselineSpearman(PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL, rows, (r) => r.baselineXgXaPerMatch),
+    summarizeConstantBaseline(rows),
+  ]
+}
+
+export interface BaselineVerdict {
+  label: string
+  modelSpearman: number | null
+  baselineSpearman: number | null
+  /** modelSpearman - baselineSpearman, season aggregate. Null when either side is null (undefined correlation somewhere — no verdict can be stated as a number then). A DIFFERENCE, never checked against an asserted threshold (ticket text) — the report states the number and stops. */
+  delta: number | null
+}
+
+/** Ticket #159: "model's Spearman MINUS each baseline's, at the season aggregate, printed in the report — a difference, never a threshold." */
+export function buildBaselineVerdicts(modelSeasonSpearman: number | null, baselines: readonly BaselineSummary[]): BaselineVerdict[] {
+  return baselines.map((b) => ({
+    label: b.label,
+    modelSpearman: modelSeasonSpearman,
+    baselineSpearman: b.seasonSpearman,
+    delta: modelSeasonSpearman !== null && b.seasonSpearman !== null ? modelSeasonSpearman - b.seasonSpearman : null,
+  }))
 }
 
 // ============================================================================
@@ -1720,6 +2072,10 @@ interface ReportData {
   rankingByPosition: Record<Position, PositionRankingSummary>
   rankingByGameweek: Map<number, GameweekRankingSummary>
   rankingSanity: RankingSanityCheckResult
+  /** Ticket #159. */
+  baselines: BaselineSummary[]
+  baselineVerdicts: BaselineVerdict[]
+  rankingByGameweekAndPosition: GameweekPositionRankingSummary[]
 }
 
 function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): string {
@@ -1758,13 +2114,54 @@ function fmtTopN(topN: TopNOverlap | null): string {
   return `${topN.overlap} of ${topN.n} (${((topN.overlap / topN.n) * 100).toFixed(1)}%)`
 }
 
+/** Ticket #159, Defect 2: "too small to read" when refused (N too large a fraction of its own population), distinct from fmtTopN's plain "n/a" for genuinely zero rows. */
+function fmtTopNOrRefused(topN: TopNOverlap, refused: boolean): string {
+  return refused ? 'too small to read' : fmtTopN(topN)
+}
+
 function buildRankingPositionTable(byPosition: Record<Position, PositionRankingSummary>): string {
   const header = '| Position | n | Spearman | Top-10 overlap | Top-20 overlap |\n|---|---|---|---|---|'
   const rows = POSITIONS.map((position) => {
     const s = byPosition[position]
-    return `| ${POSITION_NAMES[position]} | ${s.n} | ${fmtSpearman(s.spearman)} | ${fmtTopN(s.top10)} | ${fmtTopN(s.top20)} |`
+    return `| ${POSITION_NAMES[position]} | ${s.n} | ${fmtSpearman(s.spearman)} | ${fmtTopNOrRefused(s.top10, s.top10Refused)} | ${fmtTopNOrRefused(s.top20, s.top20Refused)} |`
   })
   return [header, ...rows].join('\n')
+}
+
+// Ticket #159 — naive-baseline and gameweek×position formatting.
+
+function buildBaselineSpearmanTable(
+  modelSeasonSpearman: number | null,
+  modelByPosition: Record<Position, PositionRankingSummary>,
+  baselines: readonly BaselineSummary[],
+): string {
+  const header = '| Ranking | Season | Goalkeeper | Defender | Midfielder | Forward |\n|---|---|---|---|---|---|'
+  const row = (label: string, seasonSpearman: number | null, byPosition: Record<Position, number | null>): string =>
+    `| ${label} | ${fmtSpearman(seasonSpearman)} | ${POSITIONS.map((p) => fmtSpearman(byPosition[p])).join(' | ')} |`
+  const modelByPositionSpearman: Record<Position, number | null> = Object.fromEntries(
+    POSITIONS.map((p) => [p, modelByPosition[p].spearman]),
+  ) as Record<Position, number | null>
+  const modelRow = row('Model (projection)', modelSeasonSpearman, modelByPositionSpearman)
+  const baselineRows = baselines.map((b) => row(b.label, b.seasonSpearman, b.byPosition))
+  return [header, modelRow, ...baselineRows].join('\n')
+}
+
+function buildBaselineVerdictLines(verdicts: readonly BaselineVerdict[]): string {
+  return verdicts
+    .map(
+      (v) =>
+        `- Model (${fmtSpearman(v.modelSpearman)}) minus ${v.label} (${fmtSpearman(v.baselineSpearman)}) = **${v.delta === null ? 'n/a' : v.delta.toFixed(3)}**`,
+    )
+    .join('\n')
+}
+
+function buildGameweekPositionTable(rows: readonly GameweekPositionRankingSummary[]): string {
+  const header = '| Gameweek | Position | n | Top-10 overlap | Top-20 overlap |\n|---|---|---|---|---|'
+  const body = rows.map(
+    (r) =>
+      `| ${r.gameweekId} | ${POSITION_NAMES[r.position]} | ${r.n} | ${fmtTopNOrRefused(r.top10, r.top10Refused)} | ${fmtTopNOrRefused(r.top20, r.top20Refused)} |`,
+  )
+  return [header, ...body].join('\n')
 }
 
 function buildRankingGameweekTable(byGameweek: Map<number, GameweekRankingSummary>): string {
@@ -1961,12 +2358,46 @@ function generateReportMarkdown(data: ReportData): string {
   )
 
   sections.push(
+    '### By gameweek × position (ticket #159, Defect 3)\n\n' +
+      'The finest grain this report prints — the only place the Defender/Midfielder identical-overlap ' +
+      'observation noted in this ticket\'s decisions file is distinguishable on the next run (not asserted ' +
+      'as a bug here). Not gated by the 50-row gameweek threshold above (a per-gameweek, per-position ' +
+      'population, goalkeepers especially, is routinely under 50 by construction); IS gated by the ' +
+      `top-N-meaningfulness check directly below.\n\n` +
+      buildGameweekPositionTable(data.rankingByGameweekAndPosition),
+  )
+
+  sections.push(
+    '## Naive ranking baselines (ticket #159, Defect 1)\n\n' +
+      'The season Spearman above has no comparator on its own — an absolute band was previously asserted ' +
+      'from general intuition, not derived from anything about weekly FPL scoring. These three baselines ' +
+      'are computed over the EXACT SAME measured population as the model\'s own ranking above (no separate ' +
+      'population, no second Supabase read, and never `players.now_cost` — a 2026/27 price would be both a ' +
+      'cross-season mismatch and a lookahead against these 2025/26 gameweeks). A model with real skill ' +
+      'should beat them; one that does not is decoration, not signal.\n\n' +
+      `- **${PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL}** (\`prior_minutes / prior_matches\`) — the player who has played the most, stays.\n` +
+      `- **${PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL}** (\`(prior_xg + prior_xa) / prior_matches\`) — the player with the best underlying attacking numbers, stays.\n` +
+      `- **${CONSTANT_BASELINE_LABEL}** — every row ranked identically; the zero-skill floor, and a self-test ` +
+      'of the correlation code itself (an implementation that scores a constant ranking WELL, rather than at ' +
+      'exactly 0, is broken — see `computeConstantBaselineSpearman`).\n\n' +
+      buildBaselineSpearmanTable(data.rankingSeason.spearman, data.rankingByPosition, data.baselines),
+  )
+
+  sections.push(
+    '### Verdict — model Spearman minus each baseline\'s (season aggregate)\n\n' +
+      'A DIFFERENCE, never checked against an asserted threshold (ticket text) — the report states the ' +
+      'number and stops there.\n\n' +
+      buildBaselineVerdictLines(data.baselineVerdicts),
+  )
+
+  sections.push(
     '## Provenance\n\n' +
       `- players rows fetched: ${data.playersRowCount}\n` +
       `- feature_history rows fetched (season=${data.season}): ${data.featureHistoryRowsRead}\n` +
       `- player_match_stats rows fetched (season=${data.season}, competition=${PREMIER_LEAGUE_COMPETITION}): ${data.matchStatsRowCount}\n` +
       `- sanity bounds: mean absolute error in [${MAE_LOWER_BOUND}, ${MAE_UPPER_BOUND}]; derived clean-sheet rate ≤ ${(CLEAN_SHEET_RATE_UPPER_BOUND * 100).toFixed(0)}% per position\n` +
-      `- ranking sanity bounds (#147): Spearman rank correlation in [${SPEARMAN_LOWER_BOUND}, ${SPEARMAN_UPPER_BOUND}]; top-10 overlap ≤ ${(TOP10_OVERLAP_UPPER_BOUND_FRACTION * 100).toFixed(0)}%\n`,
+      `- ranking sanity bounds (#147, extended by #159 to top-20): Spearman rank correlation in [${SPEARMAN_LOWER_BOUND}, ${SPEARMAN_UPPER_BOUND}]; top-10 AND top-20 overlap ≤ ${(TOP10_OVERLAP_UPPER_BOUND_FRACTION * 100).toFixed(0)}%, at the season aggregate and every position\n` +
+      `- top-N meaningfulness threshold (#159): a top-N figure is refused ("too small to read") when N exceeds ${(TOP_N_MAX_POPULATION_FRACTION * 100).toFixed(0)}% of the population it was drawn from — a judgement, not a derived bound\n`,
   )
 
   return sections.join('\n\n') + '\n'
@@ -2235,8 +2666,23 @@ async function main(): Promise<void> {
       const projection = projectRow(row, classification.position, prior, classification.outcome.matchesFound)
       const projectedComponents = sumComponentTotals(projection.fixtures.map((f) => pickProjectedComponents(f.components)))
 
+      // Ticket #159, Defect 1 — naive baselines, computed from this SAME row
+      // (row.prior_matches > 0 is guaranteed here: classifyRow already
+      // excluded anything else as `noPriorMatches` above).
+      const baselineMinutes = computeBaselineMinutesPerMatch(row)
+      const baselineXgXa = computeBaselineXgXaPerMatch(row)
+
       measured.push(
-        buildMeasuredRow(row.gameweek_id, classification.position, projection.expectedPoints, projectedComponents, classification.outcome, row.prior_matches),
+        buildMeasuredRow(
+          row.gameweek_id,
+          classification.position,
+          projection.expectedPoints,
+          projectedComponents,
+          classification.outcome,
+          row.prior_matches,
+          baselineMinutes,
+          baselineXgXa,
+        ),
       )
     }
 
@@ -2261,7 +2707,14 @@ async function main(): Promise<void> {
     const rankingByGameweek = summarizeRankingByGameweek(measured)
     const rankingSeason = summarizeSeasonRanking(measured, rankingByGameweek)
     const rankingByPosition = summarizeRankingByPosition(measured)
-    const rankingSanity = checkRankingSanityBounds(rankingSeason.spearman, rankingSeason.top10, rankingByPosition)
+    // Ticket #159, Defect 3: seasonTop20 now checked alongside seasonTop10.
+    const rankingSanity = checkRankingSanityBounds(rankingSeason.spearman, rankingSeason.top10, rankingSeason.top20, rankingByPosition)
+
+    // Ticket #159 — naive baselines and the gameweek×position breakdown.
+    // Both computed entirely from `measured`; no new Supabase read.
+    const baselines = summarizeBaselines(measured)
+    const baselineVerdicts = buildBaselineVerdicts(rankingSeason.spearman, baselines)
+    const rankingByGameweekAndPosition = summarizeRankingByGameweekAndPosition(measured)
 
     const reportData: ReportData = {
       generatedAt: new Date(),
@@ -2287,6 +2740,9 @@ async function main(): Promise<void> {
       rankingByPosition,
       rankingByGameweek,
       rankingSanity,
+      baselines,
+      baselineVerdicts,
+      rankingByGameweekAndPosition,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
     await mkdir(dirname(reportPath), { recursive: true })
@@ -2316,6 +2772,8 @@ async function main(): Promise<void> {
       rankingSeason,
       rankingByPosition: Object.fromEntries(POSITIONS.map((p) => [POSITION_NAMES[p], rankingByPosition[p]])),
       rankingSanity,
+      baselines,
+      baselineVerdicts,
       reportPath,
     }
 

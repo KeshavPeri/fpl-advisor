@@ -35,6 +35,7 @@ import {
   aggregateActualForGameweek,
   assertReconciles,
   averageMinutesPerMatch,
+  buildBaselineVerdicts,
   bucketByPriorMatches,
   buildDefconMatches,
   buildDefconMatchesFromCounts,
@@ -49,7 +50,12 @@ import {
   classifyDefconSource,
   classifyRow,
   CLEAN_SHEET_RATE_UPPER_BOUND,
+  computeBaselineMinutesPerMatch,
+  computeBaselineXgXaPerMatch,
+  computeConstantBaselineSpearman,
   computePositionPriors,
+  CONSTANT_BASELINE_LABEL,
+  CONSTANT_BASELINE_VALUE,
   countMultiFixtureRowsByGameweek,
   DEFAULT_SEASON,
   defconSignedError,
@@ -70,6 +76,8 @@ import {
   MULTI_FIXTURE_HEADLINE_THRESHOLD,
   parseMatchIdTeamSlugs,
   pickProjectedComponents,
+  PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL,
+  PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL,
   projectRow,
   rankDescending,
   reconstructActualMatchPoints,
@@ -78,15 +86,19 @@ import {
   SPEARMAN_LOWER_BOUND,
   SPEARMAN_UPPER_BOUND,
   sumComponentTotals,
+  summarizeBaselines,
   summarizeByGameweek,
   summarizeByPosition,
   summarizeErrors,
   summarizeRankingByGameweek,
+  summarizeRankingByGameweekAndPosition,
   summarizeRankingByPosition,
   summarizeSeasonRanking,
   toRankingPair,
   TOP10_OVERLAP_UPPER_BOUND_FRACTION,
+  topNIsMeaningful,
   topNOverlap,
+  TOP_N_MAX_POPULATION_FRACTION,
   totalExcluded,
   type ActualMatchStatsInput,
   type FeatureHistoryRow,
@@ -740,6 +752,11 @@ function measuredRow(overrides: Partial<MeasuredRow> & Pick<MeasuredRow, 'gamewe
     // these, so they exercise exactly this default.
     fixtureCount: 1,
     priorMatches: 0,
+    // Ticket #159 defaults — 0 for both baselines, overridable per test.
+    // Existing tests that predate #159 never set these, so they exercise
+    // exactly this default (harmless: they never read either field).
+    baselineMinutesPerMatch: 0,
+    baselineXgXaPerMatch: 0,
     ...overrides,
   }
 }
@@ -1373,26 +1390,123 @@ describe('summarizeRankingByPosition', () => {
     expect(byPosition[FORWARD].spearman).toBeCloseTo(1, 10)
   })
 
-  it('sums top-N overlap per position across gameweeks WITHOUT the 50-row gameweek gate (a per-gameweek goalkeeper population is often under 50)', () => {
-    // Two gameweeks of 8 goalkeepers each — well under MIN_BUCKET_SAMPLE_SIZE,
-    // but summarizeRankingByPosition must still report a real figure.
+  // Ticket #159, Defect 2: this test USED TO assert {overlap:16,n:16} for
+  // both top10 and top20 over an 8-row weekly population — exactly the
+  // shape this ticket fixes (topNOverlap caps N at 8, so 8/8 = 100% of the
+  // population is "the top N" both times, an automatic, meaningless
+  // "overlap"). Rewritten with a 15-row weekly population (still well under
+  // MIN_BUCKET_SAMPLE_SIZE, so the original "no 50-row gate" claim below
+  // still holds) chosen so top-10 and top-20 land on opposite sides of
+  // TOP_N_MAX_POPULATION_FRACTION (0.75) — hand-computed, not copied from
+  // failing output.
+  it('sums top-N overlap per position across gameweeks WITHOUT the 50-row gameweek gate (a per-gameweek goalkeeper population is often under 50) — while refusing a slice whose N is too large a fraction of ITS OWN population (ticket #159)', () => {
+    // Two gameweeks of 15 goalkeepers each — under MIN_BUCKET_SAMPLE_SIZE.
     const rows = [
-      ...Array.from({ length: 8 }, (_, i) => measuredRow({ gameweekId: 1, position: GOALKEEPER, projectedPoints: i, actualPoints: i })),
-      ...Array.from({ length: 8 }, (_, i) => measuredRow({ gameweekId: 2, position: GOALKEEPER, projectedPoints: i, actualPoints: i })),
+      ...Array.from({ length: 15 }, (_, i) => measuredRow({ gameweekId: 1, position: GOALKEEPER, projectedPoints: i, actualPoints: i })),
+      ...Array.from({ length: 15 }, (_, i) => measuredRow({ gameweekId: 2, position: GOALKEEPER, projectedPoints: i, actualPoints: i })),
     ]
     const byPosition = summarizeRankingByPosition(rows)
-    // Each gameweek: topNOverlap caps at population size 8, perfect agreement -> overlap 8 of 8.
-    expect(byPosition[GOALKEEPER].top10).toEqual({ overlap: 16, n: 16 })
-    expect(byPosition[GOALKEEPER].top20).toEqual({ overlap: 16, n: 16 })
+    // Each gameweek: topNOverlap(pairs,10) caps n=min(10,15)=10; 10/15 ≈
+    // 66.7% <= 75% -> meaningful, perfect agreement -> overlap 10 of 10.
+    // Summed across 2 gameweeks: 20 of 20.
+    expect(byPosition[GOALKEEPER].top10).toEqual({ overlap: 20, n: 20 })
+    expect(byPosition[GOALKEEPER].top10Refused).toBe(false)
+    // Each gameweek: topNOverlap(pairs,20) caps n=min(20,15)=15; 15/15 =
+    // 100% > 75% -> refused, contributes nothing. Both gameweeks refused ->
+    // the position-level figure is empty, not a misleading 30/30 (100%).
+    expect(byPosition[GOALKEEPER].top20).toEqual({ overlap: 0, n: 0 })
+    expect(byPosition[GOALKEEPER].top20Refused).toBe(true)
+  })
+
+  it('the goalkeeper case, reproduced: a 19-row weekly population asked for top-20 is refused, not reported as ~100% (LEARNINGS §14)', () => {
+    const rows = [
+      ...Array.from({ length: 19 }, (_, i) => measuredRow({ gameweekId: 1, position: GOALKEEPER, projectedPoints: i, actualPoints: i })),
+    ]
+    const byPosition = summarizeRankingByPosition(rows)
+    // min(20,19)=19, 19/19=100% > 75% -> refused.
+    expect(byPosition[GOALKEEPER].top20).toEqual({ overlap: 0, n: 0 })
+    expect(byPosition[GOALKEEPER].top20Refused).toBe(true)
+    // min(10,19)=10, 10/19 ≈ 52.6% <= 75% -> NOT refused.
+    expect(byPosition[GOALKEEPER].top10).toEqual({ overlap: 10, n: 10 })
+    expect(byPosition[GOALKEEPER].top10Refused).toBe(false)
+  })
+
+  it('a position with no measured rows at all is n=0, NOT refused — "no data" is a different case from "refused"', () => {
+    const rows = [measuredRow({ gameweekId: 1, position: GOALKEEPER, projectedPoints: 1, actualPoints: 1 })]
+    const byPosition = summarizeRankingByPosition(rows)
+    expect(byPosition[FORWARD].top20).toEqual({ overlap: 0, n: 0 })
+    expect(byPosition[FORWARD].top20Refused).toBe(false)
+  })
+})
+
+describe('summarizeRankingByGameweekAndPosition — the per-gameweek × per-position breakdown (ticket #159, Defect 3)', () => {
+  it('returns one summary per (gameweek, position) actually present, refusing a cell whose N is too large a fraction of ITS OWN population', () => {
+    const rows = [
+      ...Array.from({ length: 19 }, (_, i) => measuredRow({ gameweekId: 1, position: GOALKEEPER, projectedPoints: i, actualPoints: i })),
+      ...Array.from({ length: 40 }, (_, i) => measuredRow({ gameweekId: 1, position: DEFENDER, projectedPoints: i, actualPoints: i })),
+    ]
+    const summaries = summarizeRankingByGameweekAndPosition(rows)
+    const gk = summaries.find((s) => s.gameweekId === 1 && s.position === GOALKEEPER)!
+    expect(gk.n).toBe(19)
+    // top-10: min(10,19)=10, 10/19 ≈ 52.6% <= 75% -> meaningful.
+    expect(gk.top10Refused).toBe(false)
+    expect(gk.top10).toEqual({ overlap: 10, n: 10 })
+    // top-20: min(20,19)=19, 19/19 = 100% > 75% -> refused.
+    expect(gk.top20Refused).toBe(true)
+
+    const def = summaries.find((s) => s.gameweekId === 1 && s.position === DEFENDER)!
+    // top-20: min(20,40)=20, 20/40 = 50% <= 75% -> meaningful.
+    expect(def.top20Refused).toBe(false)
+    expect(def.top20).toEqual({ overlap: 20, n: 20 })
+  })
+
+  it('includes every position for every gameweek present, even one with zero rows (n=0, not refused)', () => {
+    const rows = [measuredRow({ gameweekId: 5, position: MIDFIELDER, projectedPoints: 1, actualPoints: 1 })]
+    const summaries = summarizeRankingByGameweekAndPosition(rows)
+    expect(summaries).toHaveLength(4) // one per position, gameweek 5 only
+    const gk = summaries.find((s) => s.position === GOALKEEPER)!
+    expect(gk.n).toBe(0)
+    expect(gk.top10Refused).toBe(false)
+    expect(gk.top20Refused).toBe(false)
+  })
+})
+
+describe('topNIsMeaningful / TOP_N_MAX_POPULATION_FRACTION (ticket #159, Defect 2 — the goalkeeper case at the pure-function level)', () => {
+  it('TOP_N_MAX_POPULATION_FRACTION is a fraction strictly between 0 and 1', () => {
+    expect(TOP_N_MAX_POPULATION_FRACTION).toBeGreaterThan(0)
+    expect(TOP_N_MAX_POPULATION_FRACTION).toBeLessThan(1)
+  })
+
+  it('a top-20 request over a 19-row population is refused: n caps at 19, 19/19 = 100% > threshold', () => {
+    const pairs: RankingPair[] = Array.from({ length: 19 }, (_, i) => ({ projected: i, actual: i }))
+    const result = topNOverlap(pairs, 20)
+    expect(result).toEqual({ overlap: 19, n: 19 })
+    expect(topNIsMeaningful(result, 19)).toBe(false)
+  })
+
+  it('a top-10 request over the same 19-row population is NOT refused: n=10, 10/19 ≈ 52.6% <= threshold', () => {
+    const pairs: RankingPair[] = Array.from({ length: 19 }, (_, i) => ({ projected: i, actual: i }))
+    const result = topNOverlap(pairs, 10)
+    expect(result).toEqual({ overlap: 10, n: 10 })
+    expect(topNIsMeaningful(result, 19)).toBe(true)
+  })
+
+  it('a population of 0 is always refused (nothing to rank)', () => {
+    expect(topNIsMeaningful({ overlap: 0, n: 0 }, 0)).toBe(false)
   })
 })
 
 describe('checkRankingSanityBounds — Spearman lower bound', () => {
   const emptyByPosition = (): Record<string, PositionRankingSummary> =>
-    Object.fromEntries([GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [p, { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } }]))
+    Object.fromEntries(
+      [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [
+        p,
+        { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false },
+      ]),
+    )
 
   it('fails, naming the figure, when season Spearman is below -0.2', () => {
-    const result = checkRankingSanityBounds(SPEARMAN_LOWER_BOUND - 0.01, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    const result = checkRankingSanityBounds(SPEARMAN_LOWER_BOUND - 0.01, { overlap: 0, n: 0 }, { overlap: 0, n: 0 }, emptyByPosition() as never)
     expect(result.ok).toBe(false)
     expect(result.failures[0]).toMatch(/season/)
     expect(result.failures[0]).toMatch(/Spearman/)
@@ -1400,31 +1514,44 @@ describe('checkRankingSanityBounds — Spearman lower bound', () => {
   })
 
   it('passes at exactly the lower bound', () => {
-    const result = checkRankingSanityBounds(SPEARMAN_LOWER_BOUND, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    const result = checkRankingSanityBounds(SPEARMAN_LOWER_BOUND, { overlap: 0, n: 0 }, { overlap: 0, n: 0 }, emptyByPosition() as never)
     expect(result.ok).toBe(true)
   })
 })
 
 describe('checkRankingSanityBounds — Spearman upper bound', () => {
   const emptyByPosition = (): Record<string, PositionRankingSummary> =>
-    Object.fromEntries([GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [p, { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } }]))
+    Object.fromEntries(
+      [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [
+        p,
+        { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false },
+      ]),
+    )
 
   it('fails, naming the figure, when season Spearman is above 0.9 — the shape a lookahead leak takes', () => {
-    const result = checkRankingSanityBounds(SPEARMAN_UPPER_BOUND + 0.01, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    const result = checkRankingSanityBounds(SPEARMAN_UPPER_BOUND + 0.01, { overlap: 0, n: 0 }, { overlap: 0, n: 0 }, emptyByPosition() as never)
     expect(result.ok).toBe(false)
     expect(result.failures[0]).toMatch(/season/)
     expect(result.failures[0]).toContain((SPEARMAN_UPPER_BOUND + 0.01).toFixed(3))
   })
 
   it('passes at exactly the upper bound', () => {
-    const result = checkRankingSanityBounds(SPEARMAN_UPPER_BOUND, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    const result = checkRankingSanityBounds(SPEARMAN_UPPER_BOUND, { overlap: 0, n: 0 }, { overlap: 0, n: 0 }, emptyByPosition() as never)
     expect(result.ok).toBe(true)
   })
 
   it('fails on a position\'s Spearman too, naming that position', () => {
     const byPosition = emptyByPosition()
-    byPosition[DEFENDER] = { position: DEFENDER, n: 100, spearman: 0.95, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } }
-    const result = checkRankingSanityBounds(0.5, { overlap: 0, n: 0 }, byPosition as never)
+    byPosition[DEFENDER] = {
+      position: DEFENDER,
+      n: 100,
+      spearman: 0.95,
+      top10: { overlap: 0, n: 0 },
+      top20: { overlap: 0, n: 0 },
+      top10Refused: false,
+      top20Refused: false,
+    }
+    const result = checkRankingSanityBounds(0.5, { overlap: 0, n: 0 }, { overlap: 0, n: 0 }, byPosition as never)
     expect(result.ok).toBe(false)
     expect(result.failures[0]).toMatch(/Defender/)
   })
@@ -1432,17 +1559,22 @@ describe('checkRankingSanityBounds — Spearman upper bound', () => {
 
 describe('checkRankingSanityBounds — top-10 overlap bound', () => {
   const emptyByPosition = (): Record<string, PositionRankingSummary> =>
-    Object.fromEntries([GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [p, { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } }]))
+    Object.fromEntries(
+      [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [
+        p,
+        { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false },
+      ]),
+    )
 
   it('fails, naming the figure, when the season top-10 overlap exceeds 9 of 10', () => {
-    const result = checkRankingSanityBounds(0.5, { overlap: 10, n: 10 }, emptyByPosition() as never)
+    const result = checkRankingSanityBounds(0.5, { overlap: 10, n: 10 }, { overlap: 0, n: 0 }, emptyByPosition() as never)
     expect(result.ok).toBe(false)
     expect(result.failures[0]).toMatch(/top-10 overlap/)
     expect(result.failures[0]).toMatch(/10 of 10/)
   })
 
   it('passes at exactly 9 of 10 (the bound, not past it)', () => {
-    const result = checkRankingSanityBounds(0.5, { overlap: 9, n: 10 }, emptyByPosition() as never)
+    const result = checkRankingSanityBounds(0.5, { overlap: 9, n: 10 }, { overlap: 0, n: 0 }, emptyByPosition() as never)
     expect(result.ok).toBe(true)
   })
 
@@ -1451,13 +1583,187 @@ describe('checkRankingSanityBounds — top-10 overlap bound', () => {
   })
 
   it('an empty population (n=0) never divides by zero and does not fail the bound', () => {
-    const result = checkRankingSanityBounds(0.5, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    const result = checkRankingSanityBounds(0.5, { overlap: 0, n: 0 }, { overlap: 0, n: 0 }, emptyByPosition() as never)
     expect(result.ok).toBe(true)
   })
 
   it('a null season Spearman and the top-10 bound can both be checked independently — a null Spearman never fails on its own', () => {
-    const result = checkRankingSanityBounds(null, { overlap: 0, n: 0 }, emptyByPosition() as never)
+    const result = checkRankingSanityBounds(null, { overlap: 0, n: 0 }, { overlap: 0, n: 0 }, emptyByPosition() as never)
     expect(result.ok).toBe(true)
+  })
+})
+
+describe('checkRankingSanityBounds — top-20 overlap bound (ticket #159, Defect 3: LEARNINGS §14 found the leak shape at top-20, which the original #147 bound never checked)', () => {
+  const emptyByPosition = (): Record<string, PositionRankingSummary> =>
+    Object.fromEntries(
+      [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [
+        p,
+        { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false },
+      ]),
+    )
+
+  it('fails, naming the figure, when the SEASON top-20 overlap exceeds 9 of 10 — the season top-10 stays within bound', () => {
+    const result = checkRankingSanityBounds(0.5, { overlap: 5, n: 10 }, { overlap: 20, n: 20 }, emptyByPosition() as never)
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]).toMatch(/season/)
+    expect(result.failures[0]).toMatch(/top-20 overlap/)
+    expect(result.failures[0]).toMatch(/20 of 20/)
+  })
+
+  it('passes at exactly 9 of 10 for top-20 too (the bound, not past it)', () => {
+    const result = checkRankingSanityBounds(0.5, { overlap: 0, n: 0 }, { overlap: 9, n: 10 }, emptyByPosition() as never)
+    expect(result.ok).toBe(true)
+  })
+
+  it('fails on a position\'s top-20 overlap at ~99.7% — reproduces the exact shape LEARNINGS §14 found (696 of 698)', () => {
+    const byPosition = emptyByPosition()
+    byPosition[GOALKEEPER] = {
+      position: GOALKEEPER,
+      n: 700,
+      spearman: 0.5,
+      top10: { overlap: 0, n: 0 },
+      top20: { overlap: 696, n: 698 },
+      top10Refused: false,
+      top20Refused: false,
+    }
+    const result = checkRankingSanityBounds(0.5, { overlap: 0, n: 0 }, { overlap: 0, n: 0 }, byPosition as never)
+    expect(result.ok).toBe(false)
+    expect(result.failures[0]).toMatch(/Goalkeeper/)
+    expect(result.failures[0]).toMatch(/top-20 overlap/)
+    // Hand-computed: 696 / 698 * 100 = 99.71346990... -> toFixed(1) = "99.7".
+    expect(result.failures[0]).toContain('99.7')
+  })
+})
+
+// ============================================================================
+// NAIVE RANKING BASELINES — ticket #159, Defect 1.
+// ============================================================================
+
+describe('computeBaselineMinutesPerMatch / computeBaselineXgXaPerMatch — assert prior_matches > 0, never guard defensively (ticket #159)', () => {
+  it('computes prior_minutes / prior_matches for a real row', () => {
+    expect(computeBaselineMinutesPerMatch({ prior_matches: 4, prior_minutes: 270 })).toBeCloseTo(67.5, 10)
+  })
+
+  it('computes (prior_xg + prior_xa) / prior_matches for a real row', () => {
+    expect(computeBaselineXgXaPerMatch({ prior_matches: 5, prior_xg: 2.5, prior_xa: 1.0 })).toBeCloseTo(0.7, 10)
+  })
+
+  it('throws rather than silently defaulting to 0 when prior_matches <= 0 — the measured population should never reach this function with one (see classifyRow\'s noPriorMatches exclusion)', () => {
+    expect(() => computeBaselineMinutesPerMatch({ prior_matches: 0, prior_minutes: 0 })).toThrow()
+    expect(() => computeBaselineXgXaPerMatch({ prior_matches: 0, prior_xg: 0, prior_xa: 0 })).toThrow()
+    expect(() => computeBaselineMinutesPerMatch({ prior_matches: -1, prior_minutes: 90 })).toThrow()
+  })
+})
+
+describe('computeConstantBaselineSpearman — the zero-skill floor, and a self-test of the correlation code (ticket #159)', () => {
+  it('returns exactly 0 (never a numeric correlation) for a genuinely constant baseline, regardless of the actual points', () => {
+    const rows = [
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 0, actualPoints: 12 }),
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 0, actualPoints: 3 }),
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 0, actualPoints: 8 }),
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 0, actualPoints: 0 }),
+    ]
+    expect(computeConstantBaselineSpearman(rows)).toBe(0)
+  })
+
+  it('CONSTANT_BASELINE_VALUE is a fixed number — every row is assigned the identical value, by construction', () => {
+    expect(typeof CONSTANT_BASELINE_VALUE).toBe('number')
+  })
+
+  it('self-test: this IS exercising spearmanCorrelation\'s own null-for-zero-variance path, not a hardcoded shortcut — feeding the identical CONSTANT_BASELINE_VALUE through spearmanCorrelation directly returns null', () => {
+    const rows = [
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 0, actualPoints: 12 }),
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 0, actualPoints: 3 }),
+    ]
+    const raw = spearmanCorrelation(rows.map((r) => ({ projected: CONSTANT_BASELINE_VALUE, actual: r.actualPoints })))
+    expect(raw).toBeNull()
+  })
+})
+
+describe('summarizeBaselines — three baselines, season aggregate and per position (ticket #159)', () => {
+  it('reports all three baselines, in ticket order (minutes, xG+xA, constant)', () => {
+    const rows = [
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 0, actualPoints: 5, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.5 }),
+      measuredRow({ gameweekId: 1, position: FORWARD, projectedPoints: 0, actualPoints: 2, baselineMinutesPerMatch: 45, baselineXgXaPerMatch: 0.1 }),
+    ]
+    const baselines = summarizeBaselines(rows)
+    expect(baselines.map((b) => b.label)).toEqual([
+      PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL,
+      PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL,
+      CONSTANT_BASELINE_LABEL,
+    ])
+  })
+
+  it('the minutes-per-match baseline, perfect agreement with actual points, scores exactly 1 at the season aggregate and for the one position present', () => {
+    const rows = [
+      measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: 0, actualPoints: 1, baselineMinutesPerMatch: 10 }),
+      measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: 0, actualPoints: 2, baselineMinutesPerMatch: 20 }),
+      measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: 0, actualPoints: 3, baselineMinutesPerMatch: 30 }),
+    ]
+    const baselines = summarizeBaselines(rows)
+    const minutesBaseline = baselines.find((b) => b.label === PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL)!
+    expect(minutesBaseline.seasonSpearman).toBeCloseTo(1, 10)
+    expect(minutesBaseline.byPosition[MIDFIELDER]).toBeCloseTo(1, 10)
+    expect(minutesBaseline.byPosition[FORWARD]).toBeNull() // no Forward rows -> n<2 -> null, not 0
+  })
+
+  // Ties matter (ticket text): the minutes-per-match baseline produces many
+  // ties in practice. Reuses the SAME hand-worked numbers as the
+  // "spearmanCorrelation — ties" test above, applied through the baseline
+  // field this time, to prove the WIRING (not the tie math, already proven
+  // there) threads a heavily-tied baseline correctly through
+  // spearmanCorrelation's average-rank tie handling.
+  it('the minutes-per-match baseline, heavily tied, uses average-rank ties — hand-computed, matching the spearmanCorrelation ties test above', () => {
+    // Three rows tied on baselineMinutesPerMatch = 5, then two distinct
+    // values 3 and 1. baselineRanks = [2,2,2,4,5] (average of ranks 1,2,3).
+    // actual = [4,5,3,2,1] -> actualRanks = [2,1,3,4,5] (no ties).
+    // rho = 8 / sqrt(80) = 0.894427191 (worked out in full in the
+    // spearmanCorrelation ties test above).
+    const rows: MeasuredRow[] = [
+      measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: 0, actualPoints: 4, baselineMinutesPerMatch: 5 }),
+      measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: 0, actualPoints: 5, baselineMinutesPerMatch: 5 }),
+      measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: 0, actualPoints: 3, baselineMinutesPerMatch: 5 }),
+      measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: 0, actualPoints: 2, baselineMinutesPerMatch: 3 }),
+      measuredRow({ gameweekId: 1, position: MIDFIELDER, projectedPoints: 0, actualPoints: 1, baselineMinutesPerMatch: 1 }),
+    ]
+    const baselines = summarizeBaselines(rows)
+    const minutesBaseline = baselines.find((b) => b.label === PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL)!
+    expect(minutesBaseline.seasonSpearman).toBeCloseTo(0.894427191, 6)
+  })
+
+  it('the constant baseline reports exactly 0 at the season aggregate and for every position with 2+ rows', () => {
+    const rows = [
+      measuredRow({ gameweekId: 1, position: DEFENDER, projectedPoints: 0, actualPoints: 6 }),
+      measuredRow({ gameweekId: 1, position: DEFENDER, projectedPoints: 0, actualPoints: 1 }),
+    ]
+    const baselines = summarizeBaselines(rows)
+    const constantBaseline = baselines.find((b) => b.label === CONSTANT_BASELINE_LABEL)!
+    expect(constantBaseline.seasonSpearman).toBe(0)
+    expect(constantBaseline.byPosition[DEFENDER]).toBe(0)
+  })
+})
+
+describe('buildBaselineVerdicts — model Spearman minus each baseline\'s, a difference, never a threshold (ticket #159)', () => {
+  it('computes modelSpearman - baselineSpearman for each baseline, in order', () => {
+    const baselines = [
+      { label: 'A', seasonSpearman: 0.1, byPosition: {} as never },
+      { label: 'B', seasonSpearman: -0.05, byPosition: {} as never },
+    ]
+    const verdicts = buildBaselineVerdicts(0.305, baselines)
+    expect(verdicts).toEqual([
+      { label: 'A', modelSpearman: 0.305, baselineSpearman: 0.1, delta: 0.305 - 0.1 },
+      { label: 'B', modelSpearman: 0.305, baselineSpearman: -0.05, delta: 0.305 - -0.05 },
+    ])
+  })
+
+  it('delta is null when the model\'s season Spearman is null — no verdict can be stated as a number', () => {
+    const verdicts = buildBaselineVerdicts(null, [{ label: 'A', seasonSpearman: 0.1, byPosition: {} as never }])
+    expect(verdicts[0].delta).toBeNull()
+  })
+
+  it('delta is null when the baseline\'s own Spearman is null (e.g. too few rows)', () => {
+    const verdicts = buildBaselineVerdicts(0.305, [{ label: 'A', seasonSpearman: null, byPosition: {} as never }])
+    expect(verdicts[0].delta).toBeNull()
   })
 })
 
