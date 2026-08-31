@@ -39,6 +39,17 @@ import './DecisionHistoryScreen.css'
  * logic (which note wins, exactly what differed) lives in
  * src/lib/decisions/derive.ts; this file renders whichever of the two
  * fields on `DecisionEntryView` is non-null.
+ *
+ * Ticket #169 / docs/ui-audit-2026-08-31.md F43 (should-fix) — was one
+ * `<Surface>` per decision, each repeating a four-row `<dl>` and its own
+ * gameweek header: five decisions were five identical rounded rectangles.
+ * The table's own unique index is `(gameweek_id, plan_index, kind)` and
+ * `deriveOverrideAccess` enforces at most one decision per gameweek, so
+ * "group by gameweek" mostly means making the gameweek the index rather
+ * than a repeated card header: one panel, the gameweek number in a left
+ * rail, the decision collapsed to a single glance line that expands on
+ * tap (a plain `<details>`/`<summary>` — no extra React state, and free
+ * keyboard/VoiceOver disclosure semantics).
  */
 
 type ScreenState =
@@ -142,70 +153,79 @@ function HeadlineSummary({ view }: { view: DecisionHistoryView }) {
   )
 }
 
+/**
+ * F43 — one row in the gameweek-keyed list, collapsed to a glance line
+ * (gameweek number, kind pill, the transfer at a glance) that expands on
+ * tap into the full detail this used to show unconditionally. `<details>`
+ * rather than button + local state: free disclosure semantics (keyboard
+ * `Enter`/`Space`, VoiceOver announces "collapsed"/"expanded"), and no
+ * extra React state to keep in sync with `view.entries`.
+ */
 function DecisionEntryRow({ entry }: { entry: DecisionEntryView }) {
   return (
-    <Surface className="decisions-entry">
-      <div className="decisions-entry__header">
-        <p className="decisions-entry__gameweek">{entry.gameweekName}</p>
-        <span
-          className={`decisions-entry__kind decisions-entry__kind--${entry.kind}`}
-        >
+    <details className="decisions-entry">
+      <summary className="decisions-entry__summary">
+        <span className="decisions-entry__gameweek num">{entry.gameweekId}</span>
+        <span className={`decisions-entry__kind decisions-entry__kind--${entry.kind}`}>
           {entry.kindLabel}
         </span>
+        <span className="decisions-entry__glance">{entry.recorded.transferText}</span>
+      </summary>
+
+      <div className="decisions-entry__detail">
+        <dl className="decisions-entry__fields">
+          <div className="decisions-entry__field">
+            <dt>Transfer</dt>
+            <dd>{entry.recorded.transferText}</dd>
+          </div>
+          <div className="decisions-entry__field">
+            <dt>Captain</dt>
+            <dd>{entry.recorded.captainText}</dd>
+          </div>
+          <div className="decisions-entry__field">
+            <dt>Vice-captain</dt>
+            <dd>{entry.recorded.viceCaptainText}</dd>
+          </div>
+          <div className="decisions-entry__field">
+            <dt>Hit cost</dt>
+            <dd>{entry.recorded.hitCostText}</dd>
+          </div>
+          {/* F45 (should-fix, docs/ui-audit-2026-08-31.md) — a defined,
+              labelled slot for how the decision turned out. The audit's
+              own table found this honestly computable for a transfer or a
+              captaincy pick (prediction_log joined to squad_picks) but NOT
+              for a gameweek total or rank (nothing ingests FPL entry
+              history) — "a data/feature ticket, not a UI fix." This
+              ticket computes nothing and joins nothing (out of scope per
+              the audit's own instruction and CLAUDE.md's src/lib
+              boundary): the slot always renders "Not settled yet" so the
+              screen is shaped for the answer without inventing one. */}
+          <div className="decisions-entry__field">
+            <dt>Outcome</dt>
+            <dd>Not settled yet</dd>
+          </div>
+        </dl>
+
+        {/* Ticket #107: exactly one of the two notes below ever renders for
+            an override — the honest gap note when no `recommended` side
+            was stored, or the comparison summary when one was. Reuses the
+            same "gap-note" visual treatment (neutral secondary text, a
+            hairline separator) for both, per design-reference.md's rule
+            for this screen: an override compared against its
+            recommendation is not a failure, so it gets no colour
+            treatment of its own — only the words differ. */}
+        {entry.recommendationGapNote && (
+          <p className="decisions-entry__gap-note">{entry.recommendationGapNote}</p>
+        )}
+        {entry.recommendationComparison && (
+          <p className="decisions-entry__gap-note">{entry.recommendationComparison.summaryText}</p>
+        )}
+
+        <p className="decisions-entry__decided-at">
+          Decided <time dateTime={entry.decidedAtIso}>{entry.decidedAtLabel}</time>
+        </p>
       </div>
-
-      <dl className="decisions-entry__fields">
-        <div className="decisions-entry__field">
-          <dt>Transfer</dt>
-          <dd>{entry.recorded.transferText}</dd>
-        </div>
-        <div className="decisions-entry__field">
-          <dt>Captain</dt>
-          <dd>{entry.recorded.captainText}</dd>
-        </div>
-        <div className="decisions-entry__field">
-          <dt>Vice-captain</dt>
-          <dd>{entry.recorded.viceCaptainText}</dd>
-        </div>
-        <div className="decisions-entry__field">
-          <dt>Hit cost</dt>
-          <dd>{entry.recorded.hitCostText}</dd>
-        </div>
-        {/* F45 (should-fix, docs/ui-audit-2026-08-31.md) — a defined,
-            labelled slot for how the decision turned out. The audit's own
-            table found this honestly computable for a transfer or a
-            captaincy pick (prediction_log joined to squad_picks) but NOT
-            for a gameweek total or rank (nothing ingests FPL entry
-            history) — "a data/feature ticket, not a UI fix." This ticket
-            computes nothing and joins nothing (out of scope per the
-            audit's own instruction and CLAUDE.md's src/lib boundary): the
-            slot always renders "Not settled yet" so the screen is shaped
-            for the answer without inventing one. */}
-        <div className="decisions-entry__field">
-          <dt>Outcome</dt>
-          <dd>Not settled yet</dd>
-        </div>
-      </dl>
-
-      {/* Ticket #107: exactly one of the two notes below ever renders for an
-          override — the honest gap note when no `recommended` side was
-          stored, or the comparison summary when one was. Reuses the same
-          "gap-note" visual treatment (neutral secondary text, a hairline
-          separator) for both, per design-reference.md's rule for this
-          screen: an override compared against its recommendation is not a
-          failure, so it gets no colour treatment of its own — only the
-          words differ. */}
-      {entry.recommendationGapNote && (
-        <p className="decisions-entry__gap-note">{entry.recommendationGapNote}</p>
-      )}
-      {entry.recommendationComparison && (
-        <p className="decisions-entry__gap-note">{entry.recommendationComparison.summaryText}</p>
-      )}
-
-      <p className="decisions-entry__decided-at">
-        Decided <time dateTime={entry.decidedAtIso}>{entry.decidedAtLabel}</time>
-      </p>
-    </Surface>
+    </details>
   )
 }
 
@@ -220,12 +240,14 @@ function DecisionHistoryContent({ view }: { view: DecisionHistoryView }) {
         </Surface>
       )}
 
+      {/* F43 — one panel for every gameweek's decision, not one panel per
+          decision. */}
       {view.hasEntries && (
-        <div className="decisions-list">
+        <Surface className="decisions-list">
           {view.entries.map((entry) => (
             <DecisionEntryRow entry={entry} key={entry.id} />
           ))}
-        </div>
+        </Surface>
       )}
     </>
   )

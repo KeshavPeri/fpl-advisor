@@ -133,31 +133,84 @@
   margin: 0;
 }
 
-/* ---- Entry list ---- */
+/* ---- Entry list ----
+   F43 (should-fix, docs/ui-audit-2026-08-31.md) — was one <Surface> per
+   decision (five identical rounded rectangles for five decisions). Now
+   one panel, gameweek-keyed: the gameweek number sits in a left rail
+   (mono, tabular, tertiary — .decisions-entry__gameweek below), each row
+   is a native <details>/<summary> collapsed to a glance line that expands
+   on tap, separated from the next by a rule rather than by being a
+   separate panel. */
 
 .decisions-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
 }
 
 .decisions-entry {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--panel-border);
 }
 
-.decisions-entry__header {
+.decisions-list .decisions-entry:first-of-type {
+  padding-top: 0;
+  border-top: none;
+}
+
+.decisions-entry__summary {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
   gap: var(--space-3);
+  cursor: pointer;
+  /* The only disclosure affordance native <summary> renders by default is
+     the browser's own triangle marker, on the wrong side and inconsistent
+     between Safari and Chromium — replaced with a small rotating chevron
+     of our own (::after below) so it reads as one deliberate control. */
+  list-style: none;
+}
+
+.decisions-entry__summary::-webkit-details-marker {
+  display: none;
+}
+
+.decisions-entry__summary::after {
+  content: '';
+  flex-shrink: 0;
+  align-self: center;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-left: auto;
+  border-right: 1.5px solid var(--text-tertiary);
+  border-bottom: 1.5px solid var(--text-tertiary);
+  transform: rotate(-45deg);
+  transition: transform var(--dur-press) var(--ease-out);
+}
+
+.decisions-entry[open] .decisions-entry__summary::after {
+  transform: rotate(45deg);
 }
 
 .decisions-entry__gameweek {
   font: var(--text-title);
-  color: var(--text-primary);
-  margin: 0;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  min-width: 1.5em;
+}
+
+.decisions-entry__glance {
+  font: var(--text-body);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.decisions-entry__detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
 }
 
 /* F44 (must-fix, docs/ui-audit-2026-08-31.md) — both kinds stay cyan (the
