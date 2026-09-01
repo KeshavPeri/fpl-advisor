@@ -73,6 +73,18 @@
  * under-correction, not a calibration — no backtest yet shows the clamped
  * scale is closer to reality than the flat prior it replaces (see
  * docs/projection-model-backlog.md G2).
+ *
+ * TICKET #168, 31 Aug 2026 — investigated, no change here. `positionPriorRates`
+ * itself was directly measured (against fresh FPL-Core-Insights data, both
+ * ingested seasons) as reasonably calibrated for forwards' xG and xA alike —
+ * the forward assist calibration gap this ticket investigated is NOT
+ * primarily a shrinkage or prior-computation defect in this file. The one
+ * real, measured, asymmetric effect found (forwards dropped from the current
+ * roster between seasons had materially higher historical xA, but lower xG,
+ * than those retained) lives in WHICH rows this function is fed —
+ * `scripts/project-points.ts`'s current-roster join, a file out of this
+ * ticket's scope — not in the shrinkage formula itself. Full diagnostic:
+ * `expectedPoints.ts`'s own "Ticket #168" comment, and decisions/ticket-168.md.
  */
 
 /** Shrinkage strength: "phantom prior nineties" the prior is worth against observed data. Pre-answered in the ticket. */
