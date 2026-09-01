@@ -20,12 +20,18 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
+  buildClubCodeBySlug,
   buildElementTypeMap,
   buildEloByCode,
+  buildTeamCodeMap,
   planTeamEloUpdates,
+  resolveOpponentTeamCode,
+  slugifyClubName,
+  tallyOpponentResolution,
   TEAMS_REQUIRED_COLUMNS,
   toMatchStatRow,
   UnknownPositionError,
+  type MatchStatRow,
   type TeamIdentityRow,
 } from './ingest-core-insights.js'
 
@@ -37,6 +43,14 @@ describe('TEAMS_REQUIRED_COLUMNS', () => {
   it('still requires code and elo', () => {
     expect(TEAMS_REQUIRED_COLUMNS).toContain('code')
     expect(TEAMS_REQUIRED_COLUMNS).toContain('elo')
+  })
+
+  // Ticket #167: opponent resolution reads teams.csv's fotmob_name column
+  // (see buildClubCodeBySlug) — required here so a season whose teams.csv
+  // drops the column entirely fails loudly at parseCsvRecords, rather than
+  // silently resolving zero opponents with no explanation.
+  it('now also requires fotmob_name (ticket #167)', () => {
+    expect(TEAMS_REQUIRED_COLUMNS).toContain('fotmob_name')
   })
 })
 
@@ -597,6 +611,466 @@ describe('supabase/README.md (ticket #146)', () => {
   it('lists the new migration, marked not yet applied', () => {
     expect(readmeSource).toMatch(/20260829090000_feature_history_position_and_defcon\.sql/)
     const rowMatch = readmeSource.match(/\| `20260829090000_feature_history_position_and_defcon\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
+  })
+})
+
+// ============================================================================
+// slugifyClubName — ticket #167. Verified directly against real
+// FPL-Core-Insights fetched data (2025-2026 teams.csv fotmob_name column vs
+// real match_id club slugs, 31 Aug 2026): every case below is a real pairing
+// observed in the source, not a hypothetical.
+// ============================================================================
+
+describe('slugifyClubName — real fotmob_name -> match_id-slug pairings', () => {
+  it('lowercases and hyphenates a simple two-word name', () => {
+    expect(slugifyClubName('Manchester United')).toBe('manchester-united')
+    expect(slugifyClubName('Aston Villa')).toBe('aston-villa')
+  })
+
+  it('drops "&" entirely, matching the source\'s own hyphenated club slug', () => {
+    expect(slugifyClubName('Brighton & Hove Albion')).toBe('brighton-hove-albion')
+  })
+
+  it('leaves an already-single-word (or acronym-free) name lowercased', () => {
+    expect(slugifyClubName('Arsenal')).toBe('arsenal')
+  })
+
+  it('handles a three-word name with no punctuation', () => {
+    expect(slugifyClubName('AFC Bournemouth')).toBe('afc-bournemouth')
+    expect(slugifyClubName('Nottingham Forest')).toBe('nottingham-forest')
+    expect(slugifyClubName('Wolverhampton Wanderers')).toBe('wolverhampton-wanderers')
+    expect(slugifyClubName('Newcastle United')).toBe('newcastle-united')
+    expect(slugifyClubName('Tottenham Hotspur')).toBe('tottenham-hotspur')
+  })
+})
+
+// ============================================================================
+// buildClubCodeBySlug — ticket #167.
+// ============================================================================
+
+describe('buildClubCodeBySlug', () => {
+  it('builds a slug -> code map from well-formed rows, using fotmob_name (never name/short_name)', () => {
+    const result = buildClubCodeBySlug([
+      { code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: 'Arsenal' },
+      { code: '36', name: 'Brighton', short_name: 'BHA', fotmob_name: 'Brighton & Hove Albion' },
+    ])
+    expect(result.codeBySlug.get('arsenal')).toBe(3)
+    expect(result.codeBySlug.get('brighton-hove-albion')).toBe(36)
+    expect(result.blankFotmobName).toBe(0)
+    expect(result.duplicateSlugs).toBe(0)
+  })
+
+  it('counts, and leaves out of the map, a row with a blank fotmob_name cell — never falls back to name/short_name', () => {
+    const result = buildClubCodeBySlug([{ code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' }])
+    expect(result.codeBySlug.size).toBe(0)
+    expect(result.blankFotmobName).toBe(1)
+  })
+
+  // The real, observed 2026-2027 case (verified 31 Aug 2026): every row's
+  // fotmob_name is blank. This must not be treated as a bug — see the job's
+  // own header comment.
+  it('an entire teams.csv with every fotmob_name blank resolves an empty map, not an error', () => {
+    const result = buildClubCodeBySlug([
+      { code: '3', fotmob_name: '' },
+      { code: '7', fotmob_name: '' },
+    ])
+    expect(result.codeBySlug.size).toBe(0)
+    expect(result.blankFotmobName).toBe(2)
+  })
+
+  it('a row whose code does not parse is skipped, uncounted (nothing to join it onto)', () => {
+    const result = buildClubCodeBySlug([{ code: '', fotmob_name: 'Arsenal' }])
+    expect(result.codeBySlug.size).toBe(0)
+    expect(result.blankFotmobName).toBe(0)
+    expect(result.duplicateSlugs).toBe(0)
+  })
+
+  it('a slug shared by two codes is removed from the map (never guessed) and counted as a conflict', () => {
+    const result = buildClubCodeBySlug([
+      { code: '3', fotmob_name: 'Arsenal' },
+      { code: '99', fotmob_name: 'Arsenal' },
+    ])
+    expect(result.codeBySlug.has('arsenal')).toBe(false)
+    expect(result.duplicateSlugs).toBe(1)
+  })
+})
+
+// ============================================================================
+// buildTeamCodeMap — ticket #167. Same shape/behaviour as buildPlayerCodeMap.
+// ============================================================================
+
+describe('buildTeamCodeMap', () => {
+  it('maps player_id -> team_code from players.csv', () => {
+    const map = buildTeamCodeMap([
+      { player_id: '10', team_code: '3' },
+      { player_id: '20', team_code: '36' },
+    ])
+    expect(map.get(10)).toBe(3)
+    expect(map.get(20)).toBe(36)
+  })
+
+  it('leaves a row whose team_code does not parse out of the map — the same small, expected gap as player_code', () => {
+    const map = buildTeamCodeMap([{ player_id: '10', team_code: '' }])
+    expect(map.has(10)).toBe(false)
+  })
+
+  it('leaves a row whose player_id does not parse out of the map', () => {
+    const map = buildTeamCodeMap([{ player_id: '', team_code: '3' }])
+    expect(map.size).toBe(0)
+  })
+})
+
+// ============================================================================
+// resolveOpponentTeamCode — ticket #167's own central DoD line: "Opponent
+// resolution is exact, not inferred... A slug that does not resolve to
+// exactly two known clubs is counted and reported, never guessed." Named
+// tests below cover exactly the DoD's own three named cases: a normal slug,
+// a hyphenated club name, and an unresolvable slug.
+// ============================================================================
+
+describe('resolveOpponentTeamCode — a normal slug', () => {
+  it('resolves the OTHER club as the opponent, whichever position it is in', () => {
+    const codeBySlug = new Map([
+      ['manchester-united', 1],
+      ['arsenal', 3],
+    ])
+    // Player is on Man Utd (team_code 1); away side (arsenal) is the opponent.
+    expect(resolveOpponentTeamCode('25-26-prem-manchester-united-vs-arsenal', 'prem', 1, codeBySlug)).toEqual({
+      opponentTeamCode: 3,
+      reason: null,
+    })
+    // Player is on Arsenal (team_code 3); home side (manchester-united) is the opponent.
+    expect(resolveOpponentTeamCode('25-26-prem-manchester-united-vs-arsenal', 'prem', 3, codeBySlug)).toEqual({
+      opponentTeamCode: 1,
+      reason: null,
+    })
+  })
+})
+
+describe('resolveOpponentTeamCode — a hyphenated club name (brighton-hove-albion)', () => {
+  it('resolves correctly when the OTHER club\'s slug itself contains hyphens', () => {
+    const codeBySlug = new Map([
+      ['brighton-hove-albion', 36],
+      ['fulham', 54],
+    ])
+    expect(resolveOpponentTeamCode('25-26-prem-brighton-hove-albion-vs-fulham', 'prem', 54, codeBySlug)).toEqual({
+      opponentTeamCode: 36,
+      reason: null,
+    })
+  })
+
+  it('resolves correctly when the PLAYER\'S OWN club is the hyphenated one', () => {
+    const codeBySlug = new Map([
+      ['brighton-hove-albion', 36],
+      ['fulham', 54],
+    ])
+    expect(resolveOpponentTeamCode('25-26-prem-brighton-hove-albion-vs-fulham', 'prem', 36, codeBySlug)).toEqual({
+      opponentTeamCode: 54,
+      reason: null,
+    })
+  })
+})
+
+describe('resolveOpponentTeamCode — an unresolvable slug', () => {
+  it('a club slug not present in codeBySlug (e.g. a season with no fotmob_name) resolves null, with a named reason — never guessed', () => {
+    const result = resolveOpponentTeamCode('25-26-prem-manchester-united-vs-arsenal', 'prem', 1, new Map())
+    expect(result.opponentTeamCode).toBeNull()
+    expect(result.reason).not.toBeNull()
+    expect(typeof result.reason).toBe('string')
+  })
+
+  it('an own team_code of null (unresolved in players.csv) resolves null with a named reason', () => {
+    const codeBySlug = new Map([
+      ['manchester-united', 1],
+      ['arsenal', 3],
+    ])
+    const result = resolveOpponentTeamCode('25-26-prem-manchester-united-vs-arsenal', 'prem', null, codeBySlug)
+    expect(result.opponentTeamCode).toBeNull()
+    expect(result.reason).toBe('own team_code not resolved from players.csv')
+  })
+
+  it('an own team_code that matches NEITHER resolved club resolves null with a named reason — never guessed', () => {
+    const codeBySlug = new Map([
+      ['manchester-united', 1],
+      ['arsenal', 3],
+    ])
+    // team_code 999 belongs to neither club in this match.
+    const result = resolveOpponentTeamCode('25-26-prem-manchester-united-vs-arsenal', 'prem', 999, codeBySlug)
+    expect(result.opponentTeamCode).toBeNull()
+    expect(result.reason).toBe("own team_code not found among the match_id's two club slugs")
+  })
+
+  it('throws (never returns a guess) on a match_id whose slug shape is unrecognizable', () => {
+    expect(() => resolveOpponentTeamCode('25-26-prem-arsenal-chelsea', 'prem', 3, new Map())).toThrow()
+  })
+})
+
+// ============================================================================
+// tallyOpponentResolution — ticket #167's own "the counts reconcile
+// arithmetically against rows written" DoD line, proven directly: for ANY
+// input, withOpponentTeamCode + the sum of every opponentUnresolvedByReason
+// value equals rows.length.
+// ============================================================================
+
+describe('tallyOpponentResolution — reconciliation', () => {
+  function row(overrides: Partial<MatchStatRow> = {}): MatchStatRow {
+    return {
+      player_id: 1,
+      player_code: null,
+      element_type: null,
+      team_code: 3,
+      opponent_team_code: null,
+      match_id: '25-26-prem-arsenal-vs-chelsea',
+      competition: 'prem',
+      season: '2025-2026',
+      gameweek: 1,
+      minutes_played: 90,
+      goals: 0,
+      assists: 0,
+      xg: 0,
+      xa: 0,
+      xgot: 0,
+      shots_on_target: 0,
+      tackles: 0,
+      tackles_won: 0,
+      interceptions: 0,
+      recoveries: 0,
+      blocks: 0,
+      clearances: 0,
+      headed_clearances: 0,
+      saves: 0,
+      goals_conceded: 0,
+      goals_prevented: 0,
+      team_goals_conceded: 0,
+      updated_at: '2026-08-31T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  it('a mix of resolved and unresolved-for-different-reasons rows reconciles exactly against rows.length', () => {
+    const codeBySlug = new Map([
+      ['arsenal', 3],
+      ['chelsea', 8],
+    ])
+    const rows = [
+      row({ team_code: 3, opponent_team_code: 8 }), // resolved
+      row({ team_code: 3, opponent_team_code: 8 }), // resolved
+      row({ team_code: null, opponent_team_code: null }), // own team_code unresolved
+      row({ team_code: 999, opponent_team_code: null }), // team_code not among match's own clubs
+      row({ match_id: '25-26-prem-manchester-united-vs-arsenal', team_code: 3, opponent_team_code: null }), // slug not in (this) codeBySlug
+    ]
+    const result = tallyOpponentResolution(rows, codeBySlug)
+    const reasonTotal = Object.values(result.opponentUnresolvedByReason).reduce((a, b) => a + b, 0)
+    expect(result.withOpponentTeamCode).toBe(2)
+    expect(reasonTotal).toBe(3)
+    expect(result.withOpponentTeamCode + reasonTotal).toBe(rows.length)
+  })
+
+  it('an empty row list reconciles trivially', () => {
+    const result = tallyOpponentResolution([], new Map())
+    expect(result.withOpponentTeamCode).toBe(0)
+    expect(Object.values(result.opponentUnresolvedByReason).reduce((a, b) => a + b, 0)).toBe(0)
+  })
+
+  it('every row resolved leaves opponentUnresolvedByReason empty', () => {
+    const codeBySlug = new Map([
+      ['arsenal', 3],
+      ['chelsea', 8],
+    ])
+    const rows = [row({ team_code: 3, opponent_team_code: 8 }), row({ team_code: 8, opponent_team_code: 3 })]
+    const result = tallyOpponentResolution(rows, codeBySlug)
+    expect(result.withOpponentTeamCode).toBe(2)
+    expect(Object.keys(result.opponentUnresolvedByReason)).toHaveLength(0)
+  })
+})
+
+// ============================================================================
+// toMatchStatRow — team_code / opponent_team_code (ticket #167). Exercises
+// the full row-building path, the way the #146 element_type section above
+// does. Reuses matchStatsRecord's default match_id
+// ("25-26-prem-arsenal-vs-chelsea") for the plain case, and a dedicated
+// hyphenated-slug record for the brighton-hove-albion case.
+// ============================================================================
+
+describe('toMatchStatRow — team_code (ticket #167)', () => {
+  it('reads team_code from the supplied player_id -> code map', () => {
+    const teamCodeByPlayerId = new Map([[10, 3]])
+    const row = toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map(), new Map(), teamCodeByPlayerId)
+    expect(row?.team_code).toBe(3)
+  })
+
+  it('writes null, not a default team, for a player_id absent from the map', () => {
+    const row = toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map(), new Map(), new Map())
+    expect(row?.team_code).toBeNull()
+  })
+
+  it('defaults teamCodeByPlayerId (and codeBySlug) to empty when the 6th/7th arguments are omitted — the pre-#167 4/5-argument call sites', () => {
+    expect(toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map())?.team_code).toBeNull()
+    expect(toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map(), new Map())?.team_code).toBeNull()
+  })
+})
+
+describe('toMatchStatRow — opponent_team_code, a normal slug (ticket #167)', () => {
+  it('resolves the opponent when both clubs are known and the player is on one of them', () => {
+    // matchStatsRecord()'s default match_id is "25-26-prem-arsenal-vs-chelsea".
+    const teamCodeByPlayerId = new Map([[10, 3]]) // player_id 10 is on Arsenal (code 3)
+    const codeBySlug = new Map([
+      ['arsenal', 3],
+      ['chelsea', 8],
+    ])
+    const row = toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map(), new Map(), teamCodeByPlayerId, codeBySlug)
+    expect(row?.team_code).toBe(3)
+    expect(row?.opponent_team_code).toBe(8)
+  })
+})
+
+describe('toMatchStatRow — opponent_team_code, a hyphenated club name (ticket #167)', () => {
+  it('resolves correctly when a club slug in match_id is itself hyphenated (brighton-hove-albion)', () => {
+    const record = matchStatsRecord({ match_id: '25-26-prem-brighton-hove-albion-vs-fulham' })
+    const teamCodeByPlayerId = new Map([[10, 54]]) // player_id 10 is on Fulham (code 54)
+    const codeBySlug = new Map([
+      ['brighton-hove-albion', 36],
+      ['fulham', 54],
+    ])
+    const row = toMatchStatRow(record, '2025-2026', 1, new Map(), new Map(), teamCodeByPlayerId, codeBySlug)
+    expect(row?.opponent_team_code).toBe(36)
+  })
+})
+
+describe('toMatchStatRow — opponent_team_code, an unresolvable slug (ticket #167)', () => {
+  it('writes null, never a guess, when the club-slug map has no entry for either club (e.g. a season with no fotmob_name)', () => {
+    const teamCodeByPlayerId = new Map([[10, 3]])
+    const row = toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map(), new Map(), teamCodeByPlayerId, new Map())
+    expect(row?.opponent_team_code).toBeNull()
+  })
+
+  it('writes null when team_code itself could not be resolved for the player', () => {
+    const codeBySlug = new Map([
+      ['arsenal', 3],
+      ['chelsea', 8],
+    ])
+    const row = toMatchStatRow(matchStatsRecord(), '2025-2026', 1, new Map(), new Map(), new Map(), codeBySlug)
+    expect(row?.team_code).toBeNull()
+    expect(row?.opponent_team_code).toBeNull()
+  })
+})
+
+// ============================================================================
+// team_code / opponent_team_code (ticket #167) — source invariants, same
+// grep-on-real-source technique as the competition/team_goals_conceded/
+// element_type sections above.
+// ============================================================================
+
+describe('team_code / opponent_team_code (ticket #167) — source invariants', () => {
+  const sourcePath = fileURLToPath(new URL('./ingest-core-insights.ts', import.meta.url))
+  const source = readFileSync(sourcePath, 'utf8')
+
+  it('team_code appears in the row mapping, read from the supplied map rather than a literal', () => {
+    expect(source).toMatch(/team_code:\s*teamCode,/)
+  })
+
+  it('opponent_team_code appears in the row mapping, read from resolveOpponentTeamCode rather than a literal', () => {
+    expect(source).toMatch(/opponent_team_code:\s*opponentTeamCode,/)
+  })
+
+  it("the row shape sent to the upsert carries both fields as one of MatchStatRow's own fields", () => {
+    const interfaceBody = source.slice(source.indexOf('interface MatchStatRow'), source.indexOf('interface MatchStatRow') + 1400)
+    expect(interfaceBody).toMatch(/team_code:\s*number\s*\|\s*null/)
+    expect(interfaceBody).toMatch(/opponent_team_code:\s*number\s*\|\s*null/)
+  })
+
+  it('reports named non-null-team_code and non-null-opponent_team_code counts in job_runs.details', () => {
+    expect(source).toMatch(/matchRowsWithTeamCode/)
+    expect(source).toMatch(/matchRowsWithOpponentTeamCode/)
+  })
+
+  it('reports a named per-reason breakdown for unresolved opponents in job_runs.details', () => {
+    expect(source).toMatch(/matchRowsOpponentUnresolvedByReason/)
+  })
+
+  it('never reads the live public.players or public.teams tables to resolve team_code — only players.csv / teams.csv', () => {
+    // Every .from('players')/.from('teams') call in this file is the
+    // pre-existing teams.elo path (fetchTeamIdentities/applyTeamElo*), which
+    // reads only `id, code` — never team_code, never for player identity.
+    expect(source).not.toMatch(/\.from\(\s*['"]players['"]\s*\)/)
+  })
+
+  it('resolveOpponentTeamCode calls parseMatchClubSlugs uncaught — a slug SHAPE failure propagates to main()\'s catch block', () => {
+    const fnBody = source.slice(
+      source.indexOf('export function resolveOpponentTeamCode'),
+      source.indexOf('export function resolveOpponentTeamCode') + 1200,
+    )
+    expect(fnBody).toMatch(/parseMatchClubSlugs\(/)
+    expect(fnBody).not.toMatch(/try\s*\{/)
+  })
+})
+
+// ============================================================================
+// supabase/migrations/20260831090000_team_and_opponent.sql and
+// supabase/README.md — grep-checkable DoD items (ticket #167).
+// ============================================================================
+
+describe('supabase/migrations/20260831090000_team_and_opponent.sql', () => {
+  const migrationPath = fileURLToPath(new URL('../supabase/migrations/20260831090000_team_and_opponent.sql', import.meta.url))
+  const migrationSource = readFileSync(migrationPath, 'utf8')
+
+  it('adds player_match_stats.team_code and opponent_team_code as nullable integer columns with no default', () => {
+    for (const column of ['team_code', 'opponent_team_code']) {
+      const statementLine = migrationSource
+        .split('\n')
+        .find((line) => line.includes(`ALTER TABLE public.player_match_stats ADD COLUMN IF NOT EXISTS ${column} integer;`))
+      expect(statementLine).toBeDefined()
+      expect(statementLine).not.toMatch(/NOT NULL/)
+      expect(statementLine).not.toMatch(/DEFAULT/)
+    }
+  })
+
+  it('adds feature_history.team_code as a nullable integer column with no default', () => {
+    const statementLine = migrationSource
+      .split('\n')
+      .find((line) => line.includes('ALTER TABLE public.feature_history ADD COLUMN IF NOT EXISTS team_code integer;'))
+    expect(statementLine).toBeDefined()
+    expect(statementLine).not.toMatch(/NOT NULL/)
+    expect(statementLine).not.toMatch(/DEFAULT/)
+  })
+
+  it('is idempotent: every column addition uses ADD COLUMN IF NOT EXISTS', () => {
+    const addColumnStatements = migrationSource.match(/ALTER TABLE public\.\w+ ADD COLUMN[^;]*;/g) ?? []
+    expect(addColumnStatements.length).toBeGreaterThanOrEqual(3)
+    for (const statement of addColumnStatements) {
+      expect(statement).toMatch(/ADD COLUMN IF NOT EXISTS/)
+    }
+  })
+
+  it('carries a COMMENT ON COLUMN for all three new columns', () => {
+    expect(migrationSource).toMatch(/COMMENT ON COLUMN public\.player_match_stats\.team_code IS/)
+    expect(migrationSource).toMatch(/COMMENT ON COLUMN public\.player_match_stats\.opponent_team_code IS/)
+    expect(migrationSource).toMatch(/COMMENT ON COLUMN public\.feature_history\.team_code IS/)
+  })
+
+  it('issues no GRANT statement — table-level grants on both tables already cover new columns (see file header)', () => {
+    const codeOnly = migrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
+
+  it('is wrapped in BEGIN/COMMIT', () => {
+    expect(migrationSource).toMatch(/^BEGIN;/m)
+    expect(migrationSource).toMatch(/^COMMIT;/m)
+  })
+})
+
+describe('supabase/README.md (ticket #167)', () => {
+  const readmePath = fileURLToPath(new URL('../supabase/README.md', import.meta.url))
+  const readmeSource = readFileSync(readmePath, 'utf8')
+
+  it('lists the new migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260831090000_team_and_opponent\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260831090000_team_and_opponent\.sql` \|.*\|\s*$/m)
     expect(rowMatch).not.toBeNull()
     expect(rowMatch![0]).toMatch(/not yet applied/i)
   })

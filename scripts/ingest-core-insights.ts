@@ -156,6 +156,13 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { parse } from 'csv-parse/sync'
 import { parseCompetition } from './lib/competition.js'
+// Ticket #167. Kept as a SEPARATE import statement from parseCompetition's
+// own line above, deliberately — this file's own tests grep that exact line
+// (`import { parseCompetition } from './lib/competition.js'`) to prove
+// parseCompetition is imported from the shared module rather than
+// pattern-matched locally; widening that one import to a multi-name list
+// would still be correct code but would break that grep for no real benefit.
+import { parseMatchClubSlugs, type CompetitionToken } from './lib/competition.js'
 
 const JOB_NAME = 'ingest-core-insights'
 
@@ -296,10 +303,13 @@ function parseCsvRecords(text: string, url: string, requiredColumns: string[]): 
 }
 
 const PLAYERS_REQUIRED_COLUMNS = ['player_code', 'player_id', 'first_name', 'second_name', 'web_name', 'team_code', 'position']
-// Only the two columns this job actually reads (ticket #32) — it no longer
-// touches id/name/short_name, so requiring them here would be a stale guard
-// against columns nothing downstream of this file depends on any more.
-export const TEAMS_REQUIRED_COLUMNS = ['code', 'elo']
+// The columns this job actually reads: `code`/`elo` since ticket #32 (it no
+// longer touches id/name/short_name, so requiring those here would be a
+// stale guard against columns nothing downstream of this file depends on
+// any more), plus `fotmob_name` since ticket #167, which builds the
+// club-slug -> team_code map opponent resolution needs from this same
+// column — see buildClubCodeBySlug below.
+export const TEAMS_REQUIRED_COLUMNS = ['code', 'elo', 'fotmob_name']
 const MATCH_STATS_REQUIRED_COLUMNS = [
   'player_id',
   'match_id',
@@ -380,6 +390,81 @@ export function buildEloByCode(records: Array<Record<string, string>>): EloByCod
     eloByCode.set(code, elo)
   }
   return { eloByCode, seenCodes, malformedElo }
+}
+
+// ============================================================================
+// Club slug -> team_code — ticket #167. Built from the SAME teams.csv
+// already fetched for elo above, off its fotmob_name column, which was
+// verified directly against real fetched data (2025-2026, 17 Aug 2026) to
+// slugify EXACTLY to the club-name segments FPL-Core-Insights uses in
+// match_id: "Brighton & Hove Albion" -> "brighton-hove-albion",
+// "AFC Bournemouth" -> "afc-bournemouth", "Manchester United" ->
+// "manchester-united" -- all confirmed against real GW1 match_id values.
+// teams.csv's OTHER name columns do not: "name" holds abbreviations like
+// "Man Utd" / "Nott'm Forest" / "Spurs" that do not match match_id at all.
+//
+// A SEASON WHOSE teams.csv HAS A BLANK fotmob_name FOR EVERY CLUB IS A REAL,
+// OBSERVED CASE, NOT A HYPOTHETICAL: verified directly against
+// data/2026-2027/teams.csv on 31 Aug 2026 -- every one of its 20 rows has an
+// empty fotmob_name cell (its elo cells, by contrast, ARE populated -- the
+// two columns are independent gaps). This job does not treat that as a
+// failure: opponent resolution simply cannot succeed for a season whose
+// source has not (yet) published this column, and every row is counted
+// under matchRowsOpponentUnresolvedByReason with an honest reason rather
+// than guessed at from a different, mismatched name column. See the DoD's
+// own human-check step, scoped to 2025-2026 specifically, for why this is
+// the expected shape of the gap.
+// ============================================================================
+
+/** Lowercases, drops "&" and any other punctuation, and hyphenates whitespace — matching FPL-Core-Insights' own match_id club-slug convention exactly (verified against real fetched data, see section header above). "Brighton & Hove Albion" -> "brighton-hove-albion". */
+export function slugifyClubName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/&/g, ' ')
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+}
+
+export interface ClubCodeBySlugResult {
+  // slug -> team_code, built only from teams.csv rows with both a parseable
+  // code and a non-blank fotmob_name.
+  codeBySlug: Map<string, number>
+  // teams.csv rows whose code parsed but whose fotmob_name cell was blank —
+  // that club's slug simply cannot be built this run (see section header;
+  // an entire season's teams.csv being blank here, as observed for
+  // 2026-2027, is the expected shape of this count, not a bug).
+  blankFotmobName: number
+  // A slug shared by more than one code — ambiguous, so NEITHER code is
+  // kept in codeBySlug for that slug (removed, not guessed at). Distinct
+  // from planTeamEloUpdates' duplicateCodeConflicts, which is about
+  // public.teams rows, not this CSV-only map.
+  duplicateSlugs: number
+}
+
+export function buildClubCodeBySlug(teamRecords: Array<Record<string, string>>): ClubCodeBySlugResult {
+  const codeBySlug = new Map<string, number>()
+  const seenSlugs = new Set<string>()
+  let blankFotmobName = 0
+  let duplicateSlugs = 0
+  for (const record of teamRecords) {
+    const code = toInt(record.code)
+    if (code === null) continue // can't join this row onto anything, same as buildEloByCode's own skip
+    const fotmobName = (record.fotmob_name ?? '').trim()
+    if (fotmobName === '') {
+      blankFotmobName++
+      continue
+    }
+    const slug = slugifyClubName(fotmobName)
+    if (seenSlugs.has(slug)) {
+      duplicateSlugs++
+      codeBySlug.delete(slug) // ambiguous — neither candidate code is kept, never guessed
+      continue
+    }
+    seenSlugs.add(slug)
+    codeBySlug.set(slug, code)
+  }
+  return { codeBySlug, blankFotmobName, duplicateSlugs }
 }
 
 async function fetchTeamIdentities(supabase: SupabaseClient): Promise<TeamIdentityRow[]> {
@@ -516,7 +601,9 @@ async function applyTeamEloNulls(supabase: SupabaseClient, nulls: Array<{ id: nu
 // player_match_stats
 // ============================================================================
 
-interface MatchStatRow {
+// Exported (ticket #167) alongside toMatchStatRow so tallyOpponentResolution
+// below is directly unit-testable on constructed rows.
+export interface MatchStatRow {
   player_id: number
   player_code: number | null
   // Ticket #146: the FPL position code as it was in this ingested season,
@@ -525,6 +612,17 @@ interface MatchStatRow {
   // in that season's players.csv, same "small, expected gap" treatment as
   // player_code above.
   element_type: number | null
+  // Ticket #167: the player's OWN club code for this row, from players.csv's
+  // own team_code column (already required, previously unread past
+  // validation) -- see buildTeamCodeMap and this file's header. NULL means
+  // the player_id had no resolvable team_code in that season's players.csv,
+  // same "small, expected gap" treatment as player_code/element_type above.
+  team_code: number | null
+  // Ticket #167: the OTHER club named in match_id's slug, given team_code
+  // above -- see resolveOpponentTeamCode. NULL means it could not be
+  // resolved (a genuinely unrecognized club slug, or team_code itself
+  // unresolved) -- counted and reported in job_runs.details, never guessed.
+  opponent_team_code: number | null
   match_id: string
   competition: string
   season: string
@@ -557,6 +655,61 @@ interface MatchStatRow {
   updated_at: string
 }
 
+// ============================================================================
+// Opponent resolution — ticket #167. See this file's header and the
+// migration's own comment for the full "because"; this is the piece that
+// turns a match_id slug + a player's own team_code into the OTHER club's
+// team_code, or an honest, named reason it could not be done.
+// ============================================================================
+
+export interface OpponentResolution {
+  opponentTeamCode: number | null
+  // Set exactly when opponentTeamCode is null; one of a small, fixed set of
+  // named strings (never a formatted/interpolated message — these are meant
+  // to be tallied as job_runs.details keys, see
+  // matchRowsOpponentUnresolvedByReason below).
+  reason: string | null
+}
+
+/**
+ * Resolves the opponent's team_code from a match_id slug, given the
+ * player's own team_code and the season's club-slug -> team_code map (see
+ * buildClubCodeBySlug).
+ *
+ * Calls parseMatchClubSlugs (scripts/lib/competition.ts) UNCAUGHT — a
+ * genuine match_id SHAPE failure (no "-vs-" in the remainder — see that
+ * function's own doc comment) propagates out of this function and, via
+ * toMatchStatRow below, all the way to main()'s catch block, exactly like
+ * parseCompetition's own UnknownCompetitionError does one call earlier.
+ *
+ * Every OTHER way this can fail to resolve an opponent is a semantic,
+ * EXPECTED-to-happen gap (an unrecognized club name, a season whose
+ * teams.csv has no fotmob_name at all — see buildClubCodeBySlug's own
+ * header) — never thrown, always returned as a named `reason` and tallied
+ * by the caller. This is the DoD's own "counted and reported, never
+ * guessed" line: a slug this function cannot map onto exactly two known
+ * clubs, or whose own-club match is ambiguous, gets a reason, not a guess.
+ */
+export function resolveOpponentTeamCode(
+  matchId: string,
+  competition: CompetitionToken,
+  ownTeamCode: number | null,
+  codeBySlug: ReadonlyMap<string, number>
+): OpponentResolution {
+  const clubSlugs = parseMatchClubSlugs(matchId, competition)
+  if (ownTeamCode === null) {
+    return { opponentTeamCode: null, reason: 'own team_code not resolved from players.csv' }
+  }
+  const codeA = codeBySlug.get(clubSlugs[0]) ?? null
+  const codeB = codeBySlug.get(clubSlugs[1]) ?? null
+  if (codeA === null || codeB === null) {
+    return { opponentTeamCode: null, reason: 'club slug not found among known team codes' }
+  }
+  if (codeA === ownTeamCode) return { opponentTeamCode: codeB, reason: null }
+  if (codeB === ownTeamCode) return { opponentTeamCode: codeA, reason: null }
+  return { opponentTeamCode: null, reason: "own team_code not found among the match_id's two club slugs" }
+}
+
 // Exported (ticket #125) so its null-vs-zero handling for team_goals_conceded
 // is directly unit-testable — see ingest-core-insights.test.ts — the same
 // reasoning buildEloByCode/planTeamEloUpdates above are exported for.
@@ -569,7 +722,12 @@ export function toMatchStatRow(
   // existing call site/test written before this ticket keeps writing
   // element_type: null without needing to pass one — the same reasoning
   // playerCodeByPlayerId itself would get if it were added today.
-  elementTypeByPlayerId: Map<number, number> = new Map()
+  elementTypeByPlayerId: Map<number, number> = new Map(),
+  // Ticket #167. Same "defaulted, not required" reasoning as
+  // elementTypeByPlayerId above — every existing 4- and 5-argument call site
+  // keeps writing team_code/opponent_team_code: null without changes.
+  teamCodeByPlayerId: Map<number, number> = new Map(),
+  codeBySlug: ReadonlyMap<string, number> = new Map()
 ): MatchStatRow | null {
   const playerId = toInt(record.player_id)
   const matchId = record.match_id?.trim()
@@ -580,10 +738,17 @@ export function toMatchStatRow(
   // upsertPlayerMatchStats and all the way to main()'s catch block, so an
   // unrecognized competition fails the whole run rather than skipping one row.
   const competition = parseCompetition(matchId)
+  const teamCode = teamCodeByPlayerId.get(playerId) ?? null
+  // resolveOpponentTeamCode calls parseMatchClubSlugs uncaught too (see its
+  // own doc comment) — same propagate-to-main() treatment as
+  // parseCompetition immediately above.
+  const { opponentTeamCode } = resolveOpponentTeamCode(matchId, competition, teamCode, codeBySlug)
   return {
     player_id: playerId,
     player_code: playerCodeByPlayerId.get(playerId) ?? null,
     element_type: elementTypeByPlayerId.get(playerId) ?? null,
+    team_code: teamCode,
+    opponent_team_code: opponentTeamCode,
     match_id: matchId,
     competition,
     season,
@@ -636,6 +801,56 @@ interface PlayerMatchStatsUpsertResult {
   // "not expected to equal `written` until every player_id this job has ever
   // seen has a resolvable position" caveat as withTeamGoalsConceded above.
   withElementType: number
+  // Rows written carrying a non-null team_code (ticket #167). Same
+  // "small, expected gap" caveat as withElementType above — this uses the
+  // exact same players.csv source column.
+  withTeamCode: number
+  // Rows written carrying a non-null opponent_team_code (ticket #167). NOT
+  // expected to equal `written` for every season — see buildClubCodeBySlug's
+  // header (a season whose teams.csv has no fotmob_name at all, like
+  // 2026-2027 as observed 31 Aug 2026, resolves 0 of these by construction,
+  // not by a bug in this job).
+  withOpponentTeamCode: number
+  // Named reason -> count, for every row whose opponent_team_code is null
+  // (ticket #167's own "counted and reported, never guessed" requirement).
+  // Keys are the fixed set of strings resolveOpponentTeamCode returns —
+  // never a formatted message — so this object's keys are stable across runs
+  // and safe to read programmatically. Sums to written - withOpponentTeamCode.
+  opponentUnresolvedByReason: Record<string, number>
+}
+
+export interface OpponentResolutionTally {
+  withOpponentTeamCode: number
+  opponentUnresolvedByReason: Record<string, number>
+}
+
+/**
+ * Reconciliation tally over an already-built batch of MatchStatRow's own
+ * opponent_team_code column: how many resolved, and — for the rest — a
+ * named-reason breakdown (ticket #167's own "counted and reported, never
+ * guessed" requirement). By construction, withOpponentTeamCode + the sum of
+ * every value in opponentUnresolvedByReason always equals rows.length: every
+ * row falls into the resolved branch or exactly one reason bucket, never
+ * both, never neither.
+ *
+ * resolveOpponentTeamCode is recomputed here (cheap, pure, deterministic)
+ * rather than threaded out of toMatchStatRow's own return value, which only
+ * carries the columns actually upserted. This never re-triggers a shape
+ * throw: every row here already came back successfully from toMatchStatRow,
+ * which means parseMatchClubSlugs already succeeded for its match_id (see
+ * resolveOpponentTeamCode's own doc comment for why a shape failure
+ * propagates before a row ever reaches this point).
+ */
+export function tallyOpponentResolution(rows: readonly MatchStatRow[], codeBySlug: ReadonlyMap<string, number>): OpponentResolutionTally {
+  const withOpponentTeamCode = rows.filter((r) => r.opponent_team_code !== null).length
+  const opponentUnresolvedByReason: Record<string, number> = {}
+  for (const row of rows) {
+    if (row.opponent_team_code !== null) continue
+    const { reason } = resolveOpponentTeamCode(row.match_id, row.competition as CompetitionToken, row.team_code, codeBySlug)
+    const key = reason ?? 'unknown'
+    opponentUnresolvedByReason[key] = (opponentUnresolvedByReason[key] ?? 0) + 1
+  }
+  return { withOpponentTeamCode, opponentUnresolvedByReason }
 }
 
 async function upsertPlayerMatchStats(
@@ -645,12 +860,14 @@ async function upsertPlayerMatchStats(
   gameweek: number,
   records: Array<Record<string, string>>,
   playerCodeByPlayerId: Map<number, number>,
-  elementTypeByPlayerId: Map<number, number>
+  elementTypeByPlayerId: Map<number, number>,
+  teamCodeByPlayerId: Map<number, number>,
+  codeBySlug: ReadonlyMap<string, number>
 ): Promise<PlayerMatchStatsUpsertResult> {
   const rows: MatchStatRow[] = []
   let skipped = 0
   for (const record of records) {
-    const row = toMatchStatRow(record, season, gameweek, playerCodeByPlayerId, elementTypeByPlayerId)
+    const row = toMatchStatRow(record, season, gameweek, playerCodeByPlayerId, elementTypeByPlayerId, teamCodeByPlayerId, codeBySlug)
     if (row) {
       rows.push(row)
     } else {
@@ -664,7 +881,20 @@ async function upsertPlayerMatchStats(
   const withCompetition = rows.filter((r) => r.competition !== null && r.competition !== undefined && r.competition !== '').length
   const withTeamGoalsConceded = rows.filter((r) => r.team_goals_conceded !== null).length
   const withElementType = rows.filter((r) => r.element_type !== null).length
-  if (rows.length === 0) return { written: 0, missingPlayerCode: 0, withCompetition: 0, withTeamGoalsConceded: 0, withElementType: 0 }
+  const withTeamCode = rows.filter((r) => r.team_code !== null).length
+  const { withOpponentTeamCode, opponentUnresolvedByReason } = tallyOpponentResolution(rows, codeBySlug)
+  if (rows.length === 0) {
+    return {
+      written: 0,
+      missingPlayerCode: 0,
+      withCompetition: 0,
+      withTeamGoalsConceded: 0,
+      withElementType: 0,
+      withTeamCode: 0,
+      withOpponentTeamCode: 0,
+      opponentUnresolvedByReason: {},
+    }
+  }
 
   const { error } = await supabase.from('player_match_stats').upsert(rows, { onConflict: 'player_id,match_id' })
   if (error) {
@@ -673,7 +903,16 @@ async function upsertPlayerMatchStats(
     }
     throw new IngestError(`upsert into player_match_stats failed for ${url}: ${error.message}`)
   }
-  return { written: rows.length, missingPlayerCode, withCompetition, withTeamGoalsConceded, withElementType }
+  return {
+    written: rows.length,
+    missingPlayerCode,
+    withCompetition,
+    withTeamGoalsConceded,
+    withElementType,
+    withTeamCode,
+    withOpponentTeamCode,
+    opponentUnresolvedByReason,
+  }
 }
 
 // ============================================================================
@@ -757,6 +996,28 @@ export function buildElementTypeMap(playerRecords: Array<Record<string, string>>
 }
 
 // ============================================================================
+// team_code map — ticket #167. Same shape and same players.csv source as
+// buildPlayerCodeMap/buildElementTypeMap above, mapping player_id -> the
+// player's OWN club's stable team_code, read from players.csv's own
+// team_code column (already required by PLAYERS_REQUIRED_COLUMNS, previously
+// unread past that validation). "Small, expected gap" treatment, same as
+// buildPlayerCodeMap: a row whose team_code cell does not parse is simply
+// left out of the map, never an error.
+// ============================================================================
+
+export function buildTeamCodeMap(playerRecords: Array<Record<string, string>>): Map<number, number> {
+  const map = new Map<number, number>()
+  for (const record of playerRecords) {
+    const playerId = toInt(record.player_id)
+    const teamCode = toInt(record.team_code)
+    if (playerId !== null && teamCode !== null) {
+      map.set(playerId, teamCode)
+    }
+  }
+  return map
+}
+
+// ============================================================================
 // player_id alignment — informational only, per the ticket. Logged so it is
 // visible in every run's output; never used to filter or drop rows. See the
 // migration file's header comment and the ticket #12 Builder report for what
@@ -813,6 +1074,9 @@ async function main(): Promise<void> {
           matchRowsWithCompetition: 0,
           matchRowsWithTeamGoalsConceded: 0,
           matchRowsWithElementType: 0,
+          matchRowsWithTeamCode: 0,
+          matchRowsWithOpponentTeamCode: 0,
+          matchRowsOpponentUnresolvedByReason: {},
         },
         startedAt,
       })
@@ -830,6 +1094,8 @@ async function main(): Promise<void> {
     // parseCompetition() elsewhere in this file; it propagates to this
     // function's own catch block below and fails the whole run (ticket #146).
     const elementTypeByPlayerId = buildElementTypeMap(playerRecords)
+    // Ticket #167: the player's own club — see buildTeamCodeMap.
+    const teamCodeByPlayerId = buildTeamCodeMap(playerRecords)
 
     const teamsUrl = seasonRootUrl(season, 'teams.csv')
     const teamsResp = await fetchCsv(teamsUrl)
@@ -838,6 +1104,17 @@ async function main(): Promise<void> {
     }
     const teamRecords = parseCsvRecords(teamsResp.text, teamsUrl, TEAMS_REQUIRED_COLUMNS)
     const eloResult = buildEloByCode(teamRecords)
+    // Ticket #167: club-name slug -> team_code, off this same teams.csv's
+    // fotmob_name column — see buildClubCodeBySlug's own header for why a
+    // season whose teams.csv has no fotmob_name at all (2026-2027, as
+    // observed 31 Aug 2026) resolves zero opponents by construction, not a bug.
+    const clubCodeBySlugResult = buildClubCodeBySlug(teamRecords)
+    if (clubCodeBySlugResult.duplicateSlugs > 0) {
+      console.warn(
+        `${JOB_NAME}: ${clubCodeBySlugResult.duplicateSlugs} club slug(s) matched more than one ` +
+          'team code in teams.csv — left out of the opponent-resolution map rather than guessing which was meant'
+      )
+    }
     const existingTeams = await fetchTeamIdentities(supabase)
     const teamEloPlan = planTeamEloUpdates(existingTeams, eloResult)
     const teamsUpdated = await applyTeamEloUpdates(supabase, teamEloPlan.updates)
@@ -855,6 +1132,9 @@ async function main(): Promise<void> {
     let matchRowsWithCompetition = 0
     let matchRowsWithTeamGoalsConceded = 0
     let matchRowsWithElementType = 0
+    let matchRowsWithTeamCode = 0
+    let matchRowsWithOpponentTeamCode = 0
+    const matchRowsOpponentUnresolvedByReason: Record<string, number> = {}
     for (let gw = 1; gw <= MAX_GAMEWEEKS; gw++) {
       const url = gameweekUrl(season, gw)
       const resp = await fetchCsv(url)
@@ -870,17 +1150,33 @@ async function main(): Promise<void> {
         console.log(`${JOB_NAME}: GW${gw} playermatchstats.csv has no rows yet (season ${season}) — skipping`)
         continue
       }
-      // upsertPlayerMatchStats -> toMatchStatRow -> parseCompetition() throws
-      // UnknownCompetitionError on an unrecognized competition token, which
-      // is deliberately NOT caught here — it propagates to this function's
-      // own try/catch below, failing the whole run loudly rather than
-      // skipping the offending gameweek file. See scripts/lib/competition.ts.
-      const result = await upsertPlayerMatchStats(supabase, url, season, gw, records, playerCodeByPlayerId, elementTypeByPlayerId)
+      // upsertPlayerMatchStats -> toMatchStatRow -> parseCompetition() /
+      // parseMatchClubSlugs() throw UnknownCompetitionError /
+      // UnknownMatchSlugError on an unrecognized shape, which is
+      // deliberately NOT caught here — it propagates to this function's own
+      // try/catch below, failing the whole run loudly rather than skipping
+      // the offending gameweek file. See scripts/lib/competition.ts.
+      const result = await upsertPlayerMatchStats(
+        supabase,
+        url,
+        season,
+        gw,
+        records,
+        playerCodeByPlayerId,
+        elementTypeByPlayerId,
+        teamCodeByPlayerId,
+        clubCodeBySlugResult.codeBySlug
+      )
       matchRowsWritten += result.written
       matchRowsWithoutPlayerCode += result.missingPlayerCode
       matchRowsWithCompetition += result.withCompetition
       matchRowsWithTeamGoalsConceded += result.withTeamGoalsConceded
       matchRowsWithElementType += result.withElementType
+      matchRowsWithTeamCode += result.withTeamCode
+      matchRowsWithOpponentTeamCode += result.withOpponentTeamCode
+      for (const [reason, count] of Object.entries(result.opponentUnresolvedByReason)) {
+        matchRowsOpponentUnresolvedByReason[reason] = (matchRowsOpponentUnresolvedByReason[reason] ?? 0) + count
+      }
     }
 
     const message =
@@ -890,11 +1186,15 @@ async function main(): Promise<void> {
       `(${teamsEloNulled} elo value(s) nulled rather than left stale, ticket #63), ` +
       `${teamEloPlan.duplicateCodeConflicts} duplicate-code conflict(s), ` +
       `${eloResult.malformedElo} row(s) with a malformed elo cell skipped, ` +
+      `${clubCodeBySlugResult.blankFotmobName} team(s) with a blank fotmob_name (opponent slug unresolvable), ` +
+      `${clubCodeBySlugResult.duplicateSlugs} duplicate club-slug conflict(s), ` +
       `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted ` +
       `(${matchRowsWithoutPlayerCode} without a matching player_code in players.csv, ` +
       `${matchRowsWithCompetition} carrying a non-null competition, ` +
       `${matchRowsWithTeamGoalsConceded} carrying a non-null team_goals_conceded, ` +
-      `${matchRowsWithElementType} carrying a non-null element_type)`
+      `${matchRowsWithElementType} carrying a non-null element_type, ` +
+      `${matchRowsWithTeamCode} carrying a non-null team_code, ` +
+      `${matchRowsWithOpponentTeamCode} carrying a non-null opponent_team_code)`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
@@ -908,12 +1208,17 @@ async function main(): Promise<void> {
         teamsCodesNotInCsv: teamEloPlan.teamsCodesNotInCsv,
         duplicateCodeConflicts: teamEloPlan.duplicateCodeConflicts,
         malformedEloRows: eloResult.malformedElo,
+        blankFotmobNameRows: clubCodeBySlugResult.blankFotmobName,
+        duplicateClubSlugs: clubCodeBySlugResult.duplicateSlugs,
         gameweeksFound,
         matchRowsWritten,
         matchRowsWithoutPlayerCode,
         matchRowsWithCompetition,
         matchRowsWithTeamGoalsConceded,
         matchRowsWithElementType,
+        matchRowsWithTeamCode,
+        matchRowsWithOpponentTeamCode,
+        matchRowsOpponentUnresolvedByReason,
       },
       startedAt,
     })

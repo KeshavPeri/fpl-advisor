@@ -8,8 +8,10 @@ import { describe, expect, it } from 'vitest'
 import {
   KNOWN_COMPETITIONS,
   parseCompetition,
+  parseMatchClubSlugs,
   PREMIER_LEAGUE_COMPETITION,
   UnknownCompetitionError,
+  UnknownMatchSlugError,
 } from './competition.js'
 
 describe('parseCompetition — named competitions from real slug shapes', () => {
@@ -81,5 +83,69 @@ describe('constants', () => {
     expect([...KNOWN_COMPETITIONS].sort()).toEqual(
       ['champions-league', 'conference-league', 'efl-cup', 'europa-league', 'fa-cup', 'prem'].sort(),
     )
+  })
+})
+
+// ============================================================================
+// parseMatchClubSlugs — ticket #167. Structural parsing only: splits the
+// remainder of a match_id (after season + competition) into its two club
+// slugs. Semantic resolution (does a slug name a club this app knows about)
+// is scripts/ingest-core-insights.ts's job, tested there.
+// ============================================================================
+
+describe('parseMatchClubSlugs — real slug shapes', () => {
+  it('splits a normal two-club slug', () => {
+    expect(parseMatchClubSlugs('25-26-prem-manchester-united-vs-arsenal', 'prem')).toEqual([
+      'manchester-united',
+      'arsenal',
+    ])
+  })
+
+  it('splits a slug where one club name is itself hyphenated (brighton-hove-albion)', () => {
+    expect(parseMatchClubSlugs('25-26-prem-brighton-hove-albion-vs-fulham', 'prem')).toEqual([
+      'brighton-hove-albion',
+      'fulham',
+    ])
+  })
+
+  it('splits a slug where BOTH club names are hyphenated', () => {
+    expect(parseMatchClubSlugs('25-26-prem-wolverhampton-wanderers-vs-tottenham-hotspur', 'prem')).toEqual([
+      'wolverhampton-wanderers',
+      'tottenham-hotspur',
+    ])
+  })
+
+  it('splits correctly for a non-"prem" competition token', () => {
+    expect(parseMatchClubSlugs('25-26-efl-cup-manchester-city-vs-huddersfield-town', 'efl-cup')).toEqual([
+      'manchester-city',
+      'huddersfield-town',
+    ])
+  })
+
+  it('is season-prefix independent, matching parseCompetition', () => {
+    expect(parseMatchClubSlugs('26-27-prem-hull-city-vs-manchester-united', 'prem')).toEqual([
+      'hull-city',
+      'manchester-united',
+    ])
+  })
+})
+
+describe('parseMatchClubSlugs — unrecognizable shape', () => {
+  it('throws UnknownMatchSlugError when the remainder has no "-vs-" at all', () => {
+    expect(() => parseMatchClubSlugs('25-26-prem-arsenal-chelsea', 'prem')).toThrow(UnknownMatchSlugError)
+  })
+
+  it('throws UnknownMatchSlugError when the remainder is empty (competition token with nothing after it)', () => {
+    expect(() => parseMatchClubSlugs('25-26-prem', 'prem')).toThrow(UnknownMatchSlugError)
+  })
+
+  it('names the offending match_id in the thrown error message', () => {
+    const matchId = '25-26-prem-arsenal-chelsea'
+    expect(() => parseMatchClubSlugs(matchId, 'prem')).toThrow(matchId)
+  })
+
+  it('never splits on a bare hyphen — "-vs-" only, so a hyphenated-but-well-formed slug never false-positives as malformed', () => {
+    // Sanity check on the positive path above: this must NOT throw.
+    expect(() => parseMatchClubSlugs('25-26-prem-brighton-hove-albion-vs-fulham', 'prem')).not.toThrow()
   })
 })
