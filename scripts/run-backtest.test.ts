@@ -29,8 +29,8 @@ import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../src/lib/scoring/ty
 import { defensiveContributionPoints } from '../src/lib/scoring/defensiveContribution.ts'
 import { positionPriorRates } from '../src/lib/projection/rates.ts'
 import { estimateDefconHitRate, positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
-import { projectPlayerGameweek } from '../src/lib/projection/expectedPoints.ts'
-import { LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
+import { projectPlayerGameweek, type GameweekProjection } from '../src/lib/projection/expectedPoints.ts'
+import { HOME_ADVANTAGE_ELO, LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
 import {
   aggregateActualForGameweek,
   assertReconciles,
@@ -44,6 +44,7 @@ import {
   buildPlayerRateHistory,
   buildRateHistoryMatch,
   buildRecentMinutes,
+  buildTeamMatchRecords,
   buildTeamSlugsByGameweek,
   checkRankingSanityBounds,
   checkSanityBounds,
@@ -53,7 +54,9 @@ import {
   computeBaselineMinutesPerMatch,
   computeBaselineXgXaPerMatch,
   computeConstantBaselineSpearman,
+  computeFixtureExpectedScore,
   computePositionPriors,
+  computeTeamStrengthAsOf,
   CONSTANT_BASELINE_LABEL,
   CONSTANT_BASELINE_VALUE,
   countMultiFixtureRowsByGameweek,
@@ -61,19 +64,25 @@ import {
   defconSignedError,
   derivedCleanSheetRate,
   describeSignedError,
+  eloForExpectedScore,
   emptyDefconSourceCounts,
   emptyExclusionCounts,
+  emptyFixtureCoverageCounts,
   emptyPositionResolutionCounts,
+  fixtureHasSufficientHistory,
   formatExclusionPercentage,
   hasDefconCounters,
   incrementDefconSource,
   incrementExclusion,
+  incrementFixtureCoverage,
   incrementPositionResolution,
   inferTeamSlug,
   MAE_LOWER_BOUND,
   MAE_UPPER_BOUND,
   MIN_BUCKET_SAMPLE_SIZE,
+  MIN_TEAM_PRIOR_MATCHES,
   MULTI_FIXTURE_HEADLINE_THRESHOLD,
+  NEUTRAL_EXPECTED_SCORE_VALUE,
   parseMatchIdTeamSlugs,
   pickProjectedComponents,
   PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL,
@@ -81,6 +90,7 @@ import {
   projectRow,
   rankDescending,
   reconstructActualMatchPoints,
+  resolveFixtureTeams,
   resolveRowPosition,
   spearmanCorrelation,
   SPEARMAN_LOWER_BOUND,
@@ -94,6 +104,7 @@ import {
   summarizeRankingByGameweekAndPosition,
   summarizeRankingByPosition,
   summarizeSeasonRanking,
+  teamStrengthRate,
   toRankingPair,
   TOP10_OVERLAP_UPPER_BOUND_FRACTION,
   topNIsMeaningful,
@@ -102,10 +113,12 @@ import {
   totalExcluded,
   type ActualMatchStatsInput,
   type FeatureHistoryRow,
+  type MatchStatsForTeamStrength,
   type MeasuredRow,
   type PositionPrior,
   type PositionRankingSummary,
   type RankingPair,
+  type TeamStrengthRecord,
 } from './run-backtest.ts'
 
 const zeroPrior = (position = FORWARD): PositionPrior => ({
@@ -118,10 +131,13 @@ const zeroPrior = (position = FORWARD): PositionPrior => ({
 // the #146 migration), the same default a real pre-migration row carries.
 // Every test that needs the new columns passes them explicitly via
 // overrides; every test that does not is exercising the pre-#154 fallback
-// paths, unmodified.
+// paths, unmodified. Ticket #175: team_code likewise defaults to null (a
+// row predating the #167 migration) — every fixture-aware test passes it
+// explicitly.
 function featureRow(overrides: Partial<FeatureHistoryRow> & Pick<FeatureHistoryRow, 'gameweek_id' | 'player_code'>): FeatureHistoryRow {
   return {
     element_type: null,
+    team_code: null,
     prior_matches: 0,
     prior_minutes: 0,
     prior_xg: 0,
@@ -272,6 +288,333 @@ describe('projectRow — a single-fixture gameweek is a no-op, unchanged from be
       [{ fixtureId: row.gameweek_id, isHome: true, teamElo: null, opponentElo: null, fplDifficulty: 3, leagueBaselineGoals: LEAGUE_BASELINE_GOALS_PER_TEAM }],
     )
     expect(viaProjectRow).toEqual(viaDirectCall)
+  })
+})
+
+// ============================================================================
+// FIXTURE-AWARE EXPECTED SCORE — ticket #175.
+// ============================================================================
+
+function teamStatsRow(overrides: Partial<MatchStatsForTeamStrength> & Pick<MatchStatsForTeamStrength, 'matchId' | 'gameweek' | 'teamCode'>): MatchStatsForTeamStrength {
+  return {
+    opponentTeamCode: null,
+    teamGoalsConceded: null,
+    ...overrides,
+  }
+}
+
+describe('buildTeamMatchRecords — the max-across-players correction (ticket #175)', () => {
+  it('a normal match: two teams, several players each — goalsConceded is the MAX across each team\'s own players, goalsScored is the opponent\'s own max', () => {
+    const rows: MatchStatsForTeamStrength[] = [
+      // Team 10 (three players) concedes 2 (their goalkeeper's figure — the
+      // team total — while an outfield player's own goals_conceded-shaped
+      // field here is irrelevant; team_goals_conceded is already the
+      // TEAM figure per player, see file header).
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 2 }),
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 2 }),
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 2 }),
+      // Team 20 concedes 1.
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 20, opponentTeamCode: 10, teamGoalsConceded: 1 }),
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 20, opponentTeamCode: 10, teamGoalsConceded: 1 }),
+    ]
+    const records = buildTeamMatchRecords(rows)
+    expect(records).toHaveLength(2)
+    const team10 = records.find((r) => r.teamCode === 10)
+    const team20 = records.find((r) => r.teamCode === 20)
+    expect(team10).toEqual({ matchId: 'm1', gameweek: 5, teamCode: 10, goalsConceded: 2, goalsScored: 1 })
+    expect(team20).toEqual({ matchId: 'm1', gameweek: 5, teamCode: 20, goalsConceded: 1, goalsScored: 2 })
+  })
+
+  it('a player substituted before a late goal: his 0 must not win over his goalkeeper\'s real 1 — the MAX, never the average or the first row found', () => {
+    const rows: MatchStatsForTeamStrength[] = [
+      // The substituted outfield player: withdrawn before the late goal, so
+      // his own team_goals_conceded is 0.
+      teamStatsRow({ matchId: 'm2', gameweek: 8, teamCode: 30, opponentTeamCode: 40, teamGoalsConceded: 0 }),
+      // His goalkeeper played the full 90 and saw the goal: team_goals_conceded 1.
+      teamStatsRow({ matchId: 'm2', gameweek: 8, teamCode: 30, opponentTeamCode: 40, teamGoalsConceded: 1 }),
+      teamStatsRow({ matchId: 'm2', gameweek: 8, teamCode: 40, opponentTeamCode: 30, teamGoalsConceded: 0 }),
+    ]
+    const records = buildTeamMatchRecords(rows)
+    const team30 = records.find((r) => r.teamCode === 30)
+    // The average (0.5) or "first row found" (0) would both be wrong — the
+    // team actually conceded 1, and only the max reproduces that.
+    expect(team30?.goalsConceded).toBe(1)
+    expect(team30?.goalsConceded).not.toBe(0)
+    expect(team30?.goalsConceded).not.toBe(0.5)
+  })
+
+  it('a 0-0 match: both teams\' real zero is preserved, never skipped as "unknown" (a falsy-check bug would drop it)', () => {
+    const rows: MatchStatsForTeamStrength[] = [
+      teamStatsRow({ matchId: 'm3', gameweek: 2, teamCode: 50, opponentTeamCode: 60, teamGoalsConceded: 0 }),
+      teamStatsRow({ matchId: 'm3', gameweek: 2, teamCode: 60, opponentTeamCode: 50, teamGoalsConceded: 0 }),
+    ]
+    const records = buildTeamMatchRecords(rows)
+    expect(records).toHaveLength(2)
+    expect(records.find((r) => r.teamCode === 50)).toEqual({ matchId: 'm3', gameweek: 2, teamCode: 50, goalsConceded: 0, goalsScored: 0 })
+    expect(records.find((r) => r.teamCode === 60)).toEqual({ matchId: 'm3', gameweek: 2, teamCode: 60, goalsConceded: 0, goalsScored: 0 })
+  })
+
+  it('a match where the opponent side never resolves (no team_goals_conceded rows for it) contributes NOTHING for either side — never a guessed goalsScored', () => {
+    const rows: MatchStatsForTeamStrength[] = [
+      teamStatsRow({ matchId: 'm4', gameweek: 3, teamCode: 70, opponentTeamCode: 80, teamGoalsConceded: 1 }),
+      // Team 80's own row exists (so its opponent pointer is known) but its
+      // team_goals_conceded is null throughout — never resolved.
+      teamStatsRow({ matchId: 'm4', gameweek: 3, teamCode: 80, opponentTeamCode: 70, teamGoalsConceded: null }),
+    ]
+    expect(buildTeamMatchRecords(rows)).toEqual([])
+  })
+
+  it('rows with a null teamCode are ignored entirely, never grouped under a fake key', () => {
+    const rows: MatchStatsForTeamStrength[] = [
+      teamStatsRow({ matchId: 'm5', gameweek: 1, teamCode: null as unknown as number, opponentTeamCode: 90, teamGoalsConceded: 1 }),
+    ]
+    expect(buildTeamMatchRecords(rows)).toEqual([])
+  })
+})
+
+describe('computeTeamStrengthAsOf — THE LOOKAHEAD GUARD (ticket #175, the most important test in the ticket)', () => {
+  it('a gameweek-3 projection sees gameweeks 1 and 2 only — never gameweek 3 itself or later', () => {
+    const records = [
+      { matchId: 'a', gameweek: 1, teamCode: 1, goalsConceded: 1, goalsScored: 2 },
+      { matchId: 'b', gameweek: 2, teamCode: 1, goalsConceded: 0, goalsScored: 1 },
+      // Gameweek 3's own record is deliberately huge and distinguishable —
+      // a leak would be dramatic and obvious, not a rounding-level difference.
+      { matchId: 'c', gameweek: 3, teamCode: 1, goalsConceded: 0, goalsScored: 100 },
+      // A later gameweek, further proof `<` not `<=` is the guard.
+      { matchId: 'd', gameweek: 4, teamCode: 1, goalsConceded: 0, goalsScored: 200 },
+    ]
+    const strength = computeTeamStrengthAsOf(records, 1, 3)
+    expect(strength).toEqual({ matches: 2, goalsScored: 3, goalsConceded: 1 })
+    expect(strength.goalsScored).not.toBe(103)
+    expect(strength.goalsScored).not.toBe(303)
+  })
+
+  it('a gameweek-1 team has no prior record at all: matches=0, never a guessed value', () => {
+    const records = [{ matchId: 'a', gameweek: 1, teamCode: 1, goalsConceded: 1, goalsScored: 2 }]
+    expect(computeTeamStrengthAsOf(records, 1, 1)).toEqual({ matches: 0, goalsScored: 0, goalsConceded: 0 })
+  })
+
+  it('only the requested teamCode\'s records are summed — another team\'s history never leaks in', () => {
+    const records = [
+      { matchId: 'a', gameweek: 1, teamCode: 1, goalsConceded: 1, goalsScored: 2 },
+      { matchId: 'a', gameweek: 1, teamCode: 2, goalsConceded: 2, goalsScored: 1 },
+    ]
+    expect(computeTeamStrengthAsOf(records, 1, 5)).toEqual({ matches: 1, goalsScored: 2, goalsConceded: 1 })
+  })
+})
+
+describe('teamStrengthRate', () => {
+  it('is (goalsScored - goalsConceded) / matches', () => {
+    expect(teamStrengthRate({ matches: 4, goalsScored: 10, goalsConceded: 6 })).toBeCloseTo(1, 10)
+  })
+
+  it('is 0 with no prior matches, never a division by zero', () => {
+    expect(teamStrengthRate({ matches: 0, goalsScored: 0, goalsConceded: 0 })).toBe(0)
+  })
+})
+
+describe('fixtureHasSufficientHistory / MIN_TEAM_PRIOR_MATCHES (ticket #175)', () => {
+  it('true only when BOTH teams meet MIN_TEAM_PRIOR_MATCHES', () => {
+    const enough: TeamStrengthRecord = { matches: MIN_TEAM_PRIOR_MATCHES, goalsScored: 5, goalsConceded: 3 }
+    const notEnough: TeamStrengthRecord = { matches: MIN_TEAM_PRIOR_MATCHES - 1, goalsScored: 5, goalsConceded: 3 }
+    expect(fixtureHasSufficientHistory(enough, enough)).toBe(true)
+    expect(fixtureHasSufficientHistory(enough, notEnough)).toBe(false)
+    expect(fixtureHasSufficientHistory(notEnough, enough)).toBe(false)
+    expect(fixtureHasSufficientHistory(notEnough, notEnough)).toBe(false)
+  })
+})
+
+describe('computeFixtureExpectedScore (ticket #175)', () => {
+  const strong: TeamStrengthRecord = { matches: 10, goalsScored: 20, goalsConceded: 5 } // rate = 1.5
+  const weak: TeamStrengthRecord = { matches: 10, goalsScored: 5, goalsConceded: 20 } // rate = -1.5
+  const identicalA: TeamStrengthRecord = { matches: 6, goalsScored: 9, goalsConceded: 6 } // rate = 0.5
+  const identicalB: TeamStrengthRecord = { matches: 3, goalsScored: 4.5, goalsConceded: 3 } // rate = 0.5, different matches
+
+  it('is exactly 0.5 when two teams have identical prior records — named test', () => {
+    expect(computeFixtureExpectedScore(identicalA, identicalA, 4)).toBe(0.5)
+  })
+
+  it('is exactly 0.5 for two DIFFERENT teams whose RATE happens to be identical, regardless of scale — the delta cancels to 0, not an approximation', () => {
+    expect(computeFixtureExpectedScore(identicalA, identicalB, 1)).toBe(0.5)
+    expect(computeFixtureExpectedScore(identicalA, identicalB, 100)).toBe(0.5)
+  })
+
+  it('a stronger team gets an expectedScore above 0.5, a weaker one below', () => {
+    const strongVsWeak = computeFixtureExpectedScore(strong, weak, 4)
+    const weakVsStrong = computeFixtureExpectedScore(weak, strong, 4)
+    expect(strongVsWeak).toBeGreaterThan(0.5)
+    expect(weakVsStrong).toBeLessThan(0.5)
+    expect(strongVsWeak + weakVsStrong).toBeCloseTo(1, 10) // symmetric around 0.5
+  })
+
+  it('is clamped to exactly 1 for an extreme delta relative to scale, never a value above 1', () => {
+    expect(computeFixtureExpectedScore(strong, weak, 0.1)).toBe(1)
+  })
+
+  it('is clamped to exactly 0 for an extreme delta the other way, never a value below 0', () => {
+    expect(computeFixtureExpectedScore(weak, strong, 0.1)).toBe(0)
+  })
+
+  it('falls back to NEUTRAL_EXPECTED_SCORE_VALUE (0.5) when EITHER team is below MIN_TEAM_PRIOR_MATCHES, even with a huge underlying delta', () => {
+    const thin: TeamStrengthRecord = { matches: MIN_TEAM_PRIOR_MATCHES - 1, goalsScored: 20, goalsConceded: 0 }
+    expect(computeFixtureExpectedScore(thin, weak, 4)).toBe(NEUTRAL_EXPECTED_SCORE_VALUE)
+    expect(computeFixtureExpectedScore(strong, thin, 4)).toBe(NEUTRAL_EXPECTED_SCORE_VALUE)
+  })
+})
+
+describe('resolveFixtureTeams (ticket #175)', () => {
+  it('true when the own club and every opponent resolve', () => {
+    expect(resolveFixtureTeams(10, [20])).toBe(true)
+    expect(resolveFixtureTeams(10, [20, 30])).toBe(true) // a double gameweek, both opponents known
+  })
+
+  it('false when the own club is unresolved, regardless of the opponents', () => {
+    expect(resolveFixtureTeams(null, [20])).toBe(false)
+  })
+
+  it('false when ANY matched opponent is unresolved — the ~141-row mid-season-transfer case', () => {
+    expect(resolveFixtureTeams(10, [null])).toBe(false)
+    expect(resolveFixtureTeams(10, [20, null])).toBe(false) // one resolved, one not: still excluded
+  })
+
+  it('false with no matched actual rows at all — nothing to build a fixture from', () => {
+    expect(resolveFixtureTeams(10, [])).toBe(false)
+  })
+})
+
+describe('classifyRow — unresolvedFixtureTeams (ticket #175)', () => {
+  it('excludes with reason unresolvedFixtureTeams when fixtureTeamsResolved is explicitly false and the row would otherwise be measured', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 60, prior_matches: 3, prior_minutes: 270 })
+    const result = classifyRow(row, FORWARD, [actualRow({ minutesPlayed: 90, teamGoalsConceded: 1 })], true, false)
+    expect(result).toEqual({ kind: 'excluded', reason: 'unresolvedFixtureTeams' })
+  })
+
+  it('defaults to true (measured) — every pre-#175 3-arg and 4-arg call site is an exact no-op', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 61, prior_matches: 3, prior_minutes: 270 })
+    const actualRows = [actualRow({ minutesPlayed: 90, teamGoalsConceded: 1 })]
+    expect(classifyRow(row, FORWARD, actualRows).kind).toBe('measured')
+    expect(classifyRow(row, FORWARD, actualRows, true).kind).toBe('measured')
+  })
+
+  it('an EARLIER exclusion reason (e.g. noPriorMatches) still wins even when fixtureTeamsResolved is false — precedence unchanged', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 62, prior_matches: 0 })
+    const result = classifyRow(row, FORWARD, [actualRow({ minutesPlayed: 90 })], true, false)
+    expect(result).toEqual({ kind: 'excluded', reason: 'noPriorMatches' })
+  })
+})
+
+describe('ExclusionCounts / assertReconciles — unresolvedFixtureTeams reconciles like every other reason (ticket #175)', () => {
+  it('reconciles with unresolvedFixtureTeams included', () => {
+    const counts = emptyExclusionCounts()
+    incrementExclusion(counts, 'noPriorMatches')
+    incrementExclusion(counts, 'unresolvedFixtureTeams')
+    incrementExclusion(counts, 'unresolvedFixtureTeams')
+    expect(totalExcluded(counts)).toBe(3)
+    expect(() => assertReconciles(5, 2, counts)).not.toThrow() // 2 measured + 3 excluded = 5 read
+  })
+})
+
+describe('FixtureCoverageCounts — emptyFixtureCoverageCounts / incrementFixtureCoverage (ticket #175)', () => {
+  it('tallies real vs neutral-fallback independently', () => {
+    const counts = emptyFixtureCoverageCounts()
+    incrementFixtureCoverage(counts, true)
+    incrementFixtureCoverage(counts, true)
+    incrementFixtureCoverage(counts, false)
+    expect(counts).toEqual({ realFixture: 2, neutralFallback: 1 })
+  })
+})
+
+describe('eloForExpectedScore (ticket #175)', () => {
+  it('at s=0.5, the elo gap is exactly HOME_ADVANTAGE_ELO (log10(1) = 0)', () => {
+    expect(eloForExpectedScore(0.5)).toBe(HOME_ADVANTAGE_ELO)
+  })
+
+  it('round-trips through fixture.ts\'s own expectedScore formula (isHome=false, opponentElo=0) back to the original target, for several values', () => {
+    // Reproduces the exact construction buildFixtureContextFromExpectedScore
+    // uses, via the same expectedScore fixture.ts exports and this file
+    // imports for other tests — proving eloForExpectedScore is a true
+    // inverse, not merely "close enough".
+    const expectedScoreFn = (eloFor: number, eloAgainst: number, isHome: boolean): number =>
+      1 / (1 + 10 ** ((eloAgainst - eloFor - (isHome ? HOME_ADVANTAGE_ELO : -HOME_ADVANTAGE_ELO)) / 400))
+    for (const s of [0.05, 0.25, 0.5, 0.6, 0.75, 0.95]) {
+      const eloFor = eloForExpectedScore(s)
+      expect(expectedScoreFn(eloFor, 0, false)).toBeCloseTo(s, 10)
+    }
+  })
+
+  it('resolves the s=0 and s=1 boundaries via Infinity arithmetic — exactly 0 and exactly 1, never NaN', () => {
+    const expectedScoreFn = (eloFor: number, eloAgainst: number, isHome: boolean): number =>
+      1 / (1 + 10 ** ((eloAgainst - eloFor - (isHome ? HOME_ADVANTAGE_ELO : -HOME_ADVANTAGE_ELO)) / 400))
+    expect(expectedScoreFn(eloForExpectedScore(0), 0, false)).toBe(0)
+    expect(expectedScoreFn(eloForExpectedScore(1), 0, false)).toBe(1)
+    expect(Number.isNaN(eloForExpectedScore(0))).toBe(false)
+    expect(Number.isNaN(eloForExpectedScore(1))).toBe(false)
+  })
+})
+
+// Compares two GameweekProjections on everything that actually determines
+// the numbers this file reports (expectedPoints, expectedMinutes, and every
+// fixture's components/expectedEvents) while ignoring modelInputs.
+// eloFallbackUsed — a legitimate, expected difference in HOW expectedScore
+// 0.5 was reached (the pre-#175 fplDifficulty fallback vs this ticket's
+// elo-gap construction), never in the resulting number. Asserting on that
+// diagnostic flag here would be asserting an implementation detail neither
+// this ticket nor #147 ever claimed to preserve.
+function expectSameProjectionOutcome(a: GameweekProjection, b: GameweekProjection): void {
+  expect(a.expectedPoints).toBeCloseTo(b.expectedPoints, 10)
+  expect(a.expectedMinutes).toBeCloseTo(b.expectedMinutes, 10)
+  expect(a.fixtures).toHaveLength(b.fixtures.length)
+  a.fixtures.forEach((fixture, i) => {
+    expect(fixture.components).toEqual(b.fixtures[i].components)
+    expect(fixture.expectedEvents).toEqual(b.fixtures[i].expectedEvents)
+    expect(fixture.modelInputs.expectedScore).toBeCloseTo(b.fixtures[i].modelInputs.expectedScore, 10)
+  })
+}
+
+describe('projectRow — fixture-aware expectedScore (ticket #175)', () => {
+  it('a defined expectedScore of exactly 0.5 reproduces the SAME projection outcome as the neutral fallback — same points, same components, same expectedScore (0.5), only the construction path (eloFallbackUsed) legitimately differs', () => {
+    const row = featureRow({ gameweek_id: 15, player_code: 800, prior_matches: 5, prior_minutes: 450, prior_xg: 2 })
+    const prior = zeroPrior(FORWARD)
+    const neutral = projectRow(row, FORWARD, prior, 1)
+    const explicitHalf = projectRow(row, FORWARD, prior, 1, [0.5])
+    expectSameProjectionOutcome(explicitHalf, neutral)
+    expect(neutral.fixtures[0].modelInputs.eloFallbackUsed).toBe(true) // fplDifficulty fallback (teamElo/opponentElo null)
+    expect(explicitHalf.fixtures[0].modelInputs.eloFallbackUsed).toBe(false) // this ticket's elo-gap construction (both non-null)
+  })
+
+  it('a favourable expectedScore (0.75) projects MORE points than neutral; an unfavourable one (0.25) projects FEWER — the fixture actually moves the number', () => {
+    const row = featureRow({ gameweek_id: 15, player_code: 801, prior_matches: 5, prior_minutes: 450, prior_xg: 2 })
+    const prior = zeroPrior(FORWARD)
+    const neutral = projectRow(row, FORWARD, prior, 1, [0.5])
+    const favourable = projectRow(row, FORWARD, prior, 1, [0.75])
+    const unfavourable = projectRow(row, FORWARD, prior, 1, [0.25])
+    expect(favourable.expectedPoints).toBeGreaterThan(neutral.expectedPoints)
+    expect(unfavourable.expectedPoints).toBeLessThan(neutral.expectedPoints)
+  })
+
+  it('a multi-fixture row can carry a DIFFERENT expectedScore per fixture, by index — a double gameweek against two different-strength opponents', () => {
+    const row = featureRow({ gameweek_id: 15, player_code: 802, prior_matches: 5, prior_minutes: 450, prior_xg: 2 })
+    const prior = zeroPrior(FORWARD)
+    const mixed = projectRow(row, FORWARD, prior, 2, [0.75, 0.25])
+    const bothFavourable = projectRow(row, FORWARD, prior, 2, [0.75, 0.75])
+    const bothNeutral = projectRow(row, FORWARD, prior, 2, [0.5, 0.5])
+    expect(mixed.fixtures).toHaveLength(2)
+    // Every FORWARD component fixture.ts feeds is LINEAR in expectedScore
+    // (attackingMultiplier = 2s; forwards earn no clean-sheet/goals-conceded
+    // points at all — pointValues.ts), so [0.75, 0.25] sums to EXACTLY the
+    // same total as [0.5, 0.5] (both average to 0.5) — proving each index's
+    // own value was actually used (not just the first one broadcast to
+    // both fixtures, which would instead make mixed equal bothFavourable).
+    expect(mixed.expectedPoints).toBeCloseTo(bothNeutral.expectedPoints, 10)
+    expect(mixed.expectedPoints).toBeLessThan(bothFavourable.expectedPoints)
+  })
+
+  it('an index past the end of fixtureExpectedScores falls back to neutral for that fixture only', () => {
+    const row = featureRow({ gameweek_id: 15, player_code: 803, prior_matches: 5, prior_minutes: 450, prior_xg: 2 })
+    const prior = zeroPrior(FORWARD)
+    const oneScoreTwoFixtures = projectRow(row, FORWARD, prior, 2, [0.75])
+    const explicitMixed = projectRow(row, FORWARD, prior, 2, [0.75, 0.5])
+    expectSameProjectionOutcome(oneScoreTwoFixtures, explicitMixed)
   })
 })
 
@@ -1813,13 +2156,21 @@ describe('run-backtest.ts — the join is on player_code, never player_id', () =
   })
 
   it('reads team_goals_conceded, never the per-player goals_conceded column, for actuals', () => {
+    // Ticket #175 extended this select list with team_code/opponent_team_code
+    // (the fixture-identity columns) — updated here, the one exact-string
+    // test this ticket's own required scope change could not leave
+    // unmodified (every other pre-#175 test in this file is untouched).
     expect(source).toMatch(
-      /'player_code, match_id, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries'/,
+      /'player_code, match_id, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries, team_code, opponent_team_code'/,
     )
     // A bare "goals_conceded" column in a select list (comma-delimited, not
     // prefixed by "team_") would appear as ", goals_conceded," or end a
     // select string as ", goals_conceded'" — neither pattern occurs.
     expect(source).not.toMatch(/,\s*goals_conceded\s*[,']/)
+  })
+
+  it('ticket #175: feature_history select also reads team_code, the player\'s own club', () => {
+    expect(source).toMatch(/'gameweek_id, player_code, element_type, team_code, prior_matches/)
   })
 
   it('selects match_id from player_match_stats — ticket #140, team-slug inference for blank-gameweek detection only, never used for point reconstruction', () => {
