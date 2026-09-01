@@ -278,7 +278,7 @@ interface FinishedFixtureRow {
   team_a_score: number | null
 }
 
-interface MatchStatsRow {
+export interface MatchStatsRow {
   player_code: number | null
   season: string
   gameweek: number
@@ -291,6 +291,15 @@ interface MatchStatsRow {
   interceptions: number | null
   tackles: number | null
   recoveries: number | null
+  /**
+   * The FPL position code as it was in THIS ingested season's own
+   * players.csv (ticket #146) — never the live `players` table, which holds
+   * only the current season's roster. NULL means this row predates the
+   * #146 migration or the season's own player list didn't resolve a
+   * position. Ticket #177: this is now the PRIMARY source for the
+   * position-prior computation below — see resolvePriorRowPosition.
+   */
+  element_type: number | null
 }
 
 // ============================================================================
@@ -612,7 +621,7 @@ async function main(): Promise<void> {
       supabase
         .from('player_match_stats')
         .select(
-          'player_code, season, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries',
+          'player_code, season, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, element_type',
         )
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
         .order('player_id', { ascending: true })
