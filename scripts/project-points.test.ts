@@ -30,6 +30,11 @@ import { CURRENT_SEASON, classifySeasonCoverage, sortRecentFirst, splitBySeason 
 // medianNowCostByPosition are plain pure functions, imported and exercised
 // directly.
 import { effectiveRatePositionPrior, medianNowCostByPosition } from './project-points.ts'
+// Ticket #177: same reasoning -- resolvePriorRowPosition and
+// buildPositionPriorMatches are plain pure functions (no Supabase call of
+// their own), imported and exercised directly so the survivorship-bias fix
+// is provable on constructed rows, not only grepped.
+import { resolvePriorRowPosition, buildPositionPriorMatches, type MatchStatsRow } from './project-points.ts'
 import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
 import { computeTwoStagePlayerRates } from '../src/lib/projection/rates.ts'
 
@@ -477,5 +482,259 @@ describe('project-points.ts — price-prior source invariants (ticket #119)', ()
     }
     expect(playersPriceAdjustedPrior).toBe(playersWithNeitherSeasonRows)
     expect(playersPriceAdjustedPrior).toBe(3)
+  })
+})
+
+// ============================================================================
+// Ticket #177 — position priors from every qualifying row, not survivors
+// onto the current roster only. resolvePriorRowPosition and
+// buildPositionPriorMatches are pulled out as plain pure functions (same
+// technique as the #113/#119 helpers above) specifically so the
+// survivorship-bias fix #168 measured is provable on constructed rows,
+// without a live Supabase project.
+// ============================================================================
+
+/** Builds a MatchStatsRow with sensible defaults, overridable per field -- keeps each test's arrange step to only the fields it actually cares about. */
+function matchRow(overrides: Partial<MatchStatsRow> = {}): MatchStatsRow {
+  return {
+    player_code: 1,
+    season: '2025-2026',
+    gameweek: 1,
+    minutes_played: 90,
+    xg: 0.2,
+    xa: 0.1,
+    saves: 0,
+    clearances: 1,
+    blocks: 1,
+    interceptions: 1,
+    tackles: 1,
+    recoveries: 2,
+    element_type: null,
+    ...overrides,
+  }
+}
+
+function rosterOf(entries: ReadonlyArray<[number, number]>): Map<number, { element_type: number }> {
+  return new Map(entries.map(([code, elementType]) => [code, { element_type: elementType }]))
+}
+
+describe('resolvePriorRowPosition — ticket #177', () => {
+  it('element_type is the PRIMARY source when present, regardless of what the roster says', () => {
+    const row = matchRow({ player_code: 1, element_type: FORWARD })
+    const roster = rosterOf([[1, GOALKEEPER]]) // deliberately contradicts element_type
+    const resolution = resolvePriorRowPosition(row, roster)
+    expect(resolution).toEqual({ position: FORWARD, source: 'elementType' })
+  })
+
+  it('falls back to the roster only when element_type is null', () => {
+    const row = matchRow({ player_code: 1, element_type: null })
+    const roster = rosterOf([[1, DEFENDER]])
+    const resolution = resolvePriorRowPosition(row, roster)
+    expect(resolution).toEqual({ position: DEFENDER, source: 'playersFallback' })
+  })
+
+  it('unresolved when element_type is null and the player has no roster entry -- the exact row the pre-#177 join silently dropped', () => {
+    const row = matchRow({ player_code: 999, element_type: null })
+    const roster = rosterOf([]) // empty roster -- player_code 999 not found
+    const resolution = resolvePriorRowPosition(row, roster)
+    expect(resolution).toEqual({ position: undefined, source: 'unresolved' })
+  })
+
+  it('unresolved (not a thrown error) when player_code is null and element_type is also null', () => {
+    const row = matchRow({ player_code: null, element_type: null })
+    const roster = rosterOf([])
+    const resolution = resolvePriorRowPosition(row, roster)
+    expect(resolution).toEqual({ position: undefined, source: 'unresolved' })
+  })
+
+  it('a row with element_type set still resolves even when player_code is null -- the two failure modes are independent', () => {
+    const row = matchRow({ player_code: null, element_type: MIDFIELDER })
+    const roster = rosterOf([])
+    const resolution = resolvePriorRowPosition(row, roster)
+    expect(resolution).toEqual({ position: MIDFIELDER, source: 'elementType' })
+  })
+})
+
+describe('buildPositionPriorMatches — a historical row for a player NOT on the current roster now contributes, and did not before (ticket #177)', () => {
+  it('the OLD behaviour: a roster-only join drops this row outright', () => {
+    // This is the exact line ticket #177 replaces (see project-points.ts's
+    // header and git history): `codeToPlayer.get(row.player_code)` with no
+    // element_type fallback. Reproduced here, standalone, to prove the
+    // "did not before" half of the DoD item -- not just asserted in prose.
+    const roster = rosterOf([]) // the 44 forwards #168 found dropped from the roster
+    const oldJoinResult = roster.get(999) // player_code 999 -- no entry
+    expect(oldJoinResult).toBeUndefined() // pre-#177: `if (!player) continue` -- row silently skipped, contributes to no prior
+  })
+
+  it('the NEW behaviour: the same row, with element_type populated, contributes to its position prior', () => {
+    const roster = rosterOf([]) // same empty roster -- player_code 999 still absent
+    const rows = [matchRow({ player_code: 999, element_type: FORWARD, xg: 0.4, xa: 0.3, minutes_played: 90 })]
+    const result = buildPositionPriorMatches(rows, roster)
+    expect(result.rateMatchesByPosition[FORWARD]).toHaveLength(1)
+    expect(result.rateMatchesByPosition[FORWARD][0]).toMatchObject({ xg: 0.4, xa: 0.3, minutesPlayed: 90 })
+    expect(result.priorRowsContributing).toBe(1)
+    expect(result.priorRowsContributingNoRosterEntry).toBe(1) // the recovered population
+  })
+
+  it('the defcon position prior is fixed by the SAME change -- built from the same loop, same row', () => {
+    const roster = rosterOf([])
+    const rows = [
+      matchRow({ player_code: 999, element_type: FORWARD, clearances: 3, blocks: 2, interceptions: 1, tackles: 4, recoveries: 5 }),
+    ]
+    const result = buildPositionPriorMatches(rows, roster)
+    expect(result.defconMatchesByPosition[FORWARD]).toHaveLength(1)
+    expect(result.defconMatchesByPosition[FORWARD][0]).toMatchObject({
+      clearances: 3,
+      blocks: 2,
+      interceptions: 1,
+      tackles: 4,
+      recoveries: 5,
+    })
+  })
+
+  it('a player who IS on the current roster still contributes, and is not double-counted as "no roster entry"', () => {
+    const roster = rosterOf([[1, FORWARD]])
+    const rows = [matchRow({ player_code: 1, element_type: FORWARD })]
+    const result = buildPositionPriorMatches(rows, roster)
+    expect(result.priorRowsContributing).toBe(1)
+    expect(result.priorRowsContributingNoRosterEntry).toBe(0)
+  })
+
+  it('a row with neither a stored element_type nor a roster entry is skipped, counted, and contributes to no prior', () => {
+    const roster = rosterOf([])
+    const rows = [matchRow({ player_code: 999, element_type: null })]
+    const result = buildPositionPriorMatches(rows, roster)
+    expect(result.rateMatchesByPosition[FORWARD]).toHaveLength(0)
+    expect(result.rateMatchesByPosition[GOALKEEPER]).toHaveLength(0)
+    expect(result.rateMatchesByPosition[DEFENDER]).toHaveLength(0)
+    expect(result.rateMatchesByPosition[MIDFIELDER]).toHaveLength(0)
+    expect(result.priorRowsContributing).toBe(0)
+    expect(result.priorRowsSkippedNoPosition).toBe(1)
+  })
+
+  it('a row with no player_code at all is skipped under its OWN counter, separate from "no resolvable position"', () => {
+    const roster = rosterOf([])
+    const rows = [matchRow({ player_code: null, element_type: null })]
+    const result = buildPositionPriorMatches(rows, roster)
+    expect(result.priorRowsSkippedNoPlayerCode).toBe(1)
+    expect(result.priorRowsSkippedNoPosition).toBe(0)
+  })
+
+  it('the four counters reconcile arithmetically against the rows read, over a mixed population', () => {
+    const roster = rosterOf([[1, FORWARD], [2, DEFENDER]])
+    const rows = [
+      matchRow({ player_code: 1, element_type: FORWARD }), // contributes, on roster
+      matchRow({ player_code: 999, element_type: MIDFIELDER }), // contributes, NOT on roster -- recovered
+      matchRow({ player_code: 2, element_type: null }), // contributes via roster fallback
+      matchRow({ player_code: 888, element_type: null }), // skipped -- no position resolvable
+      matchRow({ player_code: null, element_type: null }), // skipped -- no player_code
+    ]
+    const result = buildPositionPriorMatches(rows, roster)
+    expect(result.priorRowsContributing).toBe(3)
+    expect(result.priorRowsContributingNoRosterEntry).toBe(1)
+    expect(result.priorRowsSkippedNoPosition).toBe(1)
+    expect(result.priorRowsSkippedNoPlayerCode).toBe(1)
+    expect(
+      result.priorRowsContributing + result.priorRowsSkippedNoPosition + result.priorRowsSkippedNoPlayerCode,
+    ).toBe(rows.length)
+  })
+
+  it('an empty input produces empty priors and all-zero counters, not an error', () => {
+    const result = buildPositionPriorMatches([], rosterOf([]))
+    for (const position of [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD]) {
+      expect(result.rateMatchesByPosition[position]).toEqual([])
+      expect(result.defconMatchesByPosition[position]).toEqual([])
+    }
+    expect(result.priorRowsContributing).toBe(0)
+    expect(result.priorRowsContributingNoRosterEntry).toBe(0)
+    expect(result.priorRowsSkippedNoPosition).toBe(0)
+    expect(result.priorRowsSkippedNoPlayerCode).toBe(0)
+  })
+})
+
+describe('project-points.ts — position-prior source invariants (ticket #177)', () => {
+  it('the prior-building loop no longer skips a row solely because its player_code is absent from the live roster', () => {
+    // The exact line this ticket replaces (see git history): `const player =
+    // codeToPlayer.get(row.player_code); if (!player) continue`. Neither
+    // that skip nor its accompanying old comment may remain anywhere in the
+    // file.
+    expect(source).not.toMatch(/if\s*\(\s*!player\s*\)\s*continue/)
+    expect(source).not.toMatch(/contributes no position prior/)
+  })
+
+  it('imports element_type in the player_match_stats select, alongside the existing columns', () => {
+    expect(source).toMatch(/\.select\(\s*\n?\s*['"][^'"]*\bplayer_code\b[^'"]*\belement_type\b[^'"]*['"]/)
+  })
+
+  it('resolvePriorRowPosition and buildPositionPriorMatches are used to build the position priors', () => {
+    expect(source).toMatch(/function resolvePriorRowPosition/)
+    expect(source).toMatch(/function buildPositionPriorMatches/)
+    expect(source).toMatch(/buildPositionPriorMatches\(matchStatsRows,\s*codeToPlayer\)/)
+  })
+
+  it('reports all four ticket #177 counters as separate named job_runs.details fields', () => {
+    expect(source).toMatch(/priorRowsContributing\b/)
+    expect(source).toMatch(/priorRowsContributingNoRosterEntry/)
+    expect(source).toMatch(/priorRowsSkippedNoPosition/)
+    expect(source).toMatch(/priorRowsSkippedNoPlayerCode/)
+  })
+
+  it('never introduces a second assist-conversion constant -- #168 explicitly refused this, and this ticket must not either', () => {
+    // Guards against the exact temptation the ticket's Notes call out: a
+    // 0.67-shaped multiplier applied to an assist figure to "correct" it on
+    // top of the recovered priors, rather than letting the wider source
+    // population speak for itself. The diagnostic figure itself is fine in
+    // a comment (this file's own header cites it) -- what must never appear
+    // is it used as an operand.
+    expect(source).not.toMatch(/0\.67\s*\*/)
+    expect(source).not.toMatch(/\*\s*0\.67/)
+    expect(source).not.toMatch(/assist\w*\s*\*=?\s*0\.67/i)
+  })
+})
+
+// ============================================================================
+// Ticket #177 — the PROJECTED population (which players receive a
+// player_projections row) must be unchanged: only the position priors move,
+// never who gets projected. This is the item that stops the ticket leaking
+// into the solver's player pool. main()'s per-player loop can't be
+// exercised without a live Supabase project (see file header), so this is
+// proven the same way the rest of this file proves main()'s untestable
+// behaviour: by grepping the shipped source for the exact structural
+// guarantee.
+// ============================================================================
+
+describe('project-points.ts — projected population unchanged (ticket #177)', () => {
+  it('the per-player projection loop still iterates playerRows -- the live current-roster read from section 2 -- unconditionally', () => {
+    expect(source).toMatch(/for \(const player of playerRows\) \{/)
+  })
+
+  it('resolvePriorRowPosition and buildPositionPriorMatches are called only once, to build the position priors, never inside the per-player projection loop that stages playerGwKeys/stagedFixtures', () => {
+    // `for (const player of playerRows) {` appears TWICE: once building
+    // codeToPlayer (section 2/4 boundary) and once as section 5's actual
+    // per-player projection loop, which runs through to section 5b's
+    // bonus-allocation comment. lastIndexOf targets the second (real
+    // projection loop) -- neither position-prior helper's name may appear
+    // inside it; if one did, a historical-only player_code could leak into
+    // the projected population, exactly what this ticket must not do.
+    const loopStart = source.lastIndexOf('for (const player of playerRows) {')
+    expect(loopStart).toBeGreaterThan(-1)
+    const loopEnd = source.indexOf('5b. Bonus allocation', loopStart)
+    expect(loopEnd).toBeGreaterThan(loopStart)
+    const loopBody = source.slice(loopStart, loopEnd)
+    expect(loopBody).not.toMatch(/buildPositionPriorMatches|resolvePriorRowPosition/)
+    // Sanity: the slice actually captured section 5's loop body, not an
+    // empty or trivial span -- it must contain playerGwKeys.push, which
+    // only exists in that loop.
+    expect(loopBody).toMatch(/playerGwKeys\.push\(/)
+  })
+
+  it('buildPositionPriorMatches is called exactly once in the whole file -- the position priors are computed a single time, not per player', () => {
+    const occurrences = source.split('buildPositionPriorMatches(matchStatsRows, codeToPlayer)').length - 1
+    expect(occurrences).toBe(1)
+  })
+
+  it('rowsToUpsert (and therefore player_projections) is built by iterating playerGwKeys, which is populated only inside the playerRows loop above', () => {
+    expect(source).toMatch(/for \(const key of playerGwKeys\)/)
+    expect(source).toMatch(/playerGwKeys\.push\(/)
   })
 })
