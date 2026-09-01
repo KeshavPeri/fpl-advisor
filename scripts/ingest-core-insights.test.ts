@@ -1,20 +1,26 @@
 // Unit tests for scripts/ingest-core-insights.ts's team-elo join logic —
 // ticket #32, extended by ticket #63 (null elo on an unmatched club rather
-// than leaving a stale — possibly another club's — rating in place).
+// than leaving a stale — possibly another club's — rating in place), and
+// narrowed by ticket #176 (never null a known rating over a source gap;
+// preserve it and record staleness instead — see that file's header for the
+// full "because", including why #63's own "genuinely removed" case cannot
+// actually reach this job's input).
 //
 // These exercise buildEloByCode/planTeamEloUpdates directly: pure functions
 // with no live Supabase project involved (none is available to this
 // Builder's session). They prove the join is on `code`, that a code with no
 // matching public.teams row is skipped and counted, that a public.teams row
-// whose code has no CSV entry is queued for nulling and counted (#63), that
-// a row whose code IS present still gets the CSV value exactly as before
-// (#63 must not regress this), that a malformed elo cell never overwrites an
-// existing rating with null or queues it for nulling, and that a duplicate
-// code across two public.teams rows updates neither, nulls neither, and is
-// counted as a conflict — every testable bullet from the ticket's
-// definition of done. It cannot prove what the *live* table currently
-// holds, or that the projection fallback then engages; that's a human
-// verification step after merge, out of scope here (see ticket #63's Notes).
+// whose code has no CSV entry is queued to be PRESERVED and marked stale
+// (ticket #176, replacing #63's queue-for-nulling), that a row whose code IS
+// present still gets the CSV value exactly as before (#63/#176 must not
+// regress this), that a malformed or blank elo cell never overwrites an
+// existing rating and is now also queued to be marked stale (ticket #176),
+// and that a duplicate code across two public.teams rows updates neither,
+// preserves neither, and is counted as a conflict — every testable bullet
+// from the ticket's definition of done. It cannot prove what the *live*
+// table currently holds, or that the projection fallback then engages;
+// that's a human verification step after merge, out of scope here (see
+// ticket #63's Notes, still true under #176).
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -24,6 +30,7 @@ import {
   buildElementTypeMap,
   buildEloByCode,
   buildTeamCodeMap,
+  countOpponentsResolvedViaFallback,
   planTeamEloUpdates,
   resolveOpponentTeamCode,
   slugifyClubName,
@@ -31,6 +38,7 @@ import {
   TEAMS_REQUIRED_COLUMNS,
   toMatchStatRow,
   UnknownPositionError,
+  type ClubSlugSource,
   type MatchStatRow,
   type TeamIdentityRow,
 } from './ingest-core-insights.js'
@@ -51,6 +59,15 @@ describe('TEAMS_REQUIRED_COLUMNS', () => {
   // silently resolving zero opponents with no explanation.
   it('now also requires fotmob_name (ticket #167)', () => {
     expect(TEAMS_REQUIRED_COLUMNS).toContain('fotmob_name')
+  })
+
+  // Ticket #176: name/short_name are now READ (as the fallback slug source
+  // when fotmob_name is blank — see buildClubCodeBySlug), so a season whose
+  // teams.csv drops either column must fail loudly here too, rather than
+  // silently leaving the fallback permanently empty.
+  it('now also requires name and short_name (ticket #176)', () => {
+    expect(TEAMS_REQUIRED_COLUMNS).toContain('name')
+    expect(TEAMS_REQUIRED_COLUMNS).toContain('short_name')
   })
 })
 
@@ -96,8 +113,8 @@ describe('buildEloByCode', () => {
 // planTeamEloUpdates — the join itself.
 // ============================================================================
 
-function team(id: number, code: number | null): TeamIdentityRow {
-  return { id, code }
+function team(id: number, code: number | null, eloStaleSince: string | null = null): TeamIdentityRow {
+  return { id, code, elo_stale_since: eloStaleSince }
 }
 
 describe('planTeamEloUpdates', () => {
@@ -122,7 +139,7 @@ describe('planTeamEloUpdates', () => {
     expect(plan.codesNotInTeams).toBe(0)
     expect(plan.teamsCodesNotInCsv).toBe(0)
     expect(plan.duplicateCodeConflicts).toBe(0)
-    expect(plan.nulls).toEqual([])
+    expect(plan.staleMarks).toEqual([])
   })
 
   it('skips (does not insert) a CSV code with no matching public.teams row, and counts it', () => {
@@ -134,74 +151,125 @@ describe('planTeamEloUpdates', () => {
     const plan = planTeamEloUpdates(existingTeams, elo)
     expect(plan.updates).toEqual([{ id: 1, elo: 1650 }])
     expect(plan.codesNotInTeams).toBe(1)
-    // Nothing to null: there is no public.teams row for the missing code.
-    expect(plan.nulls).toEqual([])
+    // Nothing to preserve/mark: there is no public.teams row for the missing code.
+    expect(plan.staleMarks).toEqual([])
   })
 
-  // Ticket #63 — this is the DoD's central regression guard: a matched code
-  // must still take the CSV value exactly as before, unaffected by the new
-  // nulling path.
-  it('sets elo to the CSV value for a row whose code IS present, exactly as before #63', () => {
+  // Ticket #63/#176 — this is the DoD's central regression guard: a matched
+  // code must still take the CSV value exactly as before, unaffected by the
+  // preserve-and-mark-stale path, and its elo_stale_since is not part of
+  // updates (applyTeamEloUpdates clears it separately — see that function).
+  it('sets elo to the CSV value for a row whose code IS present, exactly as before #63/#176', () => {
     const existingTeams = [team(1, 90)]
     const elo = buildEloByCode([{ code: '90', elo: '1650' }])
     const plan = planTeamEloUpdates(existingTeams, elo)
     expect(plan.updates).toEqual([{ id: 1, elo: 1650 }])
-    expect(plan.nulls).toEqual([])
+    expect(plan.staleMarks).toEqual([])
   })
 
-  // Ticket #63 — the ticket's central case: a promoted club (code not in the
-  // historical CSV) must be queued to have its elo nulled, not left holding
-  // whatever it last held.
-  it('queues a public.teams row for nulling when its code has no CSV entry, and counts it (ticket #63)', () => {
+  // Ticket #176 — DoD shape 1 of 3: a club ABSENT from the season file
+  // (a promoted club not in the historical CSV, e.g.) is queued to be
+  // PRESERVED and marked stale, never nulled.
+  it('queues a public.teams row to be preserved and marked stale when its code has no CSV entry, and counts it (ticket #176, replacing #63)', () => {
     const existingTeams = [team(1, 90), team(2, 55)] // team 2's code never appears in the CSV
     const elo = buildEloByCode([{ code: '90', elo: '1650' }])
     const plan = planTeamEloUpdates(existingTeams, elo)
     expect(plan.updates).toEqual([{ id: 1, elo: 1650 }])
     expect(plan.teamsCodesNotInCsv).toBe(1)
-    expect(plan.nulls).toEqual([{ id: 2 }])
+    expect(plan.staleMarks).toEqual([{ id: 2, alreadyStale: false }])
   })
 
-  it('counts a public.teams row with a null code as not-in-csv, never crashing the join, and queues it for nulling (#63)', () => {
+  it('counts a public.teams row with a null code as not-in-csv, never crashing the join, and queues it to be preserved and marked stale (#176)', () => {
     const existingTeams = [team(1, null)]
     const elo = buildEloByCode([{ code: '90', elo: '1650' }])
     const plan = planTeamEloUpdates(existingTeams, elo)
     expect(plan.updates).toEqual([])
     expect(plan.teamsCodesNotInCsv).toBe(1)
     expect(plan.codesNotInTeams).toBe(1) // code 90 also has no matching row
-    expect(plan.nulls).toEqual([{ id: 1 }])
+    expect(plan.staleMarks).toEqual([{ id: 1, alreadyStale: false }])
   })
 
-  // Ticket #63 — the DoD's explicit "must not be conflated" case: a
-  // malformed elo cell is a different outcome from an absent code, and must
-  // not queue the row for nulling.
-  it('does not write null over an existing rating, and does not queue it for nulling, when the elo cell was malformed (#63)', () => {
+  // Ticket #176 — DoD shape 2 of 3: a club present in the CSV with a BLANK
+  // elo cell retains its existing rating and is now also queued to be
+  // marked stale (previously silently untouched and uncounted under #63).
+  it('preserves the existing rating and queues the row to be marked stale when the elo cell was blank (ticket #176)', () => {
+    const existingTeams = [team(1, 90)]
+    const elo = buildEloByCode([{ code: '90', elo: '' }])
+    const plan = planTeamEloUpdates(existingTeams, elo)
+    expect(plan.updates).toEqual([])
+    expect(plan.teamsCodeInCsvNoUsableElo).toBe(1)
+    expect(plan.staleMarks).toEqual([{ id: 1, alreadyStale: false }])
+    // Not counted as codesNotInTeams or teamsCodesNotInCsv — the code
+    // matched fine, only the elo value was missing.
+    expect(plan.codesNotInTeams).toBe(0)
+    expect(plan.teamsCodesNotInCsv).toBe(0)
+  })
+
+  // Ticket #176 — DoD shape 3 of 3: a club present in the CSV with a
+  // MALFORMED (non-blank, non-numeric) elo cell gets the identical
+  // preserve-and-mark-stale treatment as the blank-cell case above.
+  it('preserves the existing rating and queues the row to be marked stale when the elo cell was malformed (ticket #63/#176)', () => {
     const existingTeams = [team(1, 90)]
     const elo = buildEloByCode([{ code: '90', elo: 'not-a-number' }])
     const plan = planTeamEloUpdates(existingTeams, elo)
     expect(plan.updates).toEqual([])
-    expect(plan.nulls).toEqual([])
-    // Not counted as codesNotInTeams or teamsCodesNotInCsv — the code matched
-    // fine, only the elo value was bad (buildEloByCode's malformedElo covers this).
+    expect(plan.teamsCodeInCsvNoUsableElo).toBe(1)
+    expect(plan.staleMarks).toEqual([{ id: 1, alreadyStale: false }])
     expect(plan.codesNotInTeams).toBe(0)
     expect(plan.teamsCodesNotInCsv).toBe(0)
     expect(plan.duplicateCodeConflicts).toBe(0)
   })
 
-  it('updates neither row, nulls neither row, and counts a conflict when two public.teams rows share a code', () => {
+  // Ticket #176: a row already marked stale on an earlier run carries that
+  // forward as alreadyStale: true, so applyTeamEloStaleMarks knows not to
+  // re-stamp elo_stale_since and lose the original moment it first went stale.
+  it('carries an already-stale row\'s prior elo_stale_since state through as alreadyStale: true (ticket #176)', () => {
+    const existingTeams = [team(2, 55, '2026-08-20T09:00:00.000Z')]
+    const elo = buildEloByCode([{ code: '90', elo: '1650' }]) // code 55 absent from CSV
+    const plan = planTeamEloUpdates(existingTeams, elo)
+    expect(plan.staleMarks).toEqual([{ id: 2, alreadyStale: true }])
+  })
+
+  it('updates neither row, preserves neither row, and counts a conflict when two public.teams rows share a code', () => {
     const existingTeams = [team(1, 90), team(2, 90)]
     const elo = buildEloByCode([{ code: '90', elo: '1650' }])
     const plan = planTeamEloUpdates(existingTeams, elo)
     expect(plan.updates).toEqual([])
-    expect(plan.nulls).toEqual([])
+    expect(plan.staleMarks).toEqual([])
     expect(plan.duplicateCodeConflicts).toBe(1)
     // Not double-counted under the other buckets.
     expect(plan.codesNotInTeams).toBe(0)
     expect(plan.teamsCodesNotInCsv).toBe(0)
   })
 
-  it('produces no updates, no nulls and no false positives against an empty CSV and an empty table', () => {
+  it('produces no updates, no preservations and no false positives against an empty CSV and an empty table', () => {
     const plan = planTeamEloUpdates([], buildEloByCode([]))
-    expect(plan).toEqual({ updates: [], nulls: [], codesNotInTeams: 0, teamsCodesNotInCsv: 0, duplicateCodeConflicts: 0 })
+    expect(plan).toEqual({
+      updates: [],
+      staleMarks: [],
+      codesNotInTeams: 0,
+      teamsCodesNotInCsv: 0,
+      teamsCodeInCsvNoUsableElo: 0,
+      duplicateCodeConflicts: 0,
+    })
+  })
+
+  // Ticket #176's own reconciliation requirement: the two new preserved-count
+  // buckets sum to the total staleMarks length, for any input.
+  it('teamsCodesNotInCsv + teamsCodeInCsvNoUsableElo reconciles exactly against staleMarks.length', () => {
+    const existingTeams = [
+      team(1, 90), // matched, updates
+      team(2, 55), // absent from CSV -> teamsCodesNotInCsv
+      team(3, 91), // in CSV, blank elo -> teamsCodeInCsvNoUsableElo
+      team(4, null), // null code -> teamsCodesNotInCsv
+    ]
+    const elo = buildEloByCode([
+      { code: '90', elo: '1650' },
+      { code: '91', elo: '' },
+    ])
+    const plan = planTeamEloUpdates(existingTeams, elo)
+    expect(plan.teamsCodesNotInCsv + plan.teamsCodeInCsvNoUsableElo).toBe(plan.staleMarks.length)
+    expect(plan.staleMarks).toHaveLength(3)
   })
 })
 
@@ -224,25 +292,54 @@ describe('source invariants (grep-based, matching the DoD wording exactly)', () 
     expect(source).not.toMatch(/onConflict:\s*['"]id['"]/)
   })
 
-  // Ticket #63's own DoD line: job_runs.details must carry a named count of
-  // teams whose elo was nulled, alongside the pre-existing counters.
-  it('reports teamsEloNulled as a named job_runs.details field (ticket #63)', () => {
-    expect(source).toMatch(/teamsEloNulled/)
+  // Ticket #176's own DoD line, replacing #63's teamsEloNulled: job_runs.details
+  // must carry a named count of teams PRESERVED rather than nulled, alongside
+  // the pre-existing counters.
+  it('reports teamsEloPreserved as a named job_runs.details field (ticket #176, replacing #63\'s teamsEloNulled)', () => {
+    expect(source).toMatch(/teamsEloPreserved/)
   })
 
-  it('references identity columns only inside TEAMS_REQUIRED_COLUMNS/comments, never as a write', () => {
+  // Ticket #176's own central DoD line: no code path anywhere in this file
+  // may set teams.elo to null. The old nulling behaviour (#63) has been
+  // replaced, not merely deprioritized.
+  it('never sets elo: null anywhere in the file (ticket #176 — #63\'s nulling is replaced)', () => {
+    expect(source).not.toMatch(/elo:\s*null/)
+  })
+
+  it('references identity columns this job never writes only inside TEAMS_REQUIRED_COLUMNS/comments, never as a write', () => {
     // Strip whole-line and trailing "// ..." comments (not URLs — those are
     // never preceded by whitespace) so what's left is code only. The DoD's
     // own wording permits these words in comments; TEAMS_REQUIRED_COLUMNS no
     // longer lists them (asserted above), so any remaining appearance in the
     // stripped code would mean a write path, which is what this actually guards.
+    // `short_name` and `name` are deliberately NOT in this list any more
+    // (ticket #176) — see the dedicated test below, which proves the
+    // narrower thing that is actually still true: they are READ from the
+    // source CSV (the club-slug fallback) but never WRITTEN to public.teams.
     const codeOnly = source
       .split('\n')
       .filter((line) => !line.trim().startsWith('//'))
       .map((line) => line.replace(/\s\/\/.*$/, ''))
       .join('\n')
-    for (const forbidden of ['short_name', 'strength_overall_home', 'strength_attack_home', 'strength_defence_home', 'pulse_id']) {
+    for (const forbidden of ['strength_overall_home', 'strength_attack_home', 'strength_defence_home', 'pulse_id']) {
       expect(codeOnly.includes(forbidden)).toBe(false)
+    }
+  })
+
+  // Ticket #176: name/short_name are now legitimately READ from teams.csv
+  // (the club-slug fallback, buildClubCodeBySlug), but the DoD's underlying
+  // invariant — this job never WRITES team identity to public.teams; that
+  // stays scripts/ingest-fpl.ts's alone — must still hold. Every
+  // .update(...)/.upsert(...) call against 'teams' in this file is checked
+  // directly rather than re-deriving the same string-matching logic above,
+  // which no longer catches this (name/short_name now appear in legitimate
+  // read paths).
+  it('never writes name or short_name to public.teams (ticket #176 — read-only use of both columns)', () => {
+    const teamsWriteCalls = source.match(/\.from\(\s*['"]teams['"]\s*\)\s*\.(update|upsert)\([^)]*\)/gs) ?? []
+    expect(teamsWriteCalls.length).toBeGreaterThan(0) // sanity: this job does write teams.elo/elo_stale_since somewhere
+    for (const call of teamsWriteCalls) {
+      expect(call).not.toMatch(/\bname\b/)
+      expect(call).not.toMatch(/\bshort_name\b/)
     }
   })
 })
@@ -662,10 +759,73 @@ describe('buildClubCodeBySlug', () => {
     expect(result.duplicateSlugs).toBe(0)
   })
 
-  it('counts, and leaves out of the map, a row with a blank fotmob_name cell — never falls back to name/short_name', () => {
+  // Ticket #176: this REVERSES the pre-#176 rule (a blank fotmob_name used to
+  // leave the club out of the map entirely, with no fallback at all — see
+  // Defect 2 in the ticket). A blank fotmob_name cell now falls back to this
+  // same row's own `name` column, single-word case.
+  it('falls back to name when fotmob_name is blank — a single-word club (ticket #176)', () => {
     const result = buildClubCodeBySlug([{ code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' }])
+    expect(result.codeBySlug.get('arsenal')).toBe(3)
+    expect(result.slugSource.get('arsenal')).toBe('name_or_short_name_fallback')
+    expect(result.blankFotmobName).toBe(1)
+    expect(result.fallbackSlugsResolved).toBe(1)
+    expect(result.fallbackSlugUnresolvable).toBe(0)
+  })
+
+  // Ticket #176's own named DoD case: a multi-word club name.
+  it('falls back to name when fotmob_name is blank — a multi-word club, wolverhampton-wanderers (ticket #176)', () => {
+    const result = buildClubCodeBySlug([{ code: '39', name: 'Wolverhampton Wanderers', short_name: 'WOL', fotmob_name: '' }])
+    expect(result.codeBySlug.get('wolverhampton-wanderers')).toBe(39)
+    expect(result.slugSource.get('wolverhampton-wanderers')).toBe('name_or_short_name_fallback')
+    expect(result.fallbackSlugsResolved).toBe(1)
+  })
+
+  // Ticket #176: falls back a level further, to short_name, only when name
+  // itself is also blank.
+  it('falls back to short_name when both fotmob_name and name are blank (ticket #176)', () => {
+    const result = buildClubCodeBySlug([{ code: '3', name: '', short_name: 'ARS', fotmob_name: '' }])
+    expect(result.codeBySlug.get('ars')).toBe(3)
+    expect(result.slugSource.get('ars')).toBe('name_or_short_name_fallback')
+    expect(result.fallbackSlugsResolved).toBe(1)
+  })
+
+  // Ticket #176's own named DoD case: a club whose derived slug matches no
+  // fixture must be counted, never guessed. buildClubCodeBySlug itself does
+  // add the derived slug to the map (it has no fixture data to check
+  // against) — the "matches no fixture" failure surfaces one layer up, at
+  // resolveOpponentTeamCode, which returns its existing named reason rather
+  // than guessing. See the dedicated resolveOpponentTeamCode/toMatchStatRow
+  // test below for that half; this test covers what buildClubCodeBySlug
+  // itself does: derives "man-utd" from the source's own abbreviated `name`
+  // column, which does not match match_id's actual "manchester-united" slug
+  // — verified directly against real fetched data, 1 Sept 2026 (see this
+  // file's header).
+  it('derives a slug from an abbreviated name that will not match any real fixture — added to the map, not guessed at here', () => {
+    const result = buildClubCodeBySlug([{ code: '1', name: 'Man Utd', short_name: 'MUN', fotmob_name: '' }])
+    expect(result.codeBySlug.get('man-utd')).toBe(1)
+    expect(result.codeBySlug.has('manchester-united')).toBe(false)
+    expect(result.fallbackSlugsResolved).toBe(1)
+  })
+
+  // Ticket #176: neither name nor short_name is usable — no slug can be
+  // derived for this club at all this run. Counted, not guessed.
+  it('counts a row as fallback-unresolvable when fotmob_name, name and short_name are all blank (ticket #176)', () => {
+    const result = buildClubCodeBySlug([{ code: '3', name: '', short_name: '', fotmob_name: '' }])
     expect(result.codeBySlug.size).toBe(0)
     expect(result.blankFotmobName).toBe(1)
+    expect(result.fallbackSlugsResolved).toBe(0)
+    expect(result.fallbackSlugUnresolvable).toBe(1)
+  })
+
+  // Ticket #176's own reconciliation requirement.
+  it('blankFotmobName reconciles exactly against fallbackSlugsResolved + fallbackSlugUnresolvable', () => {
+    const result = buildClubCodeBySlug([
+      { code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' },
+      { code: '39', name: 'Wolverhampton Wanderers', short_name: 'WOL', fotmob_name: '' },
+      { code: '4', name: '', short_name: '', fotmob_name: '' },
+    ])
+    expect(result.blankFotmobName).toBe(3)
+    expect(result.fallbackSlugsResolved + result.fallbackSlugUnresolvable).toBe(3)
   })
 
   // The real, observed 2026-2027 case (verified 31 Aug 2026): every row's
@@ -1004,6 +1164,218 @@ describe('team_code / opponent_team_code (ticket #167) — source invariants', (
     )
     expect(fnBody).toMatch(/parseMatchClubSlugs\(/)
     expect(fnBody).not.toMatch(/try\s*\{/)
+  })
+})
+
+// ============================================================================
+// countOpponentsResolvedViaFallback — ticket #176's own new counter: among
+// rows already carrying a resolved opponent_team_code, how many resolved via
+// a club slug that came from the name/short_name fallback rather than
+// fotmob_name.
+// ============================================================================
+
+describe('countOpponentsResolvedViaFallback', () => {
+  function row(overrides: Partial<MatchStatRow> = {}): MatchStatRow {
+    return {
+      player_id: 1,
+      player_code: null,
+      element_type: null,
+      team_code: 3,
+      opponent_team_code: null,
+      match_id: '26-27-prem-arsenal-vs-chelsea',
+      competition: 'prem',
+      season: '2026-2027',
+      gameweek: 1,
+      minutes_played: 90,
+      goals: 0,
+      assists: 0,
+      xg: 0,
+      xa: 0,
+      xgot: 0,
+      shots_on_target: 0,
+      tackles: 0,
+      tackles_won: 0,
+      interceptions: 0,
+      recoveries: 0,
+      blocks: 0,
+      clearances: 0,
+      headed_clearances: 0,
+      saves: 0,
+      goals_conceded: 0,
+      goals_prevented: 0,
+      team_goals_conceded: 0,
+      updated_at: '2026-09-01T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  it('counts a row whose resolved opponent came from the fallback slug source', () => {
+    const codeBySlug = new Map([
+      ['arsenal', 3],
+      ['chelsea', 8],
+    ])
+    const slugSource = new Map<string, ClubSlugSource>([
+      ['arsenal', 'fotmob_name'],
+      ['chelsea', 'name_or_short_name_fallback'],
+    ])
+    const rows = [row({ team_code: 3, opponent_team_code: 8 })]
+    expect(countOpponentsResolvedViaFallback(rows, codeBySlug, slugSource)).toBe(1)
+  })
+
+  it('does not count a row whose resolved opponent came from fotmob_name', () => {
+    const codeBySlug = new Map([
+      ['arsenal', 3],
+      ['chelsea', 8],
+    ])
+    const slugSource = new Map<string, ClubSlugSource>([
+      ['arsenal', 'fotmob_name'],
+      ['chelsea', 'fotmob_name'],
+    ])
+    const rows = [row({ team_code: 3, opponent_team_code: 8 })]
+    expect(countOpponentsResolvedViaFallback(rows, codeBySlug, slugSource)).toBe(0)
+  })
+
+  it('does not count an unresolved row (opponent_team_code null)', () => {
+    const rows = [row({ team_code: 3, opponent_team_code: null })]
+    expect(countOpponentsResolvedViaFallback(rows, new Map(), new Map())).toBe(0)
+  })
+
+  it('is always <= the number of resolved rows in the batch (reconciliation)', () => {
+    const codeBySlug = new Map([
+      ['arsenal', 3],
+      ['chelsea', 8],
+    ])
+    const slugSource = new Map<string, ClubSlugSource>([
+      ['arsenal', 'fotmob_name'],
+      ['chelsea', 'name_or_short_name_fallback'],
+    ])
+    const rows = [
+      row({ team_code: 3, opponent_team_code: 8 }),
+      row({ team_code: 8, opponent_team_code: 3 }),
+      row({ team_code: null, opponent_team_code: null }),
+    ]
+    const resolvedCount = rows.filter((r) => r.opponent_team_code !== null).length
+    const viaFallback = countOpponentsResolvedViaFallback(rows, codeBySlug, slugSource)
+    expect(viaFallback).toBeLessThanOrEqual(resolvedCount)
+  })
+})
+
+// ============================================================================
+// End-to-end: buildClubCodeBySlug's fallback feeding resolveOpponentTeamCode
+// / toMatchStatRow, ticket #176's own named DoD cases — a single-word club,
+// wolverhampton-wanderers (multi-word), and a club whose derived slug
+// matches no fixture (counted, never guessed).
+// ============================================================================
+
+describe('opponent resolution via the name/short_name fallback, end to end (ticket #176)', () => {
+  it('resolves an opponent for a 2026-2027-shaped season whose teams.csv has blank fotmob_name for every club, single-word clubs', () => {
+    // Mirrors the real 2026-2027 data/teams.csv shape verified 1 Sept 2026:
+    // fotmob_name blank for every row, name populated.
+    const teamRecords = [
+      { code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' },
+      { code: '11', name: 'Everton', short_name: 'EVE', fotmob_name: '' },
+    ]
+    const { codeBySlug, slugSource } = buildClubCodeBySlug(teamRecords)
+    const teamCodeByPlayerId = new Map([[10, 3]]) // player on Arsenal
+    const record = {
+      player_id: '10',
+      match_id: '26-27-prem-arsenal-vs-everton',
+      minutes_played: '90',
+    }
+    const matchRow = toMatchStatRow(record, '2026-2027', 1, new Map(), new Map(), teamCodeByPlayerId, codeBySlug)
+    expect(matchRow?.opponent_team_code).toBe(11)
+    expect(countOpponentsResolvedViaFallback([matchRow as MatchStatRow], codeBySlug, slugSource)).toBe(1)
+  })
+
+  it("resolves an opponent for a multi-word club name, wolverhampton-wanderers", () => {
+    const teamRecords = [
+      { code: '39', name: 'Wolverhampton Wanderers', short_name: 'WOL', fotmob_name: '' },
+      { code: '54', name: 'Fulham', short_name: 'FUL', fotmob_name: '' },
+    ]
+    const { codeBySlug } = buildClubCodeBySlug(teamRecords)
+    const teamCodeByPlayerId = new Map([[20, 54]]) // player on Fulham
+    const record = {
+      player_id: '20',
+      match_id: '26-27-prem-wolverhampton-wanderers-vs-fulham',
+      minutes_played: '90',
+    }
+    const matchRow = toMatchStatRow(record, '2026-2027', 1, new Map(), new Map(), teamCodeByPlayerId, codeBySlug)
+    expect(matchRow?.opponent_team_code).toBe(39)
+  })
+
+  it('a club whose derived slug matches no fixture resolves null and is counted, never guessed', () => {
+    // Mirrors the real observed mismatch: teams.csv's own `name` for
+    // Manchester United is the abbreviated "Man Utd", which slugifies to
+    // "man-utd" — match_id's actual slug is "manchester-united". The
+    // fallback must not correct or fuzzy-match this; it is counted under
+    // resolveOpponentTeamCode's existing named reason.
+    const teamRecords = [
+      { code: '1', name: 'Man Utd', short_name: 'MUN', fotmob_name: '' },
+      { code: '9', name: 'Hull City', short_name: 'HUL', fotmob_name: '' },
+    ]
+    const { codeBySlug } = buildClubCodeBySlug(teamRecords)
+    const teamCodeByPlayerId = new Map([[30, 9]]) // player on Hull City
+    const record = {
+      player_id: '30',
+      match_id: '26-27-prem-hull-city-vs-manchester-united',
+      minutes_played: '90',
+    }
+    const matchRow = toMatchStatRow(record, '2026-2027', 1, new Map(), new Map(), teamCodeByPlayerId, codeBySlug)
+    expect(matchRow?.opponent_team_code).toBeNull()
+    const tally = tallyOpponentResolution([matchRow as MatchStatRow], codeBySlug)
+    expect(tally.opponentUnresolvedByReason['club slug not found among known team codes']).toBe(1)
+  })
+})
+
+// ============================================================================
+// supabase/migrations/20260901090000_teams_elo_stale_since.sql and
+// supabase/README.md — grep-checkable DoD items (ticket #176).
+// ============================================================================
+
+describe('supabase/migrations/20260901090000_teams_elo_stale_since.sql', () => {
+  const migrationPath = fileURLToPath(new URL('../supabase/migrations/20260901090000_teams_elo_stale_since.sql', import.meta.url))
+  const migrationSource = readFileSync(migrationPath, 'utf8')
+
+  it('adds teams.elo_stale_since as a nullable timestamptz column with no default', () => {
+    const statementLine = migrationSource
+      .split('\n')
+      .find((line) => line.includes('ALTER TABLE public.teams ADD COLUMN IF NOT EXISTS elo_stale_since timestamptz;'))
+    expect(statementLine).toBeDefined()
+    expect(statementLine).not.toMatch(/NOT NULL/)
+    expect(statementLine).not.toMatch(/DEFAULT/)
+  })
+
+  it('is idempotent: ADD COLUMN IF NOT EXISTS', () => {
+    expect(migrationSource).toMatch(/ADD COLUMN IF NOT EXISTS/)
+  })
+
+  it('carries a COMMENT ON COLUMN for elo_stale_since', () => {
+    expect(migrationSource).toMatch(/COMMENT ON COLUMN public\.teams\.elo_stale_since IS/)
+  })
+
+  it('issues no GRANT statement — table-level grants on teams already cover new columns', () => {
+    const codeOnly = migrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
+
+  it('is wrapped in BEGIN/COMMIT', () => {
+    expect(migrationSource).toMatch(/^BEGIN;/m)
+    expect(migrationSource).toMatch(/^COMMIT;/m)
+  })
+})
+
+describe('supabase/README.md (ticket #176)', () => {
+  const readmePath = fileURLToPath(new URL('../supabase/README.md', import.meta.url))
+  const readmeSource = readFileSync(readmePath, 'utf8')
+
+  it('lists the new migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260901090000_teams_elo_stale_since\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260901090000_teams_elo_stale_since\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
   })
 })
 
