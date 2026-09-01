@@ -451,6 +451,170 @@ function toDefconMatch(m: MatchStatsRow): DefensiveContributionMatch {
 }
 
 // ============================================================================
+// Ticket #177 — position priors from EVERY qualifying row, not survivors
+// only.
+//
+// #168 measured the defect this fixes: the pre-#177 loop built the position
+// priors (and the defcon position prior, built from the same loop) by
+// joining every player_match_stats row to the LIVE players table and
+// skipping any row whose player_code wasn't found there. That is a
+// current-roster join applied to a PRIOR, not a projection -- and #168
+// measured the resulting bias directly: of the 95 forward player_codes with
+// 2025/26 Premier League minutes, the 44 dropped from the current roster
+// since then had HIGHER xA/90 (0.0728) but LOWER xG/90 (0.2768) than the 51
+// retained -- systematically better at scoring, worse at creating, exactly
+// the shape that explains why goals calibrate cleanly (1.04x) and forward
+// assists don't (0.67x). See this file's header for the full picture and
+// #146/#154 for the same fix already applied to feature_history and the
+// backtest respectively.
+//
+// Pulled out as independently-testable pure functions, same technique as
+// the #113/#119 helpers above: main()'s Supabase reads can't be exercised
+// without a live project, but row-to-prior resolution has no I/O of its
+// own.
+//
+// NOT IN SCOPE HERE: which players receive a projection row. That is
+// section 5's per-player loop in main(), which iterates playerRows (the
+// live roster) exclusively and is untouched by this ticket -- a player who
+// has left the league cannot be transferred in, so he must not appear in
+// player_projections, even though his historical rows now inform the
+// priors every OTHER player's projection rests on. See project-points.test.ts
+// for the source-invariant tests proving that population is unchanged.
+// ============================================================================
+
+/** Which source resolved one row's position for prior-building. Mirrors scripts/run-backtest.ts's PositionResolutionSource (ticket #154) -- same two-source, three-outcome shape, a different table. */
+export type PriorPositionSource = 'elementType' | 'playersFallback' | 'unresolved'
+
+export interface PriorPositionResolution {
+  position: Position | undefined
+  source: PriorPositionSource
+}
+
+/**
+ * One player_match_stats row's position, FOR POSITION-PRIOR PURPOSES ONLY
+ * (never for which players get a projection row -- see the section header
+ * above). Primary source is the row's own `element_type` (ticket #146),
+ * populated at ingest time from that season's own players.csv and
+ * therefore present even for a player who has since left the league --
+ * never dropped for that reason. `codeToPlayer` (the live roster) is a
+ * fallback for a row written before the #146 migration ONLY, never the
+ * primary source. Returns `undefined` (source 'unresolved') only when
+ * neither resolves -- see buildPositionPriorMatches for how that case is
+ * counted rather than silently dropped.
+ */
+export function resolvePriorRowPosition(
+  row: Pick<MatchStatsRow, 'player_code' | 'element_type'>,
+  codeToPlayer: ReadonlyMap<number, Pick<PlayerRow, 'element_type'>>,
+): PriorPositionResolution {
+  if (row.element_type !== null && row.element_type !== undefined) {
+    return { position: row.element_type as Position, source: 'elementType' }
+  }
+  const fallback = row.player_code !== null ? codeToPlayer.get(row.player_code) : undefined
+  if (fallback !== undefined) {
+    return { position: fallback.element_type as Position, source: 'playersFallback' }
+  }
+  return { position: undefined, source: 'unresolved' }
+}
+
+/** The four job_runs.details counters buildPositionPriorMatches produces -- see each field's own doc for what it measures and how the four reconcile. */
+export interface PositionPriorCounters {
+  /** Rows that contributed a rate-history and defcon match entry to their position's prior -- resolved via element_type or, failing that, the roster fallback. */
+  priorRowsContributing: number
+  /**
+   * Of priorRowsContributing, the rows whose player_code has NO entry in
+   * codeToPlayer -- i.e. the population #168 found silently dropped by the
+   * pre-#177 roster join (a player who has since left the league). This is
+   * the population this ticket recovers; it is always <= priorRowsContributing,
+   * never a separate bucket.
+   */
+  priorRowsContributingNoRosterEntry: number
+  /** Rows with a player_code but neither a stored element_type nor a roster entry -- cannot be attributed to any position, so they contribute to no prior. Counted, never silently dropped. */
+  priorRowsSkippedNoPosition: number
+  /**
+   * Rows with no player_code at all -- the pre-existing, unrelated #22
+   * migration gap (see matchesByPlayerCode's own comment in main()).
+   * Counted here purely so the four counters reconcile arithmetically
+   * against matchStatsRows.length: priorRowsContributing +
+   * priorRowsSkippedNoPosition + priorRowsSkippedNoPlayerCode ==
+   * matchStatsRows.length, by construction (every row falls into exactly
+   * one of the three).
+   */
+  priorRowsSkippedNoPlayerCode: number
+}
+
+export interface PositionPriorMatches {
+  rateMatchesByPosition: Record<Position, RateHistoryMatch[]>
+  defconMatchesByPosition: Record<Position, DefensiveContributionMatch[]>
+}
+
+/**
+ * Builds the per-position rate-history and defensive-contribution match
+ * lists positionPriorRates()/positionPriorHitRate() consume, from EVERY
+ * qualifying player_match_stats row (ticket #177) -- not only rows whose
+ * player_code survives onto the current roster. Resolves each row's
+ * position via resolvePriorRowPosition above. Does not read, filter, or
+ * mutate matchesByPlayerCode or anything else main() builds for the
+ * per-player projection loop -- that population is a completely separate
+ * concern (see the section header above).
+ */
+export function buildPositionPriorMatches(
+  matchStatsRows: readonly MatchStatsRow[],
+  codeToPlayer: ReadonlyMap<number, Pick<PlayerRow, 'element_type'>>,
+): PositionPriorMatches & PositionPriorCounters {
+  const rateMatchesByPosition: Record<Position, RateHistoryMatch[]> = { 1: [], 2: [], 3: [], 4: [] }
+  const defconMatchesByPosition: Record<Position, DefensiveContributionMatch[]> = { 1: [], 2: [], 3: [], 4: [] }
+  let priorRowsContributing = 0
+  let priorRowsContributingNoRosterEntry = 0
+  let priorRowsSkippedNoPosition = 0
+  let priorRowsSkippedNoPlayerCode = 0
+
+  for (const row of matchStatsRows) {
+    if (row.player_code === null) {
+      priorRowsSkippedNoPlayerCode++
+      continue // no join key on this row -- see #22 migration, a small gap is expected
+    }
+
+    const resolution = resolvePriorRowPosition(row, codeToPlayer)
+    if (resolution.position === undefined) {
+      priorRowsSkippedNoPosition++
+      continue // neither element_type nor the roster resolves a position for this row -- cannot attribute it to any prior
+    }
+
+    priorRowsContributing++
+    if (!codeToPlayer.has(row.player_code)) priorRowsContributingNoRosterEntry++
+
+    const position = resolution.position
+    rateMatchesByPosition[position].push({
+      minutesPlayed: row.minutes_played ?? 0,
+      xg: row.xg ?? 0,
+      xa: row.xa ?? 0,
+      saves: row.saves ?? 0,
+      // CBI = clearances + blocks + interceptions -- NOT tackles, same
+      // definition src/lib/scoring/bps.ts uses (ticket #78).
+      cbi: (row.clearances ?? 0) + (row.blocks ?? 0) + (row.interceptions ?? 0),
+      recoveries: row.recoveries ?? 0,
+    })
+    defconMatchesByPosition[position].push({
+      minutesPlayed: row.minutes_played ?? 0,
+      clearances: row.clearances ?? 0,
+      blocks: row.blocks ?? 0,
+      interceptions: row.interceptions ?? 0,
+      tackles: row.tackles ?? 0,
+      recoveries: row.recoveries ?? 0,
+    })
+  }
+
+  return {
+    rateMatchesByPosition,
+    defconMatchesByPosition,
+    priorRowsContributing,
+    priorRowsContributingNoRosterEntry,
+    priorRowsSkippedNoPosition,
+    priorRowsSkippedNoPlayerCode,
+  }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -681,40 +845,38 @@ async function main(): Promise<void> {
       if (player.code !== null) codeToPlayer.set(player.code, player)
     }
 
+    // matchesByPlayerCode -- every qualifying row, keyed by player_code,
+    // for section 5's PER-PLAYER loop below (which iterates playerRows, the
+    // live roster, exclusively -- a player not in the game today cannot be
+    // projected). This lookup is unaffected by ticket #177: it is still
+    // built from the SAME matchStatsRows, unfiltered by roster membership,
+    // and section 5 still only ever reads it for a player.code drawn from
+    // playerRows.
     const matchesByPlayerCode = new Map<number, MatchStatsRow[]>()
-    const rateMatchesByPosition: Record<Position, RateHistoryMatch[]> = { 1: [], 2: [], 3: [], 4: [] }
-    const defconMatchesByPosition: Record<Position, DefensiveContributionMatch[]> = { 1: [], 2: [], 3: [], 4: [] }
-
     for (const row of matchStatsRows) {
       if (row.player_code === null) continue // no join key on this row -- see #22 migration, a small gap is expected
-
       const list = matchesByPlayerCode.get(row.player_code) ?? []
       list.push(row)
       matchesByPlayerCode.set(row.player_code, list)
-
-      const player = codeToPlayer.get(row.player_code)
-      if (!player) continue // this historical player_code is not among the currently-ingested players -- contributes no position prior
-
-      const position = player.element_type as Position
-      rateMatchesByPosition[position].push({
-        minutesPlayed: row.minutes_played ?? 0,
-        xg: row.xg ?? 0,
-        xa: row.xa ?? 0,
-        saves: row.saves ?? 0,
-        // CBI = clearances + blocks + interceptions -- NOT tackles, same
-        // definition src/lib/scoring/bps.ts uses (ticket #78).
-        cbi: (row.clearances ?? 0) + (row.blocks ?? 0) + (row.interceptions ?? 0),
-        recoveries: row.recoveries ?? 0,
-      })
-      defconMatchesByPosition[position].push({
-        minutesPlayed: row.minutes_played ?? 0,
-        clearances: row.clearances ?? 0,
-        blocks: row.blocks ?? 0,
-        interceptions: row.interceptions ?? 0,
-        tackles: row.tackles ?? 0,
-        recoveries: row.recoveries ?? 0,
-      })
     }
+
+    // Ticket #177 -- the POSITION PRIORS (and the defcon position prior)
+    // are built from EVERY qualifying row, resolved via
+    // player_match_stats.element_type first, the live roster only as a
+    // fallback for a null -- see buildPositionPriorMatches's own doc and
+    // this file's header for the survivorship bias #168 measured. This is
+    // deliberately a SEPARATE pass from matchesByPlayerCode above: building
+    // a prior does not require a player to still be in the game, projecting
+    // one does -- see the file header's "current-roster join is not wrong
+    // everywhere" note.
+    const {
+      rateMatchesByPosition,
+      defconMatchesByPosition,
+      priorRowsContributing,
+      priorRowsContributingNoRosterEntry,
+      priorRowsSkippedNoPosition,
+      priorRowsSkippedNoPlayerCode,
+    } = buildPositionPriorMatches(matchStatsRows, codeToPlayer)
 
     const ratePriorByPosition = Object.fromEntries(
       POSITIONS.map((position) => [position, positionPriorRates(rateMatchesByPosition[position])]),
@@ -1098,6 +1260,21 @@ async function main(): Promise<void> {
       matchStatsRowsRead: matchStatsRows.length,
       matchStatsRowsExcludedNonPremierLeague: matchStatsRowsExcludedNonPremierLeague ?? 0,
       matchStatsRowsExcludedNullCompetition: matchStatsRowsNullCompetition ?? 0,
+      // Ticket #177 -- position priors now built from every qualifying row
+      // (resolved via player_match_stats.element_type, the live roster only
+      // as a fallback for a null), not survivors onto the current roster
+      // only. The four counters reconcile arithmetically: priorRowsContributing
+      // + priorRowsSkippedNoPosition + priorRowsSkippedNoPlayerCode ==
+      // matchStatsRowsRead, by construction of buildPositionPriorMatches
+      // (every row falls into exactly one of the three).
+      // priorRowsContributingNoRosterEntry is the population #168 found this
+      // ticket recovers -- rows from a player who has since left the
+      // Premier League, previously dropped by the roster-only join. See
+      // this file's header for #168's measured figures.
+      priorRowsContributing,
+      priorRowsContributingNoRosterEntry,
+      priorRowsSkippedNoPosition,
+      priorRowsSkippedNoPlayerCode,
       // Ticket #78 -- bonus allocation. fixturesBonusAllocated + fixturesZeroExcess ==
       // the total number of distinct fixtures staged. See docs/projection-model-backlog.md
       // G3 for what these mean and the expected range for the last one.
@@ -1118,7 +1295,10 @@ async function main(): Promise<void> {
       `neither (${playersPriceAdjustedPrior} price-adjusted: ${playersPriceAdjustedScaledUp} scaled up, ` +
       `${playersPriceAdjustedScaledDown} scaled down). Bonus: ${fixturesBonusAllocated} fixture(s) ` +
       `allocated, ${fixturesZeroExcess} zero-excess, ${playerFixturesBonusClamped} player-fixture(s) clamped, mean ` +
-      `${meanProjectedBonusAmongLikelyStarters.toFixed(2)} among likely starters.`
+      `${meanProjectedBonusAmongLikelyStarters.toFixed(2)} among likely starters. Position priors: ` +
+      `${priorRowsContributing} row(s) contributing (${priorRowsContributingNoRosterEntry} with no current-roster ` +
+      `entry), ${priorRowsSkippedNoPosition} skipped (no resolvable position), ${priorRowsSkippedNoPlayerCode} ` +
+      `skipped (no player_code).`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {
