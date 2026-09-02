@@ -29,6 +29,7 @@ import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../src/lib/scoring/ty
 import { defensiveContributionPoints } from '../src/lib/scoring/defensiveContribution.ts'
 import { positionPriorRates } from '../src/lib/projection/rates.ts'
 import { estimateDefconHitRate, positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
+import { estimateMinutes } from '../src/lib/projection/minutes.ts'
 import { projectPlayerGameweek, type GameweekProjection } from '../src/lib/projection/expectedPoints.ts'
 import { HOME_ADVANTAGE_ELO, LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
 import {
@@ -50,10 +51,12 @@ import {
   buildRecentMinutes,
   buildTeamMatchRecords,
   buildTeamSlugsByGameweek,
+  checkOracleCeiling,
   checkRankingSanityBounds,
   checkSanityBounds,
   classifyDefconSource,
   classifyFiveGameweekRow,
+  classifyRecentMinutesSource,
   classifyRow,
   CLEAN_SHEET_RATE_UPPER_BOUND,
   computeBaselineMinutesPerMatch,
@@ -62,6 +65,9 @@ import {
   computeFixtureExpectedScore,
   computeGenericConstantBaselineSpearman,
   computeLastGameweekInData,
+  computeOracleAppearanceRate,
+  computeOracleFeaturedRate,
+  computeOracleFiveGameweekEstimate,
   computeOracleRate,
   computePositionPriors,
   computeTeamStrengthAsOf,
@@ -78,6 +84,8 @@ import {
   emptyFiveGameweekExclusionCounts,
   emptyFixtureCoverageCounts,
   emptyPositionResolutionCounts,
+  emptyRecentMinutesSourceCounts,
+  emptyRecentMinutesWindowLengthDistribution,
   FIVE_GAMEWEEK_HORIZON,
   fallbackPositionPrior,
   fixtureHasSufficientHistory,
@@ -85,11 +93,14 @@ import {
   generateReportMarkdown,
   groupSeasonMatchesByPlayer,
   hasDefconCounters,
+  hasStoredRecentMinutesWindow,
   incrementDefconSource,
   incrementExclusion,
   incrementFiveGameweekExclusion,
   incrementFixtureCoverage,
   incrementPositionResolution,
+  incrementRecentMinutesSource,
+  incrementRecentMinutesWindowLength,
   inferTeamSlug,
   isFiveGameweekWindowTruncated,
   MAE_LOWER_BOUND,
@@ -161,7 +172,11 @@ const zeroPrior = (position = FORWARD): PositionPrior => ({
 // overrides; every test that does not is exercising the pre-#154 fallback
 // paths, unmodified. Ticket #175: team_code likewise defaults to null (a
 // row predating the #167 migration) — every fixture-aware test passes it
-// explicitly.
+// explicitly. Ticket #187: prior_recent_minutes likewise defaults to null (a
+// row predating the #185 migration, or never rebuilt after it landed) — every
+// test that does not pass it explicitly is exercising the pre-#187
+// single-averaged-match fallback path, unmodified, exactly like every other
+// column here.
 function featureRow(overrides: Partial<FeatureHistoryRow> & Pick<FeatureHistoryRow, 'gameweek_id' | 'player_code'>): FeatureHistoryRow {
   return {
     element_type: null,
@@ -178,6 +193,7 @@ function featureRow(overrides: Partial<FeatureHistoryRow> & Pick<FeatureHistoryR
     prior_recoveries: 0,
     prior_defcon_qualifying_matches: null,
     prior_defcon_hits: null,
+    prior_recent_minutes: null,
     ...overrides,
   }
 }
@@ -747,6 +763,143 @@ describe('averageMinutesPerMatch / buildRecentMinutes / buildDefconMatches', () 
     expect(buildDefconMatches(row)).toEqual([
       { minutesPlayed: 90, clearances: 2, blocks: 1, interceptions: 1, tackles: 3, recoveries: 5 },
     ])
+  })
+})
+
+// ============================================================================
+// buildRecentMinutes — ticket #187, Defect 1 fix. THE NAMED TEST the ticket
+// text requires: "a named test proves a five-entry window reaches
+// estimateMinutes() intact rather than being averaged."
+// ============================================================================
+
+describe('hasStoredRecentMinutesWindow / classifyRecentMinutesSource (ticket #187)', () => {
+  it('is false, and classifies as averagedFallback, when prior_recent_minutes is null — the pre-#185 case', () => {
+    expect(hasStoredRecentMinutesWindow({ prior_recent_minutes: null })).toBe(false)
+    expect(classifyRecentMinutesSource({ prior_recent_minutes: null })).toBe('averagedFallback')
+  })
+
+  it('is true, and classifies as storedWindow, when prior_recent_minutes is a real array — including the real empty-array case (prior_matches = 0)', () => {
+    expect(hasStoredRecentMinutesWindow({ prior_recent_minutes: [] })).toBe(true)
+    expect(classifyRecentMinutesSource({ prior_recent_minutes: [] })).toBe('storedWindow')
+    expect(hasStoredRecentMinutesWindow({ prior_recent_minutes: [90, 45] })).toBe(true)
+    expect(classifyRecentMinutesSource({ prior_recent_minutes: [90, 45] })).toBe('storedWindow')
+  })
+})
+
+describe('RecentMinutesSourceCounts — emptyRecentMinutesSourceCounts / incrementRecentMinutesSource (ticket #187)', () => {
+  it('tallies each of the two sources independently', () => {
+    const counts = emptyRecentMinutesSourceCounts()
+    incrementRecentMinutesSource(counts, 'storedWindow')
+    incrementRecentMinutesSource(counts, 'storedWindow')
+    incrementRecentMinutesSource(counts, 'averagedFallback')
+    expect(counts).toEqual({ fromStoredWindow: 2, fromAveragedFallback: 1 })
+  })
+})
+
+describe('RecentMinutesWindowLengthDistribution — empty/increment (ticket #187)', () => {
+  it('builds a histogram keyed by observed length, starting from an empty object', () => {
+    const distribution = emptyRecentMinutesWindowLengthDistribution()
+    expect(distribution).toEqual({})
+    incrementRecentMinutesWindowLength(distribution, 5)
+    incrementRecentMinutesWindowLength(distribution, 5)
+    incrementRecentMinutesWindowLength(distribution, 0)
+    incrementRecentMinutesWindowLength(distribution, 1)
+    expect(distribution).toEqual({ 5: 2, 0: 1, 1: 1 })
+  })
+})
+
+describe('buildRecentMinutes — reads the #185 stored window (ticket #187)', () => {
+  it('returns the stored window exactly, most-recent-first, when prior_recent_minutes is non-null — never averaged', () => {
+    const row = featureRow({
+      gameweek_id: 6,
+      player_code: 4,
+      prior_matches: 5,
+      prior_minutes: 200,
+      prior_recent_minutes: [90, 90, 20, 0, 0], // most-recent-first: the two 0s are the two MOST RECENT matches
+    })
+    // Exact array, exact order — proves "unmodified, most-recent-first",
+    // never sorted, reversed, or collapsed into a single average.
+    expect(buildRecentMinutes(row)).toEqual([90, 90, 20, 0, 0])
+  })
+
+  it('a real empty stored window ([], prior_matches = 0) returns [], the same result the pre-#187 fallback already gave for that case', () => {
+    const row = featureRow({ gameweek_id: 1, player_code: 9, prior_matches: 0, prior_minutes: 0, prior_recent_minutes: [] })
+    expect(buildRecentMinutes(row)).toEqual([])
+  })
+
+  it('mutating the returned array never mutates row.prior_recent_minutes — a defensive copy, not the same reference', () => {
+    const stored = [90, 45, 90]
+    const row = featureRow({ gameweek_id: 7, player_code: 5, prior_matches: 3, prior_minutes: 225, prior_recent_minutes: stored })
+    const result = buildRecentMinutes(row)
+    result.push(999)
+    expect(stored).toEqual([90, 45, 90])
+  })
+
+  it('falls back to the pre-#187 single-averaged-match construction when prior_recent_minutes is null (row predates the #185 migration)', () => {
+    const row = featureRow({ gameweek_id: 8, player_code: 6, prior_matches: 4, prior_minutes: 360, prior_recent_minutes: null })
+    expect(buildRecentMinutes(row)).toEqual([90]) // averageMinutesPerMatch(row) = 360/4 = 90, the old construction exactly
+  })
+
+  it(
+    'THE NAMED TEST: a five-entry stored window reaches estimateMinutes() intact, most-recent-first, unmodified — ' +
+      'never collapsed into one averaged match. This is the pSixtyPlus distinction the ticket exists to restore: a ' +
+      'player who just lost his starting place (his two MOST RECENT matches are 0 minutes) looks IDENTICAL to a ' +
+      'nailed starter under the old single-averaged-match construction (both average to the same 40 minutes, and a ' +
+      'single synthetic match is either wholly 60+ or wholly not — binary), but is CORRECTLY distinguished once the ' +
+      'true five-match window reaches estimateMinutes() directly.',
+    () => {
+      // prior_matches = 5 (exactly RECENT_MATCH_COUNT), so prior_minutes/prior_matches
+      // and the stored window's own average necessarily coincide — isolating
+      // pSixtyPlus as the one figure the fix actually changes.
+      const row = featureRow({
+        gameweek_id: 9,
+        player_code: 7,
+        prior_matches: 5,
+        prior_minutes: 200, // 90+90+20+0+0 = 200, matching the stored window's own sum exactly
+        prior_recent_minutes: [90, 90, 20, 0, 0], // most-recent-first — the two 0s are his two most recent matches
+      })
+
+      const recentMinutes = buildRecentMinutes(row)
+      expect(recentMinutes).toEqual([90, 90, 20, 0, 0]) // the array that actually reaches estimateMinutes()
+
+      const fixedEstimate = estimateMinutes(recentMinutes, 1)
+      const oldFallbackEstimate = estimateMinutes([averageMinutesPerMatch(row)], 1) // what pre-#187 buildRecentMinutes would have fed it
+
+      // Same average either way (both average to 40) — proves this test isn't
+      // accidentally exercising a different code path for the two constructions.
+      expect(fixedEstimate.expectedMinutes).toBeCloseTo(40, 10)
+      expect(oldFallbackEstimate.expectedMinutes).toBeCloseTo(40, 10)
+
+      // pSixtyPlus is where the fix actually shows up: the old single-averaged
+      // match is binary (40 < 60, so exactly 0); the true window correctly
+      // reports 2 of 5 real matches at 60+ minutes.
+      expect(oldFallbackEstimate.pSixtyPlus).toBe(0)
+      expect(fixedEstimate.pSixtyPlus).toBeCloseTo(0.4, 10)
+      expect(fixedEstimate.pSixtyPlus).not.toBe(oldFallbackEstimate.pSixtyPlus)
+    },
+  )
+
+  it('projectRow itself is measurably sensitive to the fix (not just buildRecentMinutes/estimateMinutes in isolation) — the full pipeline reaches a different projection', () => {
+    const rowFixed = featureRow({
+      gameweek_id: 10,
+      player_code: 8,
+      element_type: FORWARD,
+      prior_matches: 5,
+      prior_minutes: 200,
+      prior_recent_minutes: [90, 90, 20, 0, 0],
+    })
+    const rowFallback = featureRow({ ...rowFixed, prior_recent_minutes: null })
+    const prior = zeroPrior(FORWARD)
+
+    const fixedProjection = projectRow(rowFixed, FORWARD, prior)
+    const fallbackProjection = projectRow(rowFallback, FORWARD, prior)
+
+    // Same expectedMinutes (proven above), but pSixtyPlus differs, and
+    // pSixtyPlus feeds the appearance-points/clean-sheet/defcon terms — the
+    // two full projections must therefore differ measurably, not just at
+    // the minutes-estimate layer.
+    expect(fixedProjection.expectedMinutes).toBeCloseTo(fallbackProjection.expectedMinutes, 10)
+    expect(fixedProjection.expectedPoints).not.toBeCloseTo(fallbackProjection.expectedPoints, 10)
   })
 })
 
@@ -2246,6 +2399,182 @@ describe('computeOracleRate — THE MOST IMPORTANT TEST IN THIS TICKET: no gamew
   })
 })
 
+// ============================================================================
+// Ticket #187 — the oracle fix. The five-gameweek target is a TOTAL, not a
+// rate (computeOracleRate above stays exactly as it was, still correct, and
+// still used unmodified for the one-gameweek oracle) — computeOracleFeaturedRate
+// / computeOracleAppearanceRate / computeOracleFiveGameweekEstimate below
+// build the new leave-window-out TOTAL. Mirrors the computeOracleRate block
+// above section-for-section: the leak guard first (both factors), then the
+// combining function, then the null/zero edge case the ticket's own notes
+// call out explicitly.
+// ============================================================================
+
+describe('computeOracleFeaturedRate (ticket #187)', () => {
+  it('excludes the window, and only averages over FEATURED out-of-window gameweeks — an unfeatured week must not dilute the rate', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 6, matches: 1, featured: true },
+      { playerCode: 1, gameweekId: 2, points: 0, matches: 1, featured: false }, // unfeatured — must not count toward the featured-rate denominator
+      { playerCode: 1, gameweekId: 3, points: 4, matches: 1, featured: true },
+      { playerCode: 1, gameweekId: 7, points: 1000, matches: 1, featured: true }, // inside the window — must not leak
+    ]
+    const rate = computeOracleFeaturedRate(seasonMatches, new Set([5, 6, 7, 8, 9]))
+    expect(rate).toBe(5) // (6 + 4) / 2 featured gameweeks — gw2 (unfeatured) and gw7 (in-window) both excluded
+  })
+
+  it('null when the player has zero FEATURED matches outside the window — never a guessed rate', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 0, matches: 1, featured: false },
+      { playerCode: 1, gameweekId: 2, points: 0, matches: 1, featured: false },
+    ]
+    expect(computeOracleFeaturedRate(seasonMatches, new Set([5]))).toBeNull()
+  })
+})
+
+describe('computeOracleAppearanceRate — THE MOST IMPORTANT TEST IN THIS TICKET: the appearance factor is exactly as leak-guarded as the scoring rate', () => {
+  it(
+    'is driven ENTIRELY by out-of-window data — an outrageous, unmissable change to the WINDOW\'S OWN featured ' +
+      'status (all featured vs all unfeatured) must not move the result at all',
+    () => {
+      const outsideWindow: readonly PlayerSeasonMatch[] = [
+        { playerCode: 1, gameweekId: 1, points: 2, matches: 1, featured: true },
+        { playerCode: 1, gameweekId: 2, points: 2, matches: 1, featured: true },
+        { playerCode: 1, gameweekId: 3, points: 0, matches: 1, featured: false },
+        { playerCode: 1, gameweekId: 4, points: 2, matches: 1, featured: true },
+      ] // out-of-window: 3 of 4 featured -> appearance rate 0.75, whatever the window says
+
+      // Variant A: the player features in EVERY window gameweek (5-9) — the
+      // spectacular, unmissable leak trap for an appearance-rate leak (if
+      // this leaked, the result would rise toward 1.0).
+      const allFeaturedInWindow: PlayerSeasonMatch[] = [
+        ...outsideWindow,
+        ...[5, 6, 7, 8, 9].map((gw) => ({ playerCode: 1, gameweekId: gw, points: 1000, matches: 1, featured: true })),
+      ]
+      // Variant B: the player NEVER features in the window (if this leaked,
+      // the result would fall toward 0).
+      const neverFeaturedInWindow: PlayerSeasonMatch[] = [
+        ...outsideWindow,
+        ...[5, 6, 7, 8, 9].map((gw) => ({ playerCode: 1, gameweekId: gw, points: 0, matches: 1, featured: false })),
+      ]
+
+      const excludeGameweeks = new Set([5, 6, 7, 8, 9])
+      const rateA = computeOracleAppearanceRate(allFeaturedInWindow, excludeGameweeks)
+      const rateB = computeOracleAppearanceRate(neverFeaturedInWindow, excludeGameweeks)
+
+      expect(rateA).toBe(0.75)
+      expect(rateB).toBe(0.75)
+      expect(rateA).toBe(rateB) // identical regardless of the window's own (huge, unmissable) featured signal
+    },
+  )
+
+  it('null when there are zero out-of-window entries at all — no evidence, never a guessed rate', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [{ playerCode: 1, gameweekId: 5, points: 2, matches: 1, featured: true }]
+    expect(computeOracleAppearanceRate(seasonMatches, new Set(buildFiveGameweekWindow(5)))).toBeNull()
+  })
+
+  it('a real 0 (out-of-window entries exist, none featured) is returned as exactly 0, not null — a genuine "never plays" signal', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 0, matches: 1, featured: false },
+      { playerCode: 1, gameweekId: 2, points: 0, matches: 1, featured: false },
+    ]
+    expect(computeOracleAppearanceRate(seasonMatches, new Set([5]))).toBe(0)
+  })
+})
+
+describe('computeOracleFiveGameweekEstimate — the fix itself: a TOTAL, not a rate (ticket #187)', () => {
+  it('multiplies the featured rate by the appearance rate by the horizon width — hand-computed', () => {
+    // Out-of-window: gw1 featured 6pts, gw2 unfeatured 0pts, gw3 featured
+    // 4pts, gw4 featured 8pts -> featured rate (6+4+8)/3 = 6, appearance
+    // rate 3/4 = 0.75. Estimate = 6 * 0.75 * 5 = 22.5.
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 6, matches: 1, featured: true },
+      { playerCode: 1, gameweekId: 2, points: 0, matches: 1, featured: false },
+      { playerCode: 1, gameweekId: 3, points: 4, matches: 1, featured: true },
+      { playerCode: 1, gameweekId: 4, points: 8, matches: 1, featured: true },
+    ]
+    const estimate = computeOracleFiveGameweekEstimate(seasonMatches, new Set(buildFiveGameweekWindow(5)), FIVE_GAMEWEEK_HORIZON)
+    expect(estimate).toBeCloseTo(22.5, 10)
+  })
+
+  it('a player who never features outside the window resolves to EXACTLY 0, not null (appearanceRate 0, featuredRate null -> 0 * 0 * horizon)', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 0, matches: 1, featured: false },
+      { playerCode: 1, gameweekId: 2, points: 0, matches: 1, featured: false },
+    ]
+    const estimate = computeOracleFiveGameweekEstimate(seasonMatches, new Set([5]), FIVE_GAMEWEEK_HORIZON)
+    expect(estimate).toBe(0)
+    expect(estimate).not.toBeNull()
+  })
+
+  it('null when there is no out-of-window evidence at all', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [{ playerCode: 1, gameweekId: 5, points: 10, matches: 1, featured: true }]
+    expect(computeOracleFiveGameweekEstimate(seasonMatches, new Set(buildFiveGameweekWindow(5)), FIVE_GAMEWEEK_HORIZON)).toBeNull()
+  })
+
+  it(
+    'THE FULL LEAK-GUARD TEST, end to end: an outrageous, unmissable change to the WINDOW\'S OWN points AND featured ' +
+      'status must not move the five-gameweek TOTAL estimate at all',
+    () => {
+      const outsideWindow: readonly PlayerSeasonMatch[] = [
+        { playerCode: 1, gameweekId: 1, points: 3, matches: 1, featured: true },
+        { playerCode: 1, gameweekId: 2, points: 3, matches: 1, featured: true },
+        { playerCode: 1, gameweekId: 3, points: 0, matches: 1, featured: false },
+        { playerCode: 1, gameweekId: 4, points: 3, matches: 1, featured: true },
+      ]
+      const excludeGameweeks = new Set(buildFiveGameweekWindow(10))
+      const leakTrapHigh: PlayerSeasonMatch[] = [
+        ...outsideWindow,
+        ...buildFiveGameweekWindow(10).map((gw) => ({ playerCode: 1, gameweekId: gw, points: 999, matches: 1, featured: true })),
+      ]
+      const leakTrapLow: PlayerSeasonMatch[] = [
+        ...outsideWindow,
+        ...buildFiveGameweekWindow(10).map((gw) => ({ playerCode: 1, gameweekId: gw, points: 0, matches: 1, featured: false })),
+      ]
+      const estimateHigh = computeOracleFiveGameweekEstimate(leakTrapHigh, excludeGameweeks, FIVE_GAMEWEEK_HORIZON)
+      const estimateLow = computeOracleFiveGameweekEstimate(leakTrapLow, excludeGameweeks, FIVE_GAMEWEEK_HORIZON)
+      expect(estimateHigh).toBe(estimateLow) // identical regardless of the window's own (huge, unmissable) points/featured signal
+      expect(estimateHigh).toBeCloseTo(3 * 0.75 * FIVE_GAMEWEEK_HORIZON, 10) // = 11.25, driven only by outsideWindow
+    },
+  )
+})
+
+describe('checkOracleCeiling (ticket #187)', () => {
+  it('ok when the oracle sits strictly above the model at both horizons', () => {
+    const result = checkOracleCeiling(0.3, 0.35, 0.4, 0.48)
+    expect(result).toEqual({ ok: true, failures: [] })
+  })
+
+  it('fails when the model meets or beats the one-gameweek oracle', () => {
+    const tied = checkOracleCeiling(0.35, 0.35, 0.4, 0.48)
+    expect(tied.ok).toBe(false)
+    expect(tied.failures).toHaveLength(1)
+    expect(tied.failures[0]).toMatch(/one-gameweek/)
+
+    const beats = checkOracleCeiling(0.4, 0.35, 0.4, 0.48)
+    expect(beats.ok).toBe(false)
+  })
+
+  it('fails when the model meets or beats the five-gameweek oracle — the exact shape ticket #89/#187 was written to catch (model 0.672 vs oracle 0.507)', () => {
+    const result = checkOracleCeiling(0.325, 0.336, 0.672, 0.507)
+    expect(result.ok).toBe(false)
+    expect(result.failures).toHaveLength(1)
+    expect(result.failures[0]).toMatch(/five-gameweek/)
+    expect(result.failures[0]).toContain('0.672')
+    expect(result.failures[0]).toContain('0.507')
+  })
+
+  it('reports both horizons independently when both fail', () => {
+    const result = checkOracleCeiling(0.4, 0.3, 0.5, 0.4)
+    expect(result.ok).toBe(false)
+    expect(result.failures).toHaveLength(2)
+  })
+
+  it('null on either side of a comparison skips it — insufficient data is not the same failure as a ceiling the model exceeds', () => {
+    expect(checkOracleCeiling(null, null, null, null)).toEqual({ ok: true, failures: [] })
+    expect(checkOracleCeiling(0.9, null, 0.9, null)).toEqual({ ok: true, failures: [] })
+  })
+})
+
 describe('buildPlayerSeasonMatches / groupSeasonMatchesByPlayer', () => {
   it('reconstructs one points/matches pair per (player, gameweek) via the SAME aggregateActualForGameweek used everywhere else in this file', () => {
     const groups = [
@@ -2254,9 +2583,9 @@ describe('buildPlayerSeasonMatches / groupSeasonMatchesByPlayer', () => {
     ]
     const matches = buildPlayerSeasonMatches(groups, () => FORWARD)
     expect(matches).toHaveLength(2)
-    expect(matches[0]).toMatchObject({ playerCode: 1, gameweekId: 1, matches: 1 })
+    expect(matches[0]).toMatchObject({ playerCode: 1, gameweekId: 1, matches: 1, featured: true })
     expect(matches[0].points).toBeGreaterThan(0) // a goal was scored
-    expect(matches[1]).toMatchObject({ playerCode: 1, gameweekId: 2, points: 0, matches: 1 })
+    expect(matches[1]).toMatchObject({ playerCode: 1, gameweekId: 2, points: 0, matches: 1, featured: false }) // ticket #187 — a matched row with 0 minutes is NOT featured
   })
 
   it('skips a (player, gameweek) group whose position cannot be resolved — points cannot be computed without one', () => {
@@ -2635,6 +2964,8 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     exclusions: emptyExclusionCounts(),
     positionResolution: emptyPositionResolutionCounts(),
     defconSource: emptyDefconSourceCounts(),
+    recentMinutesSource: emptyRecentMinutesSourceCounts(),
+    recentMinutesWindowLengthDistribution: emptyRecentMinutesWindowLengthDistribution(),
     featureHistoryRowsRead: 1,
     actualRowsMatched: 1,
     playersRowCount: 1,
@@ -2663,6 +2994,7 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
       baselineVerdicts: buildBaselineVerdicts(fgSeason.spearman, fgBaselines),
       oracleOneGw: { season: fgSeason, byPosition: fgByPosition, insufficientData: 0 },
       oracleFiveGw: { season: fgSeason, byPosition: fgByPosition, insufficientData: 0 },
+      oracleCeiling: { ok: true, failures: [] },
     },
   }
 
@@ -2678,6 +3010,36 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     const outputHeaders = [...output.matchAll(/^#{1,3} .+$/gm)].map((m) => m[0])
     expect(outputHeaders.slice(0, preTicketHeaders.length)).toEqual(preTicketHeaders)
     expect(outputHeaders.length).toBeGreaterThan(preTicketHeaders.length)
+  })
+
+  // Ticket #187 — appended strictly after the five-gameweek section (see
+  // generateReportMarkdown's own final two pushes). Everything through the
+  // end of the five-gameweek section stays byte-identical (proven above);
+  // this only proves the #187 additions exist, in the right relative order.
+  it('appends the oracle-ceiling check and the minutes-evidence section after the five-gameweek section, in that order', () => {
+    const output = generateReportMarkdown(data)
+    const fiveGwHeaderIndex = output.indexOf('\n\n## Five-gameweek ranking (ticket #183)')
+    const ceilingIndex = output.indexOf('### Oracle-ceiling check: PASSED')
+    const minutesIndex = output.indexOf('## Minutes evidence (ticket #187)')
+    expect(fiveGwHeaderIndex).toBeGreaterThan(-1)
+    expect(ceilingIndex).toBeGreaterThan(fiveGwHeaderIndex)
+    expect(minutesIndex).toBeGreaterThan(ceilingIndex)
+    expect(output).toContain(`window (ticket #185/#187): ${data.recentMinutesSource.fromStoredWindow}`)
+    expect(output).toContain(`read as suspect): ${data.recentMinutesSource.fromAveragedFallback}`)
+  })
+
+  it('the oracle-ceiling check reports FAILED, with its failure text, when oracleCeiling.ok is false', () => {
+    const failingData: ReportData = {
+      ...data,
+      fiveGameweek: {
+        ...data.fiveGameweek,
+        oracleCeiling: { ok: false, failures: ['five-gameweek quality oracle (Spearman 0.507) does not sit above the model (0.672) — same reasoning as the one-gameweek check above.'] },
+      },
+    }
+    const output = generateReportMarkdown(failingData)
+    expect(output).toContain('### Oracle-ceiling check: FAILED')
+    expect(output).toContain('0.672')
+    expect(output).toContain('0.507')
   })
 })
 
@@ -2932,6 +3294,10 @@ describe('run-backtest.ts — the join is on player_code, never player_id', () =
 
   it('ticket #175: feature_history select also reads team_code, the player\'s own club', () => {
     expect(source).toMatch(/'gameweek_id, player_code, element_type, team_code, prior_matches/)
+  })
+
+  it('ticket #187: feature_history select also reads prior_recent_minutes, the #185 stored last-five-match window', () => {
+    expect(source).toMatch(/prior_defcon_qualifying_matches, prior_defcon_hits, prior_recent_minutes'/)
   })
 
   it('selects match_id from player_match_stats — ticket #140, team-slug inference for blank-gameweek detection only, never used for point reconstruction', () => {

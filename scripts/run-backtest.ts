@@ -654,6 +654,25 @@ export interface FeatureHistoryPriorFields {
    * means never computed; 0 is a real measurement.
    */
   prior_defcon_hits: number | null
+  /**
+   * Ticket #181/#185/#187. This player's minutes played in his most recent
+   * Premier League matches with a resolvable player_code — the SAME
+   * contributing-row set `prior_matches` and every other `prior_*` total are
+   * built from — STRICTLY BEFORE `gameweek_id`, MOST RECENT FIRST, capped at
+   * `minutes.ts`'s `RECENT_MATCH_COUNT` (5). NOT filtered by any
+   * minutes-played threshold — cameo appearances count, matching
+   * `estimateMinutes()`'s own window exactly (never the unrelated
+   * 60-minute `isQualifyingMatch()` rule `prior_defcon_qualifying_matches`
+   * uses). NULL means this row predates the #185 migration or was never
+   * rebuilt after it landed — a genuine "not yet computed" gap, distinct
+   * from a real empty array (a player with `prior_matches = 0`, e.g. his
+   * first ingested gameweek). Ticket #185 stored this column; this is the
+   * first ticket to read it — see `buildRecentMinutes` below, and
+   * `supabase/migrations/20260902090000_feature_history_recent_minutes.sql`
+   * for the full definition (not restated here beyond what that function
+   * needs).
+   */
+  prior_recent_minutes: number[] | null
 }
 
 export interface FeatureHistoryRow extends FeatureHistoryPriorFields {
@@ -746,13 +765,81 @@ export function computeBaselineXgXaPerMatch(row: Pick<FeatureHistoryPriorFields,
 }
 
 /**
- * The single-averaged-match approximation this file's header documents —
- * feature_history has no last-five-match list, so this feeds minutes.ts's
- * estimateMinutes() one "typical match" (average minutes per prior match)
- * rather than a true recent-form window. Empty for a player with no prior
- * matches — minutes.ts's own no-history baseline applies unmodified.
+ * Ticket #187. True when a feature_history row carries the #185 stored
+ * last-five-match minutes window — distinguishes "zero prior matches, a
+ * real empty array" ([], see the migration's own column comment) from
+ * "never computed" (null — a row predating the #185 migration or never
+ * rebuilt after it landed). Mirrors `hasDefconCounters`'s own null-check
+ * shape exactly: an explicit empty array is a real value, only null/
+ * undefined means "not yet computed".
  */
-export function buildRecentMinutes(row: Pick<FeatureHistoryPriorFields, 'prior_matches' | 'prior_minutes'>): number[] {
+export function hasStoredRecentMinutesWindow(row: Pick<FeatureHistoryPriorFields, 'prior_recent_minutes'>): boolean {
+  return row.prior_recent_minutes !== null && row.prior_recent_minutes !== undefined
+}
+
+/** Ticket #187. Which construction `buildRecentMinutes` used for one row — surfaced so main() can count and report both, mirroring `DefconMatchSource`/`classifyDefconSource` exactly. */
+export type RecentMinutesSource = 'storedWindow' | 'averagedFallback'
+
+/** Ticket #187. Pure classifier mirroring `buildRecentMinutes`'s own branch — the branch main() counts is the exact same branch buildRecentMinutes takes, never a second guess at it. */
+export function classifyRecentMinutesSource(row: Pick<FeatureHistoryPriorFields, 'prior_recent_minutes'>): RecentMinutesSource {
+  return hasStoredRecentMinutesWindow(row) ? 'storedWindow' : 'averagedFallback'
+}
+
+/** Ticket #187. A strict 2-way partition of every `feature_history` row read (mirrors `DefconSourceCounts` exactly) — how many rows fed `estimateMinutes()` the true #185 stored window vs the pre-#185 single-averaged-match fallback. */
+export interface RecentMinutesSourceCounts {
+  fromStoredWindow: number
+  fromAveragedFallback: number
+}
+
+export function emptyRecentMinutesSourceCounts(): RecentMinutesSourceCounts {
+  return { fromStoredWindow: 0, fromAveragedFallback: 0 }
+}
+
+/** Mutates counts in place from one row's `classifyRecentMinutesSource` result. */
+export function incrementRecentMinutesSource(counts: RecentMinutesSourceCounts, source: RecentMinutesSource): void {
+  if (source === 'storedWindow') counts.fromStoredWindow++
+  else counts.fromAveragedFallback++
+}
+
+/**
+ * Ticket #187. Histogram of `buildRecentMinutes(row).length` across every
+ * `feature_history` row read — 0–5 for a row on the stored #185 window
+ * (min(prior_matches, 5) by that column's own construction), 0–1 for a row
+ * on the pre-#185 averaged-match fallback. Keyed by length rather than a
+ * fixed-size array/tuple so this file never has to import `RECENT_MATCH_COUNT`
+ * from `minutes.ts` just to size a bucket list — any length that actually
+ * occurs gets its own entry.
+ */
+export type RecentMinutesWindowLengthDistribution = Record<number, number>
+
+export function emptyRecentMinutesWindowLengthDistribution(): RecentMinutesWindowLengthDistribution {
+  return {}
+}
+
+export function incrementRecentMinutesWindowLength(distribution: RecentMinutesWindowLengthDistribution, length: number): void {
+  distribution[length] = (distribution[length] ?? 0) + 1
+}
+
+/**
+ * Ticket #187 — the fix. Prefers the #185 stored last-five-match window
+ * (`prior_recent_minutes`), returned EXACTLY as stored: most-recent-first,
+ * unmodified — never sorted, reversed, or averaged. Falls back to the
+ * pre-#187 single-averaged-match approximation this file's header
+ * documented ("feeds minutes.ts's estimateMinutes() one 'typical match'")
+ * only when the column is null (a row predating the #185 migration or never
+ * rebuilt after it landed — see `hasStoredRecentMinutesWindow`), counted via
+ * `classifyRecentMinutesSource`/`RecentMinutesSourceCounts` in main() so the
+ * fallback's prevalence is visible in the report, never silent. A defensive
+ * copy (`[...]`) is returned for the stored-window path so a caller can
+ * never mutate `row.prior_recent_minutes` itself through this function's
+ * result.
+ */
+export function buildRecentMinutes(
+  row: Pick<FeatureHistoryPriorFields, 'prior_matches' | 'prior_minutes' | 'prior_recent_minutes'>,
+): number[] {
+  if (hasStoredRecentMinutesWindow(row)) {
+    return [...(row.prior_recent_minutes as number[])]
+  }
   return row.prior_matches > 0 ? [averageMinutesPerMatch(row)] : []
 }
 
@@ -2854,12 +2941,24 @@ export interface PlayerGameweekActualGroup {
   rows: readonly ActualMatchStatsInput[]
 }
 
-/** One (player, gameweek) actual points/matches pair — the raw material computeOracleRate sums over, excluding whichever gameweeks the caller's target window covers. */
+/**
+ * One (player, gameweek) actual points/matches pair — the raw material computeOracleRate sums over, excluding whichever gameweeks the caller's target window covers.
+ *
+ * `featured` (ticket #187) is OPTIONAL: real data from `buildPlayerSeasonMatches`
+ * below always sets it, but it is optional on the TYPE so every pre-#187 test
+ * literal in this file's own test suite (`computeOracleRate`'s own leak-guard
+ * tests, `groupSeasonMatchesByPlayer`'s bucketing test) keeps compiling and
+ * exercising `computeOracleRate` unmodified — that function never reads this
+ * field. Only the new #187 appearance-rate functions below read it, and every
+ * test that exercises those sets it explicitly.
+ */
 export interface PlayerSeasonMatch {
   playerCode: number
   gameweekId: number
   points: number
   matches: number
+  /** True if the player featured (any minutes > 0) this gameweek — see the interface comment above. */
+  featured?: boolean
 }
 
 /** Reconstructs every (player, gameweek) actual outcome for the WHOLE season (not gated by the measured-population rules above — the oracle needs a player's full season record, including gameweeks the model-accuracy sections exclude) via the SAME aggregateActualForGameweek used everywhere else in this file. A player whose position cannot be resolved (`positionOf` returns undefined) is skipped — points cannot be computed without a position. */
@@ -2872,7 +2971,13 @@ export function buildPlayerSeasonMatches(
     const position = positionOf(g.playerCode)
     if (position === undefined) continue
     const outcome = aggregateActualForGameweek(position, g.rows)
-    result.push({ playerCode: g.playerCode, gameweekId: g.gameweekId, points: outcome.totalPoints, matches: outcome.matchesFound })
+    result.push({
+      playerCode: g.playerCode,
+      gameweekId: g.gameweekId,
+      points: outcome.totalPoints,
+      matches: outcome.matchesFound,
+      featured: outcome.featured,
+    })
   }
   return result
 }
@@ -2911,6 +3016,148 @@ export function computeOracleRate(playerSeasonMatches: readonly PlayerSeasonMatc
   return matches > 0 ? points / matches : null
 }
 
+// ----------------------------------------------------------------------------
+// Ticket #187 — the oracle fix. `computeOracleRate` above is UNCHANGED and
+// still the one-gameweek oracle's own rate (ticket text: "a per-gameweek
+// figure for the single-gameweek target, matching [its] units" — a
+// points-per-match rate already matches a single gameweek's units closely
+// enough, per the ticket's own explicit scoping to the five-gameweek target
+// only; see this file's "FIVE-GAMEWEEK RANKING TARGET" section header,
+// "THE QUALITY ORACLE", for the defect this section fixes).
+//
+// The five-gameweek target is a TOTAL, not a rate, so the oracle fed to it
+// must estimate a total: (points per FEATURED out-of-window gameweek) ×
+// (out-of-window appearance rate) × (the horizon width). Both factors are
+// leak-guarded EXACTLY like computeOracleRate above — the SAME
+// `excludeGameweeks.has(m.gameweekId)` check, repeated in each function
+// below rather than factored through computeOracleRate, so each factor's
+// own leak guard is independently visible and independently testable (the
+// ticket's own instruction: "the appearance rate is exactly as leak-prone as
+// the scoring rate").
+// ----------------------------------------------------------------------------
+
+/**
+ * Ticket #187. The out-of-window rate factor for the five-gameweek TOTAL
+ * estimate — points per FEATURED gameweek (never per raw match/fixture row:
+ * conditioning on `featured` keeps this factor answering "how well does he
+ * score when he actually plays", never diluted by benched weeks, which the
+ * separate `computeOracleAppearanceRate` factor already accounts for — see
+ * this section's header for why the two factors must not double-count the
+ * same non-appearance risk). Null when the player has zero FEATURED matches
+ * outside the window — no evidence to rank on, never a guessed rate.
+ */
+export function computeOracleFeaturedRate(playerSeasonMatches: readonly PlayerSeasonMatch[], excludeGameweeks: ReadonlySet<number>): number | null {
+  let points = 0
+  let featuredCount = 0
+  for (const m of playerSeasonMatches) {
+    if (excludeGameweeks.has(m.gameweekId)) continue
+    if (m.featured !== true) continue
+    points += m.points
+    featuredCount++
+  }
+  return featuredCount > 0 ? points / featuredCount : null
+}
+
+/**
+ * Ticket #187. The out-of-window appearance-rate factor for the
+ * five-gameweek TOTAL estimate — the fraction of out-of-window (player,
+ * gameweek) entries in which the player featured. THIS IS THE LEAK RISK THE
+ * TICKET NAMES EXPLICITLY: it is tempting to use how many of the FIVE WINDOW
+ * gameweeks the player actually featured in, but that is inside the window
+ * and would be a leak producing a spectacular, wrong ceiling — this function
+ * only ever looks outside it, via the identical `excludeGameweeks.has(...)`
+ * guard `computeOracleRate`/`computeOracleFeaturedRate` use. Null when there
+ * are zero out-of-window entries at all (no evidence, never a guessed rate);
+ * a real 0 (out-of-window entries exist, none featured) is returned as 0 —
+ * a genuine "never plays" signal, not missing data. See
+ * `computeOracleFiveGameweekEstimate`'s own comment for why that distinction
+ * matters to the caller.
+ */
+export function computeOracleAppearanceRate(playerSeasonMatches: readonly PlayerSeasonMatch[], excludeGameweeks: ReadonlySet<number>): number | null {
+  let featuredCount = 0
+  let total = 0
+  for (const m of playerSeasonMatches) {
+    if (excludeGameweeks.has(m.gameweekId)) continue
+    total++
+    if (m.featured === true) featuredCount++
+  }
+  return total > 0 ? featuredCount / total : null
+}
+
+/**
+ * Ticket #187 — THE MOST IMPORTANT FUNCTION IN THIS TICKET (ticket text: "a
+ * named test proves no data from inside the target window reaches the
+ * oracle — including the appearance-rate factor"). The five-gameweek
+ * quality-oracle TOTAL: `computeOracleFeaturedRate` × `computeOracleAppearanceRate`
+ * × `horizonWidth`, both factors computed from the SAME out-of-window
+ * `playerSeasonMatches`/`excludeGameweeks` this function itself never reads
+ * directly — every leak guard lives in the two functions above, not
+ * duplicated here. Null only when there is NO out-of-window evidence at all
+ * (`computeOracleAppearanceRate` returns null); a player with out-of-window
+ * evidence who simply never featured in any of it (`appearanceRate === 0`)
+ * resolves to exactly 0, not null — `computeOracleFeaturedRate` is null in
+ * that case too (no featured matches to average), so `rate ?? 0` reflects
+ * "he is estimated to score 0 because he is estimated to never play",
+ * arithmetically the same conclusion either way but stated without relying
+ * on `0 × null` type-coercion.
+ */
+export function computeOracleFiveGameweekEstimate(
+  playerSeasonMatches: readonly PlayerSeasonMatch[],
+  excludeGameweeks: ReadonlySet<number>,
+  horizonWidth: number,
+): number | null {
+  const appearanceRate = computeOracleAppearanceRate(playerSeasonMatches, excludeGameweeks)
+  if (appearanceRate === null) return null
+  const rate = computeOracleFeaturedRate(playerSeasonMatches, excludeGameweeks)
+  return (rate ?? 0) * appearanceRate * horizonWidth
+}
+
+/**
+ * Ticket #187. `checkOracleCeiling`'s own result shape — mirrors
+ * `RankingSanityCheckResult`'s `{ ok, failures }` exactly so main() folds it
+ * into the SAME combined failure gate the existing sanity checks already
+ * use, no new job-status mechanism invented.
+ */
+export interface OracleCeilingCheckResult {
+  ok: boolean
+  failures: string[]
+}
+
+/**
+ * Ticket #187, DoD: "The oracle sits above the model at both horizons. If it
+ * does not, STOP and report rather than shipping a ceiling the model
+ * exceeds — that's a finding, not a pass." A hindsight ceiling the model
+ * meets or beats means the CEILING is mis-specified, not that the model
+ * found headroom that does not exist (ticket #183 said so explicitly, and
+ * ticket #89/#187's own history — model 0.672 vs oracle 0.507 at five
+ * gameweeks, pre-fix — is exactly the shape this check exists to catch
+ * automatically rather than relying on a human reading the report). `>=`,
+ * not `>` alone: a tie is not "the oracle sits above the model" either. Null
+ * on either side of a comparison skips it (insufficient data to compare is
+ * not the same failure as a ceiling the model exceeds).
+ */
+export function checkOracleCeiling(
+  oneGwModelSpearman: number | null,
+  oneGwOracleSpearman: number | null,
+  fiveGwModelSpearman: number | null,
+  fiveGwOracleSpearman: number | null,
+): OracleCeilingCheckResult {
+  const failures: string[] = []
+  if (oneGwModelSpearman !== null && oneGwOracleSpearman !== null && oneGwModelSpearman >= oneGwOracleSpearman) {
+    failures.push(
+      `one-gameweek quality oracle (Spearman ${oneGwOracleSpearman.toFixed(3)}) does not sit above the model (${oneGwModelSpearman.toFixed(3)}) — ` +
+        'a hindsight ceiling the model meets or exceeds means the oracle is mis-specified, not that the model beat its own ceiling.',
+    )
+  }
+  if (fiveGwModelSpearman !== null && fiveGwOracleSpearman !== null && fiveGwModelSpearman >= fiveGwOracleSpearman) {
+    failures.push(
+      `five-gameweek quality oracle (Spearman ${fiveGwOracleSpearman.toFixed(3)}) does not sit above the model (${fiveGwModelSpearman.toFixed(3)}) — ` +
+        'same reasoning as the one-gameweek check above.',
+    )
+  }
+  return { ok: failures.length === 0, failures }
+}
+
 // ============================================================================
 // Report generation.
 // ============================================================================
@@ -2933,6 +3180,9 @@ export interface ReportData {
   /** Ticket #154. */
   positionResolution: PositionResolutionCounts
   defconSource: DefconSourceCounts
+  /** Ticket #187. */
+  recentMinutesSource: RecentMinutesSourceCounts
+  recentMinutesWindowLengthDistribution: RecentMinutesWindowLengthDistribution
   featureHistoryRowsRead: number
   actualRowsMatched: number
   playersRowCount: number
@@ -2982,6 +3232,8 @@ interface FiveGameweekReportData {
     byPosition: Record<Position, PositionRankingSummary>
     insufficientData: number
   }
+  /** Ticket #187, DoD: "the oracle sits above the model at both horizons ... if it does not, STOP and report". */
+  oracleCeiling: OracleCeilingCheckResult
 }
 
 function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): string {
@@ -3330,7 +3582,54 @@ export function generateReportMarkdown(data: ReportData): string {
   // for the same ReportData (see this file's own test).
   sections.push(...buildFiveGameweekSections(data))
 
+  // Ticket #187 — appended strictly AFTER the five-gameweek section above,
+  // for the identical reason (nothing above this line touched; the report
+  // through the end of the five-gameweek section stays byte-identical for
+  // the same ReportData).
+  sections.push(buildRecentMinutesEvidenceSection(data))
+
   return sections.join('\n\n') + '\n'
+}
+
+/** Ticket #187. Renders the window-length histogram as a markdown table, sorted ascending by length. */
+function buildRecentMinutesWindowLengthTable(distribution: RecentMinutesWindowLengthDistribution): string {
+  const lengths = Object.keys(distribution)
+    .map(Number)
+    .sort((a, b) => a - b)
+  const header = '| Window length | Rows |\n|---|---|'
+  if (lengths.length === 0) return header + '\n| (no rows read) | — |'
+  const rows = lengths.map((length) => `| ${length} | ${distribution[length]} |`).join('\n')
+  return [header, rows].join('\n')
+}
+
+/**
+ * Ticket #187. `buildRecentMinutes`'s source-partition and window-length
+ * counters — see this section's own definitions (`RecentMinutesSourceCounts`,
+ * `RecentMinutesWindowLengthDistribution`) for what each counts and why.
+ * Counted over every `feature_history` row read (not only the measured
+ * population below), mirroring the defcon-evidence partition above exactly.
+ */
+function buildRecentMinutesEvidenceSection(data: ReportData): string {
+  return (
+    '## Minutes evidence (ticket #187)\n\n' +
+    'Ticket #185 stored `prior_recent_minutes` — this player\'s true last-five-match minutes window, ' +
+    "most-recent-first, strictly before this row's own gameweek — and this is the first ticket to read it: " +
+    '`buildRecentMinutes` now returns that stored window unmodified, in place of the pre-#187 ' +
+    "single-averaged-match approximation every projection below (and every measured row's own projection " +
+    'above) previously received. Source is a strict 2-way partition of every row read, mirroring the ' +
+    'defensive-contribution-evidence partition above.\n\n' +
+    `- minutes evidence from the stored \`prior_recent_minutes\` window (ticket #185/#187): ${data.recentMinutesSource.fromStoredWindow}\n` +
+    '- minutes evidence from the pre-#185 single-averaged-match fallback (row predates the #185 migration, or was ' +
+    `never rebuilt after it landed — expect this near zero; a large count means #185's rebuild did not land and ` +
+    `this run should be read as suspect): ${data.recentMinutesSource.fromAveragedFallback}\n\n` +
+    '**Window-length distribution** — the array length `buildRecentMinutes` actually returned (0–5 for the ' +
+    'stored window, 0–1 for the averaged fallback):\n\n' +
+    buildRecentMinutesWindowLengthTable(data.recentMinutesWindowLengthDistribution) +
+    '\n\n**What this run cannot be compared against**: mean absolute error, signed error, and every component ' +
+    'figure in every section above move once this fix lands — each measured row now receives a different ' +
+    'projection than any previous run. This is that fix working, not a regression; reports before and after ' +
+    'ticket #187 are not comparable to each other.'
+  )
 }
 
 /**
@@ -3414,12 +3713,22 @@ function buildFiveGameweekSections(data: ReportData): string[] {
 
   sections.push(
     '### Quality oracle — a hindsight ceiling, not a target\n\n' +
-      "Each player's \"quality\" here is his own points-per-match rate over every one of HIS season's actual " +
-      'matches OUTSIDE the target window — never inside it — then that single number is ranked against the ' +
-      'same actual target the model and baselines above are ranked against. **This is a hindsight ceiling, ' +
-      'computed from results a real decision could never see in advance. No model can be expected to reach ' +
-      'it, and nothing in this project should be tuned toward it** — it exists only to show how much ranking ' +
-      'headroom remains once the model\'s own numbers are compared to it, at both horizons.\n\n' +
+      "Each player's \"quality\" is built from every one of HIS season's actual matches OUTSIDE the target " +
+      'window — never inside it — then ranked against the same actual target the model and baselines above ' +
+      'are ranked against. **This is a hindsight ceiling, computed from results a real decision could never ' +
+      'see in advance. No model can be expected to reach it, and nothing in this project should be tuned ' +
+      'toward it** — it exists only to show how much ranking headroom remains once the model\'s own numbers ' +
+      'are compared to it, at both horizons.\n\n' +
+      '**Ticket #187 fixed a units mismatch here.** The one-gameweek oracle below is his out-of-window ' +
+      'points-per-match RATE, which already matches a single gameweek\'s own units. The five-gameweek target ' +
+      'is a TOTAL, not a rate, and a five-gameweek total is dominated by how many of those five gameweeks the ' +
+      'player actually features in — a rate estimator scored against a totals target is handicapped by ' +
+      'construction, regardless of how good the rate itself is. The five-gameweek oracle below is instead a ' +
+      'TOTAL: his out-of-window points-per-FEATURED-gameweek rate × his out-of-window appearance rate × the ' +
+      `${FIVE_GAMEWEEK_HORIZON}-gameweek horizon — both factors leak-guarded identically to the rate above (see ` +
+      '`computeOracleFeaturedRate`/`computeOracleAppearanceRate` in `scripts/run-backtest.ts`), so an oracle ' +
+      'that already knows a player\'s true season-long numbers still cannot see whether he happens to feature ' +
+      'inside THIS particular five-gameweek window.\n\n' +
       `- one-gameweek oracle, season: Spearman **${fmtSpearman(fg.oracleOneGw.season.spearman)}** (n=${fg.oracleOneGw.season.n}), ` +
       `top-10 overlap **${fmtTopN(fg.oracleOneGw.season.top10)}**, top-20 overlap **${fmtTopN(fg.oracleOneGw.season.top20)}** ` +
       `(${fg.oracleOneGw.insufficientData} row(s) skipped — no season match outside the single target gameweek to rank on)\n` +
@@ -3430,6 +3739,17 @@ function buildFiveGameweekSections(data: ReportData): string[] {
       buildRankingPositionTable(fg.oracleOneGw.byPosition) +
       '\n\n#### Five-gameweek oracle, by position\n\n' +
       buildRankingPositionTable(fg.oracleFiveGw.byPosition),
+  )
+
+  sections.push(
+    (fg.oracleCeiling.ok ? '### Oracle-ceiling check: PASSED\n\n' : '### Oracle-ceiling check: FAILED\n\n') +
+      (fg.oracleCeiling.ok
+        ? 'The quality oracle sits above the model at both horizons, as a hindsight ceiling must — see ' +
+          '`checkOracleCeiling` in `scripts/run-backtest.ts`.'
+        : `**${fg.oracleCeiling.failures.length} check(s) failed — a model that meets or beats its own hindsight ` +
+          'ceiling means the CEILING is mis-specified, not that the model found real headroom. This is a ' +
+          'finding to investigate, not a result to quote:**\n\n' +
+          fg.oracleCeiling.failures.map((f) => `- ${f}`).join('\n')),
   )
 
   return sections
@@ -3533,7 +3853,7 @@ async function main(): Promise<void> {
         .from('feature_history')
         .select(
           'gameweek_id, player_code, element_type, team_code, prior_matches, prior_minutes, prior_xg, prior_xa, prior_saves, prior_clearances, prior_blocks, ' +
-            'prior_interceptions, prior_tackles, prior_recoveries, prior_defcon_qualifying_matches, prior_defcon_hits',
+            'prior_interceptions, prior_tackles, prior_recoveries, prior_defcon_qualifying_matches, prior_defcon_hits, prior_recent_minutes',
         )
         .eq('season', season)
         .order('season', { ascending: true })
@@ -3710,6 +4030,11 @@ async function main(): Promise<void> {
     // own comments for why each counts what it counts.
     const positionResolutionCounts = emptyPositionResolutionCounts()
     const defconSourceCounts = emptyDefconSourceCounts()
+    // Ticket #187 — same "every row read" population-health convention as
+    // positionResolutionCounts/defconSourceCounts above: buildRecentMinutes
+    // depends only on the row itself, not on whether it ends up measured.
+    const recentMinutesSourceCounts = emptyRecentMinutesSourceCounts()
+    const recentMinutesWindowLengthDistribution = emptyRecentMinutesWindowLengthDistribution()
     // Ticket #175 — how many measured rows used a real, computed fixture vs the neutral fallback.
     const fixtureCoverage = emptyFixtureCoverageCounts()
 
@@ -3717,6 +4042,8 @@ async function main(): Promise<void> {
       const resolution = resolveRowPosition(row, codeToPosition)
       incrementPositionResolution(positionResolutionCounts, resolution.source)
       incrementDefconSource(defconSourceCounts, classifyDefconSource(row))
+      incrementRecentMinutesSource(recentMinutesSourceCounts, classifyRecentMinutesSource(row))
+      incrementRecentMinutesWindowLength(recentMinutesWindowLengthDistribution, buildRecentMinutes(row).length)
 
       const position = resolution.position
       const actualRowsRaw = actualByPlayerGameweek.get(`${row.player_code}:${row.gameweek_id}`) ?? []
@@ -3895,20 +4222,30 @@ async function main(): Promise<void> {
     const oracleOneGwSeason = summarizeGenericSeasonRanking(oracleOneGwRows, oracleOneGwByGroup)
     const oracleOneGwByPosition = summarizeGenericRankingByPosition(oracleOneGwRows)
 
+    // Ticket #187 — the oracle fix: a TOTAL (out-of-window points-per-
+    // featured-gameweek × out-of-window appearance rate × the horizon),
+    // never the bare rate `computeOracleRate` still returns for the
+    // one-gameweek oracle above. See computeOracleFiveGameweekEstimate's own
+    // comment for the null/zero distinction.
     let oracleFiveGwInsufficientData = 0
     const oracleFiveGwRows: GenericRankingRow[] = []
     for (const row of fiveGameweekMeasured) {
       const excludeGameweeks = new Set(buildFiveGameweekWindow(row.startGameweekId))
-      const rate = computeOracleRate(seasonMatchesByPlayer.get(row.playerCode) ?? [], excludeGameweeks)
-      if (rate === null) {
+      const estimate = computeOracleFiveGameweekEstimate(seasonMatchesByPlayer.get(row.playerCode) ?? [], excludeGameweeks, FIVE_GAMEWEEK_HORIZON)
+      if (estimate === null) {
         oracleFiveGwInsufficientData++
         continue
       }
-      oracleFiveGwRows.push({ position: row.position, groupId: row.startGameweekId, projected: rate, actual: row.actualPoints })
+      oracleFiveGwRows.push({ position: row.position, groupId: row.startGameweekId, projected: estimate, actual: row.actualPoints })
     }
     const oracleFiveGwByGroup = summarizeGenericRankingByGroup(oracleFiveGwRows)
     const oracleFiveGwSeason = summarizeGenericSeasonRanking(oracleFiveGwRows, oracleFiveGwByGroup)
     const oracleFiveGwByPosition = summarizeGenericRankingByPosition(oracleFiveGwRows)
+
+    // Ticket #187, DoD: "the oracle sits above the model at both horizons ...
+    // if it does not, STOP and report". Folded into the existing sanity-bound
+    // failure gate below, not a silent report-only observation.
+    const oracleCeiling = checkOracleCeiling(rankingSeason.spearman, oracleOneGwSeason.spearman, fiveGwSeason.spearman, oracleFiveGwSeason.spearman)
 
     const fiveGameweekReportData: FiveGameweekReportData = {
       lastGameweekInData,
@@ -3922,6 +4259,7 @@ async function main(): Promise<void> {
       baselineVerdicts: fiveGwBaselineVerdicts,
       oracleOneGw: { season: oracleOneGwSeason, byPosition: oracleOneGwByPosition, insufficientData: oracleOneGwInsufficientData },
       oracleFiveGw: { season: oracleFiveGwSeason, byPosition: oracleFiveGwByPosition, insufficientData: oracleFiveGwInsufficientData },
+      oracleCeiling,
     }
 
     const reportData: ReportData = {
@@ -3936,6 +4274,8 @@ async function main(): Promise<void> {
       exclusions,
       positionResolution: positionResolutionCounts,
       defconSource: defconSourceCounts,
+      recentMinutesSource: recentMinutesSourceCounts,
+      recentMinutesWindowLengthDistribution,
       featureHistoryRowsRead: featureHistoryRows.length,
       actualRowsMatched,
       playersRowCount: playerRows.length,
@@ -3971,6 +4311,8 @@ async function main(): Promise<void> {
       exclusions,
       positionResolution: positionResolutionCounts,
       defconSource: defconSourceCounts,
+      recentMinutesSource: recentMinutesSourceCounts,
+      recentMinutesWindowLengthDistribution,
       overallMeanAbsoluteError: overall.meanAbsoluteError,
       overallMeanSignedError: overall.meanSignedError,
       byPosition: Object.fromEntries(POSITIONS.map((p) => [POSITION_NAMES[p], byPosition[p]])),
@@ -3985,21 +4327,29 @@ async function main(): Promise<void> {
       baselines,
       baselineVerdicts,
       fixtureCoverage,
-      // Ticket #183 — summary only, informational: this section never
-      // affects job status (see the unmodified `if` below), matching the
-      // ticket text's "no sanity bound derived from the oracle".
+      // Ticket #183 — informational: the oracle's own ranking figures carry
+      // no asserted threshold, matching the ticket text's "no sanity bound
+      // derived from the oracle['s ranking value]". Ticket #187 changed this
+      // only insofar as ONE relationship between figures already reported
+      // here — model vs oracle, at both horizons — is now gated below via
+      // oracleCeiling; the oracle's raw Spearman/top-N figures themselves
+      // are still never checked against a threshold.
       fiveGameweekMeasured: fiveGameweekReportData.measuredCount,
       fiveGameweekExclusions: fiveGameweekReportData.exclusions,
       fiveGameweekRankingSeason: fiveGameweekReportData.season,
       fiveGameweekOracleSeason: fiveGameweekReportData.oracleFiveGw.season,
+      oracleCeiling: fiveGameweekReportData.oracleCeiling,
       reportPath,
     }
 
     // Ticket #147: the ranking-skill bounds fail the job exactly like the
     // existing sanity bounds above — added to the existing check, neither
-    // bound's own logic touched.
-    if (!sanity.ok || !rankingSanity.ok) {
-      const combinedFailures = [...sanity.failures, ...rankingSanity.failures]
+    // bound's own logic touched. Ticket #187: oracleCeiling joins the same
+    // gate — "STOP and report" (DoD) means the job records status 'failure'
+    // and exits non-zero, exactly like every other sanity bound here, not a
+    // console note a human might miss.
+    if (!sanity.ok || !rankingSanity.ok || !fiveGameweekReportData.oracleCeiling.ok) {
+      const combinedFailures = [...sanity.failures, ...rankingSanity.failures, ...fiveGameweekReportData.oracleCeiling.failures]
       const message = `${JOB_NAME}: sanity bounds FAILED for season=${season}: ${combinedFailures.join('; ')}. Report written to ${reportPath} for diagnosis.`
       console.error(message)
       await recordJobRun(supabase, { status: 'failure', message, details, startedAt })
