@@ -81,14 +81,87 @@ export function expectedScoreFromDifficulty(difficulty: number): number {
 // ============================================================================
 
 /**
+ * Clamp range for {@link attackingMultiplier}. MIN = 0 is arithmetic: an
+ * attacking-rate multiplier can never be negative (that would mean negative
+ * expected goals), so the floor at zero follows directly from what a
+ * multiplier is, not from a judgement about the data. MAX = 2 is a judgement
+ * call, not derived from the damped formula's own domain — carried over
+ * unchanged from the pre-damping ceiling (ticket #182 / the model review's
+ * R3: "clamp unchanged") as defensive headroom for an out-of-range
+ * `expectedScore`, even though the damped formula below never itself
+ * exceeds 1.5 for any `expectedScore` inside its real [0, 1] domain
+ * (`ATTACKING_MULTIPLIER_OFFSET + 1 = 1.5`).
+ */
+export const ATTACKING_MULTIPLIER_MIN = 0
+export const ATTACKING_MULTIPLIER_MAX = 2
+
+/**
+ * Ticket #182 — damps {@link attackingMultiplier}'s slope to its measured
+ * value. Full derivation: `docs/model-review-2026-09-02.md` §1b.
+ *
+ * MECHANISM. The pre-#182 formula (`2 × expectedScore`) implies a raw-goals
+ * slope of `LEAGUE_BASELINE_GOALS_PER_TEAM × 2 = 1.45 × 2 = 2.9` goals per
+ * unit of `expectedScore` — roughly twice the measured slope below. That
+ * overstates how much one fixture should swing a team's attacking output: at
+ * the bucket extremes it projects a heavily-favoured team for ~24% more
+ * goals than observed, and a heavily-disfavoured team for ~30% fewer.
+ *
+ * MEASUREMENT (docs/model-review-2026-09-02.md, 2 September 2026;
+ * arithmetic reproduced independently for this ticket, same date): actual
+ * team goals scored, bucketed by point-in-time `expectedScore`, over every
+ * resolvable 2025-2026 Premier League team-match (n=698 total):
+ *
+ *   es bucket    | n   | mean es | actual goals | current model (1.45×2×es)
+ *   0.00–0.35    | 123 | 0.251   | 1.04         | 0.73
+ *   0.35–0.45    | 138 | 0.401   | 1.23         | 1.16
+ *   0.45–0.55    | 176 | 0.500   | 1.35         | 1.45
+ *   0.55–0.65    | 138 | 0.599   | 1.61         | 1.74
+ *   0.65–1.01    | 123 | 0.749   | 1.75         | 2.17
+ *
+ * Fitted slope: the review states "≈1.43", reproduced here as the
+ * extreme-bucket endpoint slope from the table above —
+ * `(1.75 − 1.04) / (0.749 − 0.251) = 0.71 / 0.498 = 1.4257 ≈ 1.43` goals per
+ * unit of `expectedScore` — about half the current model's 2.9 (a
+ * whole-table weighted least-squares fit over the five bucket means, by
+ * comparison, gives ≈1.50, the same "roughly half" conclusion within
+ * reconstruction noise). A damped multiplier of slope 1 instead of slope 2
+ * — `ATTACKING_MULTIPLIER_OFFSET + expectedScore` — implies a raw-goals
+ * slope of `LEAGUE_BASELINE_GOALS_PER_TEAM × 1 = 1.45`, matching the
+ * measured ~1.43–1.50 closely, and reproduces the bucket means well:
+ * predicted `1.45 × (0.5 + 0.251) = 1.089` vs actual 1.04 at the low bucket;
+ * `1.45 × (0.5 + 0.749) = 1.811` vs actual 1.75 at the high bucket
+ * (residuals from −0.10 to +0.02 across all five buckets — every bucket
+ * within ~0.1 goals, none systematically). `ATTACKING_MULTIPLIER_OFFSET` =
+ * 0.5 is also exactly the value that leaves an even fixture
+ * (`expectedScore = 0.5`) unadjusted at `1.0`, matching the pre-#182 formula
+ * at that one point — see `attackingMultiplier`'s "equals 1.0 exactly" test,
+ * the most important one this ticket adds.
+ *
+ * `expectedGoalsConceded` / `defensiveMultiplier` (the mirror
+ * `2 × (1 − expectedScore)` form) are explicitly UNTOUCHED by this
+ * measurement. The same source bucket table's "actual conceded" / "actual
+ * CS%" columns (not reproduced above — see the review doc) show the
+ * defensive side also overshoots, but damping it is deliberately deferred:
+ * goalkeeper/defender ranking is the model's clearest win and depends on
+ * that spread, and confirming the fix needs a live database read the review
+ * flags as out of scope here. Do not extend this reasoning to
+ * `defensiveMultiplier` without its own separate measurement and ticket.
+ */
+export const ATTACKING_MULTIPLIER_OFFSET = 0.5
+
+/**
  * Multiplier applied to a team's baseline attacking rates for this fixture:
- * `2 × expectedScore`, clamped to `[0, 2]`. At `expectedScore = 0.5` (an
- * even fixture) this is exactly `1.0` — no adjustment. A heavily favoured
- * fixture pushes toward `2.0` (double the expected attacking output); a
- * heavily unfavoured one pushes toward `0.0`.
+ * `ATTACKING_MULTIPLIER_OFFSET + expectedScore`, clamped to
+ * `[ATTACKING_MULTIPLIER_MIN, ATTACKING_MULTIPLIER_MAX]` — see the
+ * constant's own comment for the measurement this damped slope is fitted
+ * to. At `expectedScore = 0.5` (an even fixture) this is exactly `1.0` — no
+ * adjustment, identical to the pre-#182 formula at that one point. A
+ * heavily favoured fixture pushes toward `1.5` (at `expectedScore = 1`); a
+ * heavily unfavoured one pushes toward `0.5` (at `expectedScore = 0`) —
+ * half the pre-#182 formula's slope.
  */
 export function attackingMultiplier(expectedScoreValue: number): number {
-  return clamp(2 * expectedScoreValue, 0, 2)
+  return clamp(ATTACKING_MULTIPLIER_OFFSET + expectedScoreValue, ATTACKING_MULTIPLIER_MIN, ATTACKING_MULTIPLIER_MAX)
 }
 
 /**
