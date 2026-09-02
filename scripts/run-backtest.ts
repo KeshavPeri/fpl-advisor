@@ -374,7 +374,7 @@ import {
 import { positionPriorRates, type PlayerRateHistory, type PlayerRates, type RateHistoryMatch } from '../src/lib/projection/rates.ts'
 import { positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
 import type { DefensiveContributionMatch } from '../src/lib/projection/types.ts'
-import { LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
+import { HOME_ADVANTAGE_ELO, LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
 import {
   projectPlayerGameweek,
   type FixtureContext,
@@ -387,6 +387,7 @@ const JOB_NAME = 'run-backtest'
 const FEATURE_HISTORY_MIGRATION = 'supabase/migrations/20260827090000_feature_history.sql'
 const PLAYER_MATCH_STATS_MIGRATION = 'supabase/migrations/20260811170000_player_match_stats.sql'
 const TEAM_GOALS_CONCEDED_MIGRATION = 'supabase/migrations/20260828090000_player_match_stats_team_goals_conceded.sql'
+const TEAM_AND_OPPONENT_MIGRATION = 'supabase/migrations/20260831090000_team_and_opponent.sql'
 
 /**
  * Season this job backtests, read from BACKTEST_SEASON — trimmed, falling
@@ -668,6 +669,18 @@ export interface FeatureHistoryRow extends FeatureHistoryPriorFields {
    * `players`-table fallback map applies only then — see resolveRowPosition.
    */
   element_type: number | null
+  /**
+   * Ticket #167/#175. The FPL stable club code (matching `public.teams.code`)
+   * of the player's OWN club for this season, copied through from
+   * `player_match_stats.team_code` at ingest time — never from the live
+   * `public.players`/`public.teams` tables. NULL means this row predates the
+   * #167 migration or the player's team_code could not be resolved at
+   * ingest time (see that migration's own column comment) — a row with a
+   * null team_code is excluded from the fixture-aware measured population
+   * as `unresolvedFixtureTeams`, never guessed. 100% populated for
+   * 2025-2026 as of ticket #175 (18,588 of 18,588 rows).
+   */
+  team_code: number | null
 }
 
 /** Exact, non-approximated mapping — rates.ts's shrinkage formula is generic in the underlying count. */
@@ -966,6 +979,297 @@ function buildNeutralFixtureContext(gameweekId: number): FixtureContext {
   }
 }
 
+// ============================================================================
+// FIXTURE-AWARE EXPECTED SCORE — ticket #175. Pure, no I/O below this point:
+// every function takes already-fetched rows/records, never reads Supabase
+// itself. Replaces the neutral fplDifficulty=3 fixture (expectedScore
+// exactly 0.5, every multiplier exactly 1.0) every measured row used before
+// this ticket with a point-in-time team-strength comparison, built ONLY
+// from player_match_stats rows strictly before the row being projected.
+// ============================================================================
+
+/**
+ * Ticket #175. A team's point-in-time strength needs at least this many
+ * PRIOR matches (strictly before the row's own gameweek) on EACH side of a
+ * fixture before expectedScore is computed from a real comparison — below
+ * this, both teams fall back to NEUTRAL_EXPECTED_SCORE_VALUE (0.5), the same
+ * "average fixture" every row used before this ticket. A single early match
+ * is too noisy to base a fixture adjustment on (one red card or one own
+ * goal swings a one-match average wildly). 3 is a JUDGEMENT call (ticket
+ * text: "state the minimum as a judgement in the code comment"), not a
+ * derived value — high enough to smooth a one-match outlier, low enough
+ * that most of the season gets a real fixture signal rather than sitting at
+ * the neutral fallback (every team has played its 3rd match by gameweek 4,
+ * assuming no early postponement).
+ */
+export const MIN_TEAM_PRIOR_MATCHES = 3
+
+/**
+ * Ticket #175. The expectedScore value used whenever a fixture cannot be
+ * given a real point-in-time strength comparison. Matches fixture.ts's own
+ * "0.5 = a coin flip / an average fixture" convention exactly — the same
+ * value DIFFICULTY_EXPECTED_SCORE[3] and an even elo matchup both resolve
+ * to — never a different number invented for this fallback.
+ */
+export const NEUTRAL_EXPECTED_SCORE_VALUE = 0.5
+
+/**
+ * Ticket #175. The one free parameter in the point-in-time strength ->
+ * expectedScore construction below (see computeFixtureExpectedScore):
+ * `expectedScore = clamp(0.5 + (ownRate - opponentRate) / SCALE, 0, 1)`.
+ *
+ * CALIBRATED, NOT CHOSEN (ticket text) — set so the spread of the
+ * expectedScore values this construction produces over the 2025-2026
+ * measured population matches the spread of the elo-derived expectedScore
+ * already stored in `player_projections.components` on live data:
+ * `SCALE = stdDev(ownRate - opponentRate, over every resolvable fixture) /
+ * stdDev(live elo-derived expectedScore)`.
+ *
+ * THE TWO OBSERVED DISTRIBUTIONS.
+ *
+ * Target (live elo-derived expectedScore, `player_projections.components`,
+ * rows where `eloFallbackUsed` is false — i.e. a real elo comparison, never
+ * the coarser 5-value FDR fallback): n = 3,181, mean = 0.5003,
+ * population stdDev = 0.1701, min = 0.1238, max = 0.8762. Obtained by
+ * Keshav running a hand, read-only query directly against Supabase — NOT an
+ * in-run read from this job. This job has no Supabase access at all and
+ * never will (confirmed); the DoD's original phrasing asking for "an in-run
+ * read" was a specification error, not something to keep retrying via
+ * credentials.
+ *
+ * This construction's own delta (`ownRate - opponentRate`), 2025-2026,
+ * Premier League only, over every resolvable fixture with sufficient prior
+ * history on both sides (MIN_TEAM_PRIOR_MATCHES): n = 698 (349 matches x 2
+ * perspectives, mean exactly 0 by construction — every match contributes
+ * +delta and -delta), population stdDev = 0.9564. Computed by reconstructing
+ * player_match_stats from FPL-Core-Insights' own public per-gameweek CSVs
+ * (no Supabase needed for this side — confirmed reachable) via a throwaway
+ * script that reused this file's own buildTeamMatchRecords/
+ * computeTeamStrengthAsOf/teamStrengthRate/fixtureHasSufficientHistory and
+ * scripts/ingest-core-insights.ts's own buildClubCodeBySlug/
+ * buildTeamCodeMap/toMatchStatRow UNMODIFIED, never re-derived — the
+ * reconstruction's own row counts matched the ticket's stated population
+ * exactly before this number was trusted (15,340 of 15,340 total rows;
+ * 12,754 Premier League rows; 12,613 of 12,754 = 98.9% opponent_team_code
+ * resolved). The script was run via `npx tsx`, never committed.
+ *
+ * SCALE = 0.9564 / 0.1701 = 5.6225.
+ */
+export const SCALE = 5.6225
+
+/**
+ * One `player_match_stats` row's fields needed to build the point-in-time
+ * team-strength table — team_code (which club these particular stats
+ * belong to), opponent_team_code (the club faced, so a team's opponent in
+ * one match can be found without re-parsing match_id), and
+ * team_goals_conceded (per-player-on-pitch, not a team total — see this
+ * file's header on why the MAX across a team's players in one match is the
+ * correct team figure, never the average or the first row found).
+ */
+export interface MatchStatsForTeamStrength {
+  matchId: string
+  gameweek: number
+  teamCode: number | null
+  opponentTeamCode: number | null
+  teamGoalsConceded: number | null
+}
+
+/** One resolvable (team, match) outcome: this team's own goals conceded (the max across its players who appeared) and goals scored (the SAME match's opponent's own max-conceded figure — "the opponent's conceded figure for that same match", ticket text verbatim). */
+export interface TeamMatchRecord {
+  matchId: string
+  gameweek: number
+  teamCode: number
+  goalsConceded: number
+  goalsScored: number
+}
+
+interface TeamMatchAccumulator {
+  matchId: string
+  gameweek: number
+  teamCode: number
+  opponentTeamCode: number | null
+  goalsConceded: number | null
+}
+
+/** Ignores a null side rather than treating it as 0 — a team's goals-conceded figure is "not yet seen a non-null row" until it genuinely has one, and 0 (a clean sheet) must never be indistinguishable from "unknown". */
+function maxIgnoringNull(a: number | null, b: number | null): number | null {
+  if (a === null) return b
+  if (b === null) return a
+  return Math.max(a, b)
+}
+
+/**
+ * One row per (matchId, teamCode) actually resolvable to BOTH a real
+ * goals-conceded figure (max across that team's own players' rows) AND a
+ * real goals-scored figure (the SAME match's opponent's own max-conceded
+ * figure, found via opponent_team_code — never by re-parsing match_id) — a
+ * match where either side is missing contributes NOTHING to the
+ * point-in-time strength table (never a guessed 0), so a team's `matches`
+ * count below reflects only genuinely known outcomes. Built once per run
+ * over the SAME `player_match_stats` rows already fetched for actuals — no
+ * extra Supabase call. Named tests: a normal match, a match with a player
+ * substituted before a late goal, and a 0-0 (proving 0 is preserved, never
+ * treated as "unknown" and skipped).
+ */
+export function buildTeamMatchRecords(rows: readonly MatchStatsForTeamStrength[]): TeamMatchRecord[] {
+  const byKey = new Map<string, TeamMatchAccumulator>()
+  const keyOf = (matchId: string, teamCode: number): string => `${matchId}::${teamCode}`
+
+  for (const row of rows) {
+    if (row.teamCode === null) continue
+    const key = keyOf(row.matchId, row.teamCode)
+    const existing = byKey.get(key)
+    byKey.set(key, {
+      matchId: row.matchId,
+      gameweek: row.gameweek,
+      teamCode: row.teamCode,
+      opponentTeamCode: existing?.opponentTeamCode ?? row.opponentTeamCode,
+      goalsConceded: maxIgnoringNull(existing?.goalsConceded ?? null, row.teamGoalsConceded),
+    })
+  }
+
+  const records: TeamMatchRecord[] = []
+  for (const acc of byKey.values()) {
+    if (acc.goalsConceded === null || acc.opponentTeamCode === null) continue
+    const opponentAcc = byKey.get(keyOf(acc.matchId, acc.opponentTeamCode))
+    if (opponentAcc === undefined || opponentAcc.goalsConceded === null) continue
+    records.push({
+      matchId: acc.matchId,
+      gameweek: acc.gameweek,
+      teamCode: acc.teamCode,
+      goalsConceded: acc.goalsConceded,
+      goalsScored: opponentAcc.goalsConceded,
+    })
+  }
+  return records
+}
+
+/** A team's summed prior record as of one point in time — see computeTeamStrengthAsOf. */
+export interface TeamStrengthRecord {
+  matches: number
+  goalsScored: number
+  goalsConceded: number
+}
+
+/**
+ * Sums every one of `teamCode`'s resolvable match records with gameweek
+ * STRICTLY BEFORE `beforeGameweek` — THE LOOKAHEAD GUARD (ticket text: "the
+ * most important test in the ticket"). A gameweek-N row must never see a
+ * gameweek-N or later record; `r.gameweek < beforeGameweek`, never `<=`,
+ * is the entire guard.
+ */
+export function computeTeamStrengthAsOf(records: readonly TeamMatchRecord[], teamCode: number, beforeGameweek: number): TeamStrengthRecord {
+  const prior = records.filter((r) => r.teamCode === teamCode && r.gameweek < beforeGameweek)
+  return {
+    matches: prior.length,
+    goalsScored: prior.reduce((sum, r) => sum + r.goalsScored, 0),
+    goalsConceded: prior.reduce((sum, r) => sum + r.goalsConceded, 0),
+  }
+}
+
+/** (goalsScored - goalsConceded) per prior match — 0 with no prior matches (never divides by zero; MIN_TEAM_PRIOR_MATCHES in computeFixtureExpectedScore is what actually decides whether this value is trusted). */
+export function teamStrengthRate(record: TeamStrengthRecord): number {
+  return record.matches > 0 ? (record.goalsScored - record.goalsConceded) / record.matches : 0
+}
+
+/** Whether computeFixtureExpectedScore would use a REAL point-in-time comparison for this pair (both teams meet MIN_TEAM_PRIOR_MATCHES) rather than the neutral fallback — the SAME gate that function applies internally, exposed separately only for the report's fixture-coverage counters (never a second, divergent rule). */
+export function fixtureHasSufficientHistory(own: TeamStrengthRecord, opponent: TeamStrengthRecord): boolean {
+  return own.matches >= MIN_TEAM_PRIOR_MATCHES && opponent.matches >= MIN_TEAM_PRIOR_MATCHES
+}
+
+function clampUnit(value: number): number {
+  if (value < 0) return 0
+  if (value > 1) return 1
+  return value
+}
+
+/**
+ * Ticket #175. The point-in-time analogue of fixture.ts's elo-derived
+ * expectedScore, built from each team's (goalsScored - goalsConceded) per
+ * prior match (see file header, "THE CONSTRUCTION"). Falls back to
+ * NEUTRAL_EXPECTED_SCORE_VALUE when either team has fewer than
+ * MIN_TEAM_PRIOR_MATCHES resolvable prior matches — never a guessed
+ * adjustment from thin evidence. Named tests: exactly 0.5 for two teams
+ * with identical prior records (the delta cancels to 0 regardless of
+ * SCALE); clamped to [0, 1] for a lopsided delta; the neutral fallback
+ * below the minimum.
+ */
+export function computeFixtureExpectedScore(own: TeamStrengthRecord, opponent: TeamStrengthRecord, scale: number): number {
+  if (!fixtureHasSufficientHistory(own, opponent)) return NEUTRAL_EXPECTED_SCORE_VALUE
+  const delta = teamStrengthRate(own) - teamStrengthRate(opponent)
+  return clampUnit(0.5 + delta / scale)
+}
+
+/**
+ * Ticket #175. Whether a row's own club (`feature_history.team_code`) AND
+ * every one of its matched `player_match_stats` rows' opponent_team_code
+ * resolve — the DoD's "a row with an unresolvable own or opponent club" gate.
+ * Pure, over the SAME actual rows classifyRow/aggregateActualForGameweek
+ * already read for this (player, gameweek). An empty opponent list (no
+ * matched actual rows at all) is never resolved — there is nothing to build
+ * a fixture from — though in practice this function is only consulted for a
+ * row that has already passed the `featured` gate, which guarantees at
+ * least one matched row.
+ */
+export function resolveFixtureTeams(ownTeamCode: number | null, opponentTeamCodes: readonly (number | null)[]): boolean {
+  if (ownTeamCode === null) return false
+  if (opponentTeamCodes.length === 0) return false
+  return opponentTeamCodes.every((code) => code !== null)
+}
+
+/**
+ * Inverts fixture.ts's own `expectedScore(eloFor, eloAgainst, isHome)` elo
+ * logistic exactly, so a FixtureContext built with `{ teamElo:
+ * eloForExpectedScore(s), opponentElo: 0, isHome: false }` reproduces `s`
+ * bit-for-bit through expectedPoints.ts's own, unmodified combiner —
+ * verified at s=0.5 (see this file's own tests): it reproduces the EXACT
+ * expectedScore the pre-#175 neutral fplDifficulty=3 fallback always did.
+ * This file never reimplements attackingMultiplier/expectedGoalsConceded/
+ * defensiveMultiplier — it constructs a fixture IDENTITY (an elo pair
+ * engineered to reproduce a point-in-time expectedScore), then hands it to
+ * expectedPoints.ts's own math, unchanged.
+ *
+ * Derivation. With opponentElo pinned at 0 and isHome at false (so
+ * homeAdjustment = -HOME_ADVANTAGE_ELO):
+ *   expectedScore(eloFor, 0, false) = 1 / (1 + 10^((HOME_ADVANTAGE_ELO - eloFor) / 400))
+ * Solving for the eloFor that makes this equal `s`:
+ *   eloFor = HOME_ADVANTAGE_ELO + 400 * log10(s / (1 - s))
+ * Correct at the s=0/s=1 boundaries too: Math.log10(0) = -Infinity and
+ * Math.log10(Infinity) = Infinity propagate through IEEE-754 arithmetic to
+ * give expectedScore exactly 0 or exactly 1 — never NaN.
+ */
+export function eloForExpectedScore(targetExpectedScore: number): number {
+  return HOME_ADVANTAGE_ELO + 400 * Math.log10(targetExpectedScore / (1 - targetExpectedScore))
+}
+
+/** A FixtureContext engineered to reproduce `expectedScoreValue` exactly through expectedPoints.ts's own elo combiner — see eloForExpectedScore's own comment for the derivation and why isHome/opponentElo are fixed anchors, not signal. */
+function buildFixtureContextFromExpectedScore(expectedScoreValue: number, gameweekId: number): FixtureContext {
+  return {
+    fixtureId: gameweekId,
+    isHome: false,
+    teamElo: eloForExpectedScore(expectedScoreValue),
+    opponentElo: 0,
+    fplDifficulty: NEUTRAL_FIXTURE_DIFFICULTY, // irrelevant here — both elo fields are non-null, so expectedPoints.ts never falls back to it.
+    leagueBaselineGoals: LEAGUE_BASELINE_GOALS_PER_TEAM,
+  }
+}
+
+/** Tallies how many measured rows used a real, computed fixture vs the neutral fallback (ticket #175 report line) — see fixtureHasSufficientHistory for the gate. */
+export interface FixtureCoverageCounts {
+  realFixture: number
+  neutralFallback: number
+}
+
+export function emptyFixtureCoverageCounts(): FixtureCoverageCounts {
+  return { realFixture: 0, neutralFallback: 0 }
+}
+
+/** Mutates counts in place — real when every one of a row's fixtures used a real point-in-time comparison, neutralFallback if ANY of them fell back (conservative: a mixed double-gameweek row is not counted as fully "real"). */
+export function incrementFixtureCoverage(counts: FixtureCoverageCounts, real: boolean): void {
+  if (real) counts.realFixture++
+  else counts.neutralFallback++
+}
+
 /**
  * Projects one feature_history row via src/lib/projection/expectedPoints.ts's
  * own combiner, imported and never reimplemented. Every input is built ONLY
@@ -983,8 +1287,23 @@ function buildNeutralFixtureContext(gameweekId: number): FixtureContext {
  * negative or fractional count is truncated at 0, defensively; main() never
  * passes one (fixtureCount is always a real row count from the actual
  * side).
+ *
+ * `fixtureExpectedScores` (ticket #175) — one point-in-time expectedScore
+ * per fixture, by index; defaults to `[]` so every pre-#175 call site
+ * (every existing test included) is an EXACT no-op: an index with no entry
+ * (the whole array, by default) falls back to buildNeutralFixtureContext,
+ * bit-for-bit identical to this function's behaviour before this ticket —
+ * never reimplemented, never a "close enough" approximation (verified: a
+ * defined expectedScore of exactly 0.5 reproduces the SAME projection as
+ * the neutral fallback, see this file's own tests).
  */
-export function projectRow(row: FeatureHistoryRow, position: Position, prior: PositionPrior, fixtureCount = 1): GameweekProjection {
+export function projectRow(
+  row: FeatureHistoryRow,
+  position: Position,
+  prior: PositionPrior,
+  fixtureCount = 1,
+  fixtureExpectedScores: readonly number[] = [],
+): GameweekProjection {
   const input: PlayerProjectionInput = {
     position,
     status: ASSUMED_AVAILABILITY_STATUS,
@@ -996,7 +1315,12 @@ export function projectRow(row: FeatureHistoryRow, position: Position, prior: Po
     defconPositionPrior: prior.defconHitRate,
   }
   const count = Math.max(0, Math.trunc(fixtureCount))
-  const fixtures: FixtureContext[] = Array.from({ length: count }, () => buildNeutralFixtureContext(row.gameweek_id))
+  const fixtures: FixtureContext[] = Array.from({ length: count }, (_, i) => {
+    const expectedScoreValue = fixtureExpectedScores[i]
+    return expectedScoreValue === undefined
+      ? buildNeutralFixtureContext(row.gameweek_id)
+      : buildFixtureContextFromExpectedScore(expectedScoreValue, row.gameweek_id)
+  })
   return projectPlayerGameweek(input, fixtures)
 }
 
@@ -1158,8 +1482,14 @@ export function aggregateActualForGameweek(position: Position, rows: readonly Ac
   }
 }
 
-/** The five named exclusion reasons — see classifyRow. `blankGameweek` added by ticket #140. */
-export type ExclusionReason = 'noPriorMatches' | 'didNotFeature' | 'actualDataIncomplete' | 'unresolvedPlayerCode' | 'blankGameweek'
+/** The six named exclusion reasons — see classifyRow. `blankGameweek` added by ticket #140; `unresolvedFixtureTeams` added by ticket #175. */
+export type ExclusionReason =
+  | 'noPriorMatches'
+  | 'didNotFeature'
+  | 'actualDataIncomplete'
+  | 'unresolvedPlayerCode'
+  | 'blankGameweek'
+  | 'unresolvedFixtureTeams'
 
 export type RowClassification =
   | { kind: 'excluded'; reason: ExclusionReason }
@@ -1177,12 +1507,23 @@ export type RowClassification =
  * the player's team had no fixture this gameweek (see file header, "BLANK
  * GAMEWEEKS") does `hadFixture = false` redirect an unfeatured row to the
  * new `blankGameweek` reason instead.
+ *
+ * `fixtureTeamsResolved` (ticket #175) defaults to `true` so every pre-#175
+ * call site — every existing 3-arg and 4-arg test included — is an EXACT
+ * no-op. Checked LAST, after every other gate: a row whose own or opponent
+ * club could not be resolved (see resolveFixtureTeams) is excluded as
+ * `unresolvedFixtureTeams` only once it has already cleared every other
+ * reason a row is excluded — this is deliberately the LAST reason checked,
+ * not the first, so a row that would already be excluded for some other
+ * reason keeps that reason (matching this function's existing precedence:
+ * each check runs only once every earlier one has passed).
  */
 export function classifyRow(
   row: FeatureHistoryRow,
   position: Position | undefined,
   actualRows: readonly ActualMatchStatsInput[],
   hadFixture = true,
+  fixtureTeamsResolved = true,
 ): RowClassification {
   if (position === undefined) return { kind: 'excluded', reason: 'unresolvedPlayerCode' }
   if (row.prior_matches <= 0) return { kind: 'excluded', reason: 'noPriorMatches' }
@@ -1190,6 +1531,7 @@ export function classifyRow(
   const outcome = aggregateActualForGameweek(position, actualRows)
   if (!outcome.featured) return { kind: 'excluded', reason: hadFixture ? 'didNotFeature' : 'blankGameweek' }
   if (!outcome.teamGoalsConcededKnown) return { kind: 'excluded', reason: 'actualDataIncomplete' }
+  if (!fixtureTeamsResolved) return { kind: 'excluded', reason: 'unresolvedFixtureTeams' }
 
   return { kind: 'measured', position, outcome }
 }
@@ -1348,17 +1690,18 @@ export function checkSanityBounds(overallMae: number | null, cleanSheetRateByPos
   return { ok: failures.length === 0, failures }
 }
 
-/** The five named exclusion reasons — a strict partition of every feature_history row read, alongside measuredCount. See assertReconciles. `blankGameweek` added by ticket #140. */
+/** The six named exclusion reasons — a strict partition of every feature_history row read, alongside measuredCount. See assertReconciles. `blankGameweek` added by ticket #140; `unresolvedFixtureTeams` added by ticket #175. */
 export interface ExclusionCounts {
   noPriorMatches: number
   didNotFeature: number
   actualDataIncomplete: number
   unresolvedPlayerCode: number
   blankGameweek: number
+  unresolvedFixtureTeams: number
 }
 
 export function emptyExclusionCounts(): ExclusionCounts {
-  return { noPriorMatches: 0, didNotFeature: 0, actualDataIncomplete: 0, unresolvedPlayerCode: 0, blankGameweek: 0 }
+  return { noPriorMatches: 0, didNotFeature: 0, actualDataIncomplete: 0, unresolvedPlayerCode: 0, blankGameweek: 0, unresolvedFixtureTeams: 0 }
 }
 
 /** Mutates counts in place, incrementing the named reason by 1 — the one place a classifyRow exclusion reason is turned into a count. */
@@ -1367,7 +1710,14 @@ export function incrementExclusion(counts: ExclusionCounts, reason: ExclusionRea
 }
 
 export function totalExcluded(counts: ExclusionCounts): number {
-  return counts.noPriorMatches + counts.didNotFeature + counts.actualDataIncomplete + counts.unresolvedPlayerCode + counts.blankGameweek
+  return (
+    counts.noPriorMatches +
+    counts.didNotFeature +
+    counts.actualDataIncomplete +
+    counts.unresolvedPlayerCode +
+    counts.blankGameweek +
+    counts.unresolvedFixtureTeams
+  )
 }
 
 /** rows read = rows measured + rows excluded, by reason, exactly — throws naming both sides on any mismatch. */
@@ -2076,6 +2426,8 @@ interface ReportData {
   baselines: BaselineSummary[]
   baselineVerdicts: BaselineVerdict[]
   rankingByGameweekAndPosition: GameweekPositionRankingSummary[]
+  /** Ticket #175. */
+  fixtureCoverage: FixtureCoverageCounts
 }
 
 function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): string {
@@ -2239,9 +2591,27 @@ function generateReportMarkdown(data: ReportData): string {
       `- excluded — blank gameweek (player's team had no fixture at all, ticket #140): ${data.exclusions.blankGameweek}\n` +
       `- excluded — actual data incomplete (\`team_goals_conceded\` null, ~2% known gap, ticket #125): ${data.exclusions.actualDataIncomplete}\n` +
       `- excluded — unresolved position (neither \`feature_history.element_type\` nor the \`players\` fallback resolves, ticket #154): ${data.exclusions.unresolvedPlayerCode} ` +
-      `(${formatExclusionPercentage(data.exclusions.unresolvedPlayerCode, data.featureHistoryRowsRead)} of rows read)\n\n` +
+      `(${formatExclusionPercentage(data.exclusions.unresolvedPlayerCode, data.featureHistoryRowsRead)} of rows read)\n` +
+      `- excluded — unresolved fixture teams (own club or the opponent faced could not be resolved, ticket #175 — chiefly mid-season transfers, see that ticket's own note): ${data.exclusions.unresolvedFixtureTeams} ` +
+      `(${formatExclusionPercentage(data.exclusions.unresolvedFixtureTeams, data.featureHistoryRowsRead)} of rows read)\n\n` +
       `Reconciliation: ${data.measured.length} measured + ${totalExcluded(data.exclusions)} excluded = ` +
       `${data.measured.length + totalExcluded(data.exclusions)}, against ${data.featureHistoryRowsRead} rows read.`,
+  )
+
+  sections.push(
+    '## Fixture coverage (ticket #175)\n\n' +
+      'Before this ticket, every measured row below was projected under a neutral fixture ' +
+      '(expectedScore exactly 0.5, every multiplier exactly 1.0) — the harness could not see which ' +
+      'team a player faced. This ticket reads `feature_history.team_code` (the player\'s own club) ' +
+      'and `player_match_stats.opponent_team_code` (the club faced) and builds a point-in-time ' +
+      'team-strength table from `player_match_stats` rows strictly before the row being projected — ' +
+      'see `scripts/run-backtest.ts`\'s file header for the construction and its SCALE constant. A ' +
+      `team below ${MIN_TEAM_PRIOR_MATCHES} prior matches (a JUDGEMENT call, not derived) falls back ` +
+      'to the same neutral expectedScore every row used before this ticket — a genuinely resolvable ' +
+      'club with too little history yet, never an unresolved one (which is excluded separately ' +
+      'above, never silently defaulted to neutral).\n\n' +
+      `- measured rows that used a real, computed fixture: ${data.fixtureCoverage.realFixture}\n` +
+      `- measured rows that fell back to the neutral fixture (insufficient prior team history): ${data.fixtureCoverage.neutralFallback}\n`,
   )
 
   sections.push(
@@ -2427,6 +2797,10 @@ interface ActualSourceRow {
   interceptions: number | null
   tackles: number | null
   recoveries: number | null
+  /** Ticket #167/#175 — this row's own club, used ONLY to build the point-in-time team-strength table (buildTeamMatchRecords); never for point reconstruction. 100% populated for 2025-2026 (15,340 of 15,340 rows). */
+  team_code: number | null
+  /** Ticket #167/#175 — the club this row's player faced, used both to build the team-strength table and to resolve a measured row's specific opponent (resolveFixtureTeams). 98.9% populated for 2025-2026 Premier League rows (12,613 of 12,754) — the ~141 unresolved rows are mid-season transfers (players.csv stores one club per season), excluded as unresolvedFixtureTeams, never guessed. */
+  opponent_team_code: number | null
 }
 
 function toActualMatchStatsInput(row: ActualSourceRow): ActualMatchStatsInput {
@@ -2494,7 +2868,7 @@ async function main(): Promise<void> {
       supabase
         .from('feature_history')
         .select(
-          'gameweek_id, player_code, element_type, prior_matches, prior_minutes, prior_xg, prior_xa, prior_saves, prior_clearances, prior_blocks, ' +
+          'gameweek_id, player_code, element_type, team_code, prior_matches, prior_minutes, prior_xg, prior_xa, prior_saves, prior_clearances, prior_blocks, ' +
             'prior_interceptions, prior_tackles, prior_recoveries, prior_defcon_qualifying_matches, prior_defcon_hits',
         )
         .eq('season', season)
@@ -2507,6 +2881,9 @@ async function main(): Promise<void> {
     if (featureHistoryError) {
       if (isMissingTable(featureHistoryError, 'feature_history')) {
         throw new BacktestError(`the "feature_history" table does not exist. Apply ${FEATURE_HISTORY_MIGRATION} first.`, 'feature_history')
+      }
+      if (isMissingColumn(featureHistoryError, 'team_code')) {
+        throw new BacktestError(`feature_history.team_code does not exist in this database yet. Apply ${TEAM_AND_OPPONENT_MIGRATION} first.`, 'feature_history')
       }
       throw new BacktestError(`feature_history lookup failed: ${featureHistoryError.message}`, 'feature_history')
     }
@@ -2542,7 +2919,7 @@ async function main(): Promise<void> {
       supabase
         .from('player_match_stats')
         .select(
-          'player_code, match_id, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries',
+          'player_code, match_id, gameweek, minutes_played, goals, assists, team_goals_conceded, saves, clearances, blocks, interceptions, tackles, recoveries, team_code, opponent_team_code',
         )
         .eq('season', season)
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
@@ -2558,6 +2935,12 @@ async function main(): Promise<void> {
       if (isMissingColumn(matchStatsError, 'team_goals_conceded')) {
         throw new BacktestError(
           `player_match_stats.team_goals_conceded does not exist in this database yet. Apply ${TEAM_GOALS_CONCEDED_MIGRATION} first.`,
+          'player_match_stats',
+        )
+      }
+      if (isMissingColumn(matchStatsError, 'team_code') || isMissingColumn(matchStatsError, 'opponent_team_code')) {
+        throw new BacktestError(
+          `player_match_stats.team_code/opponent_team_code do not exist in this database yet. Apply ${TEAM_AND_OPPONENT_MIGRATION} first.`,
           'player_match_stats',
         )
       }
@@ -2603,6 +2986,24 @@ async function main(): Promise<void> {
     const teamSlugsByGameweek = buildTeamSlugsByGameweek(matchStatsRows.map((r) => ({ gameweek: r.gameweek, matchId: r.match_id })))
 
     // --------------------------------------------------------------------
+    // 4c2. Ticket #175. The point-in-time team-strength table — one row per
+    //      resolvable (matchId, teamCode), built once from the SAME
+    //      matchStatsRows already fetched above (no extra Supabase call).
+    //      computeTeamStrengthAsOf (called per measured row, step 6) filters
+    //      this down to gameweeks strictly before the row being projected —
+    //      the lookahead guard.
+    // --------------------------------------------------------------------
+    const teamMatchRecords = buildTeamMatchRecords(
+      matchStatsRows.map((r) => ({
+        matchId: r.match_id,
+        gameweek: r.gameweek,
+        teamCode: r.team_code,
+        opponentTeamCode: r.opponent_team_code,
+        teamGoalsConceded: r.team_goals_conceded,
+      })),
+    )
+
+    // --------------------------------------------------------------------
     // 4c. Ticket #154. Resolve one position per player_code for
     //     computePositionPriors (which keys its own aggregation by player
     //     code, not by row — see its own comment). First-resolved wins per
@@ -2638,6 +3039,8 @@ async function main(): Promise<void> {
     // own comments for why each counts what it counts.
     const positionResolutionCounts = emptyPositionResolutionCounts()
     const defconSourceCounts = emptyDefconSourceCounts()
+    // Ticket #175 — how many measured rows used a real, computed fixture vs the neutral fallback.
+    const fixtureCoverage = emptyFixtureCoverageCounts()
 
     for (const row of featureHistoryRows) {
       const resolution = resolveRowPosition(row, codeToPosition)
@@ -2653,17 +3056,44 @@ async function main(): Promise<void> {
       // resolved — see inferTeamSlug's own comment on the single-match tie.
       const hadFixture = teamSlug === null ? true : (teamSlugsByGameweek.get(row.gameweek_id)?.has(teamSlug) ?? false)
 
-      const classification = classifyRow(row, position, actualRowsRaw.map(toActualMatchStatsInput), hadFixture)
+      // Ticket #175 — the player's own club (feature_history.team_code) and
+      // EVERY matched actual row's opponent (player_match_stats.
+      // opponent_team_code) must all resolve, or this row is excluded as
+      // unresolvedFixtureTeams below (never guessed).
+      const fixtureTeamsResolved = resolveFixtureTeams(
+        row.team_code,
+        actualRowsRaw.map((r) => r.opponent_team_code),
+      )
+
+      const classification = classifyRow(row, position, actualRowsRaw.map(toActualMatchStatsInput), hadFixture, fixtureTeamsResolved)
       if (classification.kind === 'excluded') {
         incrementExclusion(exclusions, classification.reason)
         continue
       }
 
-      // Ticket #140: project as many neutral fixtures as the actual side
-      // found rows for (classification.outcome.matchesFound) — the same
-      // count aggregateActualForGameweek summed on the actual side.
+      // Ticket #175 — one point-in-time expectedScore per fixture, built
+      // ONLY from team-strength records with gameweek strictly before this
+      // row's own gameweek_id (the lookahead guard — see
+      // computeTeamStrengthAsOf). row.team_code is guaranteed non-null here:
+      // fixtureTeamsResolved (checked above) already required it.
+      const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, row.team_code as number, row.gameweek_id)
+      const fixtureExpectedScores = actualRowsRaw.map((r) => {
+        // opponent_team_code is likewise guaranteed non-null here — same reason.
+        const opponentStrength = computeTeamStrengthAsOf(teamMatchRecords, r.opponent_team_code as number, row.gameweek_id)
+        return computeFixtureExpectedScore(ownStrength, opponentStrength, SCALE)
+      })
+      const rowUsedRealFixture = actualRowsRaw.every((r) =>
+        fixtureHasSufficientHistory(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, r.opponent_team_code as number, row.gameweek_id)),
+      )
+      incrementFixtureCoverage(fixtureCoverage, rowUsedRealFixture)
+
+      // Ticket #140: project as many fixtures as the actual side found rows
+      // for (classification.outcome.matchesFound) — the same count
+      // aggregateActualForGameweek summed on the actual side. Ticket #175:
+      // each fixture now carries its own point-in-time expectedScore
+      // (fixtureExpectedScores) rather than always the neutral fallback.
       const prior = positionPriors.get(positionPriorKey(row.gameweek_id, classification.position)) ?? fallbackPositionPrior(classification.position)
-      const projection = projectRow(row, classification.position, prior, classification.outcome.matchesFound)
+      const projection = projectRow(row, classification.position, prior, classification.outcome.matchesFound, fixtureExpectedScores)
       const projectedComponents = sumComponentTotals(projection.fixtures.map((f) => pickProjectedComponents(f.components)))
 
       // Ticket #159, Defect 1 — naive baselines, computed from this SAME row
@@ -2743,6 +3173,7 @@ async function main(): Promise<void> {
       baselines,
       baselineVerdicts,
       rankingByGameweekAndPosition,
+      fixtureCoverage,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
     await mkdir(dirname(reportPath), { recursive: true })
@@ -2774,6 +3205,7 @@ async function main(): Promise<void> {
       rankingSanity,
       baselines,
       baselineVerdicts,
+      fixtureCoverage,
       reportPath,
     }
 
