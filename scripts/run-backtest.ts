@@ -1018,23 +1018,44 @@ export const NEUTRAL_EXPECTED_SCORE_VALUE = 0.5
  * expectedScore construction below (see computeFixtureExpectedScore):
  * `expectedScore = clamp(0.5 + (ownRate - opponentRate) / SCALE, 0, 1)`.
  *
- * CALIBRATED, NOT CHOSEN (ticket text) — meant to be set so the spread of
- * the expectedScore values this construction produces over the 2025-2026
+ * CALIBRATED, NOT CHOSEN (ticket text) — set so the spread of the
+ * expectedScore values this construction produces over the 2025-2026
  * measured population matches the spread of the elo-derived expectedScore
  * already stored in `player_projections.components` on live data:
  * `SCALE = stdDev(ownRate - opponentRate, over every resolvable fixture) /
  * stdDev(live elo-derived expectedScore)`.
  *
- * *** NOT YET CALIBRATED — see the Builder's handback report on ticket #175.
- * This worktree had no Supabase credentials (no SUPABASE_URL /
- * SUPABASE_SECRET_KEY, no MCP tool) to run the required read-only query
- * against `player_projections.components`, so this value has not been
- * measured against live data — it is a documented placeholder, not the
- * calibrated constant the DoD requires. Flagged as an open Tier-2 question
- * for the orchestrator, not guessed past. Replace this constant (and this
- * comment) once the two distributions have actually been observed. ***
+ * THE TWO OBSERVED DISTRIBUTIONS.
+ *
+ * Target (live elo-derived expectedScore, `player_projections.components`,
+ * rows where `eloFallbackUsed` is false — i.e. a real elo comparison, never
+ * the coarser 5-value FDR fallback): n = 3,181, mean = 0.5003,
+ * population stdDev = 0.1701, min = 0.1238, max = 0.8762. Obtained by
+ * Keshav running a hand, read-only query directly against Supabase — NOT an
+ * in-run read from this job. This job has no Supabase access at all and
+ * never will (confirmed); the DoD's original phrasing asking for "an in-run
+ * read" was a specification error, not something to keep retrying via
+ * credentials.
+ *
+ * This construction's own delta (`ownRate - opponentRate`), 2025-2026,
+ * Premier League only, over every resolvable fixture with sufficient prior
+ * history on both sides (MIN_TEAM_PRIOR_MATCHES): n = 698 (349 matches x 2
+ * perspectives, mean exactly 0 by construction — every match contributes
+ * +delta and -delta), population stdDev = 0.9564. Computed by reconstructing
+ * player_match_stats from FPL-Core-Insights' own public per-gameweek CSVs
+ * (no Supabase needed for this side — confirmed reachable) via a throwaway
+ * script that reused this file's own buildTeamMatchRecords/
+ * computeTeamStrengthAsOf/teamStrengthRate/fixtureHasSufficientHistory and
+ * scripts/ingest-core-insights.ts's own buildClubCodeBySlug/
+ * buildTeamCodeMap/toMatchStatRow UNMODIFIED, never re-derived — the
+ * reconstruction's own row counts matched the ticket's stated population
+ * exactly before this number was trusted (15,340 of 15,340 total rows;
+ * 12,754 Premier League rows; 12,613 of 12,754 = 98.9% opponent_team_code
+ * resolved). The script was run via `npx tsx`, never committed.
+ *
+ * SCALE = 0.9564 / 0.1701 = 5.6225.
  */
-export const SCALE = 4
+export const SCALE = 5.6225
 
 /**
  * One `player_match_stats` row's fields needed to build the point-in-time
