@@ -512,6 +512,8 @@ export interface FixtureModelInputs {
   expectedGoalsConceded: number
   /** The defensive multiplier applied to savesPer90 for this fixture -- see fixture.ts's defensiveMultiplier. Ticket #109. */
   savesMultiplier: number
+  /** The attacking multiplier applied to xgPer90/xaPer90 for this fixture -- see fixture.ts's attackingMultiplier (damped to its measured slope, ticket #182). */
+  attackingMultiplier: number
   pCleanSheet: number
   /** True when this fixture's expectedScore came from the FPL-FDR fallback in fixture.ts because a team's elo was null. Counted in job_runs.details by the job. */
   eloFallbackUsed: boolean
@@ -624,6 +626,7 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
       expectedScore: expectedScoreValue,
       expectedGoalsConceded: teamLambdaConceded,
       savesMultiplier,
+      attackingMultiplier: attackMultiplier,
       pCleanSheet,
       eloFallbackUsed,
     },
