@@ -3351,7 +3351,7 @@ function buildFiveGameweekSections(data: ReportData): string[] {
   sections.push(
     '## Five-gameweek ranking (ticket #183)\n\n' +
       `The app plans over a **${FIVE_GAMEWEEK_HORIZON}-gameweek** horizon (\`build-solver-input.ts\`'s ` +
-      "\`decay_base\`/\`ft_value_list\`; \`scripts/project-points.ts\`'s own \`PROJECTION_HORIZON = 5\`) — every " +
+      "`decay_base`/`ft_value_list`; `scripts/project-points.ts`'s own `PROJECTION_HORIZON = 5`) — every " +
       'figure above measures only one gameweek. `docs/model-review-2026-09-02.md` found the one-gameweek ' +
       'ranking section above is nearly saturated (its own quality oracle reaches only ~0.33 there — see the ' +
       'oracle section below), so it has little room left to show any future model change; the five-gameweek ' +
@@ -3444,7 +3444,8 @@ interface PlayerRow {
   element_type: number
 }
 
-interface ActualSourceRow {
+/** Exported for ticket #183's own window-leg tests (projectAndReconstructWindowGameweek's `actualRows` parameter is this exact type) — was module-private before this ticket. */
+export interface ActualSourceRow {
   player_code: number | null
   /** Ticket #140 — read only for team-slug inference (blank-gameweek detection); never used for point reconstruction. See file header, "BLANK GAMEWEEKS". */
   match_id: string
@@ -3465,7 +3466,8 @@ interface ActualSourceRow {
   opponent_team_code: number | null
 }
 
-function toActualMatchStatsInput(row: ActualSourceRow): ActualMatchStatsInput {
+/** Exported for ticket #183's own tests — was module-private before this ticket. */
+export function toActualMatchStatsInput(row: ActualSourceRow): ActualMatchStatsInput {
   return {
     minutesPlayed: row.minutes_played,
     goals: row.goals,

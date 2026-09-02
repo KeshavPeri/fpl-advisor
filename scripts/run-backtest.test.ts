@@ -33,15 +33,19 @@ import { projectPlayerGameweek, type GameweekProjection } from '../src/lib/proje
 import { HOME_ADVANTAGE_ELO, LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
 import {
   aggregateActualForGameweek,
+  assertFiveGameweekReconciles,
   assertReconciles,
   averageMinutesPerMatch,
   buildBaselineVerdicts,
   bucketByPriorMatches,
   buildDefconMatches,
   buildDefconMatchesFromCounts,
+  buildFeatureHistoryIndex,
+  buildFiveGameweekWindow,
   buildMeasuredRow,
   buildMultiFixtureDiagnostic,
   buildPlayerRateHistory,
+  buildPlayerSeasonMatches,
   buildRateHistoryMatch,
   buildRecentMinutes,
   buildTeamMatchRecords,
@@ -49,12 +53,16 @@ import {
   checkRankingSanityBounds,
   checkSanityBounds,
   classifyDefconSource,
+  classifyFiveGameweekRow,
   classifyRow,
   CLEAN_SHEET_RATE_UPPER_BOUND,
   computeBaselineMinutesPerMatch,
   computeBaselineXgXaPerMatch,
   computeConstantBaselineSpearman,
   computeFixtureExpectedScore,
+  computeGenericConstantBaselineSpearman,
+  computeLastGameweekInData,
+  computeOracleRate,
   computePositionPriors,
   computeTeamStrengthAsOf,
   CONSTANT_BASELINE_LABEL,
@@ -67,16 +75,23 @@ import {
   eloForExpectedScore,
   emptyDefconSourceCounts,
   emptyExclusionCounts,
+  emptyFiveGameweekExclusionCounts,
   emptyFixtureCoverageCounts,
   emptyPositionResolutionCounts,
+  FIVE_GAMEWEEK_HORIZON,
+  fallbackPositionPrior,
   fixtureHasSufficientHistory,
   formatExclusionPercentage,
+  generateReportMarkdown,
+  groupSeasonMatchesByPlayer,
   hasDefconCounters,
   incrementDefconSource,
   incrementExclusion,
+  incrementFiveGameweekExclusion,
   incrementFixtureCoverage,
   incrementPositionResolution,
   inferTeamSlug,
+  isFiveGameweekWindowTruncated,
   MAE_LOWER_BOUND,
   MAE_UPPER_BOUND,
   MIN_BUCKET_SAMPLE_SIZE,
@@ -87,6 +102,7 @@ import {
   pickProjectedComponents,
   PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL,
   PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL,
+  projectAndReconstructWindowGameweek,
   projectRow,
   rankDescending,
   reconstructActualMatchPoints,
@@ -100,24 +116,36 @@ import {
   summarizeByGameweek,
   summarizeByPosition,
   summarizeErrors,
+  summarizeFiveGameweekBaselines,
+  summarizeGenericBaselineSpearman,
+  summarizeGenericRankingByGroup,
+  summarizeGenericRankingByPosition,
+  summarizeGenericSeasonRanking,
   summarizeRankingByGameweek,
   summarizeRankingByGameweekAndPosition,
   summarizeRankingByPosition,
   summarizeSeasonRanking,
   teamStrengthRate,
+  toActualMatchStatsInput,
   toRankingPair,
   TOP10_OVERLAP_UPPER_BOUND_FRACTION,
   topNIsMeaningful,
   topNOverlap,
   TOP_N_MAX_POPULATION_FRACTION,
   totalExcluded,
+  totalFiveGameweekExcluded,
   type ActualMatchStatsInput,
+  type ActualSourceRow,
   type FeatureHistoryRow,
+  type FiveGameweekRow,
+  type GenericRankingRow,
   type MatchStatsForTeamStrength,
   type MeasuredRow,
+  type PlayerSeasonMatch,
   type PositionPrior,
   type PositionRankingSummary,
   type RankingPair,
+  type ReportData,
   type TeamStrengthRecord,
 } from './run-backtest.ts'
 
@@ -166,6 +194,42 @@ function actualRow(overrides: Partial<ActualMatchStatsInput> = {}): ActualMatchS
     interceptions: 0,
     tackles: 0,
     recoveries: 0,
+    ...overrides,
+  }
+}
+
+// Ticket #183: ActualSourceRow — the shape run-backtest.ts actually reads
+// from player_match_stats (ActualMatchStatsInput plus match_id/gameweek/
+// player_code/team_code/opponent_team_code). team_code/opponent_team_code
+// default to null (a genuinely resolvable club is explicit, per test).
+function sourceRow(overrides: Partial<ActualSourceRow> & Pick<ActualSourceRow, 'player_code' | 'gameweek'>): ActualSourceRow {
+  return {
+    match_id: `match-${overrides.gameweek}`,
+    minutes_played: 90,
+    goals: 0,
+    assists: 0,
+    team_goals_conceded: 0,
+    saves: 0,
+    clearances: 0,
+    blocks: 0,
+    interceptions: 0,
+    tackles: 0,
+    recoveries: 0,
+    team_code: null,
+    opponent_team_code: null,
+    ...overrides,
+  }
+}
+
+// Ticket #183: FiveGameweekRow — mirrors measuredRow's own defaulting style.
+function fiveGwRow(
+  overrides: Partial<FiveGameweekRow> & Pick<FiveGameweekRow, 'position' | 'startGameweekId' | 'actualPoints'>,
+): FiveGameweekRow {
+  return {
+    playerCode: 1,
+    projectedPoints: overrides.actualPoints,
+    baselineMinutesPerMatch: 0,
+    baselineXgXaPerMatch: 0,
     ...overrides,
   }
 }
@@ -2109,6 +2173,703 @@ describe('buildBaselineVerdicts — model Spearman minus each baseline\'s, a dif
     expect(verdicts[0].delta).toBeNull()
   })
 })
+
+// ============================================================================
+// FIVE-GAMEWEEK RANKING TARGET — ticket #183. Mirrors this file's own
+// section ordering: the leave-window-out oracle first (the ticket's own
+// "most important test"), then the window construction, then the reused
+// summarizers, then the report itself.
+// ============================================================================
+
+describe('computeOracleRate — THE MOST IMPORTANT TEST IN THIS TICKET: no gameweek inside the window contributes to its own estimate', () => {
+  it('excludes every gameweek of a five-gameweek window, even though one of them carries an outrageous point value that would obviously skew the rate if it leaked', () => {
+    // Gameweeks 1-4 and 10 (OUTSIDE the window) each score a small, uniform
+    // 2 points/match. Gameweeks 5-9 (the window) include gameweek 7 scoring
+    // 1000 — a deliberately dramatic, unmissable leak trap.
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 2, matches: 1 },
+      { playerCode: 1, gameweekId: 2, points: 2, matches: 1 },
+      { playerCode: 1, gameweekId: 3, points: 2, matches: 1 },
+      { playerCode: 1, gameweekId: 4, points: 2, matches: 1 },
+      { playerCode: 1, gameweekId: 5, points: 2, matches: 1 },
+      { playerCode: 1, gameweekId: 6, points: 2, matches: 1 },
+      { playerCode: 1, gameweekId: 7, points: 1000, matches: 1 },
+      { playerCode: 1, gameweekId: 8, points: 2, matches: 1 },
+      { playerCode: 1, gameweekId: 9, points: 2, matches: 1 },
+      { playerCode: 1, gameweekId: 10, points: 2, matches: 1 },
+    ]
+    const rate = computeOracleRate(seasonMatches, new Set([5, 6, 7, 8, 9]))
+    // Only gameweeks 1-4 and 10 contribute: 5 matches, 10 points -> rate 2.
+    // A leak of gameweek 7's 1000 points would push this far above 2.
+    expect(rate).toBe(2)
+    expect(rate).toBeLessThan(10)
+  })
+
+  it('the one-gameweek exclude set (the one-gameweek oracle) leaves out only that gameweek, not its neighbours', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 3, matches: 1 },
+      { playerCode: 1, gameweekId: 2, points: 3, matches: 1 },
+      { playerCode: 1, gameweekId: 3, points: 999, matches: 1 }, // the target gameweek — must not leak
+      { playerCode: 1, gameweekId: 4, points: 3, matches: 1 },
+    ]
+    expect(computeOracleRate(seasonMatches, new Set([3]))).toBe(3)
+  })
+
+  it('both edges of a five-gameweek window are excluded — an off-by-one would leak the first or last leg', () => {
+    // Window is exactly buildFiveGameweekWindow(10) = [10,11,12,13,14].
+    // Gameweeks 9 and 15 (just outside) must contribute; 10 and 14 (the
+    // window's own edges) must not — each edge carries an outrageous 500.
+    const seasonMatches: PlayerSeasonMatch[] = [9, 10, 11, 12, 13, 14, 15].map((gw) => ({
+      playerCode: 1,
+      gameweekId: gw,
+      points: gw === 10 || gw === 14 ? 500 : 4,
+      matches: 1,
+    }))
+    const rate = computeOracleRate(seasonMatches, new Set(buildFiveGameweekWindow(10)))
+    expect(rate).toBe(4) // only gw 9 and gw 15 contribute: (4 + 4) / 2
+  })
+
+  it('null when the player has zero matches outside the window — no evidence to rank on, never a guessed rate', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 5, points: 10, matches: 1 },
+      { playerCode: 1, gameweekId: 6, points: 10, matches: 1 },
+    ]
+    expect(computeOracleRate(seasonMatches, new Set(buildFiveGameweekWindow(5)))).toBeNull()
+  })
+
+  it('sums matches (not gameweek-count) as the denominator, so a double-gameweek outside the window counts twice', () => {
+    const seasonMatches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 10, matches: 2 }, // double gameweek
+      { playerCode: 1, gameweekId: 5, points: 999, matches: 1 }, // inside window
+    ]
+    expect(computeOracleRate(seasonMatches, new Set([5]))).toBe(5) // 10 / 2
+  })
+})
+
+describe('buildPlayerSeasonMatches / groupSeasonMatchesByPlayer', () => {
+  it('reconstructs one points/matches pair per (player, gameweek) via the SAME aggregateActualForGameweek used everywhere else in this file', () => {
+    const groups = [
+      { playerCode: 1, gameweekId: 1, rows: [actualRow({ minutesPlayed: 90, goals: 1 })] },
+      { playerCode: 1, gameweekId: 2, rows: [actualRow({ minutesPlayed: 0 })] },
+    ]
+    const matches = buildPlayerSeasonMatches(groups, () => FORWARD)
+    expect(matches).toHaveLength(2)
+    expect(matches[0]).toMatchObject({ playerCode: 1, gameweekId: 1, matches: 1 })
+    expect(matches[0].points).toBeGreaterThan(0) // a goal was scored
+    expect(matches[1]).toMatchObject({ playerCode: 1, gameweekId: 2, points: 0, matches: 1 })
+  })
+
+  it('skips a (player, gameweek) group whose position cannot be resolved — points cannot be computed without one', () => {
+    const groups = [{ playerCode: 1, gameweekId: 1, rows: [actualRow()] }]
+    const matches = buildPlayerSeasonMatches(groups, () => undefined)
+    expect(matches).toEqual([])
+  })
+
+  it('groupSeasonMatchesByPlayer buckets by playerCode, preserving every match', () => {
+    const matches: PlayerSeasonMatch[] = [
+      { playerCode: 1, gameweekId: 1, points: 1, matches: 1 },
+      { playerCode: 1, gameweekId: 2, points: 2, matches: 1 },
+      { playerCode: 2, gameweekId: 1, points: 5, matches: 1 },
+    ]
+    const grouped = groupSeasonMatchesByPlayer(matches)
+    expect(grouped.get(1)).toHaveLength(2)
+    expect(grouped.get(2)).toHaveLength(1)
+    expect(grouped.get(3)).toBeUndefined()
+  })
+})
+
+describe('buildFiveGameweekWindow / isFiveGameweekWindowTruncated / computeLastGameweekInData', () => {
+  it('FIVE_GAMEWEEK_HORIZON is 5, matching build-solver-input.ts\'s horizon and project-points.ts\'s PROJECTION_HORIZON', () => {
+    expect(FIVE_GAMEWEEK_HORIZON).toBe(5)
+  })
+
+  it('a window is five contiguous gameweeks starting at the given gameweek', () => {
+    expect(buildFiveGameweekWindow(10)).toEqual([10, 11, 12, 13, 14])
+    expect(buildFiveGameweekWindow(1)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('a starting gameweek whose window would reach past the last gameweek in data is truncated', () => {
+    expect(isFiveGameweekWindowTruncated(35, 38)).toBe(true) // window 35..39
+    expect(isFiveGameweekWindowTruncated(34, 38)).toBe(false) // window 34..38, exactly fits
+    expect(isFiveGameweekWindowTruncated(1, 38)).toBe(false)
+    expect(isFiveGameweekWindowTruncated(38, 38)).toBe(true) // a single-gameweek window is still 4 short
+  })
+
+  it('computeLastGameweekInData reads the max gameweek_id, 0 for an empty read', () => {
+    expect(computeLastGameweekInData([])).toBe(0)
+    expect(
+      computeLastGameweekInData([featureRow({ gameweek_id: 3, player_code: 1 }), featureRow({ gameweek_id: 11, player_code: 1 }), featureRow({ gameweek_id: 7, player_code: 2 })]),
+    ).toBe(11)
+  })
+})
+
+describe('buildFeatureHistoryIndex', () => {
+  it('keys rows by (player_code, gameweek_id), each row retrievable by projectAndReconstructWindowGameweek', () => {
+    const rowA = featureRow({ gameweek_id: 5, player_code: 1, prior_matches: 3 })
+    const rowB = featureRow({ gameweek_id: 5, player_code: 2, prior_matches: 7 })
+    const index = buildFeatureHistoryIndex([rowA, rowB])
+    expect(index.get('1:5')).toBe(rowA)
+    expect(index.get('2:5')).toBe(rowB)
+    expect(index.get('1:6')).toBeUndefined()
+  })
+})
+
+describe('projectAndReconstructWindowGameweek', () => {
+  it('missingFeatureHistoryRow when no feature_history row exists for this (player, gameweek) — the density guarantee failing would surface here', () => {
+    const outcome = projectAndReconstructWindowGameweek(1, 5, new Map(), new Map(), new Map(), [], [])
+    expect(outcome).toEqual({ status: 'missingFeatureHistoryRow' })
+  })
+
+  it('unresolvedPosition when neither element_type nor the players-table fallback resolves', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: null })
+    const index = buildFeatureHistoryIndex([row])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, index, new Map(), new Map(), [], [])
+    expect(outcome).toEqual({ status: 'unresolvedPosition' })
+  })
+
+  it('actualDataIncomplete when a matched actual row has team_goals_conceded unknown — never silently defaulted to a clean sheet', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: DEFENDER, prior_matches: 3 })
+    const index = buildFeatureHistoryIndex([row])
+    const rows = [sourceRow({ player_code: 1, gameweek: 5, team_goals_conceded: null })]
+    const outcome = projectAndReconstructWindowGameweek(1, 5, index, new Map(), new Map(), rows, [])
+    expect(outcome).toEqual({ status: 'actualDataIncomplete' })
+  })
+
+  it('a leg with no matching actual rows at all (no data found) reconstructs to exactly 0 actual points — never excluded ("zeros for non-featuring weeks", ticket text)', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
+    const index = buildFeatureHistoryIndex([row])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, index, new Map(), new Map(), [], [])
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+    expect(outcome.actualPoints).toBe(0)
+    expect(Number.isFinite(outcome.projectedPoints)).toBe(true)
+  })
+
+  it('a leg with a matched but non-featuring row (0 minutes) also reconstructs to exactly 0 actual points', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
+    const index = buildFeatureHistoryIndex([row])
+    const rows = [sourceRow({ player_code: 1, gameweek: 5, minutes_played: 0 })]
+    const outcome = projectAndReconstructWindowGameweek(1, 5, index, new Map(), new Map(), rows, [])
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+    expect(outcome.actualPoints).toBe(0)
+  })
+
+  it('resolves position via element_type first, the players-table fallback only when it is null — same precedence as resolveRowPosition', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: null, prior_matches: 2 })
+    const index = buildFeatureHistoryIndex([row])
+    const codeToPosition = new Map([[1, MIDFIELDER]])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, index, codeToPosition, new Map(), [], [])
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+    expect(outcome.position).toBe(MIDFIELDER)
+  })
+})
+
+describe('classifyFiveGameweekRow', () => {
+  it('excludes a truncated window without touching any lookup maps', () => {
+    const classification = classifyFiveGameweekRow(
+      1,
+      { gameweekId: 36, position: FORWARD, projectedPoints: 1, actualPoints: 1, baselineMinutesPerMatch: 0, baselineXgXaPerMatch: 0 },
+      38,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      [],
+    )
+    expect(classification).toEqual({ kind: 'excluded', reason: 'truncatedWindow' })
+  })
+
+  it('propagates a window leg\'s own exclusion reason for the WHOLE window — a window is only as good as its worst-resolved leg', () => {
+    // Gameweek 2 (a G+1 leg) has no feature_history row at all.
+    const startRow = { gameweekId: 1, position: FORWARD, projectedPoints: 3, actualPoints: 2, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.2 }
+    const classification = classifyFiveGameweekRow(1, startRow, 38, new Map(), new Map(), new Map(), new Map(), [])
+    expect(classification).toEqual({ kind: 'excluded', reason: 'missingFeatureHistoryRow' })
+  })
+
+  it('five projections summed, NEVER one projection × 5 — each leg is built from ITS OWN feature_history row, and the sum matches an independent leg-by-leg reconstruction', () => {
+    const playerCode = 900
+    const startRow = { gameweekId: 1, position: FORWARD, projectedPoints: 7.5, actualPoints: 6, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.3 }
+
+    // Distinct prior_xg per leg (2..5) — if classifyFiveGameweekRow ever
+    // regressed to reusing gameweek 1's projection five times, this would
+    // diverge measurably from summing four DIFFERENT per-gameweek
+    // projections.
+    const legRows = [2, 3, 4, 5].map((gw) => featureRow({ gameweek_id: gw, player_code: playerCode, element_type: FORWARD, prior_matches: gw, prior_minutes: gw * 90, prior_xg: gw }))
+    const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(legRows)
+
+    const legActualRow = (gw: number): ActualSourceRow => sourceRow({ player_code: playerCode, gameweek: gw })
+    const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([
+      [`${playerCode}:2`, [legActualRow(2)]],
+      [`${playerCode}:3`, [legActualRow(3)]],
+      [`${playerCode}:4`, [legActualRow(4)]],
+      [`${playerCode}:5`, [legActualRow(5)]],
+    ])
+
+    const classification = classifyFiveGameweekRow(
+      playerCode,
+      startRow,
+      38,
+      featureHistoryByPlayerGameweek,
+      new Map(),
+      new Map(), // positionPriors empty — every leg falls back to fallbackPositionPrior(FORWARD)
+      actualByPlayerGameweek,
+      [],
+    )
+    expect(classification.kind).toBe('measured')
+    if (classification.kind !== 'measured') return
+
+    const prior = fallbackPositionPrior(FORWARD)
+    let expectedProjected = startRow.projectedPoints
+    let expectedActual = startRow.actualPoints
+    for (const row of legRows) {
+      expectedProjected += projectRow(row, FORWARD, prior, 1, []).expectedPoints
+      expectedActual += aggregateActualForGameweek(FORWARD, [toActualMatchStatsInput(legActualRow(row.gameweek_id))]).totalPoints
+    }
+
+    expect(classification.row.projectedPoints).toBeCloseTo(expectedProjected, 10)
+    expect(classification.row.actualPoints).toBeCloseTo(expectedActual, 10)
+    expect(classification.row).toMatchObject({
+      playerCode,
+      startGameweekId: 1,
+      position: FORWARD,
+      baselineMinutesPerMatch: 90, // reused verbatim from startRow — never recomputed per leg
+      baselineXgXaPerMatch: 0.3,
+    })
+
+    // The guard has teeth: leg 2's own projection genuinely differs from leg 5's.
+    const leg2 = projectRow(legRows[0], FORWARD, prior, 1, [])
+    const leg5 = projectRow(legRows[3], FORWARD, prior, 1, [])
+    expect(leg2.expectedPoints).not.toBeCloseTo(leg5.expectedPoints, 2)
+  })
+
+  it('a non-featuring leg contributes 0 actual points to the sum, never excludes the window ("that risk is part of what a transfer buys")', () => {
+    const playerCode = 901
+    const startRow = { gameweekId: 10, position: FORWARD, projectedPoints: 4, actualPoints: 3, baselineMinutesPerMatch: 80, baselineXgXaPerMatch: 0.25 }
+    const legRows = [11, 12, 13, 14].map((gw) => featureRow({ gameweek_id: gw, player_code: playerCode, element_type: FORWARD, prior_matches: 5, prior_minutes: 450, prior_xg: 3 }))
+    const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(legRows)
+    // No actual rows at all for any of gameweeks 11-14 — a blank stretch.
+    const classification = classifyFiveGameweekRow(playerCode, startRow, 38, featureHistoryByPlayerGameweek, new Map(), new Map(), new Map(), [])
+    expect(classification.kind).toBe('measured')
+    if (classification.kind !== 'measured') return
+    // Only the starting gameweek's actual (3) contributes — every other leg is 0.
+    expect(classification.row.actualPoints).toBe(3)
+  })
+})
+
+describe('emptyFiveGameweekExclusionCounts / incrementFiveGameweekExclusion / totalFiveGameweekExcluded / assertFiveGameweekReconciles', () => {
+  it('increments the named reason only', () => {
+    const counts = emptyFiveGameweekExclusionCounts()
+    incrementFiveGameweekExclusion(counts, 'truncatedWindow')
+    incrementFiveGameweekExclusion(counts, 'truncatedWindow')
+    incrementFiveGameweekExclusion(counts, 'actualDataIncomplete')
+    expect(counts).toEqual({ truncatedWindow: 2, missingFeatureHistoryRow: 0, unresolvedPosition: 0, actualDataIncomplete: 1 })
+    expect(totalFiveGameweekExcluded(counts)).toBe(3)
+  })
+
+  it('assertFiveGameweekReconciles throws, naming both sides, on a mismatch', () => {
+    const counts = emptyFiveGameweekExclusionCounts()
+    incrementFiveGameweekExclusion(counts, 'truncatedWindow')
+    expect(() => assertFiveGameweekReconciles(5, 3, counts)).toThrow(/five-gameweek reconciliation failed/)
+  })
+
+  it('does not throw when measured + excluded exactly equals candidates', () => {
+    const counts = emptyFiveGameweekExclusionCounts()
+    incrementFiveGameweekExclusion(counts, 'truncatedWindow')
+    incrementFiveGameweekExclusion(counts, 'unresolvedPosition')
+    expect(() => assertFiveGameweekReconciles(5, 3, counts)).not.toThrow()
+  })
+})
+
+describe('summarizeGenericRankingByGroup / summarizeGenericSeasonRanking / summarizeGenericRankingByPosition — reused math, new row shape', () => {
+  it('gates a group under MIN_BUCKET_SAMPLE_SIZE as "too small to read", same rule as the one-gameweek by-gameweek table', () => {
+    const rows: GenericRankingRow[] = Array.from({ length: 10 }, (_, i) => ({ position: FORWARD, groupId: 1, projected: i, actual: i }))
+    const byGroup = summarizeGenericRankingByGroup(rows)
+    expect(byGroup.get(1)?.tooSmallToRead).toBe(true)
+    expect(byGroup.get(1)?.spearman).toBeNull()
+  })
+
+  it('a perfectly-ordered set of at least MIN_BUCKET_SAMPLE_SIZE rows scores Spearman exactly 1, at both the group and season level', () => {
+    const rows: GenericRankingRow[] = Array.from({ length: 60 }, (_, i) => ({ position: MIDFIELDER, groupId: 7, projected: i, actual: i }))
+    const byGroup = summarizeGenericRankingByGroup(rows)
+    expect(byGroup.get(7)?.tooSmallToRead).toBe(false)
+    expect(byGroup.get(7)?.spearman).toBeCloseTo(1, 10)
+    const season = summarizeGenericSeasonRanking(rows, byGroup)
+    expect(season.spearman).toBeCloseTo(1, 10)
+    expect(season.n).toBe(60)
+  })
+
+  it('summarizeGenericRankingByPosition pools one position across every groupId, mirroring summarizeRankingByPosition', () => {
+    const rows: GenericRankingRow[] = [
+      ...Array.from({ length: 30 }, (_, i) => ({ position: DEFENDER, groupId: 1, projected: i, actual: i })),
+      ...Array.from({ length: 30 }, (_, i) => ({ position: DEFENDER, groupId: 2, projected: i, actual: i })),
+      { position: MIDFIELDER, groupId: 1, projected: 1, actual: 1 },
+    ]
+    const byPosition = summarizeGenericRankingByPosition(rows)
+    expect(byPosition[DEFENDER].n).toBe(60)
+    expect(byPosition[DEFENDER].spearman).toBeCloseTo(1, 10)
+    expect(byPosition[MIDFIELDER].n).toBe(1)
+  })
+})
+
+describe('summarizeFiveGameweekBaselines / computeGenericConstantBaselineSpearman — the SAME self-test as computeConstantBaselineSpearman, reapplied to the five-gameweek target (ticket text: "a constant ranking scores 0 on the five-gameweek target too")', () => {
+  it('computeGenericConstantBaselineSpearman returns exactly 0 for a set of five-gameweek actual totals with real variance', () => {
+    expect(computeGenericConstantBaselineSpearman([3, 45, 12, 0, 27, 9])).toBe(0)
+  })
+
+  it('summarizeFiveGameweekBaselines\' constant-baseline row is exactly 0 at season aggregate and every position it appears in', () => {
+    const rows: FiveGameweekRow[] = [
+      fiveGwRow({ position: DEFENDER, startGameweekId: 1, actualPoints: 12 }),
+      fiveGwRow({ position: DEFENDER, startGameweekId: 2, actualPoints: 30 }),
+      fiveGwRow({ position: MIDFIELDER, startGameweekId: 1, actualPoints: 5 }),
+    ]
+    const baselines = summarizeFiveGameweekBaselines(rows)
+    expect(baselines.map((b) => b.label)).toEqual([PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL, PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL, CONSTANT_BASELINE_LABEL])
+    const constant = baselines.find((b) => b.label === CONSTANT_BASELINE_LABEL)!
+    expect(constant.seasonSpearman).toBe(0)
+    expect(constant.byPosition[DEFENDER]).toBe(0)
+    expect(constant.byPosition[MIDFIELDER]).toBe(0)
+  })
+
+  it('ranks baselineMinutesPerMatch/baselineXgXaPerMatch — the SAME per-row prior quantity as the one-gameweek section, computed at the starting gameweek — against the five-gameweek actual total', () => {
+    const rows: FiveGameweekRow[] = Array.from({ length: 20 }, (_, i) => ({
+      playerCode: i,
+      startGameweekId: 1,
+      position: FORWARD,
+      projectedPoints: i,
+      actualPoints: i, // perfectly correlated with baselineMinutesPerMatch below
+      baselineMinutesPerMatch: i,
+      baselineXgXaPerMatch: 0,
+    }))
+    const baselines = summarizeFiveGameweekBaselines(rows)
+    const minutesBaseline = baselines.find((b) => b.label === PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL)!
+    expect(minutesBaseline.seasonSpearman).toBeCloseTo(1, 10)
+    const xgXaBaseline = baselines.find((b) => b.label === PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL)!
+    // baselineXgXaPerMatch is constant (0) across all rows — undefined correlation, reported null.
+    expect(xgXaBaseline.seasonSpearman).toBeNull()
+  })
+})
+
+describe('summarizeGenericBaselineSpearman', () => {
+  it('mirrors summarizeBaselineSpearman\'s own shape — one BaselineSummary with a season figure and a per-position breakdown', () => {
+    const rows: GenericRankingRow[] = [
+      { position: FORWARD, groupId: 1, projected: 1, actual: 1 },
+      { position: FORWARD, groupId: 1, projected: 2, actual: 2 },
+    ]
+    const summary = summarizeGenericBaselineSpearman('label', rows)
+    expect(summary.label).toBe('label')
+    expect(summary.seasonSpearman).toBeCloseTo(1, 10)
+    expect(summary.byPosition[FORWARD]).toBeCloseTo(1, 10)
+    expect(summary.byPosition[DEFENDER]).toBeNull()
+  })
+})
+
+// ============================================================================
+// generateReportMarkdown — ticket #183's second most important test: the
+// existing (pre-#183) report must be byte-identical for the same input.
+// PRE_TICKET_183_REPORT below is the EXACT output generateReportMarkdown
+// produced for this same ReportData BEFORE ticket #183 touched this file
+// (captured by running the pre-#183 commit's generateReportMarkdown,
+// verbatim — never hand-typed, never re-derived). Ticket #183 only ever
+// APPENDS sections after this point (see generateReportMarkdown's own
+// final `sections.push(...buildFiveGameweekSections(data))` call), so
+// today's output must start with exactly this string.
+// ============================================================================
+
+describe('generateReportMarkdown — the existing (pre-#183) report is byte-identical for the same input', () => {
+  const measured: MeasuredRow[] = [
+    {
+      gameweekId: 1,
+      position: FORWARD,
+      projectedPoints: 5,
+      actualPoints: 4,
+      signedError: 1,
+      absError: 1,
+      projectedComponents: {
+        appearancePoints: 2,
+        goalPoints: 0,
+        assistPoints: 0,
+        cleanSheetPoints: 0,
+        goalsConcededPoints: 0,
+        savePoints: 0,
+        defensiveContributionPoints: 0,
+      },
+      actualComponents: {
+        appearancePoints: 2,
+        goalPoints: 0,
+        assistPoints: 0,
+        cleanSheetPoints: 0,
+        goalsConcededPoints: 0,
+        savePoints: 0,
+        defensiveContributionPoints: 0,
+      },
+      actualMinutes: 90,
+      fixtureCount: 1,
+      priorMatches: 5,
+      baselineMinutesPerMatch: 90,
+      baselineXgXaPerMatch: 0.3,
+    },
+  ]
+
+  const fgRankingRows: GenericRankingRow[] = []
+  const fgByGroup = summarizeGenericRankingByGroup(fgRankingRows)
+  const fgSeason = summarizeGenericSeasonRanking(fgRankingRows, fgByGroup)
+  const fgByPosition = summarizeGenericRankingByPosition(fgRankingRows)
+  const fgBaselines = summarizeFiveGameweekBaselines([])
+
+  const data: ReportData = {
+    generatedAt: new Date('2026-09-02T00:00:00.000Z'),
+    season: '2025-2026',
+    measured,
+    overall: { n: 1, meanAbsoluteError: 1, meanSignedError: 1 },
+    byPosition: {
+      [GOALKEEPER]: { n: 0, meanAbsoluteError: null, meanSignedError: null },
+      [DEFENDER]: { n: 0, meanAbsoluteError: null, meanSignedError: null },
+      [MIDFIELDER]: { n: 0, meanAbsoluteError: null, meanSignedError: null },
+      [FORWARD]: { n: 1, meanAbsoluteError: 1, meanSignedError: 1 },
+    } as Record<typeof GOALKEEPER | typeof DEFENDER | typeof MIDFIELDER | typeof FORWARD, { n: number; meanAbsoluteError: number | null; meanSignedError: number | null }>,
+    byGameweek: new Map([[1, { n: 1, meanAbsoluteError: 1, meanSignedError: 1 }]]),
+    cleanSheetRateByPosition: { [GOALKEEPER]: null, [DEFENDER]: null, [MIDFIELDER]: null, [FORWARD]: null },
+    sanity: { ok: true, failures: [] },
+    exclusions: emptyExclusionCounts(),
+    positionResolution: emptyPositionResolutionCounts(),
+    defconSource: emptyDefconSourceCounts(),
+    featureHistoryRowsRead: 1,
+    actualRowsMatched: 1,
+    playersRowCount: 1,
+    matchStatsRowCount: 1,
+    multiFixtureByGameweek: new Map(),
+    multiFixtureDiagnostic: buildMultiFixtureDiagnostic(measured),
+    defconBuckets: bucketByPriorMatches(measured, defconSignedError),
+    overallBuckets: bucketByPriorMatches(measured, (r) => r.signedError),
+    rankingSeason: { n: 1, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 } },
+    rankingByPosition: summarizeRankingByPosition(measured),
+    rankingByGameweek: summarizeRankingByGameweek(measured),
+    rankingSanity: { ok: true, failures: [] },
+    baselines: summarizeBaselines(measured),
+    baselineVerdicts: buildBaselineVerdicts(null, summarizeBaselines(measured)),
+    rankingByGameweekAndPosition: summarizeRankingByGameweekAndPosition(measured),
+    fixtureCoverage: { realFixture: 1, neutralFallback: 0 },
+    fiveGameweek: {
+      lastGameweekInData: 38,
+      candidateCount: 1,
+      measuredCount: 0,
+      exclusions: emptyFiveGameweekExclusionCounts(),
+      season: fgSeason,
+      byPosition: fgByPosition,
+      byStartGameweek: fgByGroup,
+      baselines: fgBaselines,
+      baselineVerdicts: buildBaselineVerdicts(fgSeason.spearman, fgBaselines),
+      oracleOneGw: { season: fgSeason, byPosition: fgByPosition, insufficientData: 0 },
+      oracleFiveGw: { season: fgSeason, byPosition: fgByPosition, insufficientData: 0 },
+    },
+  }
+
+  it('starts with the exact pre-#183 report content, then continues with the new Five-gameweek section', () => {
+    const output = generateReportMarkdown(data)
+    expect(output.startsWith(PRE_TICKET_183_REPORT)).toBe(true)
+    expect(output).toContain('\n\n## Five-gameweek ranking (ticket #183)')
+  })
+
+  it('every pre-#183 section header still appears, in the same order, before the new section', () => {
+    const output = generateReportMarkdown(data)
+    const preTicketHeaders = [...PRE_TICKET_183_REPORT.matchAll(/^#{1,3} .+$/gm)].map((m) => m[0])
+    const outputHeaders = [...output.matchAll(/^#{1,3} .+$/gm)].map((m) => m[0])
+    expect(outputHeaders.slice(0, preTicketHeaders.length)).toEqual(preTicketHeaders)
+    expect(outputHeaders.length).toBeGreaterThan(preTicketHeaders.length)
+  })
+})
+
+const PRE_TICKET_183_REPORT = `# Backtest report — point-in-time projection vs actual
+
+Generated: 2026-09-02T00:00:00.000Z · Job: \`run-backtest\` · Season: \`2025-2026\`
+
+Measures the projection only — no transfers, captaincy, solver, or league position (item 32's remaining work). Every projected figure below is built strictly from \`feature_history\` prior-gameweek totals — no later gameweek, no live current-season data. See \`scripts/run-backtest.ts\`'s file header for the full method and its documented approximations, and \`docs/projection-model-backlog.md\` for what this slice does and does not settle.
+
+## Sanity check: PASSED
+
+Overall mean absolute error and every position's derived clean-sheet rate are within their sane bounds.
+
+## Headline
+
+Measured population: **1** player-gameweek row(s). Mean absolute error: **1.000**. Mean signed error: **1.000** — the model is OVER-projecting by 1.000 points per player-gameweek on average.
+
+## The measured population, and what is excluded
+
+- \`feature_history\` rows read (season=2025-2026): 1
+- rows with a matching \`player_match_stats\` actual gameweek entry found: 1
+- **rows measured (headline population)**: 1
+- excluded — no prior matches (\`prior_matches = 0\`, no point-in-time signal): 0
+- excluded — player did not feature this gameweek (a correct zero that would flatter the error): 0
+- excluded — blank gameweek (player's team had no fixture at all, ticket #140): 0
+- excluded — actual data incomplete (\`team_goals_conceded\` null, ~2% known gap, ticket #125): 0
+- excluded — unresolved position (neither \`feature_history.element_type\` nor the \`players\` fallback resolves, ticket #154): 0 (0% of rows read)
+- excluded — unresolved fixture teams (own club or the opponent faced could not be resolved, ticket #175 — chiefly mid-season transfers, see that ticket's own note): 0 (0% of rows read)
+
+Reconciliation: 1 measured + 0 excluded = 1, against 1 rows read.
+
+## Fixture coverage (ticket #175)
+
+Before this ticket, every measured row below was projected under a neutral fixture (expectedScore exactly 0.5, every multiplier exactly 1.0) — the harness could not see which team a player faced. This ticket reads \`feature_history.team_code\` (the player's own club) and \`player_match_stats.opponent_team_code\` (the club faced) and builds a point-in-time team-strength table from \`player_match_stats\` rows strictly before the row being projected — see \`scripts/run-backtest.ts\`'s file header for the construction and its SCALE constant. A team below 3 prior matches (a JUDGEMENT call, not derived) falls back to the same neutral expectedScore every row used before this ticket — a genuinely resolvable club with too little history yet, never an unresolved one (which is excluded separately above, never silently defaulted to neutral).
+
+- measured rows that used a real, computed fixture: 1
+- measured rows that fell back to the neutral fixture (insufficient prior team history): 0
+
+
+## Position resolution and defensive-contribution evidence (ticket #154)
+
+Ticket #146 added \`element_type\` and the two per-match defcon counters to \`feature_history\`; this is the first slice to read them. Position resolution is a strict 3-way partition of every row read; defcon-evidence source is a strict 2-way partition of the same population (not only the measured rows below — \`buildDefconMatches\` also runs for excluded rows via the position-prior computation).
+
+- position from \`feature_history.element_type\` (primary source): 0
+- position from the \`players\` table fallback (row predates ticket #146): 0
+- position unresolved (neither source — excluded as \`unresolvedPlayerCode\` above): 0
+- defensive-contribution evidence from stored \`prior_defcon_qualifying_matches\`/\`prior_defcon_hits\` counters: 0
+- defensive-contribution evidence from the pre-#154 single-averaged-match fallback (row predates ticket #146): 0
+
+
+## By position
+
+| Position | n | Mean absolute error | Mean signed error | Derived clean-sheet rate |
+|---|---|---|---|---|
+| Goalkeeper | 0 | n/a | n/a | n/a |
+| Defender | 0 | n/a | n/a | n/a |
+| Midfielder | 0 | n/a | n/a | n/a |
+| Forward | 1 | 1.000 | 1.000 | n/a |
+
+## By gameweek
+
+A bad week is visible here rather than averaged away into the season figure above. "Multi-fixture rows" is how many of that gameweek's measured player-gameweeks had more than one fixture (ticket #140) — a nonzero value flags a candidate double gameweek.
+
+| Gameweek | n | Mean absolute error | Mean signed error | Multi-fixture rows |
+|---|---|---|---|---|
+| 1 | 1 | 1.000 | 1.000 | 0 |
+
+## Multi-fixture gameweeks (ticket #140)
+
+Player-gameweeks with more than one fixture: **0** of 1 measured.
+
+- Season headline WITH multi-fixture rows (the figure above): n=1, MAE=1.000, mean signed error=1.000
+- Season headline WITHOUT multi-fixture rows: n=1, MAE=1.000, mean signed error=1.000
+
+Excluding multi-fixture player-gameweeks moves the season MAE by 0.000 — within the 0.05 threshold, not a material driver of the headline on its own.
+
+## Defensive-contribution signed error, by prior_matches bucket (ticket #140)
+
+Full-season calibration can look correct while point-in-time estimation shrinks hard toward the position prior early in a player's history — this table is what tells a cold-start problem (shrinks toward 0 as the bucket rises) apart from a level problem (stays flat). A bucket under 50 measured rows is reported as "too small to read", never as a number nobody checked.
+
+| prior_matches | n | Mean signed error |
+|---|---|---|
+| 1–4 | 0 | too small to read |
+| 5–9 | 1 | too small to read |
+| 10–19 | 0 | too small to read |
+| 20+ | 0 | too small to read |
+
+## Overall signed error, by prior_matches bucket (ticket #140)
+
+The same bucketing applied to the overall signed error, for comparison against the defcon-only breakdown above.
+
+| prior_matches | n | Mean signed error |
+|---|---|---|
+| 1–4 | 0 | too small to read |
+| 5–9 | 1 | too small to read |
+| 10–19 | 0 | too small to read |
+| 20+ | 0 | too small to read |
+
+## By component
+
+Mean actual vs mean projected per component, across the measured population — attributes a gap in the headline to a specific term rather than leaving it only visible in aggregate. Bonus is absent from both sides (see file header) rather than shown as an always-zero row.
+
+| Component | Mean actual | Mean projected | Mean signed error |
+|---|---|---|---|
+| Appearance | 2.000 | 2.000 | 0.000 |
+| Goals | 0.000 | 0.000 | 0.000 |
+| Assists | 0.000 | 0.000 | 0.000 |
+| Clean sheets | 0.000 | 0.000 | 0.000 |
+| Goals conceded | 0.000 | 0.000 | 0.000 |
+| Saves | 0.000 | 0.000 | 0.000 |
+| Defensive contribution | 0.000 | 0.000 | 0.000 |
+
+## Ranking skill (ticket #147)
+
+The metrics above measure how close the model's numbers are; this measures whether it puts the right players at the top — the only thing a recommendation actually depends on (the captain IS the squad's top-projected player; a transfer IS a claim one player will outscore another). Same measured population as above, no new Supabase read. **Spearman rank correlation** ranks projected and actual points among the same set of rows (tied values share the average rank they would occupy) and reports how well the two orderings agree — 1 is perfect agreement, −1 is perfect reversal, 0 is no relationship. **Top-N overlap** is closer to what the app actually does: of the players ranked in the model's top 10 (or top 20) that gameweek, how many were also in the actual top 10 (or top 20). See \`docs/projection-model-backlog.md\` for what this section does and does not settle — no conclusion about whether the ranking is good is drawn here.
+
+### Ranking sanity check: PASSED
+
+The season aggregate and every position's Spearman correlation and top-10 overlap are within their sane bounds.
+
+### Season aggregate
+
+- Spearman rank correlation: **n/a** (n=1)
+- Top-10 overlap: **n/a**
+- Top-20 overlap: **n/a**
+
+Top-10/20 figures are summed across every gameweek with at least 50 measured rows (the same threshold the by-gameweek table below applies) — a season-wide overlap RATE, not a single top-10 selected from the whole season pooled together.
+
+### By position
+
+A captain is chosen across positions, but a transfer is usually within one — Spearman is pooled across the whole season for that position (like the by-position table above); top-N overlap is summed across every gameweek that position appears in, uncapped by the 50-row gameweek gate (a per-gameweek goalkeeper population is often under 50 by construction).
+
+| Position | n | Spearman | Top-10 overlap | Top-20 overlap |
+|---|---|---|---|---|
+| Goalkeeper | 0 | n/a | n/a | n/a |
+| Defender | 0 | n/a | n/a | n/a |
+| Midfielder | 0 | n/a | n/a | n/a |
+| Forward | 1 | n/a | too small to read | too small to read |
+
+### By gameweek
+
+A gameweek with fewer than 50 measured rows is reported "too small to read" rather than as a correlation nobody could trust.
+
+| Gameweek | n | Spearman | Top-10 overlap | Top-20 overlap |
+|---|---|---|---|---|
+| 1 | 1 | too small to read | too small to read | too small to read |
+
+### By gameweek × position (ticket #159, Defect 3)
+
+The finest grain this report prints — the only place the Defender/Midfielder identical-overlap observation noted in this ticket's decisions file is distinguishable on the next run (not asserted as a bug here). Not gated by the 50-row gameweek threshold above (a per-gameweek, per-position population, goalkeepers especially, is routinely under 50 by construction); IS gated by the top-N-meaningfulness check directly below.
+
+| Gameweek | Position | n | Top-10 overlap | Top-20 overlap |
+|---|---|---|---|---|
+| 1 | Goalkeeper | 0 | n/a | n/a |
+| 1 | Defender | 0 | n/a | n/a |
+| 1 | Midfielder | 0 | n/a | n/a |
+| 1 | Forward | 1 | too small to read | too small to read |
+
+## Naive ranking baselines (ticket #159, Defect 1)
+
+The season Spearman above has no comparator on its own — an absolute band was previously asserted from general intuition, not derived from anything about weekly FPL scoring. These three baselines are computed over the EXACT SAME measured population as the model's own ranking above (no separate population, no second Supabase read, and never \`players.now_cost\` — a 2026/27 price would be both a cross-season mismatch and a lookahead against these 2025/26 gameweeks). A model with real skill should beat them; one that does not is decoration, not signal.
+
+- **Prior minutes per match** (\`prior_minutes / prior_matches\`) — the player who has played the most, stays.
+- **Prior xG+xA per match** (\`(prior_xg + prior_xa) / prior_matches\`) — the player with the best underlying attacking numbers, stays.
+- **Constant (zero-skill floor)** — every row ranked identically; the zero-skill floor, and a self-test of the correlation code itself (an implementation that scores a constant ranking WELL, rather than at exactly 0, is broken — see \`computeConstantBaselineSpearman\`).
+
+| Ranking | Season | Goalkeeper | Defender | Midfielder | Forward |
+|---|---|---|---|---|---|
+| Model (projection) | n/a | n/a | n/a | n/a | n/a |
+| Prior minutes per match | n/a | n/a | n/a | n/a | n/a |
+| Prior xG+xA per match | n/a | n/a | n/a | n/a | n/a |
+| Constant (zero-skill floor) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+
+### Verdict — model Spearman minus each baseline's (season aggregate)
+
+A DIFFERENCE, never checked against an asserted threshold (ticket text) — the report states the number and stops there.
+
+- Model (n/a) minus Prior minutes per match (n/a) = **n/a**
+- Model (n/a) minus Prior xG+xA per match (n/a) = **n/a**
+- Model (n/a) minus Constant (zero-skill floor) (0.000) = **n/a**
+
+## Provenance
+
+- players rows fetched: 1
+- feature_history rows fetched (season=2025-2026): 1
+- player_match_stats rows fetched (season=2025-2026, competition=prem): 1
+- sanity bounds: mean absolute error in [1, 3.5]; derived clean-sheet rate ≤ 60% per position
+- ranking sanity bounds (#147, extended by #159 to top-20): Spearman rank correlation in [-0.2, 0.9]; top-10 AND top-20 overlap ≤ 90%, at the season aggregate and every position
+- top-N meaningfulness threshold (#159): a top-N figure is refused ("too small to read") when N exceeds 75% of the population it was drawn from — a judgement, not a derived bound
+
+`
+
 
 // ============================================================================
 // Source invariants — proving the shape of the shipped source, since main()'s
