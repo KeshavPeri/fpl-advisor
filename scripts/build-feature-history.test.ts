@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import { buildFeatureHistory, DEFAULT_SEASON, ZERO_TOTALS, type SourceMatchRow } from './build-feature-history.ts'
 import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
+import { RECENT_MATCH_COUNT } from '../src/lib/projection/minutes.ts'
 
 const SEASON = '2025-2026'
 const COMPUTED_AT = '2026-08-27T09:00:00.000Z'
@@ -702,6 +703,25 @@ describe('build-feature-history.ts — source invariants', () => {
   it('selects element_type off player_match_stats', () => {
     expect(jobSource).toMatch(/\.select\(\s*\n?\s*'player_code,\s*element_type,/)
   })
+
+  // Ticket #181's own DoD line: the window length is defined by
+  // RECENT_MATCH_COUNT, imported from src/lib/projection/minutes.ts, never a
+  // locally reimplemented literal "5".
+  it('imports RECENT_MATCH_COUNT from src/lib/projection/minutes.ts rather than a local literal', () => {
+    expect(jobSource).toMatch(
+      /import\s*\{\s*RECENT_MATCH_COUNT\s*\}\s*from\s*['"]\.\.\/src\/lib\/projection\/minutes\.ts['"]/,
+    )
+    expect(jobSource).toMatch(/RECENT_MATCH_COUNT/)
+  })
+
+  // Ticket #181's own DoD line: job_runs.details must carry the four
+  // prior_recent_minutes counters as named fields.
+  it('reports the four prior_recent_minutes counters as named job_runs.details fields', () => {
+    expect(jobSource).toMatch(/rowsWithRecentMinutes/)
+    expect(jobSource).toMatch(/rowsWithFullRecentMinutesWindow/)
+    expect(jobSource).toMatch(/rowsWithShortRecentMinutesWindow/)
+    expect(jobSource).toMatch(/rowsWithEmptyRecentMinutesWindow/)
+  })
 })
 
 // ============================================================================
@@ -853,6 +873,14 @@ describe('supabase/README.md', () => {
     expect(rowMatch).not.toBeNull()
     expect(rowMatch![0]).toMatch(/not yet applied/i)
   })
+
+  // Ticket #181's own new migration row.
+  it('lists the new feature_history_recent_minutes migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260902090000_feature_history_recent_minutes\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260902090000_feature_history_recent_minutes\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
+  })
 })
 
 // ============================================================================
@@ -914,6 +942,144 @@ describe('buildFeatureHistory — team_code (ticket #167)', () => {
 })
 
 // ============================================================================
+// prior_recent_minutes (ticket #181). The true last-five-match minutes
+// window — see build-feature-history.ts's own header for the full "why".
+// The strictly-before / lookahead-guard test is the most important test in
+// this ticket per its own DoD.
+// ============================================================================
+
+describe('buildFeatureHistory — prior_recent_minutes lookahead guard (ticket #181)', () => {
+  // DoD: "A named test proves a gameweek-N row contains no minutes from
+  // gameweek N or later — the lookahead guard, the most important test in
+  // this ticket." Every gameweek carries a distinguishable minutes value so
+  // leakage from gameweek N or later would be obvious in the array.
+  it('the gameweek-6 row contains no minutes from gameweek 6 or any later gameweek', () => {
+    const matches = [1, 2, 3, 4, 5, 6, 7].map((gw) => premMatch(940, gw, { minutes_played: gw * 10 }))
+    const result = buildFeatureHistory(matches, SEASON, COMPUTED_AT)
+    const row6 = result.rows.find((r) => r.gameweek_id === 6 && r.player_code === 940)!
+
+    // Direction 1: gameweek 6's own match (minutes 60) and every later one
+    // (70) must be absent.
+    expect(row6.prior_recent_minutes).not.toContain(60)
+    expect(row6.prior_recent_minutes).not.toContain(70)
+    // Direction 2: the window is the true last five matches strictly before
+    // gameweek 6 — gameweeks 1-5 (minutes 10,20,30,40,50) — most recent
+    // first, i.e. gameweek 5 through gameweek 1.
+    expect(row6.prior_recent_minutes).toEqual([50, 40, 30, 20, 10])
+  })
+})
+
+describe('buildFeatureHistory — prior_recent_minutes ordering and cap (ticket #181)', () => {
+  // Each test adds a different player's later match purely to extend
+  // lastGameweekInData past the subject player's own final match — the same
+  // "later player" technique the #125/#146 dense-rows tests above use — so
+  // there is a row whose strictly-before window can actually include every
+  // one of the subject player's matches.
+  it('a player with more than five prior matches gets a five-entry, most-recent-first window', () => {
+    const matches = [1, 2, 3, 4, 5, 6].map((gw) => premMatch(941, gw, { minutes_played: gw }))
+    const laterPlayer = premMatch(998, 7)
+    const result = buildFeatureHistory([...matches, laterPlayer], SEASON, COMPUTED_AT)
+    const row7 = result.rows.find((r) => r.gameweek_id === 7 && r.player_code === 941)!
+    // Strictly before gameweek 7: all six matches (gw1..gw6) qualify, capped
+    // at RECENT_MATCH_COUNT (5) — the five most recent (gw6..gw2), newest first.
+    expect(row7.prior_recent_minutes).toEqual([6, 5, 4, 3, 2])
+    expect(row7.prior_recent_minutes).toHaveLength(RECENT_MATCH_COUNT)
+  })
+
+  it('a player with exactly five prior matches gets a full window, most-recent-first', () => {
+    const matches = [1, 2, 3, 4, 5].map((gw) => premMatch(942, gw, { minutes_played: gw }))
+    const laterPlayer = premMatch(998, 6)
+    const result = buildFeatureHistory([...matches, laterPlayer], SEASON, COMPUTED_AT)
+    const row6 = result.rows.find((r) => r.gameweek_id === 6 && r.player_code === 942)!
+    expect(row6.prior_recent_minutes).toEqual([5, 4, 3, 2, 1])
+    expect(row6.prior_recent_minutes).toHaveLength(RECENT_MATCH_COUNT)
+  })
+
+  it('a player with exactly two prior matches gets a two-entry window, most-recent-first', () => {
+    const matches = [1, 2].map((gw) => premMatch(943, gw, { minutes_played: gw }))
+    const laterPlayer = premMatch(998, 3)
+    const result = buildFeatureHistory([...matches, laterPlayer], SEASON, COMPUTED_AT)
+    const row3 = result.rows.find((r) => r.gameweek_id === 3 && r.player_code === 943)!
+    expect(row3.prior_recent_minutes).toEqual([2, 1])
+  })
+
+  it('a player with no prior matches at all gets an empty array, not null', () => {
+    const result = buildFeatureHistory([premMatch(944, 1)], SEASON, COMPUTED_AT)
+    const row1 = result.rows.find((r) => r.gameweek_id === 1 && r.player_code === 944)!
+    expect(row1.prior_recent_minutes).toEqual([])
+    expect(row1.prior_recent_minutes).not.toBeNull()
+  })
+
+  it('cameo appearances count — the window is not filtered by any minutes-played threshold', () => {
+    const gw1Cameo = premMatch(945, 1, { minutes_played: 5 }) // well below any 60-minute qualifying line
+    const gw2 = premMatch(945, 2, { minutes_played: 90 })
+    const laterPlayer = premMatch(998, 3)
+    const result = buildFeatureHistory([gw1Cameo, gw2, laterPlayer], SEASON, COMPUTED_AT)
+    const row3 = result.rows.find((r) => r.gameweek_id === 3 && r.player_code === 945)!
+    expect(row3.prior_recent_minutes).toEqual([90, 5]) // both matches present, including the 5-minute cameo
+  })
+})
+
+describe('buildFeatureHistory — prior_recent_minutes agrees with prior_matches (ticket #181)', () => {
+  // DoD: "The window is built from the same filtered row set the cumulative
+  // prior_* columns use, so a row's prior_matches and its array length agree
+  // wherever prior_matches is below RECENT_MATCH_COUNT."
+  it('array length equals prior_matches whenever prior_matches is below RECENT_MATCH_COUNT', () => {
+    const matches = [1, 2].map((gw) => premMatch(946, gw))
+    const cup = cupMatch(946, 3) // excluded from both prior_matches and the window
+    const result = buildFeatureHistory([...matches, cup], SEASON, COMPUTED_AT)
+    const row3 = result.rows.find((r) => r.gameweek_id === 3 && r.player_code === 946)!
+    expect(row3.prior_matches).toBe(2)
+    expect(row3.prior_recent_minutes).toHaveLength(row3.prior_matches)
+  })
+
+  it('array length caps at RECENT_MATCH_COUNT even though prior_matches keeps growing past it', () => {
+    const matches = Array.from({ length: 8 }, (_, i) => premMatch(947, i + 1))
+    const laterPlayer = premMatch(998, 9)
+    const result = buildFeatureHistory([...matches, laterPlayer], SEASON, COMPUTED_AT)
+    const row9 = result.rows.find((r) => r.gameweek_id === 9 && r.player_code === 947)!
+    expect(row9.prior_matches).toBe(8)
+    expect(row9.prior_recent_minutes).toHaveLength(RECENT_MATCH_COUNT)
+    expect(row9.prior_recent_minutes).not.toHaveLength(row9.prior_matches)
+  })
+})
+
+describe('buildFeatureHistory — prior_recent_minutes counters reconcile (ticket #181)', () => {
+  it('the four counters reconcile arithmetically against rows written', () => {
+    const rows: SourceMatchRow[] = [
+      // Player 950: ends with an empty window (his only row is his first gameweek).
+      premMatch(950, 1),
+      // Player 951: two prior matches by gameweek 3 -> a short window there.
+      premMatch(951, 1),
+      premMatch(951, 2),
+      // Player 952: six prior matches by gameweek 7 -> a full (capped) window there.
+      ...[1, 2, 3, 4, 5, 6].map((gw) => premMatch(952, gw)),
+    ]
+    const result = buildFeatureHistory(rows, SEASON, COMPUTED_AT)
+
+    expect(result.rowsWithRecentMinutes).toBe(result.rows.length)
+    expect(
+      result.rowsWithFullRecentMinutesWindow +
+        result.rowsWithShortRecentMinutesWindow +
+        result.rowsWithEmptyRecentMinutesWindow,
+    ).toBe(result.rowsWithRecentMinutes)
+
+    // Concretely, independently counted from the rows themselves.
+    const full = result.rows.filter((r) => r.prior_recent_minutes.length === RECENT_MATCH_COUNT).length
+    const short = result.rows.filter(
+      (r) => r.prior_recent_minutes.length > 0 && r.prior_recent_minutes.length < RECENT_MATCH_COUNT,
+    ).length
+    const empty = result.rows.filter((r) => r.prior_recent_minutes.length === 0).length
+    expect(result.rowsWithFullRecentMinutesWindow).toBe(full)
+    expect(result.rowsWithShortRecentMinutesWindow).toBe(short)
+    expect(result.rowsWithEmptyRecentMinutesWindow).toBe(empty)
+    expect(full).toBeGreaterThan(0)
+    expect(short).toBeGreaterThan(0)
+    expect(empty).toBeGreaterThan(0)
+  })
+})
+
+// ============================================================================
 // supabase/migrations/20260831090000_team_and_opponent.sql — the
 // feature_history-side column (ticket #167). The player_match_stats side
 // (team_code, opponent_team_code) is asserted in
@@ -945,5 +1111,53 @@ describe('supabase/migrations/20260831090000_team_and_opponent.sql — feature_h
       .filter((line) => !line.trim().startsWith('--'))
       .join('\n')
     expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
+})
+
+// ============================================================================
+// supabase/migrations/20260902090000_feature_history_recent_minutes.sql —
+// ticket #181's own new migration.
+// ============================================================================
+
+const recentMinutesMigrationPath = fileURLToPath(
+  new URL('../supabase/migrations/20260902090000_feature_history_recent_minutes.sql', import.meta.url),
+)
+const recentMinutesMigrationSource = readFileSync(recentMinutesMigrationPath, 'utf8')
+
+describe('supabase/migrations/20260902090000_feature_history_recent_minutes.sql', () => {
+  it('adds feature_history.prior_recent_minutes as a nullable integer array with no default', () => {
+    const statementLine = recentMinutesMigrationSource
+      .split('\n')
+      .find((line) =>
+        line.includes('ALTER TABLE public.feature_history ADD COLUMN IF NOT EXISTS prior_recent_minutes integer[];'),
+      )
+    expect(statementLine).toBeDefined()
+    expect(statementLine).not.toMatch(/NOT NULL/)
+    expect(statementLine).not.toMatch(/DEFAULT/)
+  })
+
+  it('is idempotent: the column addition uses ADD COLUMN IF NOT EXISTS', () => {
+    expect(recentMinutesMigrationSource).toMatch(/ADD COLUMN IF NOT EXISTS prior_recent_minutes integer\[\]/)
+  })
+
+  it('carries a COMMENT ON COLUMN for feature_history.prior_recent_minutes', () => {
+    expect(recentMinutesMigrationSource).toMatch(/COMMENT ON COLUMN public\.feature_history\.prior_recent_minutes IS/)
+  })
+
+  // DoD: "issues any GRANT it needs in the same file" — this migration needs
+  // none (ADD COLUMN on a table whose table-level grants already cover new
+  // columns, same precedent as #146/#167/#176), so this asserts the correct
+  // "none needed" outcome rather than an accidental omission.
+  it('issues no GRANT statement — table-level grants already cover feature_history (see file header)', () => {
+    const codeOnly = recentMinutesMigrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/\bGRANT\b/)
+  })
+
+  it('is wrapped in BEGIN/COMMIT, matching every migration in this repo', () => {
+    expect(recentMinutesMigrationSource).toMatch(/^BEGIN;/m)
+    expect(recentMinutesMigrationSource).toMatch(/^COMMIT;/m)
   })
 })

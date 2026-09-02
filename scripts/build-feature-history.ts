@@ -113,6 +113,27 @@
 // verifies its count against an independent count-only query — the same
 // db-max-rows ceiling ticket #43 found already bit this app once.
 //
+// PRIOR_RECENT_MINUTES — THE TRUE LAST-FIVE-MATCH WINDOW (ticket #181).
+// scripts/run-backtest.ts's buildRecentMinutes has been grading the model on
+// a blurred version of its own inputs: an array of exactly one synthetic
+// match, the player's average minutes across all prior matches. The live
+// model instead calls estimateMinutes() (src/lib/projection/minutes.ts)
+// with the player's last RECENT_MATCH_COUNT (5) actual match rows. This job
+// now stores that same true window on feature_history — prior_recent_minutes,
+// an integer[] — so a follow-up ticket can make the backtest read it
+// instead of reconstructing an average. Built from the IDENTICAL
+// contributing-row set and strictly-before cut-off the cumulative prior_*
+// totals already use (see buildFeatureHistory below): never a
+// separately-derived query that could admit a lookahead. Most-recent-first,
+// capped at RECENT_MATCH_COUNT — imported from src/lib/projection/minutes.ts,
+// never a locally reimplemented "5". NOT filtered by any minutes-played
+// threshold (cameos count), matching estimateMinutes()'s own window — this
+// is a different "qualifying" than isQualifyingMatch()'s 60-minute rule
+// used two paragraphs up for the unrelated defcon counters. This ticket
+// changes no other file: scripts/run-backtest.ts, scripts/project-points.ts
+// and every other prior_* column are all untouched, and no backtest number
+// moves when this merges.
+//
 // NOT WIRED INTO ANY WORKFLOW. Run by hand for now — see the ticket's scope.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
@@ -121,12 +142,14 @@ import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import type { Position } from '../src/lib/scoring/types.ts'
 import { defensiveContributionPoints } from '../src/lib/scoring/defensiveContribution.ts'
 import { isQualifyingMatch } from '../src/lib/projection/defconRate.ts'
+import { RECENT_MATCH_COUNT } from '../src/lib/projection/minutes.ts'
 
 const JOB_NAME = 'build-feature-history'
 const PLAYER_MATCH_STATS_MIGRATION = 'supabase/migrations/20260811170000_player_match_stats.sql'
 const FEATURE_HISTORY_MIGRATION = 'supabase/migrations/20260827090000_feature_history.sql'
 const POSITION_AND_DEFCON_MIGRATION = 'supabase/migrations/20260829090000_feature_history_position_and_defcon.sql'
 const TEAM_AND_OPPONENT_MIGRATION = 'supabase/migrations/20260831090000_team_and_opponent.sql'
+const RECENT_MINUTES_MIGRATION = 'supabase/migrations/20260902090000_feature_history_recent_minutes.sql'
 
 /** The four FPL position codes this job ever sees on a resolved element_type — see src/lib/scoring/types.ts. Guards the cast into `Position` below without reimplementing what a valid code is. */
 function isPosition(value: number): value is Position {
@@ -324,6 +347,15 @@ export interface FeatureHistoryRow extends FeatureTotals {
   // an absent value.
   prior_defcon_qualifying_matches: number
   prior_defcon_hits: number
+  // Ticket #181. This player's minutes played in his most recent
+  // (contributing, i.e. Premier League + resolvable player_code) matches,
+  // strictly before gameweek_id, most-recent-first, capped at
+  // RECENT_MATCH_COUNT. Always a real array, never null, exactly like every
+  // prior_* total above: a player's first gameweek carries [], not an
+  // absent value. Length is always min(prior_matches, RECENT_MATCH_COUNT) —
+  // see buildFeatureHistory's own comment for why that holds by
+  // construction, not by coincidence.
+  prior_recent_minutes: number[]
   computed_at: string
 }
 
@@ -454,6 +486,19 @@ export interface BuildFeatureHistoryResult {
   // no resolved team_code yet (predates the #167 ingest change, or a re-run
   // has not happened) reports this honestly below rows.length.
   rowsWithTeamCode: number
+  // Ticket #181 — surfaced in job_runs.details, four counters that must
+  // reconcile arithmetically. prior_recent_minutes is always a real array by
+  // construction (see FeatureHistoryRow), so rowsWithRecentMinutes is
+  // expected to equal rows.length on every run — computed independently
+  // rather than assumed, same reasoning as rowsWithDefconCounters. The other
+  // three are a strict partition of it by window length: every row has
+  // EITHER a full RECENT_MATCH_COUNT-length window, OR a shorter
+  // (1..RECENT_MATCH_COUNT-1) one, OR an empty one (a player with no prior
+  // matches at all) — never more than one of the three.
+  rowsWithRecentMinutes: number
+  rowsWithFullRecentMinutesWindow: number
+  rowsWithShortRecentMinutesWindow: number
+  rowsWithEmptyRecentMinutesWindow: number
 }
 
 /**
@@ -515,6 +560,13 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
     // counters to disagree with the totals about which matches are prior.
     let defconQualifyingMatches = 0
     let defconHits = 0
+    // Ticket #181: the recent-minutes window, folded in the SAME while loop
+    // as runningTotals/the defcon counters above — same "cannot disagree
+    // about which matches are prior" guarantee. Held oldest-first internally
+    // (push, then shift once past RECENT_MATCH_COUNT — an O(1) amortized cap
+    // at this size) and reversed only at emission time into the
+    // most-recent-first order the column actually stores.
+    let recentMinutesWindow: number[] = []
 
     // Every integer gameweek from this player's first contributing match
     // through the last gameweek present anywhere in the season's data —
@@ -531,6 +583,11 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
           defconQualifyingMatches++
           if (reachedDefconThreshold(elementType, match)) defconHits++
         }
+        // Ticket #181: NOT gated behind isQualifyingMatch above — every
+        // contributing match's minutes count here, cameos included, matching
+        // estimateMinutes()'s own window (see this file's header).
+        recentMinutesWindow.push(match.minutes_played ?? 0)
+        if (recentMinutesWindow.length > RECENT_MATCH_COUNT) recentMinutesWindow.shift()
         matchIndex++
       }
       outputRows.push({
@@ -541,6 +598,7 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
         team_code: teamCode,
         prior_defcon_qualifying_matches: defconQualifyingMatches,
         prior_defcon_hits: defconHits,
+        prior_recent_minutes: [...recentMinutesWindow].reverse(),
         ...runningTotals,
         computed_at: computedAt,
       })
@@ -552,6 +610,15 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
     (r) => r.prior_defcon_qualifying_matches !== null && r.prior_defcon_hits !== null,
   ).length
   const rowsWithTeamCode = outputRows.filter((r) => r.team_code !== null).length
+  // Ticket #181 — a strict partition of rowsWithRecentMinutes by window
+  // length; see BuildFeatureHistoryResult's own comment for why the four
+  // reconcile arithmetically.
+  const rowsWithRecentMinutes = outputRows.filter((r) => r.prior_recent_minutes !== null).length
+  const rowsWithFullRecentMinutesWindow = outputRows.filter((r) => r.prior_recent_minutes.length === RECENT_MATCH_COUNT).length
+  const rowsWithShortRecentMinutesWindow = outputRows.filter(
+    (r) => r.prior_recent_minutes.length > 0 && r.prior_recent_minutes.length < RECENT_MATCH_COUNT,
+  ).length
+  const rowsWithEmptyRecentMinutesWindow = outputRows.filter((r) => r.prior_recent_minutes.length === 0).length
 
   return {
     rows: outputRows,
@@ -564,6 +631,10 @@ export function buildFeatureHistory(rows: readonly SourceMatchRow[], season: str
     rowsWithTeamCode,
     rowsWithElementType,
     rowsWithDefconCounters,
+    rowsWithRecentMinutes,
+    rowsWithFullRecentMinutesWindow,
+    rowsWithShortRecentMinutesWindow,
+    rowsWithEmptyRecentMinutesWindow,
   }
 }
 
@@ -688,6 +759,13 @@ async function main(): Promise<void> {
             'feature_history',
           )
         }
+        if (isMissingColumn(error, 'prior_recent_minutes')) {
+          throw new FeatureHistoryError(
+            `feature_history is missing prior_recent_minutes. Apply ${RECENT_MINUTES_MIGRATION} (ticket #181) ` +
+              'before running this job.',
+            'feature_history',
+          )
+        }
         throw new FeatureHistoryError(`upsert into "feature_history" failed: ${error.message}`, 'feature_history')
       }
     }
@@ -703,6 +781,10 @@ async function main(): Promise<void> {
       rowsWithElementType: result.rowsWithElementType,
       rowsWithDefconCounters: result.rowsWithDefconCounters,
       rowsWithTeamCode: result.rowsWithTeamCode,
+      rowsWithRecentMinutes: result.rowsWithRecentMinutes,
+      rowsWithFullRecentMinutesWindow: result.rowsWithFullRecentMinutesWindow,
+      rowsWithShortRecentMinutesWindow: result.rowsWithShortRecentMinutesWindow,
+      rowsWithEmptyRecentMinutesWindow: result.rowsWithEmptyRecentMinutesWindow,
       playersCovered: result.playersCovered,
       gameweeksCovered: result.gameweeksCovered,
       lastGameweekInData: result.lastGameweekInData,
@@ -714,7 +796,10 @@ async function main(): Promise<void> {
       `written across ${result.playersCovered} player(s), through gameweek ${result.lastGameweekInData} ` +
       `(${result.rowsWithElementType} carrying a non-null element_type, ` +
       `${result.rowsWithDefconCounters} carrying non-null defcon counters, ` +
-      `${result.rowsWithTeamCode} carrying a non-null team_code).`
+      `${result.rowsWithTeamCode} carrying a non-null team_code, ` +
+      `${result.rowsWithRecentMinutes} carrying a non-null prior_recent_minutes array: ` +
+      `${result.rowsWithFullRecentMinutesWindow} full, ${result.rowsWithShortRecentMinutesWindow} short, ` +
+      `${result.rowsWithEmptyRecentMinutesWindow} empty).`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {
