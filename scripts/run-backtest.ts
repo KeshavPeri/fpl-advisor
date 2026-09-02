@@ -2388,6 +2388,530 @@ export function buildBaselineVerdicts(modelSeasonSpearman: number | null, baseli
 }
 
 // ============================================================================
+// FIVE-GAMEWEEK RANKING TARGET — ticket #183. Pure, over already-fetched
+// data (featureHistoryRows, the SAME `measured: MeasuredRow[]` population,
+// and the SAME actualByPlayerGameweek/teamMatchRecords main() already built
+// for the section above), no new Supabase read. Nothing above this point in
+// the file is read, let alone modified, by anything below — the existing
+// section's construction and every figure it prints are untouched (see this
+// file's own tests, "existing report is byte-identical").
+//
+// WHY. The app plans over a five-gameweek horizon (build-solver-input.ts's
+// `decay_base`/`ft_value_list`; scripts/project-points.ts's own
+// `PROJECTION_HORIZON = 5`) but the section above measures only one
+// gameweek. docs/model-review-2026-09-02.md (commissioned after a backtest
+// run showed the model losing to a naive minutes ranking) found that
+// single-gameweek Spearman is nearly saturated — a quality oracle that
+// knows a player's TRUE season scoring rate only reaches ~0.33 there, so the
+// 1-GW section has almost no headroom left to show any future model
+// improvement — while the 5-GW totals the solver actually optimises show
+// much more room (oracle ~0.485 vs the model's ~0.425, worse still at
+// forwards). This section adds that measurement, additively, per that
+// review's recommendation R2.
+//
+// FIVE PROJECTIONS SUMMED, NEVER ONE PROJECTION TIMES FIVE (ticket text).
+// For a window's gameweeks G+1..G+4, this section builds a FRESH
+// FeatureHistoryRow-driven projection at each one, from that gameweek's own
+// `feature_history` row (strictly-before-that-gameweek totals, by
+// feature_history's own construction — see file header, "THE JOIN") — never
+// the starting gameweek's row reused or scaled. The G leg of the window
+// reuses the corresponding `measured` row's own `projectedPoints`/
+// `actualPoints` directly (computed by the untouched section above via the
+// exact same pipeline) rather than recomputing it a second, potentially
+// divergent way.
+//
+// TRUNCATED WINDOWS — EXCLUDED, NOT SHORTENED (ticket text: "decide exclude
+// vs. shorter-window reporting, state which"). A starting gameweek G whose
+// window would run past the last gameweek this run's `feature_history` read
+// actually covers (`lastGameweekInData`, computed from the data itself,
+// never hardcoded as 38 — a partial-season read must not silently claim
+// gameweeks that were never fetched) is excluded as `truncatedWindow`,
+// counted, never reported as a shorter sum. This mirrors
+// docs/model-review-2026-09-02.md's own R2 spec verbatim ("for every
+// measured row with gameweek ≤ 34") for a 38-gameweek season — a shortened
+// window would mix different-length sums into one "5-gameweek" figure,
+// which is not the same measurement for every row.
+//
+// ZEROS FOR NON-FEATURING WEEKS INSIDE THE WINDOW (ticket text, quoting
+// docs/model-review-2026-09-02.md's R2: "zeros for non-featuring weeks —
+// that risk is part of what a transfer buys"). Unlike the single-gameweek
+// section, a window leg where the player did not feature (or had no
+// matching `player_match_stats` row at all) contributes its natural 0
+// actual points — never excludes the whole window — because a five-gameweek
+// transfer decision genuinely carries the risk of a rotation week or a
+// blank gameweek somewhere in the window; excluding those windows would
+// hide exactly the risk a real transfer bears. `aggregateActualForGameweek`
+// already returns 0 total points for an empty or non-featuring row set, so
+// this falls out of the SAME unmodified function used everywhere else in
+// this file — no special-casing needed. The one thing that STILL excludes a
+// whole window: a leg whose matched actual data has `team_goals_conceded`
+// unknown (the same ~2% gap the section above hard-excludes for) — silently
+// defaulting an unknown conceded-goals figure to 0 would bias that leg
+// toward an undeserved clean sheet, so a window with that gap in ANY leg is
+// excluded as `actualDataIncomplete`, counted, same reasoning as the
+// existing section's own gate, just re-applied per leg.
+//
+// THE QUALITY ORACLE (ticket text; docs/model-review-2026-09-02.md's own
+// construction, reproduced here from feature_history/player_match_stats
+// data this job already reads — no new Supabase call). Each player's
+// "quality" is his own points-per-match rate over every one of HIS season's
+// `player_match_stats` rows whose gameweek is OUTSIDE the target window —
+// never inside it, for one or for five gameweeks — then that single number
+// is ranked against the SAME actual target the model/baselines are ranked
+// against. `computeOracleRate` is the whole leak guard: it sums only
+// matches whose gameweekId is not in the caller's `excludeGameweeks` set.
+// THIS IS A HINDSIGHT CEILING, NEVER A MODEL AND NEVER A TARGET TO TUNE
+// TOWARD — restated in the report's own prose, not just here (ticket text).
+//
+// REUSING THE SAME MATH, NEW ROW SHAPE. spearmanCorrelation, topNOverlap,
+// topNIsMeaningful, rankDescending and MIN_BUCKET_SAMPLE_SIZE are already
+// generic over `RankingPair`/`TopNOverlap` — reused completely unmodified
+// below via `GenericRankingRow` (`{ position, groupId, projected, actual }`,
+// `groupId` meaning "starting gameweek" for the five-gameweek model/
+// baselines and the five-gameweek oracle, and plain "gameweek" for the
+// one-gameweek oracle). `summarizeGenericRankingByGroup`/
+// `summarizeGenericSeasonRanking`/`summarizeGenericRankingByPosition`
+// deliberately RETURN the SAME exported types the section above already
+// uses (`GameweekRankingSummary`/`SeasonRankingSummary`/
+// `PositionRankingSummary`) so the existing `buildRankingGameweekTable`/
+// `buildBaselineSpearmanTable`/`buildBaselineVerdictLines`/`fmtSpearman`/
+// `fmtTopN`/`fmtTopNOrRefused` formatting functions are reused, unmodified,
+// for this section's tables too — never a second, divergent formatting
+// layer.
+// ============================================================================
+
+/**
+ * The horizon this section sums — five gameweeks, matching
+ * build-solver-input.ts's `decay_base`/`ft_value_list` and
+ * scripts/project-points.ts's own `PROJECTION_HORIZON = 5`. Defined locally
+ * rather than imported (same convention MIN_BUCKET_SAMPLE_SIZE's own comment
+ * states: this file's own small, self-contained constants, not a
+ * cross-import into another script for one shared number).
+ */
+export const FIVE_GAMEWEEK_HORIZON = 5
+
+function windowKey(playerCode: number, gameweekId: number): string {
+  return `${playerCode}:${gameweekId}`
+}
+
+/** Every gameweek_id read this run, keyed for O(1) lookup by (player_code, gameweek_id) — the index main() builds once from the SAME `featureHistoryRows` array the section above already fetched. */
+export function buildFeatureHistoryIndex(rows: readonly FeatureHistoryRow[]): Map<string, FeatureHistoryRow> {
+  const result = new Map<string, FeatureHistoryRow>()
+  for (const row of rows) result.set(windowKey(row.player_code, row.gameweek_id), row)
+  return result
+}
+
+/** The last gameweek_id this run's `feature_history` read actually covers — 0 for an empty read. Computed from the data itself so a partial-season read never silently claims gameweeks it never fetched (see this section's own header, "TRUNCATED WINDOWS"). */
+export function computeLastGameweekInData(rows: readonly FeatureHistoryRow[]): number {
+  let max = 0
+  for (const row of rows) if (row.gameweek_id > max) max = row.gameweek_id
+  return max
+}
+
+/** The five contiguous gameweek ids a starting gameweek's window covers — `[G, G+1, G+2, G+3, G+4]`. */
+export function buildFiveGameweekWindow(startGameweekId: number): number[] {
+  return Array.from({ length: FIVE_GAMEWEEK_HORIZON }, (_, i) => startGameweekId + i)
+}
+
+/** True when a starting gameweek's window would reach past `lastGameweekInData` — the truncated-window exclusion gate (see this section's own header). */
+export function isFiveGameweekWindowTruncated(startGameweekId: number, lastGameweekInData: number): boolean {
+  return startGameweekId + FIVE_GAMEWEEK_HORIZON - 1 > lastGameweekInData
+}
+
+/** One window leg's outcome — `'ok'` carries both sides so the caller can sum; every other status is a named reason the WHOLE window gets excluded (see classifyFiveGameweekRow). */
+export type WindowGameweekOutcome =
+  | { status: 'ok'; position: Position; projectedPoints: number; actualPoints: number }
+  | { status: 'missingFeatureHistoryRow' }
+  | { status: 'unresolvedPosition' }
+  | { status: 'actualDataIncomplete' }
+
+/**
+ * Projects and reconstructs ONE window leg — a (player, gameweek) pair that
+ * may or may not be the window's own starting gameweek. Every function
+ * called here is imported/defined ABOVE this section, unmodified:
+ * `resolveRowPosition` (same two-source resolution the section above uses,
+ * same `codeToPosition` fallback), `aggregateActualForGameweek`/
+ * `reconstructActualMatchPoints` (via `toActualMatchStatsInput`, so a
+ * non-featuring or no-data leg naturally reconstructs to 0 points — see this
+ * section's own header, "ZEROS FOR NON-FEATURING WEEKS"), `resolveFixtureTeams`/
+ * `computeTeamStrengthAsOf`/`computeFixtureExpectedScore` (the SAME
+ * point-in-time fixture construction ticket #175 built, degrading to the
+ * neutral fixture exactly as it already does when a team cannot be
+ * resolved — never a second, divergent fixture rule), and `projectRow`
+ * itself. No lookahead: `row` is this gameweek's OWN feature_history row
+ * (strictly-before-gameweek totals by that table's own construction), and
+ * `computeTeamStrengthAsOf` is called with `gameweekId` — this leg's own
+ * gameweek — exactly as the section above already does.
+ */
+export function projectAndReconstructWindowGameweek(
+  playerCode: number,
+  gameweekId: number,
+  featureHistoryByPlayerGameweek: ReadonlyMap<string, FeatureHistoryRow>,
+  codeToPosition: ReadonlyMap<number, Position>,
+  positionPriors: ReadonlyMap<string, PositionPrior>,
+  actualRows: readonly ActualSourceRow[],
+  teamMatchRecords: readonly TeamMatchRecord[],
+): WindowGameweekOutcome {
+  const row = featureHistoryByPlayerGameweek.get(windowKey(playerCode, gameweekId))
+  if (row === undefined) return { status: 'missingFeatureHistoryRow' }
+
+  const resolution = resolveRowPosition(row, codeToPosition)
+  if (resolution.position === undefined) return { status: 'unresolvedPosition' }
+  const position = resolution.position
+
+  const actualInputs = actualRows.map(toActualMatchStatsInput)
+  const outcome = aggregateActualForGameweek(position, actualInputs)
+  if (!outcome.teamGoalsConcededKnown) return { status: 'actualDataIncomplete' }
+
+  const opponentTeamCodes = actualRows.map((r) => r.opponent_team_code)
+  const fixtureTeamsResolved = resolveFixtureTeams(row.team_code, opponentTeamCodes)
+  let fixtureExpectedScores: number[] = []
+  if (fixtureTeamsResolved) {
+    const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, row.team_code as number, gameweekId)
+    fixtureExpectedScores = opponentTeamCodes.map((code) =>
+      computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, code as number, gameweekId), SCALE),
+    )
+  }
+
+  const prior = positionPriors.get(positionPriorKey(gameweekId, position)) ?? fallbackPositionPrior(position)
+  const projection = projectRow(row, position, prior, outcome.matchesFound, fixtureExpectedScores)
+
+  return { status: 'ok', position, projectedPoints: projection.expectedPoints, actualPoints: outcome.totalPoints }
+}
+
+/** One measured five-gameweek row — mirrors MeasuredRow's shape for the fields the ranking/baseline/report layer below needs, summed across the window rather than one gameweek. */
+export interface FiveGameweekRow {
+  playerCode: number
+  startGameweekId: number
+  position: Position
+  /** Sum of five per-gameweek projections — never one projection × 5 (see this section's header). */
+  projectedPoints: number
+  /** Sum of five actual-points reconstructions, 0 for a non-featuring leg (see this section's header). */
+  actualPoints: number
+  /** Ticket text: "the same prior quantity ranked against the five-gameweek actual total" — reused verbatim from the corresponding `measured` row's own baseline (computed at the START gameweek, never recomputed per leg or averaged across the window). */
+  baselineMinutesPerMatch: number
+  baselineXgXaPerMatch: number
+}
+
+export type FiveGameweekExclusionReason = 'truncatedWindow' | 'missingFeatureHistoryRow' | 'unresolvedPosition' | 'actualDataIncomplete'
+
+export type FiveGameweekClassification =
+  | { kind: 'excluded'; reason: FiveGameweekExclusionReason }
+  | { kind: 'measured'; row: FiveGameweekRow }
+
+/**
+ * Classifies one (player, starting gameweek) pair — `startRow` is the
+ * CORRESPONDING single-gameweek `measured` row (its own `projectedPoints`/
+ * `actualPoints`/`position`/both baselines reused directly for the window's
+ * G leg, never recomputed a second way). Gameweeks G+1..G+4 are each
+ * projected and reconstructed fresh via `projectAndReconstructWindowGameweek`
+ * — any non-'ok' leg excludes the WHOLE window under that leg's own reason
+ * (a window is only as good as its worst-resolved leg; never a partial sum
+ * silently missing a leg).
+ */
+export function classifyFiveGameweekRow(
+  playerCode: number,
+  startRow: Pick<MeasuredRow, 'gameweekId' | 'position' | 'projectedPoints' | 'actualPoints' | 'baselineMinutesPerMatch' | 'baselineXgXaPerMatch'>,
+  lastGameweekInData: number,
+  featureHistoryByPlayerGameweek: ReadonlyMap<string, FeatureHistoryRow>,
+  codeToPosition: ReadonlyMap<number, Position>,
+  positionPriors: ReadonlyMap<string, PositionPrior>,
+  actualByPlayerGameweek: ReadonlyMap<string, readonly ActualSourceRow[]>,
+  teamMatchRecords: readonly TeamMatchRecord[],
+): FiveGameweekClassification {
+  if (isFiveGameweekWindowTruncated(startRow.gameweekId, lastGameweekInData)) {
+    return { kind: 'excluded', reason: 'truncatedWindow' }
+  }
+
+  let projectedPoints = startRow.projectedPoints
+  let actualPoints = startRow.actualPoints
+
+  const window = buildFiveGameweekWindow(startRow.gameweekId)
+  for (let i = 1; i < window.length; i++) {
+    const gameweekId = window[i]
+    const actualRows = actualByPlayerGameweek.get(windowKey(playerCode, gameweekId)) ?? []
+    const outcome = projectAndReconstructWindowGameweek(
+      playerCode,
+      gameweekId,
+      featureHistoryByPlayerGameweek,
+      codeToPosition,
+      positionPriors,
+      actualRows,
+      teamMatchRecords,
+    )
+    if (outcome.status !== 'ok') return { kind: 'excluded', reason: outcome.status }
+    projectedPoints += outcome.projectedPoints
+    actualPoints += outcome.actualPoints
+  }
+
+  return {
+    kind: 'measured',
+    row: {
+      playerCode,
+      startGameweekId: startRow.gameweekId,
+      position: startRow.position,
+      projectedPoints,
+      actualPoints,
+      baselineMinutesPerMatch: startRow.baselineMinutesPerMatch,
+      baselineXgXaPerMatch: startRow.baselineXgXaPerMatch,
+    },
+  }
+}
+
+/** The four named exclusion reasons — a strict partition of every single-gameweek `measured` row (the candidate population), alongside the five-gameweek measured count. Mirrors `ExclusionCounts`/`assertReconciles` above exactly, for the five-gameweek population. */
+export interface FiveGameweekExclusionCounts {
+  truncatedWindow: number
+  missingFeatureHistoryRow: number
+  unresolvedPosition: number
+  actualDataIncomplete: number
+}
+
+export function emptyFiveGameweekExclusionCounts(): FiveGameweekExclusionCounts {
+  return { truncatedWindow: 0, missingFeatureHistoryRow: 0, unresolvedPosition: 0, actualDataIncomplete: 0 }
+}
+
+export function incrementFiveGameweekExclusion(counts: FiveGameweekExclusionCounts, reason: FiveGameweekExclusionReason): void {
+  counts[reason]++
+}
+
+export function totalFiveGameweekExcluded(counts: FiveGameweekExclusionCounts): number {
+  return counts.truncatedWindow + counts.missingFeatureHistoryRow + counts.unresolvedPosition + counts.actualDataIncomplete
+}
+
+/** candidates (the single-gameweek `measured` population) = five-gameweek measured + excluded, by reason, exactly — mirrors `assertReconciles` above. */
+export function assertFiveGameweekReconciles(candidateCount: number, measuredCount: number, counts: FiveGameweekExclusionCounts): void {
+  const excluded = totalFiveGameweekExcluded(counts)
+  const total = measuredCount + excluded
+  if (total !== candidateCount) {
+    throw new BacktestError(
+      `five-gameweek reconciliation failed: ${candidateCount} single-gameweek measured row(s) were candidates, but five-gameweek measured (${measuredCount}) + excluded (${excluded}) = ${total}. ` +
+        `Exclusion breakdown: ${JSON.stringify(counts)}.`,
+      'reconciliation',
+    )
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Generic ranking summarizers — reused for the five-gameweek model ranking,
+// both naive baselines, and the quality oracle at BOTH horizons (see this
+// section's own header, "REUSING THE SAME MATH, NEW ROW SHAPE"). Return
+// types are the SAME exported types the section above already uses, so its
+// formatting functions apply here unmodified.
+// ----------------------------------------------------------------------------
+
+/** `groupId` means "starting gameweek" for every five-gameweek use below, and plain "gameweek" for the one-gameweek oracle — see this section's header. */
+export interface GenericRankingRow {
+  position: Position
+  groupId: number
+  projected: number
+  actual: number
+}
+
+function toGenericRankingPair(row: Pick<GenericRankingRow, 'projected' | 'actual'>): RankingPair {
+  return { projected: row.projected, actual: row.actual }
+}
+
+/** Mirrors summarizeRankingByGameweek exactly, generalized to GenericRankingRow — same MIN_BUCKET_SAMPLE_SIZE gate, same tie rules (via the unmodified spearmanCorrelation/topNOverlap). */
+export function summarizeGenericRankingByGroup(rows: readonly GenericRankingRow[]): Map<number, GameweekRankingSummary> {
+  const groupIds = [...new Set(rows.map((r) => r.groupId))].sort((a, b) => a - b)
+  const result = new Map<number, GameweekRankingSummary>()
+  for (const groupId of groupIds) {
+    const groupRows = rows.filter((r) => r.groupId === groupId)
+    const n = groupRows.length
+    const tooSmallToRead = n < MIN_BUCKET_SAMPLE_SIZE
+    const pairs = groupRows.map(toGenericRankingPair)
+    result.set(groupId, {
+      gameweekId: groupId,
+      n,
+      tooSmallToRead,
+      spearman: tooSmallToRead ? null : spearmanCorrelation(pairs),
+      top10: tooSmallToRead ? null : topNOverlap(pairs, 10),
+      top20: tooSmallToRead ? null : topNOverlap(pairs, 20),
+    })
+  }
+  return result
+}
+
+/** Mirrors summarizeSeasonRanking exactly, generalized to GenericRankingRow. */
+export function summarizeGenericSeasonRanking(rows: readonly GenericRankingRow[], byGroup: ReadonlyMap<number, GameweekRankingSummary>): SeasonRankingSummary {
+  const spearman = spearmanCorrelation(rows.map(toGenericRankingPair))
+  let overlap10 = 0
+  let n10 = 0
+  let overlap20 = 0
+  let n20 = 0
+  for (const summary of byGroup.values()) {
+    if (summary.tooSmallToRead || summary.top10 === null || summary.top20 === null) continue
+    overlap10 += summary.top10.overlap
+    n10 += summary.top10.n
+    overlap20 += summary.top20.overlap
+    n20 += summary.top20.n
+  }
+  return { n: rows.length, spearman, top10: { overlap: overlap10, n: n10 }, top20: { overlap: overlap20, n: n20 } }
+}
+
+/** Mirrors summarizeRankingByPosition exactly, generalized to GenericRankingRow — including the Defect 2 topNIsMeaningful gate, unmodified. */
+export function summarizeGenericRankingByPosition(rows: readonly GenericRankingRow[]): Record<Position, PositionRankingSummary> {
+  const result = {} as Record<Position, PositionRankingSummary>
+  for (const position of POSITIONS) {
+    const positionRows = rows.filter((r) => r.position === position)
+    const spearman = spearmanCorrelation(positionRows.map(toGenericRankingPair))
+
+    const groupIds = [...new Set(positionRows.map((r) => r.groupId))]
+    let overlap10 = 0
+    let n10 = 0
+    let overlap20 = 0
+    let n20 = 0
+    for (const groupId of groupIds) {
+      const pairs = positionRows.filter((r) => r.groupId === groupId).map(toGenericRankingPair)
+      const population = pairs.length
+      const t10 = topNOverlap(pairs, 10)
+      const t20 = topNOverlap(pairs, 20)
+      if (topNIsMeaningful(t10, population)) {
+        overlap10 += t10.overlap
+        n10 += t10.n
+      }
+      if (topNIsMeaningful(t20, population)) {
+        overlap20 += t20.overlap
+        n20 += t20.n
+      }
+    }
+
+    const hadAnyGroupWithRows = groupIds.length > 0
+    result[position] = {
+      position,
+      n: positionRows.length,
+      spearman,
+      top10: { overlap: overlap10, n: n10 },
+      top20: { overlap: overlap20, n: n20 },
+      top10Refused: hadAnyGroupWithRows && n10 === 0,
+      top20Refused: hadAnyGroupWithRows && n20 === 0,
+    }
+  }
+  return result
+}
+
+/** Ticket #183, five-gameweek naive baselines — the SAME two per-row prior quantities the single-gameweek section's baselines use (`baselineMinutesPerMatch`/`baselineXgXaPerMatch`, both computed at the START gameweek — see FiveGameweekRow's own comment), ranked here against the five-gameweek actual total instead of the single-gameweek one. */
+export function summarizeGenericBaselineSpearman(label: string, rows: readonly GenericRankingRow[]): BaselineSummary {
+  const seasonSpearman = spearmanCorrelation(rows.map(toGenericRankingPair))
+  const byPosition = {} as Record<Position, number | null>
+  for (const position of POSITIONS) {
+    byPosition[position] = spearmanCorrelation(rows.filter((r) => r.position === position).map(toGenericRankingPair))
+  }
+  return { label, seasonSpearman, byPosition }
+}
+
+/**
+ * Ticket #183. THE SAME self-test as computeConstantBaselineSpearman above
+ * (ticket text: "a constant ranking scores 0 on the five-gameweek target
+ * too" — named test), reapplied to the five-gameweek actual target: every
+ * row assigned the IDENTICAL CONSTANT_BASELINE_VALUE has zero variance, so
+ * spearmanCorrelation must return null, never a numeric value — asserted
+ * (throws otherwise) rather than assumed, exactly like the original.
+ */
+export function computeGenericConstantBaselineSpearman(actualValues: readonly number[]): number {
+  const raw = spearmanCorrelation(actualValues.map((actual) => ({ projected: CONSTANT_BASELINE_VALUE, actual })))
+  if (raw !== null) {
+    throw new BacktestError(
+      `five-gameweek constant-ranking baseline unexpectedly produced a non-null Spearman correlation (${raw.toFixed(6)}) — ` +
+        'the identical self-test computeConstantBaselineSpearman applies to the one-gameweek target (see its own comment), reapplied here to the ' +
+        'five-gameweek actual total: a genuinely constant projected value has zero variance, so spearmanCorrelation must return null.',
+      'baseline',
+    )
+  }
+  return 0
+}
+
+function summarizeGenericConstantBaseline(rows: readonly GenericRankingRow[]): BaselineSummary {
+  const seasonSpearman = computeGenericConstantBaselineSpearman(rows.map((r) => r.actual))
+  const byPosition = {} as Record<Position, number | null>
+  for (const position of POSITIONS) {
+    byPosition[position] = computeGenericConstantBaselineSpearman(rows.filter((r) => r.position === position).map((r) => r.actual))
+  }
+  return { label: CONSTANT_BASELINE_LABEL, seasonSpearman, byPosition }
+}
+
+/** The three naive baselines for the five-gameweek target, in the SAME report order as the one-gameweek section (minutes, then xG+xA, then the constant floor). */
+export function summarizeFiveGameweekBaselines(rows: readonly FiveGameweekRow[]): BaselineSummary[] {
+  const minutesRows: GenericRankingRow[] = rows.map((r) => ({ position: r.position, groupId: r.startGameweekId, projected: r.baselineMinutesPerMatch, actual: r.actualPoints }))
+  const xgXaRows: GenericRankingRow[] = rows.map((r) => ({ position: r.position, groupId: r.startGameweekId, projected: r.baselineXgXaPerMatch, actual: r.actualPoints }))
+  const constantRows: GenericRankingRow[] = rows.map((r) => ({ position: r.position, groupId: r.startGameweekId, projected: CONSTANT_BASELINE_VALUE, actual: r.actualPoints }))
+  return [
+    summarizeGenericBaselineSpearman(PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL, minutesRows),
+    summarizeGenericBaselineSpearman(PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL, xgXaRows),
+    summarizeGenericConstantBaseline(constantRows),
+  ]
+}
+
+// ----------------------------------------------------------------------------
+// The quality oracle — ticket text, docs/model-review-2026-09-02.md's own
+// construction. See this section's own header, "THE QUALITY ORACLE".
+// ----------------------------------------------------------------------------
+
+/** One (player, gameweek) actual outcome, pre-grouped — the shape buildPlayerSeasonMatches needs; main() builds this once from the SAME `actualByPlayerGameweek` map the section above already built (no new Supabase read). */
+export interface PlayerGameweekActualGroup {
+  playerCode: number
+  gameweekId: number
+  rows: readonly ActualMatchStatsInput[]
+}
+
+/** One (player, gameweek) actual points/matches pair — the raw material computeOracleRate sums over, excluding whichever gameweeks the caller's target window covers. */
+export interface PlayerSeasonMatch {
+  playerCode: number
+  gameweekId: number
+  points: number
+  matches: number
+}
+
+/** Reconstructs every (player, gameweek) actual outcome for the WHOLE season (not gated by the measured-population rules above — the oracle needs a player's full season record, including gameweeks the model-accuracy sections exclude) via the SAME aggregateActualForGameweek used everywhere else in this file. A player whose position cannot be resolved (`positionOf` returns undefined) is skipped — points cannot be computed without a position. */
+export function buildPlayerSeasonMatches(
+  groups: readonly PlayerGameweekActualGroup[],
+  positionOf: (playerCode: number) => Position | undefined,
+): PlayerSeasonMatch[] {
+  const result: PlayerSeasonMatch[] = []
+  for (const g of groups) {
+    const position = positionOf(g.playerCode)
+    if (position === undefined) continue
+    const outcome = aggregateActualForGameweek(position, g.rows)
+    result.push({ playerCode: g.playerCode, gameweekId: g.gameweekId, points: outcome.totalPoints, matches: outcome.matchesFound })
+  }
+  return result
+}
+
+export function groupSeasonMatchesByPlayer(matches: readonly PlayerSeasonMatch[]): Map<number, PlayerSeasonMatch[]> {
+  const result = new Map<number, PlayerSeasonMatch[]>()
+  for (const m of matches) {
+    const list = result.get(m.playerCode) ?? []
+    list.push(m)
+    result.set(m.playerCode, list)
+  }
+  return result
+}
+
+/**
+ * THE MOST IMPORTANT FUNCTION IN THIS TICKET — the leave-window-out oracle
+ * rate (ticket text: "a named test proves no gameweek inside the window
+ * contributes to its own estimate"). Sums points and matches from every one
+ * of `playerSeasonMatches` whose `gameweekId` is NOT in `excludeGameweeks` —
+ * the caller's target window, whether one gameweek wide (the one-gameweek
+ * oracle) or five (the five-gameweek oracle) — and divides. The ENTIRE leak
+ * guard is the `excludeGameweeks.has(m.gameweekId)` check below; nothing
+ * else in this file may compute a value that gets treated as this player's
+ * "quality" for a window that includes the gameweek it was measured in.
+ * Null when the player has zero matches outside the window (no evidence to
+ * rank on — never a guessed rate).
+ */
+export function computeOracleRate(playerSeasonMatches: readonly PlayerSeasonMatch[], excludeGameweeks: ReadonlySet<number>): number | null {
+  let points = 0
+  let matches = 0
+  for (const m of playerSeasonMatches) {
+    if (excludeGameweeks.has(m.gameweekId)) continue
+    points += m.points
+    matches += m.matches
+  }
+  return matches > 0 ? points / matches : null
+}
+
+// ============================================================================
 // Report generation.
 // ============================================================================
 
@@ -2395,7 +2919,8 @@ function fmt(n: number | null, decimals = 3): string {
   return n === null ? 'n/a' : n.toFixed(decimals)
 }
 
-interface ReportData {
+/** Exported for ticket #183's own report-generation tests (byte-identical existing sections; the new five-gameweek sections) — was module-private before this ticket; this visibility change is the only edit to any pre-#183 line in this interface. */
+export interface ReportData {
   generatedAt: Date
   season: string
   measured: MeasuredRow[]
@@ -2428,6 +2953,35 @@ interface ReportData {
   rankingByGameweekAndPosition: GameweekPositionRankingSummary[]
   /** Ticket #175. */
   fixtureCoverage: FixtureCoverageCounts
+  /** Ticket #183 — the five-gameweek ranking target. See this file's "FIVE-GAMEWEEK RANKING TARGET" section. */
+  fiveGameweek: FiveGameweekReportData
+}
+
+/** Ticket #183. Everything the five-gameweek section's report block needs, computed entirely in main() from data the section above already fetched — no new Supabase read. */
+interface FiveGameweekReportData {
+  lastGameweekInData: number
+  /** How many single-gameweek `measured` rows were CANDIDATES for a five-gameweek window (== data.measured.length, repeated here so this section's own reconciliation line is self-contained). */
+  candidateCount: number
+  measuredCount: number
+  exclusions: FiveGameweekExclusionCounts
+  season: SeasonRankingSummary
+  byPosition: Record<Position, PositionRankingSummary>
+  byStartGameweek: Map<number, GameweekRankingSummary>
+  baselines: BaselineSummary[]
+  baselineVerdicts: BaselineVerdict[]
+  /** One-gameweek quality oracle — the SAME single-gameweek `measured` population, leaving out only the one target gameweek. */
+  oracleOneGw: {
+    season: SeasonRankingSummary
+    byPosition: Record<Position, PositionRankingSummary>
+    /** measured rows skipped because the player had no season match outside the excluded gameweek — no evidence to rank on. */
+    insufficientData: number
+  }
+  /** Five-gameweek quality oracle — leaves out the WHOLE target window. */
+  oracleFiveGw: {
+    season: SeasonRankingSummary
+    byPosition: Record<Position, PositionRankingSummary>
+    insufficientData: number
+  }
 }
 
 function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): string {
@@ -2554,7 +3108,8 @@ function buildComponentTable(rows: readonly MeasuredRow[]): string {
   return [header, body].join('\n')
 }
 
-function generateReportMarkdown(data: ReportData): string {
+/** Exported for ticket #183's own "existing report is byte-identical" test — was module-private before this ticket; this visibility change is the only edit to any pre-#183 line touching this function. */
+export function generateReportMarkdown(data: ReportData): string {
   const sections: string[] = []
 
   sections.push(
@@ -2770,7 +3325,114 @@ function generateReportMarkdown(data: ReportData): string {
       `- top-N meaningfulness threshold (#159): a top-N figure is refused ("too small to read") when N exceeds ${(TOP_N_MAX_POPULATION_FRACTION * 100).toFixed(0)}% of the population it was drawn from — a judgement, not a derived bound\n`,
   )
 
+  // Ticket #183 — appended strictly AFTER every section above. Nothing above
+  // this line is touched by this push; the existing report is byte-identical
+  // for the same ReportData (see this file's own test).
+  sections.push(...buildFiveGameweekSections(data))
+
   return sections.join('\n\n') + '\n'
+}
+
+/**
+ * Ticket #183. Builds the five-gameweek ranking target's own report
+ * sections — the model's ranking, the three naive baselines and their
+ * verdicts, and the quality oracle at both horizons. Every table below is
+ * built by the SAME formatting functions the one-gameweek section above
+ * uses (buildRankingPositionTable/buildRankingGameweekTable/
+ * buildBaselineSpearmanTable/buildBaselineVerdictLines/fmtSpearman/fmtTopN),
+ * unmodified — see this file's "FIVE-GAMEWEEK RANKING TARGET" section header
+ * for why that reuse is safe (summarizeGenericRankingBy* return the exact
+ * same types).
+ */
+function buildFiveGameweekSections(data: ReportData): string[] {
+  const fg = data.fiveGameweek
+  const sections: string[] = []
+
+  sections.push(
+    '## Five-gameweek ranking (ticket #183)\n\n' +
+      `The app plans over a **${FIVE_GAMEWEEK_HORIZON}-gameweek** horizon (\`build-solver-input.ts\`'s ` +
+      "`decay_base`/`ft_value_list`; `scripts/project-points.ts`'s own `PROJECTION_HORIZON = 5`) — every " +
+      'figure above measures only one gameweek. `docs/model-review-2026-09-02.md` found the one-gameweek ' +
+      'ranking section above is nearly saturated (its own quality oracle reaches only ~0.33 there — see the ' +
+      'oracle section below), so it has little room left to show any future model change; the five-gameweek ' +
+      'totals below are the horizon the solver actually optimises, and are the primary ranking figure this ' +
+      'project should read going forward, not the one-gameweek section above (which stays exactly as it was — ' +
+      'nothing above this heading changed). Same measured single-gameweek population feeds every window below ' +
+      '(no new Supabase read): for each starting gameweek, the model\'s own projections at gameweeks ' +
+      "G..G+4 are summed (never one projection × 5 — each leg is built from THAT gameweek's own " +
+      'strictly-before `feature_history` row), and compared against the sum of actual points over the same ' +
+      'five gameweeks (0 for a gameweek the player did not feature in — the risk a five-gameweek transfer ' +
+      'decision genuinely carries, not excluded).',
+  )
+
+  sections.push(
+    '### Population, truncated windows, and reconciliation\n\n' +
+      `- last gameweek this run's \`feature_history\` read covers: **${fg.lastGameweekInData}**\n` +
+      `- single-gameweek measured rows (the candidate population for a five-gameweek window): ${fg.candidateCount}\n` +
+      `- excluded — **truncated window** (starting gameweek + 4 exceeds gameweek ${fg.lastGameweekInData}, i.e. a starting gameweek ` +
+      `above ${fg.lastGameweekInData - FIVE_GAMEWEEK_HORIZON + 1} — excluded rather than reported as a shorter sum, per ` +
+      `\`docs/model-review-2026-09-02.md\`'s own R2 rule): ${fg.exclusions.truncatedWindow}\n` +
+      `- excluded — a window leg's \`feature_history\` row was missing (should not occur given that table's own density guarantee; a data-integrity check, not an expected case): ${fg.exclusions.missingFeatureHistoryRow}\n` +
+      `- excluded — a window leg's position could not be resolved: ${fg.exclusions.unresolvedPosition}\n` +
+      `- excluded — a window leg's actual data was incomplete (\`team_goals_conceded\` unknown, the same ~2% gap the section above excludes for, re-applied per leg): ${fg.exclusions.actualDataIncomplete}\n` +
+      `- **five-gameweek rows measured**: ${fg.measuredCount}\n\n` +
+      `Reconciliation: ${fg.measuredCount} measured + ${totalFiveGameweekExcluded(fg.exclusions)} excluded = ` +
+      `${fg.measuredCount + totalFiveGameweekExcluded(fg.exclusions)}, against ${fg.candidateCount} single-gameweek measured rows as candidates.`,
+  )
+
+  sections.push(
+    '### Season aggregate\n\n' +
+      `- Spearman rank correlation: **${fmtSpearman(fg.season.spearman)}** (n=${fg.season.n})\n` +
+      `- Top-10 overlap: **${fmtTopN(fg.season.top10)}**\n` +
+      `- Top-20 overlap: **${fmtTopN(fg.season.top20)}**`,
+  )
+
+  sections.push('### By position\n\n' + buildRankingPositionTable(fg.byPosition))
+
+  sections.push(
+    '### By starting gameweek\n\n' +
+      '"Gameweek" in this table means the WINDOW\'S STARTING gameweek (its own actual/projected totals cover ' +
+      `that gameweek and the next four). Same ${MIN_BUCKET_SAMPLE_SIZE}-row "too small to read" gate the ` +
+      'one-gameweek section\'s own by-gameweek table applies.\n\n' +
+      buildRankingGameweekTable(fg.byStartGameweek),
+  )
+
+  sections.push(
+    '### Naive ranking baselines\n\n' +
+      'The same three baselines as the one-gameweek section above, computed the same way (ticket text: ' +
+      '"the same prior quantity ranked against the five-gameweek actual total") — `prior_minutes / prior_matches` ' +
+      'and `(prior_xg + prior_xa) / prior_matches`, both taken at the WINDOW\'S STARTING gameweek and ranked ' +
+      'here against the five-gameweek actual total, plus the constant zero-skill floor.\n\n' +
+      buildBaselineSpearmanTable(fg.season.spearman, fg.byPosition, fg.baselines),
+  )
+
+  sections.push(
+    '### Verdict — model Spearman minus each baseline\'s (season aggregate)\n\n' +
+      'A DIFFERENCE, never checked against an asserted threshold — same rule as the one-gameweek verdict above.\n\n' +
+      buildBaselineVerdictLines(fg.baselineVerdicts),
+  )
+
+  sections.push(
+    '### Quality oracle — a hindsight ceiling, not a target\n\n' +
+      "Each player's \"quality\" here is his own points-per-match rate over every one of HIS season's actual " +
+      'matches OUTSIDE the target window — never inside it — then that single number is ranked against the ' +
+      'same actual target the model and baselines above are ranked against. **This is a hindsight ceiling, ' +
+      'computed from results a real decision could never see in advance. No model can be expected to reach ' +
+      'it, and nothing in this project should be tuned toward it** — it exists only to show how much ranking ' +
+      'headroom remains once the model\'s own numbers are compared to it, at both horizons.\n\n' +
+      `- one-gameweek oracle, season: Spearman **${fmtSpearman(fg.oracleOneGw.season.spearman)}** (n=${fg.oracleOneGw.season.n}), ` +
+      `top-10 overlap **${fmtTopN(fg.oracleOneGw.season.top10)}**, top-20 overlap **${fmtTopN(fg.oracleOneGw.season.top20)}** ` +
+      `(${fg.oracleOneGw.insufficientData} row(s) skipped — no season match outside the single target gameweek to rank on)\n` +
+      `- five-gameweek oracle, season: Spearman **${fmtSpearman(fg.oracleFiveGw.season.spearman)}** (n=${fg.oracleFiveGw.season.n}), ` +
+      `top-10 overlap **${fmtTopN(fg.oracleFiveGw.season.top10)}**, top-20 overlap **${fmtTopN(fg.oracleFiveGw.season.top20)}** ` +
+      `(${fg.oracleFiveGw.insufficientData} row(s) skipped — no season match outside the five-gameweek target window to rank on)\n\n` +
+      '#### One-gameweek oracle, by position\n\n' +
+      buildRankingPositionTable(fg.oracleOneGw.byPosition) +
+      '\n\n#### Five-gameweek oracle, by position\n\n' +
+      buildRankingPositionTable(fg.oracleFiveGw.byPosition),
+  )
+
+  return sections
 }
 
 // ============================================================================
@@ -2782,7 +3444,8 @@ interface PlayerRow {
   element_type: number
 }
 
-interface ActualSourceRow {
+/** Exported for ticket #183's own window-leg tests (projectAndReconstructWindowGameweek's `actualRows` parameter is this exact type) — was module-private before this ticket. */
+export interface ActualSourceRow {
   player_code: number | null
   /** Ticket #140 — read only for team-slug inference (blank-gameweek detection); never used for point reconstruction. See file header, "BLANK GAMEWEEKS". */
   match_id: string
@@ -2803,7 +3466,8 @@ interface ActualSourceRow {
   opponent_team_code: number | null
 }
 
-function toActualMatchStatsInput(row: ActualSourceRow): ActualMatchStatsInput {
+/** Exported for ticket #183's own tests — was module-private before this ticket. */
+export function toActualMatchStatsInput(row: ActualSourceRow): ActualMatchStatsInput {
   return {
     minutesPlayed: row.minutes_played,
     goals: row.goals,
@@ -3033,6 +3697,13 @@ async function main(): Promise<void> {
     // --------------------------------------------------------------------
     const exclusions = emptyExclusionCounts()
     const measured: MeasuredRow[] = []
+    // Ticket #183 — the player_code for each `measured` row, same index
+    // correspondence (measuredPlayerCodes[i] is measured[i]'s player) —
+    // MeasuredRow itself carries no player identity, and the five-gameweek
+    // section needs it to look up gameweeks G+1..G+4 for the SAME player.
+    // Pushed alongside `measured.push` below; nothing about that push itself
+    // is touched.
+    const measuredPlayerCodes: number[] = []
     let actualRowsMatched = 0
     // Ticket #154 — population-health counters, over every feature_history
     // row read (not only the measured population): see the two interfaces'
@@ -3114,6 +3785,8 @@ async function main(): Promise<void> {
           baselineXgXa,
         ),
       )
+      // Ticket #183 — see the declaration comment above.
+      measuredPlayerCodes.push(row.player_code)
     }
 
     assertReconciles(featureHistoryRows.length, measured.length, exclusions)
@@ -3146,6 +3819,111 @@ async function main(): Promise<void> {
     const baselineVerdicts = buildBaselineVerdicts(rankingSeason.spearman, baselines)
     const rankingByGameweekAndPosition = summarizeRankingByGameweekAndPosition(measured)
 
+    // --------------------------------------------------------------------
+    // Ticket #183 — the five-gameweek ranking target. Everything below is
+    // NEW: it reads only `featureHistoryRows`, `measured`/`measuredPlayerCodes`,
+    // `actualByPlayerGameweek`, `codeToPosition`, `resolvedPositionByCode`,
+    // `positionPriors` and `teamMatchRecords` — all already fetched/built
+    // above for the section above, untouched by anything below. No new
+    // Supabase read.
+    // --------------------------------------------------------------------
+    const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(featureHistoryRows)
+    const lastGameweekInData = computeLastGameweekInData(featureHistoryRows)
+
+    const fiveGameweekExclusions = emptyFiveGameweekExclusionCounts()
+    const fiveGameweekMeasured: FiveGameweekRow[] = []
+    for (let i = 0; i < measured.length; i++) {
+      const classification = classifyFiveGameweekRow(
+        measuredPlayerCodes[i],
+        measured[i],
+        lastGameweekInData,
+        featureHistoryByPlayerGameweek,
+        codeToPosition,
+        positionPriors,
+        actualByPlayerGameweek,
+        teamMatchRecords,
+      )
+      if (classification.kind === 'excluded') {
+        incrementFiveGameweekExclusion(fiveGameweekExclusions, classification.reason)
+        continue
+      }
+      fiveGameweekMeasured.push(classification.row)
+    }
+    assertFiveGameweekReconciles(measured.length, fiveGameweekMeasured.length, fiveGameweekExclusions)
+
+    const fiveGwRankingRows: GenericRankingRow[] = fiveGameweekMeasured.map((r) => ({
+      position: r.position,
+      groupId: r.startGameweekId,
+      projected: r.projectedPoints,
+      actual: r.actualPoints,
+    }))
+    const fiveGwByStartGameweek = summarizeGenericRankingByGroup(fiveGwRankingRows)
+    const fiveGwSeason = summarizeGenericSeasonRanking(fiveGwRankingRows, fiveGwByStartGameweek)
+    const fiveGwByPosition = summarizeGenericRankingByPosition(fiveGwRankingRows)
+
+    const fiveGwBaselines = summarizeFiveGameweekBaselines(fiveGameweekMeasured)
+    const fiveGwBaselineVerdicts = buildBaselineVerdicts(fiveGwSeason.spearman, fiveGwBaselines)
+
+    // The quality oracle — a player's whole-season actual record, built once
+    // from the SAME `actualByPlayerGameweek` map (no new Supabase read).
+    // `resolvedPositionByCode` (ticket #154's own two-source resolution,
+    // first-resolved per player_code) is the position source: the oracle
+    // needs one position per player, not a per-row resolution.
+    const playerGameweekGroups: PlayerGameweekActualGroup[] = [...actualByPlayerGameweek.entries()].map(([key, rows]) => {
+      const separatorIndex = key.indexOf(':')
+      return {
+        playerCode: Number(key.slice(0, separatorIndex)),
+        gameweekId: Number(key.slice(separatorIndex + 1)),
+        rows: rows.map(toActualMatchStatsInput),
+      }
+    })
+    const playerSeasonMatches = buildPlayerSeasonMatches(playerGameweekGroups, (code) => resolvedPositionByCode.get(code))
+    const seasonMatchesByPlayer = groupSeasonMatchesByPlayer(playerSeasonMatches)
+
+    let oracleOneGwInsufficientData = 0
+    const oracleOneGwRows: GenericRankingRow[] = []
+    for (let i = 0; i < measured.length; i++) {
+      const row = measured[i]
+      const rate = computeOracleRate(seasonMatchesByPlayer.get(measuredPlayerCodes[i]) ?? [], new Set([row.gameweekId]))
+      if (rate === null) {
+        oracleOneGwInsufficientData++
+        continue
+      }
+      oracleOneGwRows.push({ position: row.position, groupId: row.gameweekId, projected: rate, actual: row.actualPoints })
+    }
+    const oracleOneGwByGroup = summarizeGenericRankingByGroup(oracleOneGwRows)
+    const oracleOneGwSeason = summarizeGenericSeasonRanking(oracleOneGwRows, oracleOneGwByGroup)
+    const oracleOneGwByPosition = summarizeGenericRankingByPosition(oracleOneGwRows)
+
+    let oracleFiveGwInsufficientData = 0
+    const oracleFiveGwRows: GenericRankingRow[] = []
+    for (const row of fiveGameweekMeasured) {
+      const excludeGameweeks = new Set(buildFiveGameweekWindow(row.startGameweekId))
+      const rate = computeOracleRate(seasonMatchesByPlayer.get(row.playerCode) ?? [], excludeGameweeks)
+      if (rate === null) {
+        oracleFiveGwInsufficientData++
+        continue
+      }
+      oracleFiveGwRows.push({ position: row.position, groupId: row.startGameweekId, projected: rate, actual: row.actualPoints })
+    }
+    const oracleFiveGwByGroup = summarizeGenericRankingByGroup(oracleFiveGwRows)
+    const oracleFiveGwSeason = summarizeGenericSeasonRanking(oracleFiveGwRows, oracleFiveGwByGroup)
+    const oracleFiveGwByPosition = summarizeGenericRankingByPosition(oracleFiveGwRows)
+
+    const fiveGameweekReportData: FiveGameweekReportData = {
+      lastGameweekInData,
+      candidateCount: measured.length,
+      measuredCount: fiveGameweekMeasured.length,
+      exclusions: fiveGameweekExclusions,
+      season: fiveGwSeason,
+      byPosition: fiveGwByPosition,
+      byStartGameweek: fiveGwByStartGameweek,
+      baselines: fiveGwBaselines,
+      baselineVerdicts: fiveGwBaselineVerdicts,
+      oracleOneGw: { season: oracleOneGwSeason, byPosition: oracleOneGwByPosition, insufficientData: oracleOneGwInsufficientData },
+      oracleFiveGw: { season: oracleFiveGwSeason, byPosition: oracleFiveGwByPosition, insufficientData: oracleFiveGwInsufficientData },
+    }
+
     const reportData: ReportData = {
       generatedAt: new Date(),
       season,
@@ -3174,6 +3952,7 @@ async function main(): Promise<void> {
       baselineVerdicts,
       rankingByGameweekAndPosition,
       fixtureCoverage,
+      fiveGameweek: fiveGameweekReportData,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
     await mkdir(dirname(reportPath), { recursive: true })
@@ -3206,6 +3985,13 @@ async function main(): Promise<void> {
       baselines,
       baselineVerdicts,
       fixtureCoverage,
+      // Ticket #183 — summary only, informational: this section never
+      // affects job status (see the unmodified `if` below), matching the
+      // ticket text's "no sanity bound derived from the oracle".
+      fiveGameweekMeasured: fiveGameweekReportData.measuredCount,
+      fiveGameweekExclusions: fiveGameweekReportData.exclusions,
+      fiveGameweekRankingSeason: fiveGameweekReportData.season,
+      fiveGameweekOracleSeason: fiveGameweekReportData.oracleFiveGw.season,
       reportPath,
     }
 
@@ -3226,6 +4012,8 @@ async function main(): Promise<void> {
       `(of ${featureHistoryRows.length} feature_history row(s) read). Mean absolute error ${fmt(overall.meanAbsoluteError)}, ` +
       `mean signed error ${fmt(overall.meanSignedError)} — ${describeSignedError(overall.meanSignedError)}. ` +
       `Ranking skill: Spearman ${fmtSpearman(rankingSeason.spearman)}, top-10 overlap ${fmtTopN(rankingSeason.top10)}. ` +
+      `Five-gameweek ranking (#183): Spearman ${fmtSpearman(fiveGameweekReportData.season.spearman)} ` +
+      `(n=${fiveGameweekReportData.season.n}), oracle ${fmtSpearman(fiveGameweekReportData.oracleFiveGw.season.spearman)}. ` +
       `Report written to ${reportPath}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
