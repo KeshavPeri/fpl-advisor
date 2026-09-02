@@ -332,7 +332,7 @@ outstanding piece of evidence for G7** — it has not been re-run as part of #12
 (that ticket's scope is the instrument, not the reading of it). Dispatching the report and
 reading its headline is the next step, per the note above: not from argument alone.
 
-## G8 — Fixture sensitivity may be too narrow
+## G8 — Fixture sensitivity may be too narrow — ANSWERED, INVERTED: 2 Sep 2026 model review
 
 Surfaced while investigating G7 and untested.
 
@@ -345,6 +345,27 @@ Two candidates, both untested: the elo-to-goals mapping (`2 × (1 - expectedScor
 range, and `leagueBaselineGoals` is still on its pre-season fallback constant rather than computed
 from results. **The second resolves itself once the season has fixtures with scores** — which makes
 this worth re-measuring after a few gameweeks rather than tuning now.
+
+**Answered, and in reverse — 2 Sep 2026.** `docs/model-review-2026-09-02.md` §1b measured this
+directly, bucketing every resolvable 2025-26 team-match by point-in-time `expectedScore` and
+comparing actual outcomes to the model's implied response. The model's fixture sensitivity is not
+too narrow — it is **too wide, on both sides**:
+
+- **Goals.** The model's implied slope is 2.9 points of goals per unit of `expectedScore`
+  (`attackingMultiplier = 2 × es`); the measured actual slope is ≈1.43.
+- **Clean sheets.** The model's clean-sheet probability spans 11%→48% across the easiest-to-hardest
+  fixture buckets; the actual clean-sheet rate spans 9%→39% over the same buckets.
+
+Source: review §1b's bucket table, n=698 resolvable 2025-26 team-matches, bucketed by point-in-time
+`expectedScore`.
+
+**The attacking half is addressed — ticket #184.** `attackingMultiplier` changed from `2 × es` to
+`0.5 + es` (`src/lib/projection/fixture.ts`'s `ATTACKING_MULTIPLIER_OFFSET`), damping the slope to
+match the measured ≈1.43.
+
+**The defensive half is untouched, deliberately — see G12, below.** The same overshoot exists on
+the `expectedGoalsConceded`/`defensiveMultiplier` side, and it must not be damped the same way
+without its own in-harness measurement first. G12 records why and what that measurement is.
 
 ---
 
@@ -518,6 +539,33 @@ exclusion — 4,209 of 18,243 rows in the first run, `feature_history`/#121's ow
 now reported as a percentage (23%) alongside the count, so its size doesn't require doing the
 division by hand to notice.
 
+**Question 2 CLOSED, 2 Sep 2026 — cold start, not a level problem.** The bucketed diagnostic
+this ticket built is read for the first time in backtest report 7 (ticket #175 slice), and the
+2 September model review (`docs/model-review-2026-09-02.md`, §1b) confirms the reading:
+
+| prior_matches bucket | 1–4 | 5–9 | 10–19 | 20+ |
+|---|---|---|---|---|
+| defcon signed error | −0.057 | −0.059 | −0.045 | +0.006 |
+
+A gap shrinking to ~zero as evidence accumulates is exactly this entry's own stated test for
+**cold start** ("a shrinking gap across rising buckets points at cold start; a flat gap points at
+a level problem") — not the level/miscalibration explanation, which would have stayed flat. The
+estimator is behaving correctly: it is appropriately cautious with little evidence and converges
+as evidence builds. This entry's standing instruction stands, now on a stronger basis: **do NOT
+tune `k`, the shrinkage formula, or any constant in `defconRate.ts`** — `k = 5` is confirmed as
+not the problem, not merely un-implicated.
+
+**The #154 instrument caveat — do not read the improvement as a model gain.** Report 7's defcon
+figures above are only readable at all because ticket #154 first fixed a defect in the *harness*,
+not the model: before #154, `buildDefconMatches` returned a single averaged match, which capped
+evidence at 1 against the `k = 5` shrinkage formula forever — `prior_matches` was structurally 0
+or 1 for every row, regardless of how much history a player actually had. Under that defect,
+overall defcon signed error read −0.191. After #154 restored real per-match evidence counts, the
+same overall figure reads −0.035 (report 7's by-component table). **That −0.191 → −0.035 change
+measures the instrument being fixed, not the model getting better** — stated explicitly so a
+future reader does not credit `defconRate.ts` with an improvement that happened in
+`buildDefconMatches` instead.
+
 ---
 
 ## G11 — Ticket #147, 28 Aug 2026: ranking skill — a different question from calibration, and it is
@@ -573,3 +621,101 @@ real, useful, imperfect projection model looks like; above 0.8 suggests a leak; 
 the model has no ranking skill at all and the whole recommendation approach needs rethinking. Both
 extremes are findings, neither should be assumed, and this is the open question G11 leaves for that
 first live run.
+
+---
+
+## Forward assists — CLOSED, 2 Sep 2026: expected roster-churn artefact, not actionable
+
+Calibration report 6 reads forward assists at **0.70x** after three separate tickets aimed at the
+assist conversion gap — #148, #168 and #177 — with three hypotheses raised and refuted along the
+way. `docs/model-review-2026-09-02.md` §1e explains why the figure would not move further no
+matter how many more of those tickets ran, and closes the workstream.
+
+**The explanation is the instrument's design, not the model.** Calibration report 6 compares the
+**2026/27 roster's** projections against the **2025/26 population's** actuals — a cross-population
+comparison by construction. Ticket #168 measured the difference between those two populations
+directly, and it is precisely assist-shaped: departed forwards' xA/90 was 0.073, retained forwards'
+0.055. A cross-population distributional comparison cannot resolve a within-position component
+level that sits below the size of ordinary summer roster churn — the 0.70x is consistent with
+comparing a different set of forwards to a different set of forwards, not with the model
+mis-projecting assists for the players actually on the pitch this season.
+
+**The better instrument agrees the component is fine.** The backtest — paired point-in-time,
+same players on both sides, no cross-population gap — puts the whole assist component's signed
+error at **−0.020 points per row** (backtest report 7's by-component table).
+
+**The construction itself was tested too, and gains nothing.** Predicting assists from shrunk
+*actual* assist rates instead of xA — the natural alternative construction — scores season Spearman
+0.325, against 0.326 for the xA+factor construction already shipped. No improvement.
+
+**Record:** 0.70x on calibration report 6 is expected, given how that report is built, not a sign
+of a model defect. The assist workstream is closed; no further ticket should chase this figure.
+
+---
+
+## G12 — The defensive multiplier overshoots symmetrically to G8's attacking side, and must not be
+## damped without its own in-harness measurement
+
+The same review §1b bucket table that resolved G8 shows `expectedGoalsConceded` /
+`defensiveMultiplier` overshooting real outcomes in the same direction and by a similar shape as
+the attacking side did — **deliberately left alone**, unlike the attacking multiplier (#184).
+
+**Why it must stay alone.** Goalkeeper and defender ranking is this model's clearest measured
+win, and it depends on that spread: the review's neutral-fixture variant (multiplier forced to
+1.0 for every fixture) collapses goalkeeper Spearman from 0.168 to **−0.017**. Whatever the
+defensive multiplier's exact shape error is, removing or naively damping the spread it produces
+would cost the one part of the model that is unambiguously working, not just correct a level
+error.
+
+**Why a same-shape fix (mirroring #184) is not safe here.** The empirical clean-sheet curve is
+steeper than a Poisson model with a damped λ produces — damping `expectedGoalsConceded`'s slope
+(and therefore λ, since `pCleanSheet = exp(−λ)`) would change the *shape* of the clean-sheet
+curve, not just narrow its ends the way `0.5 + es` narrowed the attacking side. The attacking fix
+was a slope change that reproduced the bucket means almost exactly; the same move is not shown to
+do that here.
+
+**The findable pointer already exists in code.** `src/lib/projection/fixture.ts`'s own comment on
+`ATTACKING_MULTIPLIER_OFFSET` already warns: "Do not extend this reasoning to `defensiveMultiplier`
+without its own separate measurement and ticket." This backlog entry is that warning's matching,
+findable entry — the measurement it calls for has still not been done.
+
+**Next step, recorded as this entry's own.** An in-harness variant sweep over the defensive slope
+in `scripts/run-backtest.ts`, read on goalkeeper and defender Spearman **and** clean-sheet
+calibration together — not MAE alone, since MAE would not by itself catch a ranking collapse like
+the neutral-fixture variant's.
+
+**Batching conflict — note this before scheduling that work.** That sweep touches
+`scripts/run-backtest.ts`. Ticket #187 is editing that same file in this very batch (2 Sep 2026).
+G12's proposed work must not be batched alongside a ticket already editing `run-backtest.ts` — it
+waits for a future batch.
+
+---
+
+## G13 — Ticket #183's 5-gameweek quality oracle was mis-specified; the specification defect is the
+## lesson, not the number
+
+Ticket #183 specified its 5-gameweek quality oracle as "quality estimated from actual results
+outside the target window" — without requiring that estimate be expressed in the target metric's
+own units.
+
+**The result was an impossible-looking ordering.** A per-match *rate* oracle, scored against a
+*totals* target, produced **model 0.672 > oracle 0.507** — an oracle built to know the answer
+scoring below the model it was meant to bound. The number was never a model finding; the metric
+itself was wrong, comparing a rate to a total as if they were the same quantity.
+
+**The review's independent reconstruction of the same comparison, done in the correct units,
+reads the expected ordering.** `docs/model-review-2026-09-02.md`'s 5-gameweek quality oracle
+(leave-target-out season points-per-match, expressed as a total over the 5-GW window) reads
+**model 0.425 vs oracle 0.485** — the oracle above the model, as an oracle with genuine lookahead
+on quality should be.
+
+**The fix, and who does it.** Ticket #89 reconciles the two constructions and corrects the oracle
+to estimate a *total* — out-of-window points-per-match × out-of-window appearance rate — in the
+same units as the 5-GW target it is meant to bound. Ticket #187 is running concurrently in this
+same batch (2 Sep 2026) and is the one doing this oracle fix; its outcome is not yet known and is
+not asserted here — this entry records the defect and the two figure pairs as specified, not
+#187's result.
+
+**The general lesson, for any future oracle or bound in this repo:** a bound is only a bound if it
+is computed in the same units as the thing it bounds. A rate is not a total, however cleanly it
+can be described in one sentence.
