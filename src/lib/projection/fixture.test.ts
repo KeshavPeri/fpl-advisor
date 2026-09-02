@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ATTACKING_MULTIPLIER_MAX,
+  ATTACKING_MULTIPLIER_MIN,
+  ATTACKING_MULTIPLIER_OFFSET,
   HOME_ADVANTAGE_ELO,
   attackingMultiplier,
   defensiveMultiplier,
@@ -73,17 +76,39 @@ describe('expectedScoreFromDifficulty — the documented elo-null fallback', () 
   })
 })
 
+// ============================================================================
+// Ticket #182 -- attackingMultiplier damped to its measured slope
+// (docs/model-review-2026-09-02.md §1b; full derivation and bucket table
+// quoted in ATTACKING_MULTIPLIER_OFFSET's own comment in fixture.ts).
+// ============================================================================
+
 describe('attackingMultiplier', () => {
-  it('equals 1.0 exactly at expectedScore = 0.5', () => {
+  it('equals 1.0 exactly at expectedScore = 0.5 -- the most important test in this ticket: an even fixture must stay unadjusted after the damping', () => {
     expect(attackingMultiplier(0.5)).toBe(1.0)
   })
-  it('is 2 x expectedScore', () => {
-    expect(attackingMultiplier(0.3)).toBeCloseTo(0.6, 10)
-    expect(attackingMultiplier(0.9)).toBeCloseTo(1.8, 10)
+
+  it('is ATTACKING_MULTIPLIER_OFFSET + expectedScore (slope 1, half the pre-#182 slope of 2)', () => {
+    // Hand-computed: 0.5 + 0.3 = 0.8; 0.5 + 0.9 = 1.4. (Pre-#182 these were 0.6 and 1.8 --
+    // deliberately different values, since this ticket's whole point is to change the slope.)
+    expect(attackingMultiplier(0.3)).toBeCloseTo(0.5 + 0.3, 10)
+    expect(attackingMultiplier(0.9)).toBeCloseTo(0.5 + 0.9, 10)
+    expect(ATTACKING_MULTIPLIER_OFFSET).toBe(0.5)
   })
-  it('is clamped to [0, 2] even for an out-of-range expectedScore', () => {
+
+  it('is clamped to [ATTACKING_MULTIPLIER_MIN, ATTACKING_MULTIPLIER_MAX] = [0, 2] for an out-of-range expectedScore -- named test proving the clamp binds', () => {
+    // expectedScore = -1 -> raw 0.5 + -1 = -0.5, clamped up to the floor, 0.
     expect(attackingMultiplier(-1)).toBe(0)
+    expect(ATTACKING_MULTIPLIER_MIN).toBe(0)
+    // expectedScore = 2 -> raw 0.5 + 2 = 2.5, clamped down to the ceiling, 2 -- note the
+    // damped formula never reaches 2 for any expectedScore inside its real [0, 1] domain
+    // (max there is 0.5 + 1 = 1.5), so this exercises only the defensive out-of-range path.
     expect(attackingMultiplier(2)).toBe(2)
+    expect(ATTACKING_MULTIPLIER_MAX).toBe(2)
+  })
+
+  it('within the valid [0, 1] expectedScore domain the clamp never binds -- output ranges exactly [0.5, 1.5]', () => {
+    expect(attackingMultiplier(0)).toBeCloseTo(0.5, 10)
+    expect(attackingMultiplier(1)).toBeCloseTo(1.5, 10)
   })
 })
 
@@ -124,6 +149,28 @@ describe('defensiveMultiplier -- ticket #109, the exact mirror of attackingMulti
     const leagueBaselineGoals = 1.45
     for (const s of [0, 0.25, 0.5, 0.75, 1]) {
       expect(expectedGoalsConceded(leagueBaselineGoals, s)).toBeCloseTo(leagueBaselineGoals * defensiveMultiplier(s), 12)
+    }
+  })
+})
+
+describe('ticket #182: defensiveMultiplier and expectedGoalsConceded (which the clean-sheet, goals-conceded and saves components all derive from) are byte-identical to their pre-ticket values, for a fixed expectedScore -- named test, per the DoD', () => {
+  it.each([0, 0.25, 0.5, 0.75, 1] as const)('expectedScore = %s', (s) => {
+    // Hand-computed pre-ticket values (defensiveMultiplier and expectedGoalsConceded's own
+    // formulas are untouched by this ticket -- 2 x (1 - s), and leagueBaselineGoals x that):
+    const expectedDefensiveMultiplier = 2 * (1 - s)
+    const leagueBaselineGoals = 1.45
+    const expectedGoalsConcededHand = Math.max(0, leagueBaselineGoals * 2 * (1 - s))
+
+    expect(defensiveMultiplier(s)).toBe(expectedDefensiveMultiplier)
+    expect(expectedGoalsConceded(leagueBaselineGoals, s)).toBeCloseTo(expectedGoalsConcededHand, 12)
+
+    // And attackingMultiplier at the SAME expectedScore is deliberately different from what
+    // defensiveMultiplier gives (except at s = 0.5, where both are exactly 1.0) -- confirming
+    // the two multipliers really are independent, not accidentally sharing one code path.
+    if (s !== 0.5) {
+      expect(attackingMultiplier(s)).not.toBeCloseTo(defensiveMultiplier(s), 5)
+    } else {
+      expect(attackingMultiplier(s)).toBeCloseTo(defensiveMultiplier(s), 12)
     }
   })
 })

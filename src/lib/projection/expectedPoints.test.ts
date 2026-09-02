@@ -890,6 +890,104 @@ describe('ticket #168: diagnosed the forward-assist calibration gap, shipped no 
   })
 })
 
+// ============================================================================
+// Ticket #182 -- attackingMultiplier damped to its measured slope
+// ============================================================================
+
+describe('modelInputs.attackingMultiplier is surfaced alongside the existing savesMultiplier (ticket #182)', () => {
+  it('equals attackingMultiplier(modelInputs.expectedScore), and is present for every position', () => {
+    const positions: Position[] = [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD]
+    for (const position of positions) {
+      const p = player({ position })
+      // fplDifficulty 4 with the FDR fallback -> expectedScore 0.375, not the neutral 0.5,
+      // so the surfaced value is actually exercised rather than trivially 1.0.
+      const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 4 })
+      const projection = projectPlayerFixture(p, f)
+
+      expect(projection.modelInputs.expectedScore).toBeCloseTo(0.375, 10)
+      expect(projection.modelInputs.attackingMultiplier).toBeCloseTo(attackingMultiplier(0.375), 12)
+      expect(Number.isFinite(projection.modelInputs.attackingMultiplier)).toBe(true)
+    }
+  })
+
+  it('is exactly 1.0 at an even (FDR 3 / expectedScore 0.5) fixture', () => {
+    const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 3 })
+    const projection = projectPlayerFixture(player(), f)
+    expect(projection.modelInputs.expectedScore).toBe(0.5)
+    expect(projection.modelInputs.attackingMultiplier).toBe(1.0)
+  })
+})
+
+describe('ticket #182: every component other than goalPoints/assistPoints (and expectedGoals/expectedAssists) is byte-identical to the pre-ticket formula, for a fixed input at a fixed, non-neutral expectedScore, across every position', () => {
+  // A deliberately non-0.5 expectedScore (0.25, via the FDR-5 fallback) so the damped
+  // attackingMultiplier is actually exercised -- at 0.5 both the pre- and post-#182
+  // formulas agree, which would prove nothing.
+  //
+  // Hand-computed pre- and post-ticket values for this fixture and player shape
+  // (leagueBaselineGoals=1.4, teamElo/opponentElo null, fplDifficulty=5 ->
+  // expectedScore=0.25; recentMinutes all 90 with status 'a' -> pAppears=pSixtyPlus=1;
+  // xgPer90=0.3, xaPer90=0.36, savesPer90=2 observed with matching priors so shrinkage
+  // lands exactly there -- the SAME rate shape as the #148/#162 byte-identical tests,
+  // reused deliberately so all three tickets' effects can be cross-checked):
+  //   defensiveMultiplier(0.25) = 2 x (1 - 0.25) = 1.5 -- UNTOUCHED by this ticket
+  //   teamLambdaConceded = expectedGoalsConceded(1.4, 0.25) = 1.4 x 2 x 0.75 = 2.1
+  //   pCleanSheet = exp(-2.1)
+  //   expectedSaves = 2 x 1 x defensiveMultiplier(0.25) = 2 x 1 x 1.5 = 3
+  //   attackingMultiplier(0.25) = 0.5 + 0.25 = 0.75 -- THIS is what #182 changed (pre-ticket
+  //     value would have been 2 x 0.25 = 0.5)
+  //   expectedGoals (raw) = 0.3 x 1 x 0.75 = 0.225 x this position's goalConversionFactor
+  //   expectedAssists (raw) = 0.36 x 1 x 0.75 = 0.27 x this position's assistConversionFactor
+  //   defensiveContributionPoints = 0 (defconPositionPrior=0, no matches, for every position)
+  //   appearancePoints = 1 x 1 + 1 x 1 = 2
+  // None of cleanSheetPoints/goalsConcededPoints/savePoints/defensiveContributionPoints/
+  // appearancePoints depend on attackingMultiplier -- unaffected by this ticket.
+  const rateHistory = { minutesPlayed: 900, totalXg: 3.0, totalXa: 3.6, totalSaves: 20, totalCbi: 0, totalRecoveries: 0 }
+  const ratePositionPrior = { xgPer90: 0.3, xaPer90: 0.36, savesPer90: 2, cbiPer90: 0, recoveriesPer90: 0 }
+  const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 5, leagueBaselineGoals: 1.4 })
+  const teamLambdaConceded = 2.1
+  const pCleanSheet = cleanSheetProbability(teamLambdaConceded)
+  const expectedSavesHand = 3
+  const preTicketAttackMultiplier = 0.5 // 2 x 0.25
+  const postTicketAttackMultiplier = 0.75 // 0.5 + 0.25
+
+  it.each([
+    [GOALKEEPER, 4, ASSIST_CONVERSION_GOALKEEPER, GOAL_CONVERSION_GOALKEEPER],
+    [DEFENDER, 4, ASSIST_CONVERSION_DEFENDER, GOAL_CONVERSION_DEFENDER],
+    [MIDFIELDER, 1, ASSIST_CONVERSION_MIDFIELDER, GOAL_CONVERSION_MIDFIELDER],
+    [FORWARD, 0, ASSIST_CONVERSION_FORWARD, GOAL_CONVERSION_FORWARD],
+  ] as const)(
+    '%s: every component except goalPoints/assistPoints matches the pre-ticket formula exactly; goalPoints/assistPoints reflect the damped multiplier',
+    (position, expectedCleanSheetPointsValue, assistFactor, goalFactor) => {
+      const p = player({ position, rateHistory, ratePositionPrior, defconPositionPrior: 0, defconMatches: [] })
+      const projection = projectPlayerFixture(p, f)
+
+      expect(projection.modelInputs.expectedScore).toBeCloseTo(0.25, 10)
+      expect(projection.modelInputs.attackingMultiplier).toBeCloseTo(postTicketAttackMultiplier, 12)
+      expect(cleanSheetPointsFor(position)).toBe(expectedCleanSheetPointsValue) // sanity-check the table read above
+
+      expect(projection.components.appearancePoints).toBeCloseTo(2, 12)
+      expect(projection.components.cleanSheetPoints).toBeCloseTo(pCleanSheet * 1 * expectedCleanSheetPointsValue, 12)
+      expect(projection.components.goalsConcededPoints).toBeCloseTo(expectedGoalsConcededPoints(teamLambdaConceded, position), 12)
+      expect(projection.components.savePoints).toBeCloseTo(expectedSavePoints(expectedSavesHand, position), 10)
+      expect(projection.components.defensiveContributionPoints).toBe(0)
+      expect(projection.components.bonusPoints).toBe(0)
+
+      // goalPoints/assistPoints DO change: they use the post-#182 attackingMultiplier
+      // (0.75), not the pre-#182 value (0.5) -- both computed by hand above, neither
+      // copied from this function's own output.
+      const preTicketGoalPoints = 0.3 * 1 * preTicketAttackMultiplier * goalFactor * goalPointsForAssistTest(position)
+      const postTicketGoalPoints = 0.3 * 1 * postTicketAttackMultiplier * goalFactor * goalPointsForAssistTest(position)
+      expect(projection.components.goalPoints).toBeCloseTo(postTicketGoalPoints, 10)
+      expect(projection.components.goalPoints).not.toBeCloseTo(preTicketGoalPoints, 5)
+
+      const preTicketAssistPoints = 0.36 * 1 * preTicketAttackMultiplier * assistFactor * ASSIST_POINTS
+      const postTicketAssistPoints = 0.36 * 1 * postTicketAttackMultiplier * assistFactor * ASSIST_POINTS
+      expect(projection.components.assistPoints).toBeCloseTo(postTicketAssistPoints, 10)
+      expect(projection.components.assistPoints).not.toBeCloseTo(preTicketAssistPoints, 5)
+    },
+  )
+})
+
 describe('expectedEvents: expectedCbi and expectedRecoveries (ticket #78, unaffected by ticket #148)', () => {
   it('expectedCbi and expectedRecoveries scale with minutesFraction only -- no fixture attacking multiplier applied', () => {
     // A heavily favoured fixture (high expectedScore) inflates expectedGoals/expectedAssists via the
