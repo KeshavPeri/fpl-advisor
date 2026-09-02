@@ -1,34 +1,82 @@
 // FPL-Core-Insights ingest job — ticket #12, team-write matching fixed by
-// ticket #32, stale-elo-on-unmatched-club fixed by ticket #63.
+// ticket #32, stale-elo-on-unmatched-club fixed by ticket #63, #63's own
+// nulling rule narrowed (never applied to a source gap) and opponent
+// resolution given a slug fallback by ticket #176.
 //
-// TICKET #63 FINDING (verified 18 Aug 2026, live data). A club whose `code`
-// has no row in the ingested season's teams.csv — i.e. counted under
-// `teamsCodesNotInCsv` below — used to be left with whatever `elo` value it
-// last held, rather than having that value cleared. For three of this
-// season's promoted clubs, what it last held was a ClubElo rating that
-// belonged to an entirely different club, written during the pre-#32 era
-// when this job upserted teams.elo keyed on `id` rather than `code` (FPL
+// TICKET #63 FINDING (verified 18 Aug 2026, live data) — WHAT IT GOT RIGHT.
+// A club whose `code` has no row in the ingested season's teams.csv — i.e.
+// counted under `teamsCodesNotInCsv` below — used to be left with whatever
+// `elo` value it last held, rather than having that value cleared. For three
+// of this season's promoted clubs, what it last held was a ClubElo rating
+// that belonged to an entirely different club, written during the pre-#32
+// era when this job upserted teams.elo keyed on `id` rather than `code` (FPL
 // team ids are not stable across seasons — see the #32 note below). Confirmed
 // against the live public.teams table on 18 Aug 2026:
 //   Coventry City (id 7)  was holding Chelsea's  rating
 //   Hull City     (id 11) was holding Leeds's    rating
 //   Ipswich Town  (id 12) was holding Liverpool's rating
-// All three are 2026/27 promoted clubs with no row in the historical
-// 2025-2026 teams.csv this job reads, so `teamsCodesNotInCsv` counted them
-// correctly — but counting is all the pre-#63 code did; the stale value sat
-// there unflagged because it was present, not null. A promoted club rated
-// like a top-four side inverts its projection in both directions: its own
-// players are over-projected, and its opponents are under-projected on
-// clean sheets. Fixed by nulling `elo` (see `teamsEloNulled` below) on every
-// public.teams row this job cannot currently match to a CSV code, rather
-// than leaving whatever the row last held. A null elo is not silent — it is
-// the documented input that makes src/lib/projection/fixture.ts's existing
-// FDR fallback engage (see that module and its `fixtureEloFallbackCount`),
-// which was built for exactly this case and, before this fix, had never
-// once triggered because the column had never been null. This job does not
-// invent a substitute rating: data/2026-2027/teams.csv (the current season's
-// own file) was checked on 18 Aug 2026 and its `elo` column is empty for all
-// twenty clubs, so no current-season rating exists at this source yet.
+// A promoted club rated like a top-four side inverts its projection in both
+// directions: its own players are over-projected, and its opponents are
+// under-projected on clean sheets. #63 was RIGHT to refuse to leave that
+// specific stale-and-wrong value in place — that problem was real and #63's
+// fix of it stands.
+//
+// TICKET #176 FINDING — THE CASE #63 DID NOT ANTICIPATE. #63's fix nulled
+// `elo` on EVERY public.teams row this job cannot currently match to a CSV
+// code, on every run, forever — not just the one time it cleared the
+// pre-#32 mismatched values. That is correct for a club that has genuinely
+// left the competition (see the "genuine removal" note below for why that
+// case, in practice, never reaches this function at all). It is wrong for a
+// club that is very much still in the competition but whose *season file*
+// the source has not (yet) populated: data/2026-2027/teams.csv was checked
+// again on 1 Sept 2026 (fresh, not trusted from an earlier note — see
+// LEARNINGS-first-build-wave.md §5) and its `elo` AND `fotmob_name` columns
+// are still empty for all 20 clubs. Every run of the 2025-2026-season ingest
+// (this job's DEFAULT_SEASON, see .github/workflows/scheduled-jobs.yml)
+// re-nulls the three promoted clubs' `elo` on that basis, and — because no
+// season file has ever supplied a fresh value for them — nothing ever
+// repopulates it. The rating is not gone from the world; the source simply
+// has nothing to say about it *this run*. #63's own rule cannot tell those
+// two cases apart, because it only ever sees one CSV snapshot at a time.
+//
+// GENUINE REMOVAL VS. A TEMPORARY SOURCE GAP — HOW (NOT) TOLD APART, AND WHY
+// THAT'S SAFE. This job never inserts or deletes a public.teams row — see the
+// #32 note below — it only reads back rows scripts/ingest-fpl.ts already
+// wrote. That job upserts `teams` keyed on `id` from the CURRENT season's
+// live bootstrap-static/, which always lists exactly the 20 clubs presently
+// in the top flight; a relegated club's old id slot is overwritten with the
+// promoted club that now holds it (identity columns included), not left
+// behind as a separate row. So a club that has genuinely left the
+// competition leaves no public.teams row for this job to ever see in the
+// first place — there is nothing to null, because there is nothing to read.
+// Every row `fetchTeamIdentities` returns is, by construction, a club
+// scripts/ingest-fpl.ts confirms is CURRENTLY in the competition. That means
+// every case `planTeamEloUpdates` below can actually encounter — code absent
+// from the CSV, code present with a blank elo cell, code present with a
+// malformed elo cell — is a source gap, never a genuine departure. The two
+// cases #63 worried about telling apart turn out not to co-occur in this
+// job's own input at all; genuine removal is already handled, silently, one
+// layer up. This is reported as the ticket's own "if they cannot be [told
+// apart], default to keeping the rating" case — except here the two cases
+// are not merely indistinguishable, one of them structurally cannot occur.
+//
+// THE FIX: PRESERVE, NEVER NULL; RECORD STALENESS INSTEAD. A club absent
+// from the season file, or present with a blank or malformed elo cell,
+// now KEEPS its existing `teams.elo` — see `planTeamEloUpdates`'s
+// `staleMarks` below, which replaces #63's `nulls`. So "we have a rating and
+// it is current" and "we have a rating and the source stopped supplying it"
+// stay distinguishable, every row this run cannot confirm fresh has
+// `elo_stale_since` set (see
+// supabase/migrations/20260901090000_teams_elo_stale_since.sql) the first
+// time it goes stale, left untouched on every subsequent run so the ORIGINAL
+// stale-since moment survives, and cleared back to NULL the moment a fresh
+// CSV value updates it again. A stale rating is not silent, either: it is
+// visible in `job_runs.details` (`teamsEloPreserved` below) and in the
+// column itself — and it is strictly better than the FDR fallback
+// `src/lib/projection/fixture.ts` reaches for on a genuinely null elo (see
+// that module and `docs/projection-model-backlog.md` G8): a coarser
+// instrument, reached for only when there truly is no rating at all to fall
+// back on.
 //
 // Fetches CSVs over plain HTTPS from the FPL-Core-Insights repo (no
 // credential, no clone — individual files only) and upserts:
@@ -303,13 +351,17 @@ function parseCsvRecords(text: string, url: string, requiredColumns: string[]): 
 }
 
 const PLAYERS_REQUIRED_COLUMNS = ['player_code', 'player_id', 'first_name', 'second_name', 'web_name', 'team_code', 'position']
-// The columns this job actually reads: `code`/`elo` since ticket #32 (it no
-// longer touches id/name/short_name, so requiring those here would be a
-// stale guard against columns nothing downstream of this file depends on
-// any more), plus `fotmob_name` since ticket #167, which builds the
-// club-slug -> team_code map opponent resolution needs from this same
-// column — see buildClubCodeBySlug below.
-export const TEAMS_REQUIRED_COLUMNS = ['code', 'elo', 'fotmob_name']
+// The columns this job actually reads: `code`/`elo` since ticket #32, plus
+// `fotmob_name` since ticket #167, which builds the club-slug -> team_code
+// map opponent resolution needs from this same column — see
+// buildClubCodeBySlug below. `name` and `short_name` were added back to this
+// list by ticket #176: they were never WRITTEN to public.teams (still true —
+// identity stays scripts/ingest-fpl.ts's alone, see the #32 note below), but
+// they are now READ, as the fallback slug source when fotmob_name is blank —
+// see buildClubCodeBySlug. Requiring them here means a future schema change
+// that drops either column fails this job loudly rather than silently
+// leaving the fallback permanently empty with no explanation.
+export const TEAMS_REQUIRED_COLUMNS = ['code', 'elo', 'fotmob_name', 'name', 'short_name']
 const MATCH_STATS_REQUIRED_COLUMNS = [
   'player_id',
   'match_id',
@@ -356,10 +408,14 @@ function toNumeric(value: string | undefined): number | null {
 // ============================================================================
 
 // A row read back from public.teams — just enough to join the CSV's code
-// onto the table's id, which is what the update is actually keyed on.
+// onto the table's id, which is what the update is actually keyed on, plus
+// (ticket #176) elo_stale_since, so planTeamEloUpdates can tell "this row
+// just went stale this run" from "this row has been stale since an earlier
+// run" and avoid re-stamping the timestamp on every re-run.
 export interface TeamIdentityRow {
   id: number
   code: number | null
+  elo_stale_since: string | null
 }
 
 export interface EloByCodeResult {
@@ -405,15 +461,33 @@ export function buildEloByCode(records: Array<Record<string, string>>): EloByCod
 //
 // A SEASON WHOSE teams.csv HAS A BLANK fotmob_name FOR EVERY CLUB IS A REAL,
 // OBSERVED CASE, NOT A HYPOTHETICAL: verified directly against
-// data/2026-2027/teams.csv on 31 Aug 2026 -- every one of its 20 rows has an
-// empty fotmob_name cell (its elo cells, by contrast, ARE populated -- the
-// two columns are independent gaps). This job does not treat that as a
-// failure: opponent resolution simply cannot succeed for a season whose
-// source has not (yet) published this column, and every row is counted
-// under matchRowsOpponentUnresolvedByReason with an honest reason rather
-// than guessed at from a different, mismatched name column. See the DoD's
-// own human-check step, scoped to 2025-2026 specifically, for why this is
-// the expected shape of the gap.
+// data/2026-2027/teams.csv on 31 Aug 2026, and again on 1 Sept 2026 (ticket
+// #176, fresh check, not trusted from the earlier note) -- every one of its
+// 20 rows has an empty fotmob_name cell, AND an empty elo cell (unlike 31 Aug
+// when elo was reported populated -- the two columns' gaps are independent
+// and can each change run to run; see the elo section above for that half).
+//
+// TICKET #176: A NAME/short_name FALLBACK WHEN fotmob_name IS BLANK. Rather
+// than leave opponent resolution permanently empty for a season whose source
+// has not (yet) published fotmob_name, a club whose fotmob_name cell is
+// blank now gets its slug derived from the SAME row's own `name` column (or
+// `short_name` if `name` is also blank), through the exact same
+// slugifyClubName() convention. This is a REAL but PARTIAL fix, verified
+// directly against real fetched data (2026-2027 teams.csv + GW1
+// playermatchstats.csv, 1 Sept 2026): teams.csv's `name` column carries the
+// club's full name for some clubs ("Arsenal", "Crystal Palace", "Everton")
+// but a shortened form for others ("Man Utd", "Spurs", "Brighton",
+// "Nott'm Forest", "Newcastle", "Leeds") that does NOT match match_id's own
+// full-name slug ("manchester-united", "tottenham-hotspur",
+// "brighton-hove-albion", "nottingham-forest", "newcastle-united",
+// "leeds-united"). A derived slug that matches no fixture is NEVER
+// fuzzy-matched or corrected — it is left out of resolution entirely and
+// falls through to resolveOpponentTeamCode's existing "club slug not found
+// among known team codes" reason below, counted honestly like every other
+// unresolvable case in this file. `slugSource` records which of the two
+// paths produced each slug, so `countOpponentsResolvedViaFallback` can
+// report, separately from `matchRowsWithOpponentTeamCode`, how many
+// resolved opponents came from this fallback rather than fotmob_name.
 // ============================================================================
 
 /** Lowercases, drops "&" and any other punctuation, and hyphenates whitespace — matching FPL-Core-Insights' own match_id club-slug convention exactly (verified against real fetched data, see section header above). "Brighton & Hove Albion" -> "brighton-hove-albion". */
@@ -426,49 +500,105 @@ export function slugifyClubName(name: string): string {
     .replace(/\s+/g, '-')
 }
 
+// Ticket #176: which of the two source columns a codeBySlug entry's slug was
+// built from — lets countOpponentsResolvedViaFallback (below) report how
+// many resolved opponents came from the fallback specifically, separately
+// from the pre-existing matchRowsWithOpponentTeamCode total.
+export type ClubSlugSource = 'fotmob_name' | 'name_or_short_name_fallback'
+
 export interface ClubCodeBySlugResult {
-  // slug -> team_code, built only from teams.csv rows with both a parseable
-  // code and a non-blank fotmob_name.
+  // slug -> team_code, built from teams.csv rows with a parseable code and
+  // EITHER a non-blank fotmob_name, OR (ticket #176, when fotmob_name is
+  // blank) a slug derived from that same row's name or short_name.
   codeBySlug: Map<string, number>
+  // Ticket #176: slug -> which column produced it. Has exactly the same
+  // keys as codeBySlug (an entry removed from codeBySlug for being a
+  // duplicate is also removed here).
+  slugSource: Map<string, ClubSlugSource>
   // teams.csv rows whose code parsed but whose fotmob_name cell was blank —
-  // that club's slug simply cannot be built this run (see section header;
-  // an entire season's teams.csv being blank here, as observed for
-  // 2026-2027, is the expected shape of this count, not a bug).
+  // counted regardless of whether the name/short_name fallback below went on
+  // to resolve a usable slug for that row (see fallbackSlugsResolved /
+  // fallbackSlugUnresolvable for that breakdown). An entire season's
+  // teams.csv being blank here, as observed for 2026-2027, is the expected
+  // shape of this count, not a bug (see section header).
   blankFotmobName: number
+  // Ticket #176. Of the blankFotmobName rows above, how many produced a
+  // non-empty slug from name (or short_name, if name was also blank) and
+  // were added to codeBySlug. blankFotmobName === fallbackSlugsResolved +
+  // fallbackSlugUnresolvable (duplicates aside — see duplicateSlugs).
+  fallbackSlugsResolved: number
+  // Ticket #176. Of the blankFotmobName rows above, how many had BOTH name
+  // and short_name blank too — no slug could be derived for that club at
+  // all this run. Left out of codeBySlug entirely, counted here, never
+  // guessed.
+  fallbackSlugUnresolvable: number
   // A slug shared by more than one code — ambiguous, so NEITHER code is
-  // kept in codeBySlug for that slug (removed, not guessed at). Distinct
-  // from planTeamEloUpdates' duplicateCodeConflicts, which is about
-  // public.teams rows, not this CSV-only map.
+  // kept in codeBySlug for that slug (removed, not guessed at), regardless
+  // of which column(s) produced the colliding slugs. Distinct from
+  // planTeamEloUpdates' duplicateCodeConflicts, which is about public.teams
+  // rows, not this CSV-only map.
   duplicateSlugs: number
 }
 
 export function buildClubCodeBySlug(teamRecords: Array<Record<string, string>>): ClubCodeBySlugResult {
   const codeBySlug = new Map<string, number>()
+  const slugSource = new Map<string, ClubSlugSource>()
   const seenSlugs = new Set<string>()
   let blankFotmobName = 0
+  let fallbackSlugsResolved = 0
+  let fallbackSlugUnresolvable = 0
   let duplicateSlugs = 0
+
+  const register = (slug: string, code: number, source: ClubSlugSource): void => {
+    if (seenSlugs.has(slug)) {
+      duplicateSlugs++
+      codeBySlug.delete(slug) // ambiguous — neither candidate code is kept, never guessed
+      slugSource.delete(slug)
+      return
+    }
+    seenSlugs.add(slug)
+    codeBySlug.set(slug, code)
+    slugSource.set(slug, source)
+  }
+
   for (const record of teamRecords) {
     const code = toInt(record.code)
     if (code === null) continue // can't join this row onto anything, same as buildEloByCode's own skip
     const fotmobName = (record.fotmob_name ?? '').trim()
-    if (fotmobName === '') {
-      blankFotmobName++
+    if (fotmobName !== '') {
+      register(slugifyClubName(fotmobName), code, 'fotmob_name')
       continue
     }
-    const slug = slugifyClubName(fotmobName)
-    if (seenSlugs.has(slug)) {
-      duplicateSlugs++
-      codeBySlug.delete(slug) // ambiguous — neither candidate code is kept, never guessed
+    blankFotmobName++
+    // Ticket #176: fotmob_name is blank — fall back to this same row's own
+    // name, then short_name, through the identical slugify convention. See
+    // the section header for why this only PARTIALLY resolves opponents
+    // (some clubs' `name` cell is already a shortened form that does not
+    // match match_id) — the unresolved remainder falls through to
+    // resolveOpponentTeamCode's existing named-reason counting below, never
+    // guessed at here.
+    const name = (record.name ?? '').trim()
+    const shortName = (record.short_name ?? '').trim()
+    const fallbackName = name !== '' ? name : shortName
+    if (fallbackName === '') {
+      // Neither name nor short_name is usable — no slug can be derived for
+      // this club at all this run.
+      fallbackSlugUnresolvable++
       continue
     }
-    seenSlugs.add(slug)
-    codeBySlug.set(slug, code)
+    const slug = slugifyClubName(fallbackName)
+    if (slug === '') {
+      fallbackSlugUnresolvable++
+      continue
+    }
+    fallbackSlugsResolved++
+    register(slug, code, 'name_or_short_name_fallback')
   }
-  return { codeBySlug, blankFotmobName, duplicateSlugs }
+  return { codeBySlug, slugSource, blankFotmobName, fallbackSlugsResolved, fallbackSlugUnresolvable, duplicateSlugs }
 }
 
 async function fetchTeamIdentities(supabase: SupabaseClient): Promise<TeamIdentityRow[]> {
-  const { data, error } = await supabase.from('teams').select('id, code')
+  const { data, error } = await supabase.from('teams').select('id, code, elo_stale_since')
   if (error) {
     if (isMissingTable(error, 'teams')) {
       throw new IngestError('table "teams" does not exist — apply the #9 reference-schema migration first')
@@ -478,40 +608,62 @@ async function fetchTeamIdentities(supabase: SupabaseClient): Promise<TeamIdenti
   return (data ?? []) as TeamIdentityRow[]
 }
 
+// A public.teams row queued to be marked stale rather than nulled (ticket
+// #176, replacing #63's `nulls`). `alreadyStale` is true when this row's
+// elo_stale_since was already non-null coming into this run — see
+// applyTeamEloStaleMarks, which uses it to avoid re-stamping (and thereby
+// losing) the moment a rating first went stale.
+export interface StaleMark {
+  id: number
+  alreadyStale: boolean
+}
+
 export interface TeamEloUpdatePlan {
   updates: Array<{ id: number; elo: number }>
-  // public.teams rows to null out (ticket #63) — every row counted under
-  // teamsCodesNotInCsv below, i.e. every row this run cannot match to a CSV
-  // code (a null `code`, or a `code` with no entry anywhere in the CSV).
-  // These are NOT the same rows as codesNotInTeams (a CSV code with no
-  // matching public.teams row — nothing to null there, there is no row) nor
-  // duplicateCodeConflicts (the code DID match the CSV, just ambiguously —
-  // left alone, not nulled, same as before #63).
-  nulls: Array<{ id: number }>
+  // public.teams rows to PRESERVE (never null — ticket #176) and mark stale:
+  // every row this run has no fresh, confirmed rating for. Three shapes feed
+  // this, all given the identical treatment per the DoD: a code absent from
+  // the CSV entirely (also counted in teamsCodesNotInCsv below), a null
+  // `code` on the table row itself (folded into teamsCodesNotInCsv, same as
+  // before #176), and a code present in the CSV whose elo cell was blank or
+  // malformed (counted in teamsCodeInCsvNoUsableElo below — this bucket did
+  // NOT exist under #63; those rows were already left untouched, just
+  // uncounted and unmarked). NOT the same rows as codesNotInTeams (a CSV
+  // code with no matching public.teams row — nothing to preserve there,
+  // there is no row) nor duplicateCodeConflicts (the code DID match the CSV,
+  // just ambiguously — left alone, same as before).
+  staleMarks: StaleMark[]
   // CSV codes with a parsed elo but no matching row in public.teams — a club
   // relegated out of the current season. Skipped, not inserted.
   codesNotInTeams: number
   // public.teams rows whose code has no entry anywhere in the CSV (or whose
-  // code is null). Every row counted here is also queued in `nulls` (#63) —
-  // an unmatched code means this run has no honest rating for that row, so
-  // whatever `elo` last held (possibly a different club's rating entirely,
-  // see the file header) must not be left in place.
+  // code is null). Every row counted here is also queued in `staleMarks` —
+  // see that field's own comment for why preserving (not nulling) is now the
+  // only behaviour this job implements for it.
   teamsCodesNotInCsv: number
+  // Ticket #176, NEW bucket. public.teams rows whose code WAS found in the
+  // CSV, but the elo cell was blank or malformed this run — a different
+  // reason from teamsCodesNotInCsv (the code matched fine; only the value
+  // didn't), but given the identical preserve-and-mark-stale treatment. Under
+  // #63 these rows were silently left alone with no counter at all; #176
+  // makes that visible.
+  teamsCodeInCsvNoUsableElo: number
   // A code shared by more than one public.teams row. Ambiguous — neither row
-  // is updated (nor nulled — the code matched the CSV fine; only the table
-  // is at fault), and this is not the same bucket as codesNotInTeams/
-  // teamsCodesNotInCsv since it's a fault in the table, not a set mismatch.
+  // is updated (nor preserved-and-marked — the code matched the CSV fine;
+  // only the table is at fault), and this is not the same bucket as
+  // codesNotInTeams/teamsCodesNotInCsv since it's a fault in the table, not a
+  // set mismatch.
   duplicateCodeConflicts: number
 }
 
 export function planTeamEloUpdates(existingTeams: TeamIdentityRow[], elo: EloByCodeResult): TeamEloUpdatePlan {
   const teamsByCode = new Map<number, TeamIdentityRow[]>()
-  const nulls: Array<{ id: number }> = []
+  const staleMarks: StaleMark[] = []
   let teamsCodesNotInCsv = 0 // seeded below with null-code rows, then added to per-code below
   for (const team of existingTeams) {
     if (team.code === null) {
       teamsCodesNotInCsv++
-      nulls.push({ id: team.id })
+      staleMarks.push({ id: team.id, alreadyStale: team.elo_stale_since !== null })
       continue
     }
     const existing = teamsByCode.get(team.code)
@@ -522,6 +674,7 @@ export function planTeamEloUpdates(existingTeams: TeamIdentityRow[], elo: EloByC
   const updates: Array<{ id: number; elo: number }> = []
   let codesNotInTeams = 0
   let duplicateCodeConflicts = 0
+  let teamsCodeInCsvNoUsableElo = 0
 
   const allCodes = new Set<number>([...teamsByCode.keys(), ...elo.seenCodes])
   for (const code of allCodes) {
@@ -534,7 +687,7 @@ export function planTeamEloUpdates(existingTeams: TeamIdentityRow[], elo: EloByC
     }
     if (!inCsv) {
       teamsCodesNotInCsv += teams.length
-      for (const t of teams) nulls.push({ id: t.id })
+      for (const t of teams) staleMarks.push({ id: t.id, alreadyStale: t.elo_stale_since !== null })
       continue
     }
     if (teams.length > 1) {
@@ -544,19 +697,28 @@ export function planTeamEloUpdates(existingTeams: TeamIdentityRow[], elo: EloByC
     const value = elo.eloByCode.get(code)
     if (value !== undefined) {
       updates.push({ id: teams[0].id, elo: value })
+    } else {
+      // code is in the CSV but its elo cell was blank or malformed — already
+      // counted in elo.malformedElo above. Ticket #176: preserve the existing
+      // rating (never null it) and queue it to be marked stale, same as an
+      // absent code — a good stored rating survives a one-off source glitch,
+      // visibly.
+      teamsCodeInCsvNoUsableElo++
+      staleMarks.push({ id: teams[0].id, alreadyStale: teams[0].elo_stale_since !== null })
     }
-    // else: code is in the CSV but its elo cell was malformed — already
-    // counted in elo.malformedElo above; no update, no null (a good stored
-    // rating survives a one-off source glitch — see buildEloByCode).
   }
 
-  return { updates, nulls, codesNotInTeams, teamsCodesNotInCsv, duplicateCodeConflicts }
+  return { updates, staleMarks, codesNotInTeams, teamsCodesNotInCsv, teamsCodeInCsvNoUsableElo, duplicateCodeConflicts }
 }
 
 // One UPDATE per matched row, never an upsert — every id here was just read
 // back from public.teams, so there is never a row to insert, only rows to
 // leave alone or correct. `code`, `name`, `short_name`, `pulse_id` and every
 // `strength_*` column are never referenced past this point.
+//
+// Ticket #176: also clears elo_stale_since back to NULL — a fresh CSV value
+// arriving this run means the rating is current again, however long it was
+// stale before.
 async function applyTeamEloUpdates(
   supabase: SupabaseClient,
   updates: Array<{ id: number; elo: number }>
@@ -565,7 +727,7 @@ async function applyTeamEloUpdates(
   for (const update of updates) {
     const { error } = await supabase
       .from('teams')
-      .update({ elo: update.elo, updated_at: updatedAt })
+      .update({ elo: update.elo, elo_stale_since: null, updated_at: updatedAt })
       .eq('id', update.id)
     if (error) {
       if (isMissingTable(error, 'teams')) {
@@ -577,24 +739,30 @@ async function applyTeamEloUpdates(
   return updates.length
 }
 
-// One UPDATE per row this run cannot match to a CSV code (ticket #63) —
-// sets elo to null rather than leaving whatever value the row last held.
-// Same write shape as applyTeamEloUpdates above (elo, updated_at only; never
-// an upsert, never a team-identity column) — kept as a separate function
-// because it writes a different value for a different reason, not because
-// the write path differs.
-async function applyTeamEloNulls(supabase: SupabaseClient, nulls: Array<{ id: number }>): Promise<number> {
-  const updatedAt = new Date().toISOString()
-  for (const row of nulls) {
-    const { error } = await supabase.from('teams').update({ elo: null, updated_at: updatedAt }).eq('id', row.id)
+// Ticket #176, replacing #63's applyTeamEloNulls: one UPDATE per row this
+// run cannot confirm a fresh elo for, setting elo_stale_since (never elo
+// itself — the existing rating is PRESERVED, never nulled; see the file
+// header for why). Rows already stale from an earlier run (`alreadyStale`)
+// are skipped entirely — not re-written — so the timestamp records the
+// MOMENT THE RATING FIRST WENT STALE, not the moment this job last checked.
+// Returns the count of rows NEWLY marked this run (a subset of
+// `staleMarks.length`, which is what job_runs.details reports as the total
+// preserved-this-run count — see main()).
+async function applyTeamEloStaleMarks(supabase: SupabaseClient, staleMarks: StaleMark[]): Promise<number> {
+  const staleSince = new Date().toISOString()
+  let newlyMarked = 0
+  for (const mark of staleMarks) {
+    if (mark.alreadyStale) continue
+    const { error } = await supabase.from('teams').update({ elo_stale_since: staleSince }).eq('id', mark.id)
     if (error) {
       if (isMissingTable(error, 'teams')) {
         throw new IngestError('table "teams" does not exist — apply the #9 reference-schema migration first')
       }
-      throw new IngestError(`null-out of teams.elo failed for team id ${row.id}: ${error.message}`)
+      throw new IngestError(`marking teams.elo_stale_since failed for team id ${mark.id}: ${error.message}`)
     }
+    newlyMarked++
   }
-  return nulls.length
+  return newlyMarked
 }
 
 // ============================================================================
@@ -817,6 +985,10 @@ interface PlayerMatchStatsUpsertResult {
   // never a formatted message — so this object's keys are stable across runs
   // and safe to read programmatically. Sums to written - withOpponentTeamCode.
   opponentUnresolvedByReason: Record<string, number>
+  // Ticket #176. Rows written whose opponent_team_code resolved via a club
+  // slug that came from the name/short_name fallback rather than
+  // fotmob_name — a subset of withOpponentTeamCode above, never exceeding it.
+  withOpponentTeamCodeViaFallback: number
 }
 
 export interface OpponentResolutionTally {
@@ -853,6 +1025,37 @@ export function tallyOpponentResolution(rows: readonly MatchStatRow[], codeBySlu
   return { withOpponentTeamCode, opponentUnresolvedByReason }
 }
 
+/**
+ * Ticket #176's own new counter: among an already-built batch of
+ * MatchStatRow's own opponent_team_code column, how many resolved via a club
+ * slug that came from the name/short_name fallback (buildClubCodeBySlug)
+ * rather than fotmob_name. A strict subset of tallyOpponentResolution's own
+ * `withOpponentTeamCode` — every row counted here is also counted there
+ * (never the reverse) — which is the reconciliation this counter is checked
+ * against, both in tests and in job_runs.details.
+ *
+ * Recomputes the match's two club slugs the same way tallyOpponentResolution
+ * does above (cheap, pure, deterministic, and every row here already parsed
+ * successfully via toMatchStatRow — see that function's own doc comment for
+ * why this never re-triggers a shape throw).
+ */
+export function countOpponentsResolvedViaFallback(
+  rows: readonly MatchStatRow[],
+  codeBySlug: ReadonlyMap<string, number>,
+  slugSource: ReadonlyMap<string, ClubSlugSource>
+): number {
+  let count = 0
+  for (const row of rows) {
+    if (row.opponent_team_code === null) continue
+    const clubSlugs = parseMatchClubSlugs(row.match_id, row.competition as CompetitionToken)
+    const opponentSlug = clubSlugs.find((slug) => codeBySlug.get(slug) === row.opponent_team_code)
+    if (opponentSlug !== undefined && slugSource.get(opponentSlug) === 'name_or_short_name_fallback') {
+      count++
+    }
+  }
+  return count
+}
+
 async function upsertPlayerMatchStats(
   supabase: SupabaseClient,
   url: string,
@@ -862,7 +1065,8 @@ async function upsertPlayerMatchStats(
   playerCodeByPlayerId: Map<number, number>,
   elementTypeByPlayerId: Map<number, number>,
   teamCodeByPlayerId: Map<number, number>,
-  codeBySlug: ReadonlyMap<string, number>
+  codeBySlug: ReadonlyMap<string, number>,
+  slugSource: ReadonlyMap<string, ClubSlugSource>
 ): Promise<PlayerMatchStatsUpsertResult> {
   const rows: MatchStatRow[] = []
   let skipped = 0
@@ -883,6 +1087,7 @@ async function upsertPlayerMatchStats(
   const withElementType = rows.filter((r) => r.element_type !== null).length
   const withTeamCode = rows.filter((r) => r.team_code !== null).length
   const { withOpponentTeamCode, opponentUnresolvedByReason } = tallyOpponentResolution(rows, codeBySlug)
+  const withOpponentTeamCodeViaFallback = countOpponentsResolvedViaFallback(rows, codeBySlug, slugSource)
   if (rows.length === 0) {
     return {
       written: 0,
@@ -893,6 +1098,7 @@ async function upsertPlayerMatchStats(
       withTeamCode: 0,
       withOpponentTeamCode: 0,
       opponentUnresolvedByReason: {},
+      withOpponentTeamCodeViaFallback: 0,
     }
   }
 
@@ -912,6 +1118,7 @@ async function upsertPlayerMatchStats(
     withTeamCode,
     withOpponentTeamCode,
     opponentUnresolvedByReason,
+    withOpponentTeamCodeViaFallback,
   }
 }
 
@@ -1063,9 +1270,10 @@ async function main(): Promise<void> {
           reason: 'season_directory_not_found',
           playersRows: 0,
           teamsUpdated: 0,
-          teamsEloNulled: 0,
+          teamsEloPreserved: 0,
           codesNotInTeams: 0,
           teamsCodesNotInCsv: 0,
+          teamsCodeInCsvNoUsableElo: 0,
           duplicateCodeConflicts: 0,
           malformedEloRows: 0,
           gameweeksFound: 0,
@@ -1076,6 +1284,7 @@ async function main(): Promise<void> {
           matchRowsWithElementType: 0,
           matchRowsWithTeamCode: 0,
           matchRowsWithOpponentTeamCode: 0,
+          matchRowsWithOpponentTeamCodeViaFallback: 0,
           matchRowsOpponentUnresolvedByReason: {},
         },
         startedAt,
@@ -1118,7 +1327,14 @@ async function main(): Promise<void> {
     const existingTeams = await fetchTeamIdentities(supabase)
     const teamEloPlan = planTeamEloUpdates(existingTeams, eloResult)
     const teamsUpdated = await applyTeamEloUpdates(supabase, teamEloPlan.updates)
-    const teamsEloNulled = await applyTeamEloNulls(supabase, teamEloPlan.nulls)
+    // Ticket #176: preserve, never null — see applyTeamEloStaleMarks and the
+    // file header. teamsEloPreserved is the total count of rows this run
+    // could not confirm a fresh rating for (reported in job_runs.details);
+    // applyTeamEloStaleMarks's own return value is the smaller subset newly
+    // marked stale THIS run (rows already stale from an earlier run are left
+    // untouched so their original stale-since moment survives).
+    const teamsEloPreserved = teamEloPlan.staleMarks.length
+    await applyTeamEloStaleMarks(supabase, teamEloPlan.staleMarks)
     if (teamEloPlan.duplicateCodeConflicts > 0) {
       console.warn(
         `${JOB_NAME}: ${teamEloPlan.duplicateCodeConflicts} team code(s) matched more than one ` +
@@ -1134,6 +1350,7 @@ async function main(): Promise<void> {
     let matchRowsWithElementType = 0
     let matchRowsWithTeamCode = 0
     let matchRowsWithOpponentTeamCode = 0
+    let matchRowsWithOpponentTeamCodeViaFallback = 0
     const matchRowsOpponentUnresolvedByReason: Record<string, number> = {}
     for (let gw = 1; gw <= MAX_GAMEWEEKS; gw++) {
       const url = gameweekUrl(season, gw)
@@ -1165,7 +1382,8 @@ async function main(): Promise<void> {
         playerCodeByPlayerId,
         elementTypeByPlayerId,
         teamCodeByPlayerId,
-        clubCodeBySlugResult.codeBySlug
+        clubCodeBySlugResult.codeBySlug,
+        clubCodeBySlugResult.slugSource
       )
       matchRowsWritten += result.written
       matchRowsWithoutPlayerCode += result.missingPlayerCode
@@ -1174,6 +1392,7 @@ async function main(): Promise<void> {
       matchRowsWithElementType += result.withElementType
       matchRowsWithTeamCode += result.withTeamCode
       matchRowsWithOpponentTeamCode += result.withOpponentTeamCode
+      matchRowsWithOpponentTeamCodeViaFallback += result.withOpponentTeamCodeViaFallback
       for (const [reason, count] of Object.entries(result.opponentUnresolvedByReason)) {
         matchRowsOpponentUnresolvedByReason[reason] = (matchRowsOpponentUnresolvedByReason[reason] ?? 0) + count
       }
@@ -1182,11 +1401,14 @@ async function main(): Promise<void> {
     const message =
       `${JOB_NAME}: season ${season} — ${teamsUpdated} team(s) updated (elo, matched on code), ` +
       `${teamEloPlan.codesNotInTeams} CSV code(s) not in public.teams, ` +
-      `${teamEloPlan.teamsCodesNotInCsv} public.teams row(s) with no matching CSV code ` +
-      `(${teamsEloNulled} elo value(s) nulled rather than left stale, ticket #63), ` +
+      `${teamsEloPreserved} public.teams row(s) preserved rather than nulled ` +
+      `(${teamEloPlan.teamsCodesNotInCsv} with no matching CSV code, ` +
+      `${teamEloPlan.teamsCodeInCsvNoUsableElo} with a blank/malformed elo cell — ticket #176, replacing #63's nulling), ` +
       `${teamEloPlan.duplicateCodeConflicts} duplicate-code conflict(s), ` +
       `${eloResult.malformedElo} row(s) with a malformed elo cell skipped, ` +
-      `${clubCodeBySlugResult.blankFotmobName} team(s) with a blank fotmob_name (opponent slug unresolvable), ` +
+      `${clubCodeBySlugResult.blankFotmobName} team(s) with a blank fotmob_name ` +
+      `(${clubCodeBySlugResult.fallbackSlugsResolved} resolved via the name/short_name fallback, ` +
+      `${clubCodeBySlugResult.fallbackSlugUnresolvable} unresolvable — ticket #176), ` +
       `${clubCodeBySlugResult.duplicateSlugs} duplicate club-slug conflict(s), ` +
       `${gameweeksFound} gameweek file(s) found, ${matchRowsWritten} player_match_stats row(s) upserted ` +
       `(${matchRowsWithoutPlayerCode} without a matching player_code in players.csv, ` +
@@ -1194,7 +1416,8 @@ async function main(): Promise<void> {
       `${matchRowsWithTeamGoalsConceded} carrying a non-null team_goals_conceded, ` +
       `${matchRowsWithElementType} carrying a non-null element_type, ` +
       `${matchRowsWithTeamCode} carrying a non-null team_code, ` +
-      `${matchRowsWithOpponentTeamCode} carrying a non-null opponent_team_code)`
+      `${matchRowsWithOpponentTeamCode} carrying a non-null opponent_team_code, ` +
+      `${matchRowsWithOpponentTeamCodeViaFallback} of those resolved via the name/short_name fallback)`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
@@ -1203,12 +1426,15 @@ async function main(): Promise<void> {
         season,
         playersRows: playerRecords.length,
         teamsUpdated,
-        teamsEloNulled,
+        teamsEloPreserved,
         codesNotInTeams: teamEloPlan.codesNotInTeams,
         teamsCodesNotInCsv: teamEloPlan.teamsCodesNotInCsv,
+        teamsCodeInCsvNoUsableElo: teamEloPlan.teamsCodeInCsvNoUsableElo,
         duplicateCodeConflicts: teamEloPlan.duplicateCodeConflicts,
         malformedEloRows: eloResult.malformedElo,
         blankFotmobNameRows: clubCodeBySlugResult.blankFotmobName,
+        fallbackSlugsResolved: clubCodeBySlugResult.fallbackSlugsResolved,
+        fallbackSlugUnresolvable: clubCodeBySlugResult.fallbackSlugUnresolvable,
         duplicateClubSlugs: clubCodeBySlugResult.duplicateSlugs,
         gameweeksFound,
         matchRowsWritten,
@@ -1218,6 +1444,7 @@ async function main(): Promise<void> {
         matchRowsWithElementType,
         matchRowsWithTeamCode,
         matchRowsWithOpponentTeamCode,
+        matchRowsWithOpponentTeamCodeViaFallback,
         matchRowsOpponentUnresolvedByReason,
       },
       startedAt,
