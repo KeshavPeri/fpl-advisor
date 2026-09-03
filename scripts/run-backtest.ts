@@ -1231,6 +1231,68 @@ export function buildTeamMatchRecords(rows: readonly MatchStatsForTeamStrength[]
   return records
 }
 
+function clubScheduleKey(teamCode: number, gameweek: number): string {
+  return `${teamCode}:${gameweek}`
+}
+
+/**
+ * Ticket #193 — the second, larger lookahead leak in the same construction
+ * G13 partially fixed. A window leg's fixture COUNT and OPPONENT(s) used to
+ * come from `actualRows` — the player's OWN `player_match_stats` rows for
+ * that gameweek — which silently told the model, in advance, exactly which
+ * of the five weeks the player would fail to feature in (a non-featuring
+ * leg had zero actual rows, so `matchesFound` was 0 and the leg projected 0
+ * fixtures against an actual of 0: a free, foreknown pass). The number of
+ * fixtures a club plays in a gameweek, and who it plays, are PUBLISHED
+ * before the horizon starts — legitimately known at G. Whether any one
+ * player features in them is not.
+ *
+ * This builds that published schedule from the SAME `player_match_stats`
+ * rows already fetched for actuals — no extra Supabase call — keyed by
+ * (team_code, gameweek), one entry per distinct `match_id` (so a double
+ * gameweek returns two opponent codes). Deliberately NOT filtered on
+ * goals-resolvability, unlike `buildTeamMatchRecords` above: a match that
+ * happened is a match that was scheduled, whether or not both sides'
+ * goals-conceded figures happen to be readable afterward — goals are never
+ * read here at all.
+ *
+ * APPROXIMATION, STATED NOT HIDDEN (mirrors G10's own team-slug caveat):
+ * this schedule is reconstructed from matches that were actually PLAYED, so
+ * a fixture postponed after the horizon began looks identical to a club
+ * that never had one — this job has no independent fixture-schedule table
+ * for a past season (see G10). Both read as `blankGameweek` in the report
+ * below. Not a defect to fix here.
+ *
+ * Named tests: a single fixture; a double gameweek (two match_ids, one
+ * gameweek, one club) returning two opponents; a match whose
+ * `team_goals_conceded` is null on both sides still appearing (goals are
+ * never inspected — the whole point of not reusing `buildTeamMatchRecords`);
+ * a club with no rows in a gameweek returning nothing.
+ */
+export function buildClubFixtureSchedule(rows: readonly MatchStatsForTeamStrength[]): Map<string, (number | null)[]> {
+  const seenMatchTeam = new Set<string>() // dedupe by (matchId, teamCode) — many player rows share one match/team
+  const byGroup = new Map<string, (number | null)[]>()
+
+  for (const row of rows) {
+    if (row.teamCode === null) continue
+    const dedupeKey = `${row.matchId}::${row.teamCode}`
+    if (seenMatchTeam.has(dedupeKey)) continue
+    seenMatchTeam.add(dedupeKey)
+
+    const key = clubScheduleKey(row.teamCode, row.gameweek)
+    const existing = byGroup.get(key)
+    if (existing === undefined) byGroup.set(key, [row.opponentTeamCode])
+    else existing.push(row.opponentTeamCode)
+  }
+
+  return byGroup
+}
+
+/** Looks up one club's scheduled opponent(s) for one gameweek — `[]` (never `undefined`) for a club with no schedule entry that gameweek, the blank-gameweek case. The single place `clubScheduleKey`'s exact string format matters, so callers (and tests) never need to know it. */
+export function lookupClubFixtureSchedule(schedule: ReadonlyMap<string, readonly (number | null)[]>, teamCode: number, gameweek: number): readonly (number | null)[] {
+  return schedule.get(clubScheduleKey(teamCode, gameweek)) ?? []
+}
+
 /** A team's summed prior record as of one point in time — see computeTeamStrengthAsOf. */
 export interface TeamStrengthRecord {
   matches: number
@@ -2615,11 +2677,22 @@ export function isFiveGameweekWindowTruncated(startGameweekId: number, lastGamew
   return startGameweekId + FIVE_GAMEWEEK_HORIZON - 1 > lastGameweekInData
 }
 
-/** One window leg's outcome — `'ok'` carries both sides so the caller can sum; every other status is a named reason the WHOLE window gets excluded (see classifyFiveGameweekRow). */
+/**
+ * One window leg's outcome — `'ok'` carries both sides so the caller can
+ * sum; every other status is a named reason the WHOLE window gets excluded
+ * (see classifyFiveGameweekRow). Ticket #193: `'ok'` also carries
+ * `fixtureCount`/`featured`, the club-schedule diagnostics
+ * classifyFiveGameweekRow tallies across a window's four legs — both are
+ * already computed to build the projection, so this is free.
+ * `'unresolvedTeamCode'` (ticket #193) — the window's start row has no
+ * `team_code`, so the club schedule cannot be resolved for ANY leg (every
+ * leg shares the same G row's team_code — see this function's own comment).
+ */
 export type WindowGameweekOutcome =
-  | { status: 'ok'; position: Position; projectedPoints: number; actualPoints: number }
+  | { status: 'ok'; position: Position; projectedPoints: number; actualPoints: number; fixtureCount: number; featured: boolean }
   | { status: 'missingFeatureHistoryRow' }
   | { status: 'unresolvedPosition' }
+  | { status: 'unresolvedTeamCode' }
   | { status: 'actualDataIncomplete' }
 
 /**
@@ -2646,15 +2719,24 @@ export type WindowGameweekOutcome =
  *   `checkOracleCeiling` refuses. See docs/projection-model-backlog.md G13.
  *
  *   `legGameweekId` — THIS LEG'S OWN GAMEWEEK, G+i. Only what a PUBLISHED
- *   FIXTURE SCHEDULE legitimately tells you at G is keyed on it, and both of
- *   those reach this function through `actualRows`, which the caller has
- *   already selected for G+i:
- *     - that leg's real outcome — the target being ranked, not an input, and
- *     - `opponentTeamCodes`/`resolveFixtureTeams` — WHO the club plays that
- *       week and how many times (a double gameweek shows up as two rows).
- *   The schedule for G..G+4 is public at G; the form of the clubs in it is
- *   not. Hence the split: the fixture's IDENTITY is the leg's, while both
- *   sides' STRENGTH is measured as of G.
+ *   FIXTURE SCHEDULE legitimately tells you at G is keyed on it:
+ *     - that leg's real outcome (via `actualRows`, which the caller has
+ *       already selected for G+i) — the target being ranked, not an input, and
+ *     - the leg's fixture COUNT and OPPONENT(s) — WHO the player's club plays
+ *       that week and how many times (a double gameweek returns two) — via
+ *       `clubFixtureSchedule`, looked up at (this row's own `team_code`,
+ *       `legGameweekId`). **Ticket #193**: this used to come from
+ *       `actualRows` — the player's OWN matched rows for the leg — which
+ *       told the model in advance exactly which weeks the player would not
+ *       feature in (no rows ⇒ 0 fixtures ⇒ a foreknown 0 projected against a
+ *       foreknown 0 actual). The published SCHEDULE, never the player's own
+ *       appearance, is what is legitimately knowable at G — see
+ *       `buildClubFixtureSchedule`'s own comment and
+ *       docs/projection-model-backlog.md G13's addendum.
+ *   The schedule for G..G+4 is public at G; whether THIS PLAYER features in
+ *   it, and the form of the clubs in it, are not. Hence the split: the
+ *   fixture's IDENTITY is the leg's, while both sides' STRENGTH is measured
+ *   as of G and the outcome is read at the leg.
  *
  * Every function called here is imported/defined ABOVE this section,
  * unmodified: `resolveRowPosition` (same two-source resolution the section
@@ -2665,20 +2747,24 @@ export type WindowGameweekOutcome =
  * `computeTeamStrengthAsOf`/`computeFixtureExpectedScore` (the SAME
  * point-in-time fixture construction ticket #175 built, degrading to the
  * neutral fixture exactly as it already does when a club cannot be
- * resolved — never a second, divergent fixture rule), and `projectRow`
- * itself.
+ * resolved — never a second, divergent fixture rule), `lookupClubFixtureSchedule`
+ * (ticket #193), and `projectRow` itself. `projectRow` is called with the
+ * SCHEDULE's fixture count, never `outcome.matchesFound` (the player's own
+ * matched-row count) — that is the entire fix.
  */
 export function projectAndReconstructWindowGameweek(
   playerCode: number,
   /** G — the window's START gameweek. Keys the feature_history row, both team-strength reads and the position prior. See this function's own comment. */
   featureGameweekId: number,
-  /** G+i — this leg's OWN gameweek. Serves only the fixture schedule and the actual outcome, both of which arrive via `actualRows`. See this function's own comment. */
+  /** G+i — this leg's OWN gameweek. Serves only the club fixture schedule and the actual outcome. See this function's own comment. */
   legGameweekId: number,
   featureHistoryByPlayerGameweek: ReadonlyMap<string, FeatureHistoryRow>,
   codeToPosition: ReadonlyMap<number, Position>,
   positionPriors: ReadonlyMap<string, PositionPrior>,
   actualRows: readonly ActualSourceRow[],
   teamMatchRecords: readonly TeamMatchRecord[],
+  /** Ticket #193 — the published club fixture schedule (`buildClubFixtureSchedule`), the leg's fixture count/opponent(s) source. Never `actualRows`. */
+  clubFixtureSchedule: ReadonlyMap<string, readonly (number | null)[]>,
 ): WindowGameweekOutcome {
   // A leg can never sit before the window that contains it. This guard is
   // cheap and it is the one place the two arguments are compared, so a
@@ -2698,25 +2784,38 @@ export function projectAndReconstructWindowGameweek(
   if (resolution.position === undefined) return { status: 'unresolvedPosition' }
   const position = resolution.position
 
+  // Ticket #193: without the window's own club known, the schedule cannot be
+  // resolved for ANY leg (every leg shares this same G row) — excluded by
+  // name, never guessed. Narrows `row.team_code` to `number` below.
+  if (row.team_code === null) return { status: 'unresolvedTeamCode' }
+
+  // THE FIX. Fixture COUNT and OPPONENT(s) come from the published club
+  // schedule, keyed on (this row's own club, the LEG's own gameweek) — never
+  // from whether this player personally has a matching player_match_stats
+  // row for the leg. A leg with no schedule entry is the club's blank
+  // gameweek: 0 fixtures, a legitimate zero, counted separately below (never
+  // a fallback neutral fixture — that would invent a match).
+  const scheduledOpponents = lookupClubFixtureSchedule(clubFixtureSchedule, row.team_code, legGameweekId)
+  const fixtureCount = scheduledOpponents.length
+
   const actualInputs = actualRows.map(toActualMatchStatsInput)
   const outcome = aggregateActualForGameweek(position, actualInputs)
   if (!outcome.teamGoalsConcededKnown) return { status: 'actualDataIncomplete' }
 
-  // Fixture IDENTITY from the leg (via actualRows), fixture STRENGTH as of G.
-  const opponentTeamCodes = actualRows.map((r) => r.opponent_team_code)
-  const fixtureTeamsResolved = resolveFixtureTeams(row.team_code, opponentTeamCodes)
+  // Fixture IDENTITY from the schedule (at the leg), fixture STRENGTH as of G.
+  const fixtureTeamsResolved = resolveFixtureTeams(row.team_code, scheduledOpponents)
   let fixtureExpectedScores: number[] = []
   if (fixtureTeamsResolved) {
-    const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, row.team_code as number, featureGameweekId)
-    fixtureExpectedScores = opponentTeamCodes.map((code) =>
+    const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, row.team_code, featureGameweekId)
+    fixtureExpectedScores = scheduledOpponents.map((code) =>
       computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, code as number, featureGameweekId), SCALE),
     )
   }
 
   const prior = positionPriors.get(positionPriorKey(featureGameweekId, position)) ?? fallbackPositionPrior(position)
-  const projection = projectRow(row, position, prior, outcome.matchesFound, fixtureExpectedScores)
+  const projection = projectRow(row, position, prior, fixtureCount, fixtureExpectedScores)
 
-  return { status: 'ok', position, projectedPoints: projection.expectedPoints, actualPoints: outcome.totalPoints }
+  return { status: 'ok', position, projectedPoints: projection.expectedPoints, actualPoints: outcome.totalPoints, fixtureCount, featured: outcome.featured }
 }
 
 /** One measured five-gameweek row — mirrors MeasuredRow's shape for the fields the ranking/baseline/report layer below needs, summed across the window rather than one gameweek. */
@@ -2731,9 +2830,22 @@ export interface FiveGameweekRow {
   /** Ticket text: "the same prior quantity ranked against the five-gameweek actual total" — reused verbatim from the corresponding `measured` row's own baseline (computed at the START gameweek, never recomputed per leg or averaged across the window). */
   baselineMinutesPerMatch: number
   baselineXgXaPerMatch: number
+  /**
+   * Ticket #193 — club-schedule fixture diagnostics, tallied across this
+   * window's four G+1..G+4 legs only (never the G leg — its fixture count
+   * comes from the already-correct single-gameweek path above, and by
+   * construction that leg already featured). See `sumClubScheduleLegCounts`
+   * for the season-wide totals the report prints.
+   */
+  /** How many of the four legs had at least one schedule-derived fixture (0-4). */
+  legsWithScheduleFixture: number
+  /** How many of the four legs had NO schedule entry — the club's blank gameweek, a legitimate zero on both sides (0-4). */
+  legsBlankGameweek: number
+  /** THE LEAK SIZE: of the legs with a scheduled fixture, how many the player did not feature in (0-4) — this is exactly what used to project a foreknown 0 before this ticket. */
+  legsDidNotFeatureButClubHadFixture: number
 }
 
-export type FiveGameweekExclusionReason = 'truncatedWindow' | 'missingFeatureHistoryRow' | 'unresolvedPosition' | 'actualDataIncomplete'
+export type FiveGameweekExclusionReason = 'truncatedWindow' | 'missingFeatureHistoryRow' | 'unresolvedPosition' | 'unresolvedTeamCode' | 'actualDataIncomplete'
 
 export type FiveGameweekClassification =
   | { kind: 'excluded'; reason: FiveGameweekExclusionReason }
@@ -2753,9 +2865,19 @@ export type FiveGameweekClassification =
  * function's `featureGameweekId` — the model state each leg is built from is
  * the state at G, never the state at G+i, because that is the only state the
  * app has when it plans the whole horizon at G. The leg's own gameweek goes
- * in as `legGameweekId` and selects that leg's `actualRows` (its outcome and
- * its published fixture). See `projectAndReconstructWindowGameweek`'s own
- * comment for why each side gets which.
+ * in as `legGameweekId` and selects that leg's `actualRows` (its outcome)
+ * and its schedule-derived fixture (via `clubFixtureSchedule`). See
+ * `projectAndReconstructWindowGameweek`'s own comment for why each side gets
+ * which.
+ *
+ * Ticket #193 — also tallies `legsWithScheduleFixture`/`legsBlankGameweek`/
+ * `legsDidNotFeatureButClubHadFixture` across the four legs it evaluates
+ * (from each leg's `outcome.fixtureCount`/`outcome.featured`, already
+ * computed to build the projection — free). Only reaches the return for a
+ * `'measured'` window: a window excluded partway through discards whatever
+ * it had tallied for its earlier legs too, matching this function's existing
+ * "a window is only as good as its worst-resolved leg" rule — never a
+ * partial diagnostic for a window that isn't itself in the report.
  */
 export function classifyFiveGameweekRow(
   playerCode: number,
@@ -2766,6 +2888,8 @@ export function classifyFiveGameweekRow(
   positionPriors: ReadonlyMap<string, PositionPrior>,
   actualByPlayerGameweek: ReadonlyMap<string, readonly ActualSourceRow[]>,
   teamMatchRecords: readonly TeamMatchRecord[],
+  /** Ticket #193 — see `projectAndReconstructWindowGameweek`'s own parameter of the same name. */
+  clubFixtureSchedule: ReadonlyMap<string, readonly (number | null)[]>,
 ): FiveGameweekClassification {
   if (isFiveGameweekWindowTruncated(startRow.gameweekId, lastGameweekInData)) {
     return { kind: 'excluded', reason: 'truncatedWindow' }
@@ -2773,6 +2897,9 @@ export function classifyFiveGameweekRow(
 
   let projectedPoints = startRow.projectedPoints
   let actualPoints = startRow.actualPoints
+  let legsWithScheduleFixture = 0
+  let legsBlankGameweek = 0
+  let legsDidNotFeatureButClubHadFixture = 0
 
   const window = buildFiveGameweekWindow(startRow.gameweekId)
   for (let i = 1; i < window.length; i++) {
@@ -2787,10 +2914,17 @@ export function classifyFiveGameweekRow(
       positionPriors,
       actualRows,
       teamMatchRecords,
+      clubFixtureSchedule,
     )
     if (outcome.status !== 'ok') return { kind: 'excluded', reason: outcome.status }
     projectedPoints += outcome.projectedPoints
     actualPoints += outcome.actualPoints
+    if (outcome.fixtureCount > 0) {
+      legsWithScheduleFixture++
+      if (!outcome.featured) legsDidNotFeatureButClubHadFixture++
+    } else {
+      legsBlankGameweek++
+    }
   }
 
   return {
@@ -2803,20 +2937,24 @@ export function classifyFiveGameweekRow(
       actualPoints,
       baselineMinutesPerMatch: startRow.baselineMinutesPerMatch,
       baselineXgXaPerMatch: startRow.baselineXgXaPerMatch,
+      legsWithScheduleFixture,
+      legsBlankGameweek,
+      legsDidNotFeatureButClubHadFixture,
     },
   }
 }
 
-/** The four named exclusion reasons — a strict partition of every single-gameweek `measured` row (the candidate population), alongside the five-gameweek measured count. Mirrors `ExclusionCounts`/`assertReconciles` above exactly, for the five-gameweek population. */
+/** The five named exclusion reasons (`unresolvedTeamCode` added by ticket #193) — a strict partition of every single-gameweek `measured` row (the candidate population), alongside the five-gameweek measured count. Mirrors `ExclusionCounts`/`assertReconciles` above exactly, for the five-gameweek population. */
 export interface FiveGameweekExclusionCounts {
   truncatedWindow: number
   missingFeatureHistoryRow: number
   unresolvedPosition: number
+  unresolvedTeamCode: number
   actualDataIncomplete: number
 }
 
 export function emptyFiveGameweekExclusionCounts(): FiveGameweekExclusionCounts {
-  return { truncatedWindow: 0, missingFeatureHistoryRow: 0, unresolvedPosition: 0, actualDataIncomplete: 0 }
+  return { truncatedWindow: 0, missingFeatureHistoryRow: 0, unresolvedPosition: 0, unresolvedTeamCode: 0, actualDataIncomplete: 0 }
 }
 
 export function incrementFiveGameweekExclusion(counts: FiveGameweekExclusionCounts, reason: FiveGameweekExclusionReason): void {
@@ -2824,7 +2962,24 @@ export function incrementFiveGameweekExclusion(counts: FiveGameweekExclusionCoun
 }
 
 export function totalFiveGameweekExcluded(counts: FiveGameweekExclusionCounts): number {
-  return counts.truncatedWindow + counts.missingFeatureHistoryRow + counts.unresolvedPosition + counts.actualDataIncomplete
+  return counts.truncatedWindow + counts.missingFeatureHistoryRow + counts.unresolvedPosition + counts.unresolvedTeamCode + counts.actualDataIncomplete
+}
+
+/** Ticket #193 — season-wide totals of `FiveGameweekRow`'s own per-window leg diagnostics (see that interface's own comment), summed across every five-gameweek MEASURED row. The report's three new counters. */
+export interface ClubScheduleLegCounts {
+  legsWithScheduleFixture: number
+  legsBlankGameweek: number
+  legsDidNotFeatureButClubHadFixture: number
+}
+
+export function sumClubScheduleLegCounts(rows: readonly FiveGameweekRow[]): ClubScheduleLegCounts {
+  const totals: ClubScheduleLegCounts = { legsWithScheduleFixture: 0, legsBlankGameweek: 0, legsDidNotFeatureButClubHadFixture: 0 }
+  for (const row of rows) {
+    totals.legsWithScheduleFixture += row.legsWithScheduleFixture
+    totals.legsBlankGameweek += row.legsBlankGameweek
+    totals.legsDidNotFeatureButClubHadFixture += row.legsDidNotFeatureButClubHadFixture
+  }
+  return totals
 }
 
 /** candidates (the single-gameweek `measured` population) = five-gameweek measured + excluded, by reason, exactly — mirrors `assertReconciles` above. */
