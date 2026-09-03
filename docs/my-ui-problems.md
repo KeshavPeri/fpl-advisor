@@ -3,6 +3,25 @@ UI/UX polish pass — first-class input to `docs/ui-audit-2026-08-31.md`, not ba
 
 # What's wrong with this app's interface
 
+## STATUS, 3 September 2026 — round two shipped and Keshav is still not satisfied
+
+`#195` ("UI polish round two") merged on 3 Sep. It was written from this file plus a fresh round
+of the owner's feedback and his own device screenshots, and it covered: the material regression
+(fills lightened by `#171`, blur removed), four rendering faults (content under the iOS status
+bar, a sticky action row, content under the nav bar, mid-word hyphenation of player names), the
+nav bar's shape and type, the verdict card's buttons, the pitch and bench proportions, the chips
+and record screens, and an animation pass.
+
+**Keshav has reviewed the result and still has UI problems with it. He has not yet listed them.**
+
+This is the standing item to raise the next time there are not three good tickets in the backlog
+— which is his own standing instruction, recorded in the orchestrator handover. **Ask him to
+list what is still wrong before writing anything**, and add it to this file in his words, the way
+P1–P11 below were captured. Do not write a third UI ticket from the audit or from this file
+alone: two rounds have now shipped against them and the gap that remains is one only he can
+describe.
+
+
 ## How to use this file
 
 Every numbered item below is a real complaint from using the app, restated precisely and traced to
