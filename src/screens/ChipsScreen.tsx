@@ -28,10 +28,19 @@ import './ChipsScreen.css'
  * already used/lost moves to the bottom. The chip-timing caveat now sits
  * ABOVE the figure it qualifies, not below it — a caveat read after the
  * number has already been believed doesn't do its job. F42 (should-fix):
- * three panel weights instead of seven identical ones — one focal L3
- * (what's left + when), one recessed L1 (the advisories, a deliberately
- * quieter register: no accent colour, per product-brief.md §6a's "never an
- * instruction"), one L2 (the used/lost history, both sets in one panel).
+ * panel weights instead of identical ones — one focal L3 (what's left +
+ * when), one L2 (the used/lost history, both sets in one panel).
+ *
+ * #194, section F — the advisory, previously one L1 panel holding both
+ * "chip timing" and "squad rebuild" stacked with their own sub-headings,
+ * is now two separate Surfaces at different levels (L1 for chip timing,
+ * L2 for squad rebuild) — "the advisory panel currently holds two
+ * different advisories... split into two surfaces at different weights."
+ * Neither ever takes an accent colour (product-brief.md §6a: never an
+ * instruction). The remaining-chips headline (`.chips-summary__headline`,
+ * ChipsScreen.css) is demoted from a --text-display comma-separated list
+ * to a real `<ul>` at --text-title: "remaining chips are a list, not a
+ * headline."
  */
 
 type ScreenState =

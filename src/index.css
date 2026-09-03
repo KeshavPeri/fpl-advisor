@@ -117,17 +117,19 @@
   --material-hero-blur: 20px;
   --material-hero-saturate: 165%;
 
-  /* ---- The floating navigation bar — the one real glass in the app.
-     It is the only surface with live content (shirts, text, figures)
-     scrolling behind it, so it is the only place backdrop-filter does
-     visible work, and it is deliberately the glassiest thing here: the
-     LOWEST alpha of any surface (0.50, under the panels' 0.55), the only
-     blur, the strongest saturation, and the brightest light-catching
-     edge. If the bar and the panels ever read as the same substance,
-     that is the bug this ticket exists to prevent. Its fill is the same
-     re-derivation as the materials above — 0.72 -> 0.50 alpha at a
-     compensating luminosity, so its 1.077:1 lift off the base ink is
-     unchanged while it transmits 50% of what is behind it instead of
+  /* ---- The floating navigation bar — still the glassiest surface in
+     the app, even after #194 restored blur to the panels too. It is the
+     one surface with live content (shirts, text, figures) scrolling
+     directly behind it, and it stays deliberately the most material
+     thing here: the LOWEST alpha of any surface (0.50, under the
+     panels' 0.55), the strongest blur (--material-bar-blur, 28px vs
+     --panel-blur's 16px), the strongest saturation (180% vs 150%), and
+     the brightest light-catching edge. If the bar and the panels ever
+     read as the same substance, that is the bug #194's own report names
+     ("the nav bar stays the glassiest surface in the app"). Its fill is
+     the same re-derivation as the materials above — 0.72 -> 0.50 alpha
+     at a compensating luminosity, so its 1.077:1 lift off the base ink
+     is unchanged while it transmits 50% of what is behind it instead of
      28%. ---- */
   --material-bar: rgba(24, 32, 54, 0.5);
   --material-bar-blur: 28px;
