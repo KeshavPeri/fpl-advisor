@@ -3431,6 +3431,8 @@ interface FiveGameweekReportData {
   candidateCount: number
   measuredCount: number
   exclusions: FiveGameweekExclusionCounts
+  /** Ticket #193 — the three club-schedule fixture counters (season-wide totals across every measured row's legs). See `sumClubScheduleLegCounts`. */
+  clubSchedule: ClubScheduleLegCounts
   season: SeasonRankingSummary
   byPosition: Record<Position, PositionRankingSummary>
   byStartGameweek: Map<number, GameweekRankingSummary>
@@ -3878,7 +3880,9 @@ function buildFiveGameweekSections(data: ReportData): string[] {
       "G..G+4 are summed (never one projection × 5 — each leg is built from THAT gameweek's own " +
       'strictly-before `feature_history` row), and compared against the sum of actual points over the same ' +
       'five gameweeks (0 for a gameweek the player did not feature in — the risk a five-gameweek transfer ' +
-      'decision genuinely carries, not excluded).',
+      'decision genuinely carries, not excluded). **Ticket #193**: each leg\'s fixture COUNT and OPPONENT(s) ' +
+      'now come from the club\'s published schedule at that leg\'s own gameweek, never from whether this ' +
+      'player personally has a matching actual row that gameweek — see the diagnostics subsection below.',
   )
 
   sections.push(
@@ -3890,10 +3894,26 @@ function buildFiveGameweekSections(data: ReportData): string[] {
       `\`docs/model-review-2026-09-02.md\`'s own R2 rule): ${fg.exclusions.truncatedWindow}\n` +
       `- excluded — the window's START gameweek \`feature_history\` row was missing (every leg is built from it, never from the leg's own row — see \`projectAndReconstructWindowGameweek\`; should not occur at all, since a candidate row is by construction a measured row at that same gameweek): ${fg.exclusions.missingFeatureHistoryRow}\n` +
       `- excluded — the position on the window's START gameweek row could not be resolved: ${fg.exclusions.unresolvedPosition}\n` +
+      `- excluded — the window's START gameweek row had no \`team_code\` (ticket #193 — every leg shares this one row's club, so its absence means the club schedule cannot be resolved for the whole window): ${fg.exclusions.unresolvedTeamCode}\n` +
       `- excluded — a window leg's actual data was incomplete (\`team_goals_conceded\` unknown, the same ~2% gap the section above excludes for, re-applied per leg): ${fg.exclusions.actualDataIncomplete}\n` +
       `- **five-gameweek rows measured**: ${fg.measuredCount}\n\n` +
       `Reconciliation: ${fg.measuredCount} measured + ${totalFiveGameweekExcluded(fg.exclusions)} excluded = ` +
       `${fg.measuredCount + totalFiveGameweekExcluded(fg.exclusions)}, against ${fg.candidateCount} single-gameweek measured rows as candidates.`,
+  )
+
+  sections.push(
+    '### Club-schedule fixture diagnostics (ticket #193)\n\n' +
+      'Counted across every MEASURED five-gameweek row\'s four G+1..G+4 legs (never the G leg — its fixture ' +
+      'count comes from the already-correct single-gameweek path above, and by construction that leg already ' +
+      'featured, since the single-gameweek section excludes non-featuring rows outright).\n\n' +
+      `- legs whose fixture count came from the club schedule (the schedule had at least one entry that gameweek): ${fg.clubSchedule.legsWithScheduleFixture}\n` +
+      `- legs where the club had **no** scheduled fixture that gameweek (a genuine blank gameweek — 0 fixtures, a legitimate zero on both sides, never a defect): ${fg.clubSchedule.legsBlankGameweek}\n` +
+      `- legs where the club **did** have a scheduled fixture but the player did not feature in it — **this is the exact size of the leak this ticket closes**: ${fg.clubSchedule.legsDidNotFeatureButClubHadFixture}\n\n` +
+      'APPROXIMATION, stated not hidden (mirrors `docs/projection-model-backlog.md` G10\'s own team-slug ' +
+      'caveat): the published schedule above is reconstructed from matches that were actually PLAYED — this ' +
+      'job has no independent fixture-schedule table for a past season. A fixture postponed after its horizon ' +
+      'began is therefore indistinguishable from a club that never had one; both read as a blank gameweek ' +
+      'above. Not a defect to fix here.',
   )
 
   sections.push(
@@ -4205,6 +4225,29 @@ async function main(): Promise<void> {
     )
 
     // --------------------------------------------------------------------
+    // 4c3. Ticket #193. The published club fixture schedule — one row per
+    //      resolvable (matchId, teamCode) like teamMatchRecords above, but
+    //      NOT filtered on goals-resolvability (a schedule needs no goals at
+    //      all). Built once from the SAME matchStatsRows already fetched
+    //      above (no extra Supabase call). Used ONLY by the five-gameweek
+    //      window section below, to source each leg's fixture count/
+    //      opponent(s) from the club's schedule instead of the player's own
+    //      matched rows — see buildClubFixtureSchedule's own comment and
+    //      docs/projection-model-backlog.md G13's addendum. The
+    //      single-gameweek section above this point is untouched by this
+    //      ticket and does not read this map.
+    // --------------------------------------------------------------------
+    const clubFixtureSchedule = buildClubFixtureSchedule(
+      matchStatsRows.map((r) => ({
+        matchId: r.match_id,
+        gameweek: r.gameweek,
+        teamCode: r.team_code,
+        opponentTeamCode: r.opponent_team_code,
+        teamGoalsConceded: r.team_goals_conceded,
+      })),
+    )
+
+    // --------------------------------------------------------------------
     // 4c. Ticket #154. Resolve one position per player_code for
     //     computePositionPriors (which keys its own aggregation by player
     //     code, not by row — see its own comment). First-resolved wins per
@@ -4367,9 +4410,9 @@ async function main(): Promise<void> {
     // Ticket #183 — the five-gameweek ranking target. Everything below is
     // NEW: it reads only `featureHistoryRows`, `measured`/`measuredPlayerCodes`,
     // `actualByPlayerGameweek`, `codeToPosition`, `resolvedPositionByCode`,
-    // `positionPriors` and `teamMatchRecords` — all already fetched/built
-    // above for the section above, untouched by anything below. No new
-    // Supabase read.
+    // `positionPriors`, `teamMatchRecords` and (ticket #193) `clubFixtureSchedule`
+    // — all already fetched/built above for the section above, untouched by
+    // anything below. No new Supabase read.
     // --------------------------------------------------------------------
     const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(featureHistoryRows)
     const lastGameweekInData = computeLastGameweekInData(featureHistoryRows)
@@ -4386,6 +4429,7 @@ async function main(): Promise<void> {
         positionPriors,
         actualByPlayerGameweek,
         teamMatchRecords,
+        clubFixtureSchedule,
       )
       if (classification.kind === 'excluded') {
         incrementFiveGameweekExclusion(fiveGameweekExclusions, classification.reason)
@@ -4464,11 +4508,16 @@ async function main(): Promise<void> {
     // failure gate below, not a silent report-only observation.
     const oracleCeiling = checkOracleCeiling(rankingSeason.spearman, oracleOneGwSeason.spearman, fiveGwSeason.spearman, oracleFiveGwSeason.spearman)
 
+    // Ticket #193 — the three club-schedule fixture counters, summed across
+    // every five-gameweek MEASURED row's own per-window leg tallies.
+    const clubScheduleLegCounts = sumClubScheduleLegCounts(fiveGameweekMeasured)
+
     const fiveGameweekReportData: FiveGameweekReportData = {
       lastGameweekInData,
       candidateCount: measured.length,
       measuredCount: fiveGameweekMeasured.length,
       exclusions: fiveGameweekExclusions,
+      clubSchedule: clubScheduleLegCounts,
       season: fiveGwSeason,
       byPosition: fiveGwByPosition,
       byStartGameweek: fiveGwByStartGameweek,
