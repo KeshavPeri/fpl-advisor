@@ -3779,7 +3779,7 @@ describe('run-backtest.ts — the five-gameweek window reads model state at G, f
     for (const call of strengthCalls) expect(call).toMatch(/featureGameweekId\s*\)$/)
   })
 
-  it('nothing inside the function keys a lookup on legGameweekId — the leg reaches it only through actualRows', () => {
+  it('no MODEL-STATE lookup keys on legGameweekId — the leg reaches the projection only through its published fixture and its actual outcome', () => {
     expect(fn).not.toMatch(/windowKey\(playerCode, legGameweekId\)/)
     expect(fn).not.toMatch(/positionPriorKey\(legGameweekId/)
     expect(fn).not.toMatch(/computeTeamStrengthAsOf\([^)]*legGameweekId/)
@@ -3787,6 +3787,28 @@ describe('run-backtest.ts — the five-gameweek window reads model state at G, f
 
   it('classifyFiveGameweekRow passes the window\'s start gameweek as featureGameweekId, the leg\'s as legGameweekId', () => {
     expect(source).toMatch(/projectAndReconstructWindowGameweek\(\s*\n\s*playerCode,\s*\n\s*startRow\.gameweekId,\s*\n\s*gameweekId,/)
+  })
+
+  // Ticket #193 — the second leak. The leg's FIXTURE (count and opponents)
+  // is the one thing that must key on legGameweekId, and it must come from
+  // the club schedule rather than the player's own matched rows.
+  it('the leg\'s fixture comes from the club schedule, keyed on the LEG\'s own gameweek (ticket #193)', () => {
+    expect(fn).toMatch(/lookupClubFixtureSchedule\(clubFixtureSchedule, row\.team_code, legGameweekId\)/)
+  })
+
+  it('matchesFound appears nowhere in the arguments to projectRow inside this function — the leak that told the model which weeks the player would miss', () => {
+    const projectRowCalls = fn.match(/projectRow\([^)]*\)/g) ?? []
+    expect(projectRowCalls.length).toBe(1)
+    for (const call of projectRowCalls) expect(call).not.toMatch(/matchesFound/)
+    expect(fn).toMatch(/projectRow\(row, position, prior, fixtureCount, fixtureExpectedScores\)/)
+  })
+
+  it('the fixture opponents are never read off actualRows any more — that array supplies the leg\'s actual points and nothing else', () => {
+    expect(fn).not.toMatch(/actualRows\.map\(\(r\) => r\.opponent_team_code\)/)
+    // The one remaining use of actualRows: reconstructing the actual side.
+    const actualRowsUses = fn.match(/actualRows\.[a-zA-Z]+\(/g) ?? []
+    expect(actualRowsUses).toEqual(['actualRows.map('])
+    expect(fn).toMatch(/actualRows\.map\(toActualMatchStatsInput\)/)
   })
 })
 
