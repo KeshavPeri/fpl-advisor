@@ -101,6 +101,47 @@
   }
 }
 
+/* #194, section H (animation pass) — M2 from docs/ui-audit-2026-08-31.md
+   Part 3, accepted there (200ms, --ease-out, translateY(8px) -> 0,
+   spatial consistency + "preventing a jarring change" per
+   design-reference.md, which names screen transitions as one of only two
+   interactions that earn animation) but never actually built. Each
+   screen renders its own `<AppShell>`, so `.app-shell__column` is a
+   fresh DOM node on every route change (React Router swaps the whole
+   route component) — a `@keyframes` animation on it plays automatically
+   on mount with no JS, no router-transition library, and no risk of ever
+   firing on the wrong element. `<AppBar>` is a sibling of `<Routes>` in
+   App.tsx and never remounts, so it is structurally excluded — it can't
+   animate even by accident, which is what "the floating bar must not
+   animate" (M2's own requirement) needs.
+
+   Simplified from M2's exact spec: back navigation was proposed to
+   mirror the entrance (translateY(-4px) rather than +8px), which needs
+   the navigation's direction (react-router's useNavigationType, PUSH vs
+   POP) threaded through every one of six screens. This app's IA is a
+   three-item tab bar plus three contextual screens reached from within
+   a tab, not a push/pop stack — "forward" and "back" don't map onto tab
+   switches at all, and only map loosely onto the three contextual
+   routes. One consistent entrance, forward or back, is what's actually
+   implemented; see this ticket's report for the full because.
+
+   prefers-reduced-motion is handled by the existing global rule in
+   index.css (F8), which collapses animation-duration to near-zero for
+   every animation in the app — the column still receives its final,
+   settled position with no perceptible movement, the same mechanism
+   every other keyframe animation in this codebase already relies on
+   (VerdictCard.css, DeadlineCountdown.css). No local override needed. */
+@keyframes app-shell-screen-enter {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* Single column, iPhone-first. Widens gently on larger viewports but
    never chases a desktop layout — this app is read on one device. */
 .app-shell__column {
@@ -110,6 +151,7 @@
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  animation: app-shell-screen-enter var(--dur-enter) var(--ease-out);
   padding-top: calc(env(safe-area-inset-top) + var(--space-6));
   /* #194, section A3 (rendering fault) — the owner's own iPhone showed
      page content legible under the floating bar on both Home and Chips:

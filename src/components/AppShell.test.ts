@@ -33,6 +33,28 @@ describe('F19 — the escalated wash is a real, opt-in layer', () => {
   })
 })
 
+describe('#194, section H — M2 (screen transitions), accepted in the Part 3 motion audit and finally built', () => {
+  it('the column plays a real entrance keyframe at the app\'s own --dur-enter/--ease-out tokens, no hand-typed values', () => {
+    expect(css).toMatch(/animation:\s*app-shell-screen-enter\s+var\(--dur-enter\)\s+var\(--ease-out\)/)
+  })
+
+  it('the entrance keyframe moves from a settled offset, never from scale(0) or off past the safe area', () => {
+    const keyframes = css.match(/@keyframes app-shell-screen-enter\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(keyframes).toMatch(/from\s*\{[^}]*opacity:\s*0[^}]*transform:\s*translateY\(0\.5rem\)/)
+    expect(keyframes).toMatch(/to\s*\{[^}]*opacity:\s*1[^}]*transform:\s*translateY\(0\)/)
+  })
+
+  it('the floating bar is structurally excluded from the entrance animation — AppShell.tsx renders no <AppBar>, only the backdrop/grain layers and the column', () => {
+    const tsx = readFileSync(path.join(here, 'AppShell.tsx'), 'utf8')
+    expect(tsx).not.toMatch(/AppBar/)
+    // AppBar.test.ts's own "adds no motion" assertion is what proves the
+    // bar carries no animation at all — this only proves AppShell can't
+    // apply one to it, since the bar isn't one of AppShell's children
+    // (it's a sibling of <Routes> in App.tsx, so it never remounts and
+    // this keyframe never has a reason to touch it).
+  })
+})
+
 describe('#194, section A1 — no home-screen content renders above the top safe-area inset', () => {
   it('the column\'s own padding-top adds --space-6 on top of env(safe-area-inset-top), so every child (including the countdown, its first child) starts clear of it', () => {
     expect(css).toMatch(/padding-top:\s*calc\(env\(safe-area-inset-top\)\s*\+\s*var\(--space-6\)\)/)
