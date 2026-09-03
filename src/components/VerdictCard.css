@@ -21,6 +21,28 @@
   gap: var(--space-3);
 }
 
+/* #194, section D — "the verdict card is the hero. Give it a materially
+   different glass treatment from every other panel — the strongest
+   sheen, the widest bleed." `.bleed` (applied alongside this in
+   VerdictCard.tsx) gives the width; this gives the material. Stronger
+   blur and saturation than a plain panel but still short of the nav
+   bar's own glassiest tier (--material-hero-* sits between --panel-*
+   and --material-bar-* in index.css — verified in index.css.test.ts's
+   "nav bar is the glassiest surface" test), and a brighter inset sheen
+   than any other panel gets. `.verdict-card.verdict-card--hero` (two
+   classes) rather than a bare `.verdict-card--hero`, so this reliably
+   beats `.surface`'s own backdrop-filter rule regardless of CSS load
+   order — the same reasoning Surface.css's own level rules already
+   apply to background. */
+.verdict-card.verdict-card--hero {
+  -webkit-backdrop-filter: blur(var(--material-hero-blur)) saturate(var(--material-hero-saturate));
+  backdrop-filter: blur(var(--material-hero-blur)) saturate(var(--material-hero-saturate));
+  box-shadow:
+    inset 0 1px 0 0 var(--material-sheen-3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 16px 48px rgba(0, 0, 0, 0.5);
+}
+
 /* A stale recommendation reads as a confident answer to a DIFFERENT
    gameweek, not to this one — product-brief.md §6a: "It must never present
    stale recommendations as current." This banner is the one thing allowed
@@ -246,46 +268,52 @@
   color: var(--accent-coral);
 }
 
-/* F31 (should-fix) — the single quiet row beneath the primary Commit
-   button: "Why this" on the left, "Override" on the right (when it
-   applies), both at --text-label rather than --text-body so neither reads
-   as a second button competing with Commit above. */
-.verdict-card__links {
+/* #194, section D — "one row directly under Commit, both smaller than
+   Commit, both in the same secondary treatment as each other." Real
+   `<button>` elements now, not links (see VerdictCard.tsx). When only one
+   button renders (OverrideButton can render nothing — see its own
+   comment), the row still holds: the surviving button keeps its own
+   `flex: 1` and simply fills the row alone, rather than the row
+   collapsing to a left-aligned single control. */
+.verdict-card__secondary-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
+  align-items: stretch;
+  gap: var(--space-2);
   margin-top: var(--space-1);
 }
 
-/* Ticket #91 — the card's doorway into override registration
-   (design-reference.md: "Registering an override carries deliberate
-   friction"). Cyan, no button chrome — the friction this design decision
-   commits to belongs entirely on /override itself, not on the doorway to
-   it. Hidden outright when this gameweek is already committed (OverrideLink
-   in VerdictCard.tsx renders nothing in that case), so its mere presence
-   never contradicts the one-decision-per-gameweek rule. F31 — 44px of
-   vertical hit padding (iOS's own tap-target floor), text-label instead of
-   text-body so this reads as a quiet row, not a second action. */
-.verdict-card__override-link {
-  display: flex;
-  align-items: center;
-  padding: var(--space-3) 0;
+/* Ticket #91/#79, rebuilt for #194 — the doorway into override
+   registration and into the full reasoning screen now share ONE class
+   and ONE neutral treatment: recessed material (--material-1, the same
+   "present, never a card" tier PlayerShirt.css's badge recess uses),
+   --text-primary rather than an accent colour. Neither coral (reserved
+   for risk — an override is not a failure, design-reference.md's own
+   rule) nor cyan (Commit stays the only solid cyan control on the card) —
+   a fourth accent colour is explicitly out of scope. min-height keeps
+   both comfortably under Commit's own 3rem while still clearing the iOS
+   44px tap-target floor along its own axis (flex row height + padding). */
+.verdict-card__secondary-button {
+  flex: 1;
+  min-height: 2.25rem;
+  border: 1px solid var(--panel-border-strong);
+  border-radius: var(--radius-control);
+  background: var(--material-1);
+  color: var(--text-primary);
   font: var(--text-label);
   font-weight: 550;
-  color: var(--accent-cyan);
+  cursor: pointer;
+  transition: background-color var(--dur-press) ease, transform var(--dur-press) var(--ease-out);
 }
 
-/* Ticket #79 — the card's one way through to the full reasoning screen
-   (design-reference.md: "a bare number is never the whole story"). F31 —
-   same treatment as .verdict-card__override-link above, in the same row. */
-.verdict-card__reasoning-link {
-  display: flex;
-  align-items: center;
-  padding: var(--space-3) 0;
-  font: var(--text-label);
-  font-weight: 550;
-  color: var(--accent-cyan);
+.verdict-card__secondary-button:active {
+  transform: scale(0.97);
+  background: var(--material-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verdict-card__secondary-button:active {
+    transform: none;
+  }
 }
 
 /* Loading placeholder — four bars shaped roughly like the ordinary

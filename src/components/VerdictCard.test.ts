@@ -39,6 +39,45 @@ describe('#194, section A2 — the action row does not stick to the viewport whi
   })
 })
 
+describe('#194, section D — Why this / Register override are buttons, not links', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const tsx = readFileSync(path.join(here, 'VerdictCard.tsx'), 'utf8')
+  const css = readFileSync(path.join(here, 'VerdictCard.css'), 'utf8')
+
+  it('no <a> element and no react-router Link import remain in VerdictCard.tsx', () => {
+    expect(tsx).not.toMatch(/<a[\s>]/)
+    expect(tsx).not.toMatch(/import\s*\{\s*Link\s*\}\s*from\s*'react-router'/)
+  })
+
+  it('renders three <button type="button"> elements: Commit, Why this, Register override', () => {
+    expect(tsx).toMatch(/verdict-card__commit-button verdict-card__commit-control/)
+    expect((tsx.match(/type="button"/g) ?? []).length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('no arrow glyph survives on either secondary button', () => {
+    expect(tsx).not.toMatch(/Why this →/)
+    expect(tsx).not.toMatch(/Register override →/)
+    expect(tsx).not.toMatch(/Override registered →/)
+  })
+
+  it('the two secondary buttons share one class, one row, and neither uses coral or cyan', () => {
+    expect(tsx).toMatch(/className="verdict-card__secondary-button"[\s\S]*?Why this/)
+    expect(tsx).toMatch(/<OverrideButton /)
+    const rule = css.match(/\.verdict-card__secondary-button\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).not.toMatch(/accent-coral/)
+    expect(rule).not.toMatch(/accent-cyan/)
+  })
+
+  it('the secondary buttons\' own min-height is less than Commit\'s', () => {
+    const px = (raw: string) => (raw.trim().endsWith('rem') ? parseFloat(raw) * 16 : parseFloat(raw))
+    const commitRule = css.match(/\.verdict-card__commit-button\s*\{[^}]*\}/)?.[0] ?? ''
+    const secondaryRule = css.match(/\.verdict-card__secondary-button\s*\{[^}]*\}/)?.[0] ?? ''
+    const commitHeight = px(commitRule.match(/min-height:\s*([^;]+);/)![1])
+    const secondaryHeight = px(secondaryRule.match(/min-height:\s*([^;]+);/)![1])
+    expect(secondaryHeight).toBeLessThan(commitHeight)
+  })
+})
+
 describe('VerdictPointsFigure', () => {
   it('renders a whole-number points figure with no decimal point anywhere in the markup', () => {
     const html = renderToStaticMarkup(
