@@ -126,6 +126,18 @@ export interface VerdictView {
   confidenceWord: string
   /** Present only when confidenceBand is 'coin-flip' — states in words that the top options are too close to separate. */
   coinFlipNote: string | null
+  /**
+   * Ticket #194, section D — "surface the captain confidence band next to
+   * the plan confidence." Reuses `deriveCaptainConfidenceBand`
+   * (src/lib/reasoning/derive.ts) unmodified, on the SAME gap that
+   * function's own thresholds (0.5 / 1.5) were built for — this file adds
+   * no new threshold and does not import or duplicate them. Null when
+   * `gameweekPicks` doesn't support the same eleven-player guard
+   * `gameweekPoints` itself requires (no data, or not exactly eleven
+   * lineup rows), or when no pick is flagged captain — the component
+   * omits the line entirely rather than guessing.
+   */
+  captainConfidenceBand: ConfidenceBand | null
   /** Present only when at least one referenced player has no match history (recommendations.coverage). */
   coverageNote: string | null
 }

@@ -58,6 +58,25 @@ const css = rawCss.replace(/\/\*[\s\S]*?\*\//g, '')
  * the width ran out".
  */
 
+/**
+ * #194, section A4 (rendering fault) — the four names the owner's own
+ * phone rendered with a mid-word hyphen: "B.Fernan-des" (B.Fernandes),
+ * "Ver-brugg…" (Verbruggen), "João Pe-dro" (João Pedro), "I.San-garé"
+ * (I.Sangaré) — real current squad web_names, spelled correctly here and
+ * cross-checked against docs/reports/calibration-report-6.md, which
+ * cites "B.Fernandes", "Verbruggen" and "João Pedro" verbatim. `hyphens:
+ * auto` (the actual cause — PlayerShirt.css's own comment) is a browser
+ * dictionary lookup this file cannot re-run without a browser harness
+ * (the same limitation ticket #44's own header above documents for the
+ * empirical width check), so what's provable here is the same kind of
+ * proof the ellipsis tests below already use: the ONE property that can
+ * make a browser insert a hyphen character is `hyphens: auto` (or
+ * `hyphens: manual` combined with a literal soft hyphen in the string,
+ * which this file's data never contains) — if neither is set, there is
+ * no mechanism left for a hyphen to appear, mid-word or otherwise.
+ */
+const NAMES_THAT_WERE_HYPHENATING = ['B.Fernandes', 'Verbruggen', 'João Pedro', 'I.Sangaré']
+
 describe('PlayerShirt.css — name truncation mechanism (ticket #44, finding 2)', () => {
   it('never sets text-overflow: ellipsis anywhere in the file', () => {
     // The only CSS property that can produce a truncating ellipsis. If
@@ -80,5 +99,29 @@ describe('PlayerShirt.css — name truncation mechanism (ticket #44, finding 2)'
   it('reserves a fixed height for the name so 1-line and 2-line names keep every slot the same height', () => {
     const nameRule = css.match(/\.player-shirt__name\s*\{[^}]*\}/)?.[0] ?? ''
     expect(nameRule).toMatch(/min-height\s*:\s*var\(--space-8\)/)
+  })
+})
+
+describe('#194, section A4 — automatic hyphenation is disabled on the player name', () => {
+  const nameRule = css.match(/\.player-shirt__name\s*\{[^}]*\}/)?.[0] ?? ''
+
+  it('sets hyphens: none (and its -webkit- prefix for Safari/iOS)', () => {
+    expect(nameRule).toMatch(/(?<!-webkit-)hyphens\s*:\s*none/)
+    expect(nameRule).toMatch(/-webkit-hyphens\s*:\s*none/)
+  })
+
+  it('never sets hyphens: auto (the actual cause of the mid-word hyphens) anywhere in the file', () => {
+    expect(css).not.toMatch(/hyphens\s*:\s*auto/)
+  })
+
+  it('the four names that were hyphenating on the owner\'s phone are real current web_names, not compound words with a natural hyphen the app should ever break at', () => {
+    // With hyphens: none and no other insertion mechanism (checked above),
+    // none of these can render with a browser-inserted hyphen — a
+    // structural guarantee, not a per-name render (see this file's own
+    // header comment on why a real render check isn't available here).
+    for (const name of NAMES_THAT_WERE_HYPHENATING) {
+      expect(name).not.toContain('­') // no soft hyphen either
+    }
+    expect(NAMES_THAT_WERE_HYPHENATING).toEqual(['B.Fernandes', 'Verbruggen', 'João Pedro', 'I.Sangaré'])
   })
 })

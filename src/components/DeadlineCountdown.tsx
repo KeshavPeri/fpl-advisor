@@ -5,6 +5,7 @@ import {
   formatDeadlineInstant,
   type RemainingTime,
 } from '../lib/deadlineCountdown'
+import Surface from './Surface'
 import './DeadlineCountdown.css'
 
 export type DeadlineCountdownState =
@@ -85,9 +86,11 @@ function formatRemainingPadded(remaining: RemainingTime): string {
  * candidate the home screen has, and "Gameweek 4" is real information where
  * "FPL Advisor" was not.
  *
- * Deliberately not a `Surface` — no translucent panel, no blur, no border.
- * A card would restructure the home screen around this element; the ticket
- * is explicit that it must not.
+ * #194, section D — now a `Surface` of its own (level 1, compact padding):
+ * "the deadline countdown becomes its own component with its own
+ * container." It was the only element on the home screen with no surface
+ * behind it; a recessed, quiet panel gives it a place to sit without
+ * competing with the verdict card's own, louder hero material below it.
  *
  * Data comes in as a prop, not fetched here — HomeScreen owns the single
  * `fetchTargetGameweek` call the pitch section already needs, and passes
@@ -123,19 +126,19 @@ function DeadlineCountdown({ state, onEscalatedChange }: DeadlineCountdownProps)
 
   if (state.status === 'loading') {
     return (
-      <div className="deadline-countdown" aria-live="off">
+      <Surface className="deadline-countdown" level={1} padding="compact" aria-live="off">
         <h1 className="deadline-countdown__label">Deadline</h1>
         <p className="deadline-countdown__message">Checking the next gameweek…</p>
-      </div>
+      </Surface>
     )
   }
 
   if (state.status === 'unavailable') {
     return (
-      <div className="deadline-countdown" aria-live="off">
+      <Surface className="deadline-countdown" level={1} padding="compact" aria-live="off">
         <h1 className="deadline-countdown__label">Deadline</h1>
-        <p className="deadline-countdown__message">No upcoming deadline is available right now.</p>
-      </div>
+        <p className="deadline-countdown__message">No deadline available right now.</p>
+      </Surface>
     )
   }
 
@@ -145,8 +148,10 @@ function DeadlineCountdown({ state, onEscalatedChange }: DeadlineCountdownProps)
     'deadline-countdown' + (remaining.isEscalated ? ' deadline-countdown--escalated' : '')
 
   return (
-    <div
+    <Surface
       className={wrapperClass}
+      level={1}
+      padding="compact"
       // The figure ticks every second while mounted. A live region would
       // force assistive tech to announce every tick; this element is
       // fully readable on demand via normal linear navigation, it just
@@ -155,16 +160,14 @@ function DeadlineCountdown({ state, onEscalatedChange }: DeadlineCountdownProps)
     >
       <h1 className="deadline-countdown__label">{state.gameweekName}</h1>
       {remaining.hasPassed ? (
-        <p className="deadline-countdown__message">
-          Deadline passed — next gameweek not confirmed yet
-        </p>
+        <p className="deadline-countdown__message">Deadline passed — next gameweek not set yet.</p>
       ) : (
         <p className="deadline-countdown__remaining num">{formatRemainingPadded(remaining)}</p>
       )}
       <p className="deadline-countdown__deadline-line">
         Deadline <span className="num">{instant}</span>
       </p>
-    </div>
+    </Surface>
   )
 }
 

@@ -20,6 +20,9 @@
  * fetchVerdict — it's a pure presentational component — so the client is
  * stubbed out here rather than actually touched.
  */
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
@@ -27,6 +30,14 @@ import { describe, expect, it, vi } from 'vitest'
 vi.mock('../lib/supabase.ts', () => ({ supabase: {}, supabaseConfigured: false }))
 
 const { VerdictPointsFigure } = await import('./VerdictCard.tsx')
+
+describe('#194, section A2 — the action row does not stick to the viewport while scrolling', () => {
+  it('position: sticky appears nowhere in VerdictCard.css', () => {
+    const here = path.dirname(fileURLToPath(import.meta.url))
+    const css = readFileSync(path.join(here, 'VerdictCard.css'), 'utf8')
+    expect(css).not.toMatch(/position:\s*sticky/)
+  })
+})
 
 describe('VerdictPointsFigure', () => {
   it('renders a whole-number points figure with no decimal point anywhere in the markup', () => {

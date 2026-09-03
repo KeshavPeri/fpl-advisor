@@ -33,6 +33,12 @@ describe('F19 — the escalated wash is a real, opt-in layer', () => {
   })
 })
 
+describe('#194, section A1 — no home-screen content renders above the top safe-area inset', () => {
+  it('the column\'s own padding-top adds --space-6 on top of env(safe-area-inset-top), so every child (including the countdown, its first child) starts clear of it', () => {
+    expect(css).toMatch(/padding-top:\s*calc\(env\(safe-area-inset-top\)\s*\+\s*var\(--space-6\)\)/)
+  })
+})
+
 describe('F17/#194 A3 — the column reserves space for the floating bar', () => {
   it('padding-bottom accounts for the bar\'s real reserved height via the shared --nav-bar-reserve token, not just the safe area', () => {
     expect(css).toMatch(/padding-bottom:\s*calc\(env\(safe-area-inset-bottom\)\s*\+\s*var\(--nav-bar-reserve\)\)/)

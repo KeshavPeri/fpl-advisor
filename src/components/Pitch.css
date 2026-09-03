@@ -24,12 +24,15 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  /* F27 (must-fix) — was var(--space-6) (24px) against a ~105px shirt
-     block, 23% of the row height: four rows read as a centred stack, not
-     a formation. calc(var(--space-6) + var(--space-4)) = 40px (24 + 16),
-     the audit's exact proposed value — composed from two existing tokens
-     rather than a new one (see the file header). */
-  gap: calc(var(--space-6) + var(--space-4));
+  /* #194, section E — "widen the shirts and horizontal gaps... then
+     reduce the row-to-row gap. Wider rows plus tighter rows stops the
+     formation reading tall and thin." Was calc(var(--space-6) +
+     var(--space-4)) = 40px (ticket #169's own F27 fix). --space-8 (32px)
+     — an existing token, no calc needed — now that PlayerShirt.css's own
+     60px shirt (up from 56px) has already widened each row, a tighter
+     vertical gap is what keeps the formation reading wide rather than
+     tall. */
+  gap: var(--space-8);
   padding: var(--space-4) 0;
 }
 
