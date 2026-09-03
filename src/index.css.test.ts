@@ -236,30 +236,94 @@ describe('F5 — the elevation scale is genuinely separable (computed WCAG contr
   // over that panel's fill (level 2, --panel-fill's default).
   const borderOverL2L = relativeLuminance(over(border, over(material2, base)))
 
-  it('L1 (recessed) is present against the base ink without being a card — 1.06:1', () => {
-    expect(contrast(l1L, baseL)).toBeCloseTo(1.06, 1)
+  it('L1 (recessed) is present against the base ink without being a card — 1.04:1', () => {
+    expect(contrast(l1L, baseL)).toBeCloseTo(1.04, 1)
   })
 
-  it('L2 (the standard panel) is clearly visible against base — 1.25:1', () => {
-    expect(contrast(l2L, baseL)).toBeCloseTo(1.25, 1)
+  it('L2 (the standard panel) is clearly visible against base — 1.12:1', () => {
+    expect(contrast(l2L, baseL)).toBeCloseTo(1.12, 1)
   })
 
-  it('L2 is visible against L1 — 1.18:1', () => {
-    expect(contrast(l2L, l1L)).toBeCloseTo(1.18, 1)
+  it('L2 is visible against L1 — 1.17:1', () => {
+    expect(contrast(l2L, l1L)).toBeCloseTo(1.17, 1)
   })
 
-  it('L3 (the loudest surface on a screen) is clearly visible against base — 1.55:1', () => {
-    expect(contrast(l3L, baseL)).toBeCloseTo(1.55, 1)
+  it('L3 (the loudest surface on a screen) is clearly visible against base — 1.31:1', () => {
+    expect(contrast(l3L, baseL)).toBeCloseTo(1.31, 1)
   })
 
-  it('L3 is visible against L2 — 1.24:1', () => {
-    expect(contrast(l3L, l2L)).toBeCloseTo(1.24, 1)
+  it('L3 is visible against L2 — 1.17:1', () => {
+    expect(contrast(l3L, l2L)).toBeCloseTo(1.17, 1)
   })
 
   it('every adjacent elevation pair is more visible than the border between them (was inverted: 1.079:1 fill vs 1.260:1 border)', () => {
     const borderVisibility = contrast(borderOverL2L, l2L)
     expect(contrast(l2L, l1L)).toBeGreaterThan(borderVisibility)
     expect(contrast(l3L, l2L)).toBeGreaterThan(borderVisibility)
+  })
+})
+
+/**
+ * Ticket #194 ("UI polish round two") — the correction to the ticket-79
+ * follow-up's own overshoot. Alpha stays exactly where ticket-79 put it
+ * (flat 0.55, still a ceiling); what moved is how bright the fills'
+ * OWN colour was allowed to be. The owner's 3 Sep review: the app read
+ * as more luminous and transparent before the ticket-79 follow-up shipped
+ * — panels had gone from "glass over dark ink" to "pale grey-blue box."
+ */
+describe('ticket-194 — the fills go back down toward pre-#166 darkness', () => {
+  const base = parseColor(extractToken('surface-0'))
+
+  // The ticket-79 follow-up's own --material-2 composited luminance,
+  // hand-computed from its literal committed value (rgba(40, 54, 88, 0.55))
+  // rather than re-derived here, so this test still catches a regression
+  // even if someone later edits --material-2 back toward that value.
+  const TICKET_79_MATERIAL_2_LUMINANCE = 0.018440497408483296
+
+  it('the composited relative luminance of --material-2 over --surface-0 is strictly lower than the ticket-79 value', () => {
+    const material2 = parseColor(extractToken('material-2'))
+    const l2 = relativeLuminance(over(material2, base))
+    expect(l2).toBeLessThan(TICKET_79_MATERIAL_2_LUMINANCE)
+  })
+
+  it('no --material-* fill alpha exceeds 0.55 (tightened from --material-3\'s old 0.62 headroom)', () => {
+    for (const token of ['material-1', 'material-2', 'material-3']) {
+      expect(parseColor(extractToken(token)).a).toBeLessThanOrEqual(0.55)
+    }
+  })
+
+  it('the nav bar is the glassiest surface: its blur and saturation both exceed every panel tier', () => {
+    const px = (raw: string) => Number(raw.replace('px', ''))
+    const pct = (raw: string) => Number(raw.replace('%', ''))
+
+    const barBlur = px(extractToken('material-bar-blur'))
+    const heroBlur = px(extractToken('material-hero-blur'))
+    const panelBlur = px(extractToken('panel-blur'))
+    expect(barBlur).toBeGreaterThan(heroBlur)
+    expect(heroBlur).toBeGreaterThan(panelBlur)
+
+    const barSaturate = pct(extractToken('material-bar-saturate'))
+    const heroSaturate = pct(extractToken('material-hero-saturate'))
+    const panelSaturate = pct(extractToken('panel-saturate'))
+    expect(barSaturate).toBeGreaterThan(heroSaturate)
+    expect(heroSaturate).toBeGreaterThan(panelSaturate)
+  })
+
+  it('.surface carries a real backdrop blur again (F13\'s corrected reading — see docs/ui-audit-2026-08-31.md)', () => {
+    const surfaceCss = readFileSync(path.join(srcDir, 'components', 'Surface.css'), 'utf8')
+    expect(surfaceCss).toMatch(/backdrop-filter:\s*blur\(var\(--panel-blur\)\)\s*saturate\(var\(--panel-saturate\)\)/)
+  })
+
+  it('a fixed, high-frequency grain layer exists in AppShell, behind the panels', () => {
+    const appShellTsx = readFileSync(path.join(srcDir, 'components', 'AppShell.tsx'), 'utf8')
+    const appShellCss = readFileSync(path.join(srcDir, 'components', 'AppShell.css'), 'utf8')
+    expect(appShellTsx).toMatch(/app-shell__grain/)
+    const rule = extractRules(stripCommentsAndImports(appShellCss)).find(
+      (r) => r.selector === '.app-shell__grain'
+    )
+    expect(rule).toBeDefined()
+    expect(rule!.body).toMatch(/position:\s*fixed/)
+    expect(rule!.body).toMatch(/background-image:\s*url\(/)
   })
 })
 

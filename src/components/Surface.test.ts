@@ -88,14 +88,13 @@ describe('F12 — the glow is opt-in and structurally behind the panel', () => {
   })
 })
 
-describe('ticket-79 follow-up — panels are material, not fog', () => {
-  it('no panel carries a backdrop blur: blur() over the static wash returns the wash (F13)', () => {
-    expect(css).not.toMatch(/backdrop-filter:[^;]*blur\(/)
-    expect(css).not.toMatch(/--material-\d-blur/)
+describe('ticket-194 — panel blur is restored, now that the backdrop has real detail to blur', () => {
+  it('every panel carries a real backdrop blur, at the shared --panel-blur token', () => {
+    expect(css).toMatch(/backdrop-filter:\s*blur\(var\(--panel-blur\)\)\s*saturate\(var\(--panel-saturate\)\)/)
   })
 
   it('panels keep saturate(), which acts on the wash transmitted through the fill', () => {
-    expect(css).toMatch(/backdrop-filter:\s*saturate\(var\(--panel-saturate\)\)/)
+    expect(css).toMatch(/saturate\(var\(--panel-saturate\)\)/)
   })
 
   it('each level takes its own light-catching top edge and sheen — the non-alpha elevation mechanism', () => {
