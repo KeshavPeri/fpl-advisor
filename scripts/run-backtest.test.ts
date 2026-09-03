@@ -3483,6 +3483,18 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     expect(output).toContain(`read as suspect): ${data.recentMinutesSource.fromAveragedFallback}`)
   })
 
+  it('prints the three club-schedule fixture counters and the new unresolvedTeamCode exclusion line (ticket #193)', () => {
+    const output = generateReportMarkdown(data)
+    expect(output).toContain('### Club-schedule fixture diagnostics (ticket #193)')
+    expect(output).toContain(`came from the club schedule (the schedule had at least one entry that gameweek): ${data.fiveGameweek.clubSchedule.legsWithScheduleFixture}`)
+    expect(output).toContain(`a legitimate zero on both sides, never a defect): ${data.fiveGameweek.clubSchedule.legsBlankGameweek}`)
+    expect(output).toContain(`**this is the exact size of the leak this ticket closes**: ${data.fiveGameweek.clubSchedule.legsDidNotFeatureButClubHadFixture}`)
+    // The approximation is stated in the report itself, not only in the code.
+    expect(output).toContain('reconstructed from matches that were actually PLAYED')
+    // And the new exclusion reason reconciles by name alongside the others.
+    expect(output).toContain(`had no \`team_code\` (ticket #193`)
+  })
+
   it('the oracle-ceiling check reports FAILED, with its failure text, when oracleCeiling.ok is false', () => {
     const failingData: ReportData = {
       ...data,
