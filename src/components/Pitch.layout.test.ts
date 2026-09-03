@@ -73,11 +73,11 @@ function declaredLength(css: string, selector: string, property: string): number
 
 // ---- The values this file's DoD is actually about ----
 
-const STARTING_SHIRT_WIDTH = declaredLength(playerShirtCss, '\\.player-shirt', 'width')
-const BENCH_SHIRT_WIDTH = declaredLength(playerShirtCss, '\\.player-shirt--bench', 'width')
-const ROW_GAP = declaredLength(pitchCss, '\\.pitch__row', 'gap')
-const FIELD_ROW_TO_ROW_GAP = declaredLength(pitchCss, '\\.pitch__field', 'gap')
-const NAME_PRICE_GAP = declaredLength(playerShirtCss, '\\.player-shirt', 'gap')
+const STARTING_SHIRT_WIDTH = declaredLength(playerShirtCss, '.player-shirt', 'width')
+const BENCH_SHIRT_WIDTH = declaredLength(playerShirtCss, '.player-shirt--bench', 'width')
+const ROW_GAP = declaredLength(pitchCss, '.pitch__row', 'gap')
+const FIELD_ROW_TO_ROW_GAP = declaredLength(pitchCss, '.pitch__field', 'gap')
+const NAME_PRICE_GAP = declaredLength(playerShirtCss, '.player-shirt', 'gap')
 
 // The pre-#194 values (ticket #169's own F26/F27 fixes) — hand-recorded
 // baselines, the same technique index.css.test.ts uses to pin the
@@ -118,7 +118,7 @@ describe('#194, section E — the pitch is wider, tighter, and the bench stays s
     // once env() is zero is exactly --space-4 - --space-2), then compute
     // that retained margin directly — resolveLength's tiny arithmetic
     // parser doesn't handle the env()-bearing calc() itself.
-    expect(ruleBody(appShellCss, '\\.bleed-narrow')).toMatch(
+    expect(ruleBody(appShellCss, '.bleed-narrow')).toMatch(
       /margin-left:\s*calc\(-1 \* \(env\(safe-area-inset-left\)\s*\+\s*var\(--space-4\)\s*-\s*var\(--space-2\)\)\)/
     )
     const retainedMargin = spaceToken('space-4') - spaceToken('space-2')

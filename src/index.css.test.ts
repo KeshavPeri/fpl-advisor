@@ -401,10 +401,10 @@ describe('F2 — --text-tertiary meets WCAG AA (4.5:1) at its smallest used size
   const l2L = relativeLuminance(over(material2, base))
   const tertiaryL = relativeLuminance(parseColor(extractToken('text-tertiary')))
 
-  it('meets AA on the standard (L2) panel — 5.05:1', () => {
+  it('meets AA on the standard (L2) panel — 5.65:1 (was 5.05:1 before ticket #194 darkened --material-2)', () => {
     const ratio = contrast(tertiaryL, l2L)
     expect(ratio).toBeGreaterThanOrEqual(4.5)
-    expect(ratio).toBeCloseTo(5.05, 1)
+    expect(ratio).toBeCloseTo(5.65, 1)
   })
 
   it('meets AA on base ink — 6.31:1', () => {

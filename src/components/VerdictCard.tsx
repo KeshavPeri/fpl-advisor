@@ -223,8 +223,9 @@ type OverrideLinkFetchState =
  * reflects which case applies, so the label promises the state the screen
  * will actually show.
  *
- * Ticket #194, section D — `<Link>` (an `<a>`) replaced with a real
- * `<button>` that navigates programmatically: "Why this and Register
+ * Ticket #194, section D — react-router's Link (an anchor element under
+ * the hood) is replaced with a real `<button>` that navigates
+ * programmatically: "Why this and Register
  * override become buttons, not links." Shares
  * `.verdict-card__secondary-button` with the reasoning button below so
  * the two render identically — "both share one neutral treatment"; coral
