@@ -55,47 +55,12 @@
   color: var(--accent-coral);
 }
 
-/* ---- Headline summary ---- */
+/* ---- Headline summary — #194, section G ----
+   Demoted from a four-figure grid panel (the screen's loudest thing,
+   for the least important information in the app) to one quiet line, no
+   Surface, no focal glow. The decision ledger below is the screen now. */
 
 .decisions-summary {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.decisions-summary__label {
-  font: var(--text-label);
-  color: var(--text-tertiary);
-  margin: 0;
-}
-
-.decisions-summary__grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-4);
-}
-
-.decisions-summary__figure {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.decisions-summary__value {
-  font: var(--text-display);
-  font-size: 1.75rem;
-  color: var(--text-primary);
-  letter-spacing: 0.01em;
-  margin: 0;
-}
-
-.decisions-summary__figure-label {
-  font: var(--text-label);
-  color: var(--text-secondary);
-  margin: 0;
-}
-
-.decisions-summary__footnote {
   font: var(--text-label);
   color: var(--text-tertiary);
   margin: 0;

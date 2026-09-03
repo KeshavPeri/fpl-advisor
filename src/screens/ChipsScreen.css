@@ -75,10 +75,27 @@
   color: var(--text-tertiary);
 }
 
+/* #194, section F — "remaining chips are a list, not a headline." A real
+   <ul> replaces the old --text-display, comma-separated headline —
+   .chips-summary__headline now only styles the empty ("None remaining")
+   case, at --text-title rather than display size. */
 .chips-summary__headline {
-  font: var(--text-display);
+  font: var(--text-title);
   color: var(--text-primary);
-  letter-spacing: var(--tracking-display);
+}
+
+.chips-summary__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.chips-summary__list-item {
+  font: var(--text-title);
+  color: var(--text-primary);
 }
 
 .chips-summary__closes {
@@ -124,15 +141,18 @@
   background: var(--accent-coral-dim);
 }
 
-/* ---- F41/F42 — "is now a good time?" A deliberately quieter, recessed
-   register (Surface level={1} padding="compact" in ChipsScreen.tsx) —
-   never an accent colour, since this is information, not an instruction
-   (product-brief.md §6a). ---- */
+/* ---- F41/F42, rebuilt for #194 section F — two separate surfaces, at
+   different Surface `level`s (ChipsScreen.tsx), never an accent colour
+   since this is information, not an instruction (product-brief.md §6a).
+   .chips-advisory itself is the shared layout; .chips-advisory--timing /
+   --rebuild exist as hooks at their call sites even though neither needs
+   its own rule today — the weight difference is carried entirely by
+   Surface's own `level`. ---- */
 
 .chips-advisory {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-2);
 }
 
 .chips-advisory__heading {
@@ -141,25 +161,7 @@
   color: var(--text-secondary);
 }
 
-.chips-advisory__section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--panel-border);
-}
-
-.chips-advisory__heading + .chips-advisory__section {
-  padding-top: 0;
-  border-top: none;
-}
-
-.chips-advisory__label {
-  font: var(--text-label);
-  color: var(--text-tertiary);
-}
-
-/* F41 (must-fix) — the caveat now sits directly under its section's own
+/* F41 (must-fix) — the caveat now sits directly under its own panel's
    label, ABOVE the figure/plan it qualifies, not below it. */
 .chips-advisory__note {
   font: var(--text-label);

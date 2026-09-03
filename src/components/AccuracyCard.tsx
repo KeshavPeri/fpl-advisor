@@ -210,6 +210,14 @@ function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
   if (!rolling) return null // hasData: true always carries a rolling figure — defensive only.
 
   if (variant === 'summary') {
+    // #194, section D — "rewrite every string on the screen... this
+    // includes the accuracy line, which stays a single line." Was two
+    // sentences ("Model accuracy: X points average error over N
+    // gameweeks." plus the bias sentence) — "Model accuracy:" also read
+    // as the app labelling its own output, which design-reference.md's
+    // interface-writing rules flag as self-explanation. One clause now;
+    // the bias figure (when present) folds in rather than trailing as a
+    // second sentence.
     const bias = biasLine(view)
     return (
       <p className="accuracy-card-summary" role="status">
@@ -217,9 +225,10 @@ function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
           TOO_SMALL_MESSAGE
         ) : (
           <>
-            Model accuracy: <span className="num">{rolling.mae}</span> points average error over{' '}
+            <span className="num">{rolling.mae}</span> points average error over{' '}
             <span className="num">{rolling.gameweeksSettled}</span>{' '}
-            {rolling.gameweeksSettled === 1 ? 'gameweek' : 'gameweeks'}.{bias ? ` ${bias}` : ''}
+            {rolling.gameweeksSettled === 1 ? 'gameweek' : 'gameweeks'}
+            {bias ? `, ${bias.replace(/^It runs /, 'running ').replace(/\.$/, '')}.` : '.'}
           </>
         )}
       </p>
