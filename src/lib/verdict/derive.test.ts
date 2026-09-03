@@ -347,4 +347,63 @@ describe('deriveVerdictView', () => {
     )
     expect(view.headline).toBe('Roll your transfer. No changes recommended this gameweek.')
   })
+
+  describe('captainConfidenceBand (ticket #194, section D)', () => {
+    // deriveCaptainConfidenceBand's own thresholds (src/lib/reasoning/
+    // derive.ts, untouched by this ticket): > 1.5 clear, >= 0.5 marginal,
+    // else coin-flip.
+    it('is null when there is no gameweekPicks data at all', () => {
+      const view = deriveVerdictView(baseData({ gameweekPicks: null }), 5)
+      expect(view.captainConfidenceBand).toBeNull()
+    })
+
+    it('is null when the lineup is not exactly eleven rows (the same guard gameweekPoints uses)', () => {
+      const tenRows: GameweekPick[] = elevenLineupPicks(6, 3).slice(0, 10)
+      const view = deriveVerdictView(baseData({ gameweekPicks: tenRows }), 5)
+      expect(view.captainConfidenceBand).toBeNull()
+      expect(view.gameweekPoints).toBeNull()
+    })
+
+    it('is null when no pick is flagged captain (defensive)', () => {
+      const noCaptain: GameweekPick[] = Array.from({ length: 11 }, () => ({
+        expectedPoints: 4,
+        isCaptain: false,
+        isLineup: true,
+      }))
+      const view = deriveVerdictView(baseData({ gameweekPicks: noCaptain }), 5)
+      expect(view.captainConfidenceBand).toBeNull()
+    })
+
+    it('is "clear" when the captain\'s gap over the next-best starter exceeds 1.5', () => {
+      const picks = elevenLineupPicks(8, 3) // gap 5
+      const view = deriveVerdictView(baseData({ gameweekPicks: picks }), 5)
+      expect(view.captainConfidenceBand).toBe('clear')
+    })
+
+    it('is "marginal" when the gap is between 0.5 and 1.5', () => {
+      const picks = elevenLineupPicks(5, 4) // gap 1
+      const view = deriveVerdictView(baseData({ gameweekPicks: picks }), 5)
+      expect(view.captainConfidenceBand).toBe('marginal')
+    })
+
+    it('is "coin-flip" when the gap is under 0.5', () => {
+      const picks = elevenLineupPicks(5, 4.8) // gap 0.2
+      const view = deriveVerdictView(baseData({ gameweekPicks: picks }), 5)
+      expect(view.captainConfidenceBand).toBe('coin-flip')
+    })
+
+    it('compares the captain against the single BEST non-captain starter, not an average', () => {
+      const mixed: GameweekPick[] = [
+        { expectedPoints: 6, isCaptain: true, isLineup: true },
+        { expectedPoints: 5.9, isCaptain: false, isLineup: true }, // gap 0.1 -> coin-flip
+        ...Array.from({ length: 9 }, () => ({
+          expectedPoints: 1,
+          isCaptain: false,
+          isLineup: true,
+        })),
+      ]
+      const view = deriveVerdictView(baseData({ gameweekPicks: mixed }), 5)
+      expect(view.captainConfidenceBand).toBe('coin-flip')
+    })
+  })
 })

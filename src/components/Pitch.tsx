@@ -23,14 +23,19 @@ function captaincyFor(player: PitchPlayer): Captaincy {
  * `players` were composed and decisions/ticket-38.md for the read path.
  *
  * Ticket #169 / docs/ui-audit-2026-08-31.md — F25 (must-fix): the field is
- * no longer a `<Surface>` and runs full-bleed via the `.bleed` utility
- * (AppShell.css), recovering the 82px of column-padding + border +
- * panel-padding chrome the audit measured at 21% of a 393px viewport. F28
- * (must-fix): the bench is no longer a `<Surface>` either — it sits
- * directly on the base ink, visually subordinate to the eleven through
- * smaller shirts (PlayerShirt's `size="bench"`) and a full `--space-8`
- * break, not through the "Bench" label alone. See Pitch.css and
- * PlayerShirt.css for the exact values (F26/F27/F29).
+ * no longer a `<Surface>`. F28 (must-fix): the bench is no longer a
+ * `<Surface>` either — it sits directly on the base ink, visually
+ * subordinate to the eleven through smaller shirts (PlayerShirt's
+ * `size="bench"`) and a full `--space-8` break, not through the "Bench"
+ * label alone. See Pitch.css and PlayerShirt.css for the exact values
+ * (F26/F27/F29).
+ *
+ * #194, section E — `.bleed-narrow` (AppShell.css) replaces F25's full
+ * `.bleed`: the owner reviewed the shipped full-bleed pitch and chose to
+ * keep a narrow side margin rather than run to the screen edge (3 Sep
+ * 2026, see the dated correction on F25 in docs/ui-audit-2026-08-31.md).
+ * The reclaimed width goes into wider shirts and gaps instead
+ * (PlayerShirt.css, Pitch.css).
  */
 function Pitch({ players }: PitchProps) {
   const { rows, bench } = buildPitchLayout(players)
@@ -39,11 +44,11 @@ function Pitch({ players }: PitchProps) {
     // F25 (must-fix) — the field used to render inside <Surface>, which
     // cost 82px of chrome (column padding + border + panel padding) on a
     // 393px viewport, 21% of the screen, before a single shirt was drawn.
-    // `bleed` (AppShell.css's own escape hatch, built by the foundations
-    // ticket for exactly this) cancels the column's own horizontal padding
-    // so the pitch reaches the viewport edge; the field no longer has a
-    // panel behind it at all.
-    <div className="pitch bleed">
+    // #194 — `.bleed-narrow` (AppShell.css) recovers most of that width
+    // while keeping a narrow side margin, per the owner's 3 Sep decision;
+    // see this file's own header comment. The field has no panel behind
+    // it either way.
+    <div className="pitch bleed-narrow">
       <div className="pitch__field" role="group" aria-label="Starting XI">
         {rows.map((row) => (
           <div

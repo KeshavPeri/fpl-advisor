@@ -39,6 +39,11 @@ interface AppShellProps {
  * painted conditionally — see AppShell.css for why (custom properties
  * don't interpolate, so two full layers plus an opacity transition is
  * the reliable mechanism, not one layer whose gradient values change).
+ *
+ * Ticket #194: `app-shell__grain` is a third fixed layer, always
+ * rendered, behind the column exactly like the two wash layers above —
+ * see AppShell.css and docs/ui-audit-2026-08-31.md's dated correction to
+ * F13 for why panel blur needs this to have anything real to act on.
  */
 function AppShell({ children, escalated = false }: AppShellProps) {
   const rootClasses = ['app-shell', escalated ? 'app-shell--escalated' : ''].filter(Boolean).join(' ')
@@ -47,6 +52,11 @@ function AppShell({ children, escalated = false }: AppShellProps) {
     <div className={rootClasses}>
       <div className="app-shell__backdrop" aria-hidden="true" />
       <div className="app-shell__backdrop--escalated" aria-hidden="true" />
+      {/* #194, section B — a fixed, high-frequency grain layer, so a
+          panel's restored backdrop-filter blur (Surface.css) has real
+          per-pixel detail to act on instead of the smooth wash alone
+          (docs/ui-audit-2026-08-31.md's dated correction to F13). */}
+      <div className="app-shell__grain" aria-hidden="true" />
       <div className="app-shell__column">{children}</div>
     </div>
   )

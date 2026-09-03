@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { formatSyncTimestamp, toErrorMessage } from '../lib/format'
@@ -115,13 +114,9 @@ function OverrideScreen() {
 
   return (
     <AppShell>
-      <div className="override-header">
-        <Link className="override-back" to="/">
-          ← Home
-        </Link>
-        <p className="override-mark">Override</p>
-      </div>
-
+      {/* #194, section C — the back-to-Home link and "Override" caption are
+          gone: the persistent nav bar (App.tsx) is the navigation now, on
+          every screen. */}
       {state.status === 'loading' && (
         <Surface className="override-loading" aria-hidden="true">
           <div className="override-skeleton-line override-skeleton-line--title" />

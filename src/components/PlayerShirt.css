@@ -15,11 +15,23 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-1);
-  /* F26 (must-fix) — was var(--space-12) (48px), sized to survive the old
-     boxed-in field rather than to read. calc(var(--space-12) + var
-     (--space-2)) = 56px (48 + 8), the audit's exact proposed value. */
-  width: calc(var(--space-12) + var(--space-2));
+  /* #194, section E — "close the vertical gap between each player's name
+     and his price. That gap is what makes each shirt block tall."
+     Was var(--space-1) (4px, applied uniformly between all three
+     children by this one flex `gap`); halved rather than replaced with a
+     new token, since this file's own convention (see the header comment)
+     is calc() composed from two existing tokens rather than a bare new
+     value. */
+  gap: calc(var(--space-1) / 2);
+  /* #194, section E — was calc(var(--space-12) + var(--space-2)) = 56px
+     (ticket #169's own F26 fix). Widened again: "widen the shirts... to
+     use the width currently wasted. Today a five-defender row is 344px
+     inside a 393px viewport" — that 344px figure IS this file's own
+     56px value, so this ticket's job is to move past it. 60px
+     (48 + 12) — the largest step that still fits five shirts plus their
+     gaps inside the pitch's own narrow-bleed width at 393px with room to
+     spare (Pitch.layout.test.ts asserts the exact percentage). */
+  width: calc(var(--space-12) + var(--space-3));
   /* Ticket #44, finding 4 — the actual cause of the horizontal-scroll
      bug: without this, a flex item's automatic minimum width is its
      content's min-content size, not its explicit `width` above. Before
@@ -55,7 +67,8 @@
   align-items: center;
   justify-content: center;
   width: 100%;
-  height: calc(var(--space-12) + var(--space-2));
+  /* Kept square with .player-shirt's own width, above. */
+  height: calc(var(--space-12) + var(--space-3));
   border-radius: var(--radius-control);
   background: var(--material-1);
   border: 2px solid transparent;
@@ -175,7 +188,20 @@
    redo ticket #44's own empirical check (see that ticket's own comment on
    PlayerShirt.truncation.test.ts for why it isn't automated). Left as a
    Tier 3 judgement call, reported to the orchestrator rather than guessed
-   past — see this ticket's report. */
+   past — see this ticket's report. #194 widened the shirt to 60px
+   (above) without revisiting this call, for the same reason: still no
+   browser harness in this environment to re-run the empirical check.
+
+   #194, section A4 (rendering fault) — `hyphens: auto` is the actual
+   cause of "B.Fernan-des", "Ver-brugg…", "João Pe-dro", "I.San-garé" on
+   the owner's phone: the browser's own hyphenation dictionary was
+   choosing break points mid-word inside names this rule never intended
+   to hyphenate (real FPL web_names, not compound words with natural
+   hyphens). `hyphens: none` restores the two-line WRAP as the only
+   overflow mechanism — a name still wraps at a word boundary or, failing
+   that, wherever `overflow-wrap: break-word` forces a raw break, but the
+   browser never INSERTS a hyphen character earlier than that to make a
+   line fit. See PlayerShirt.truncation.test.ts. */
 .player-shirt__name {
   width: 100%;
   min-height: var(--space-8);
@@ -188,7 +214,8 @@
   overflow: hidden;
   overflow-wrap: break-word;
   word-break: break-word;
-  hyphens: auto;
+  -webkit-hyphens: none;
+  hyphens: none;
 }
 
 /* Ticket #44, finding 7 — the one number each player carries should

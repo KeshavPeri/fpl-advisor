@@ -1,5 +1,4 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Link } from 'react-router'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { fetchChipSourceData } from '../lib/chips/api.ts'
@@ -29,10 +28,19 @@ import './ChipsScreen.css'
  * already used/lost moves to the bottom. The chip-timing caveat now sits
  * ABOVE the figure it qualifies, not below it — a caveat read after the
  * number has already been believed doesn't do its job. F42 (should-fix):
- * three panel weights instead of seven identical ones — one focal L3
- * (what's left + when), one recessed L1 (the advisories, a deliberately
- * quieter register: no accent colour, per product-brief.md §6a's "never an
- * instruction"), one L2 (the used/lost history, both sets in one panel).
+ * panel weights instead of identical ones — one focal L3 (what's left +
+ * when), one L2 (the used/lost history, both sets in one panel).
+ *
+ * #194, section F — the advisory, previously one L1 panel holding both
+ * "chip timing" and "squad rebuild" stacked with their own sub-headings,
+ * is now two separate Surfaces at different levels (L1 for chip timing,
+ * L2 for squad rebuild) — "the advisory panel currently holds two
+ * different advisories... split into two surfaces at different weights."
+ * Neither ever takes an accent colour (product-brief.md §6a: never an
+ * instruction). The remaining-chips headline (`.chips-summary__headline`,
+ * ChipsScreen.css) is demoted from a --text-display comma-separated list
+ * to a real `<ul>` at --text-title: "remaining chips are a list, not a
+ * headline."
  */
 
 type ScreenState =
@@ -66,13 +74,6 @@ function ChipsScreen() {
 
   return (
     <AppShell>
-      <div className="chips-header">
-        <Link className="chips-back" to="/">
-          ← Home
-        </Link>
-        <p className="chips-mark">Chips</p>
-      </div>
-
       {screenState.status === 'loading' && (
         <Surface className="chips-loading" aria-hidden="true">
           <div className="chips-skeleton-line chips-skeleton-line--title" />
@@ -115,8 +116,6 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
     ...(state.secondSet.isAvailable ? state.secondSet.remaining : []),
   ]
 
-  const hasAdvisories = state.chipAdvisories.length > 0 || state.squadAdvisories.length > 0
-
   return (
     <>
       {/* F40/F42 — "what's left" and "when do I lose it", the two things
@@ -132,9 +131,27 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
             'Season chips'
           )}
         </p>
-        <p className="chips-summary__headline">
-          {remainingChips.length > 0 ? formatChipNames(remainingChips.map((c) => c.displayName)) : 'None remaining'}
-        </p>
+        {/* #194, section F — "the hero headline is a comma-separated list
+            of chip names at display size. Demote it: remaining chips are
+            a list, not a headline." A real <ul>, one chip per row, at
+            --text-title rather than --text-display — the panel's own
+            level={3}/focal treatment still carries the "this is the
+            important panel" signal; the chip names themselves don't need
+            to shout too. */}
+        {remainingChips.length > 0 ? (
+          <ul className="chips-summary__list">
+            {remainingChips.map((chip, index) => (
+              // `id` (KnownChipId) can repeat across the two sets when both
+              // still hold the same chip type unused — `index` disambiguates
+              // since this list is never reordered in place.
+              <li key={`${chip.id}-${index}`} className="chips-summary__list-item">
+                {chip.displayName}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="chips-summary__headline">None remaining</p>
+        )}
 
         {!state.firstSet.expired && state.firstSet.timeRemaining && (
           <p className="chips-summary__closes">
@@ -161,49 +178,49 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
         )}
       </Surface>
 
-      {/* F41/F42 — "is now a good time?" A deliberately different, quieter
-          register than the panel above: recessed (level 1), no accent
-          colour anywhere (already true — product-brief.md §6a: never an
-          instruction), and every caveat sits ABOVE the figure it
-          qualifies, not below it. */}
-      {hasAdvisories && (
-        <Surface className="chips-advisory" level={1} padding="compact">
-          <p className="chips-advisory__heading">Is now a good time?</p>
+      {/* F41/F42, rebuilt for #194 section F — "the advisory panel
+          currently holds two different advisories... stacked inside one
+          surface. Split into two surfaces at different weights." Neither
+          ever takes an accent colour (product-brief.md §6a: never an
+          instruction) — the two weights come from Surface's own `level`
+          alone. Chip timing (level 1, the quieter of the two — it is the
+          more speculative of the two advisories, several solver runs
+          agreeing on a plan rather than a single stored figure) sits
+          above squad-rebuild (level 2, closer to the standard panel
+          weight — a single computed delta, read once a state exists to
+          show). Every caveat still sits ABOVE the figure it qualifies. */}
+      {state.chipAdvisories.length > 0 && (
+        <Surface className="chips-advisory chips-advisory--timing" level={1} padding="compact">
+          <p className="chips-advisory__heading">Chip timing</p>
+          {state.chipAdvisoryNote && <p className="chips-advisory__note">{state.chipAdvisoryNote}</p>}
+          {state.chipAdvisories.map((plan) => (
+            <ChipAdvisoryPlan
+              key={plan.decisions.map((d) => `${d.chipCode}@${d.chipGameweekId}`).join('|')}
+              plan={plan}
+              showSolutionCount={state.chipAdvisories.length > 1}
+            />
+          ))}
+        </Surface>
+      )}
 
-          {state.chipAdvisories.length > 0 && (
-            <div className="chips-advisory__section">
-              <p className="chips-advisory__label">Chip advisory</p>
-              {state.chipAdvisoryNote && <p className="chips-advisory__note">{state.chipAdvisoryNote}</p>}
-              {state.chipAdvisories.map((plan) => (
-                <ChipAdvisoryPlan
-                  key={plan.decisions.map((d) => `${d.chipCode}@${d.chipGameweekId}`).join('|')}
-                  plan={plan}
-                  showSolutionCount={state.chipAdvisories.length > 1}
-                />
-              ))}
-            </div>
-          )}
-
-          {state.squadAdvisories.length > 0 && (
-            <div className="chips-advisory__section">
-              <p className="chips-advisory__label">Squad-rebuild advisory</p>
-              {state.squadAdvisoryNote && <p className="chips-advisory__note">{state.squadAdvisoryNote}</p>}
-              <ul className="chips-advisory__list">
-                {state.squadAdvisories.map((advisory) => (
-                  <li key={advisory.chipCode} className="chips-advisory__row">
-                    <span className="chips-advisory__name">{advisory.displayName}</span>
-                    <span className="chips-advisory__meta">
-                      <span className="num">
-                        {advisory.deltaWhole > 0 ? '+' : ''}
-                        {advisory.deltaWhole}
-                      </span>{' '}
-                      pts if rebuilt now
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+      {state.squadAdvisories.length > 0 && (
+        <Surface className="chips-advisory chips-advisory--rebuild" level={2} padding="compact">
+          <p className="chips-advisory__heading">Squad rebuild</p>
+          {state.squadAdvisoryNote && <p className="chips-advisory__note">{state.squadAdvisoryNote}</p>}
+          <ul className="chips-advisory__list">
+            {state.squadAdvisories.map((advisory) => (
+              <li key={advisory.chipCode} className="chips-advisory__row">
+                <span className="chips-advisory__name">{advisory.displayName}</span>
+                <span className="chips-advisory__meta">
+                  <span className="num">
+                    {advisory.deltaWhole > 0 ? '+' : ''}
+                    {advisory.deltaWhole}
+                  </span>{' '}
+                  pts if rebuilt now
+                </span>
+              </li>
+            ))}
+          </ul>
         </Surface>
       )}
 

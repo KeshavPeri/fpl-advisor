@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router'
 import AccuracyCard from '../components/AccuracyCard'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
@@ -29,6 +28,11 @@ import './ReasoningScreen.css'
  * (`deriveReasoningView`) — this component fetches, derives, and renders
  * whatever the view says, the same split VerdictCard/deriveVerdictView and
  * Pitch/pitchLayout already establish.
+ *
+ * #194, section C — the back-to-Home link and "Reasoning" caption are gone:
+ * the nav bar (App.tsx, persistent across every route including this
+ * contextual one) is the navigation now, on every screen, not only the
+ * three it lists as destinations.
  */
 
 type ScreenState =
@@ -62,13 +66,6 @@ function ReasoningScreen() {
 
   return (
     <AppShell>
-      <div className="reasoning-header">
-        <Link className="reasoning-back" to="/">
-          ← Home
-        </Link>
-        <p className="reasoning-mark">Reasoning</p>
-      </div>
-
       {state.status === 'loading' && (
         <Surface className="reasoning-loading" aria-hidden="true">
           <div className="reasoning-skeleton-line reasoning-skeleton-line--title" />

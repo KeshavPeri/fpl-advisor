@@ -1,8 +1,11 @@
 /*
   Thin, topmost strip on the home screen (design-reference.md: "Home screen
   order: thin deadline countdown, then the verdict, then the squad as a
-  pitch"). Deliberately not a Surface — no translucent panel, no blur, no
-  border — this is a quiet inline strip, not a card.
+  pitch"). #194, section D — now a `Surface` (level 1, compact padding),
+  its own quiet container rather than the one element on the screen with
+  no panel behind it. Recessed on purpose: the verdict card below it is
+  the hero (VerdictCard.css's own "hero" material), and this stays the
+  quieter of the two.
 
   F21 (docs/ui-audit-2026-08-31.md, must-fix) — was a caption (three lines,
   13-15px, ~40px total). Now a Revolut/Apple Weather treatment: the

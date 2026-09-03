@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { fetchDecisionHistorySource } from '../lib/decisions/api.ts'
@@ -83,13 +82,6 @@ function DecisionHistoryScreen() {
 
   return (
     <AppShell>
-      <div className="decisions-header">
-        <Link className="decisions-back" to="/">
-          ← Home
-        </Link>
-        <p className="decisions-mark">Decisions</p>
-      </div>
-
       {screenState.status === 'loading' && (
         <Surface className="decisions-loading" aria-hidden="true">
           <div className="decisions-skeleton-line decisions-skeleton-line--title" />
@@ -112,48 +104,48 @@ function DecisionHistoryScreen() {
   )
 }
 
+/**
+ * #194, section G — "more than half the screen is empty below the
+ * content, and the four largest numbers... are the least important thing
+ * in the app. Demote that block to a quiet line and let the decision
+ * ledger be the screen." Replaces the four-figure grid panel with one
+ * plain sentence, no Surface, no focal glow — the ledger below is now
+ * the only thing on this screen carrying real weight.
+ */
 function HeadlineSummary({ view }: { view: DecisionHistoryView }) {
   const { headline } = view
+  const hasDecisions = headline.commits > 0 || headline.overrides > 0
+
   return (
-    // F12 (Surface.tsx's own comment names this screen's season summary as
-    // one of the three intended `focal` panels — home's verdict card and
-    // chips' remaining-chips summary are the other two, both wired in this
-    // ticket) — the one glowing panel on this screen.
-    <Surface className="decisions-summary" focal>
-      <p className="decisions-summary__label">This season</p>
-      <div className="decisions-summary__grid">
-        <div className="decisions-summary__figure">
-          <p className="decisions-summary__value num">{headline.decisionsRecorded}</p>
-          <p className="decisions-summary__figure-label">
-            {headline.decisionsRecorded === 1 ? 'decision recorded' : 'decisions recorded'}
-          </p>
-        </div>
-        <div className="decisions-summary__figure">
-          <p className="decisions-summary__value num">{headline.commits}</p>
-          <p className="decisions-summary__figure-label">
-            {headline.commits === 1 ? 'commit' : 'commits'}
-          </p>
-        </div>
-        <div className="decisions-summary__figure">
-          <p className="decisions-summary__value num">{headline.overrides}</p>
-          <p className="decisions-summary__figure-label">
-            {headline.overrides === 1 ? 'override' : 'overrides'}
-          </p>
-        </div>
-        <div className="decisions-summary__figure">
-          <p className="decisions-summary__value num">{headline.gameweeksWithNoDecision}</p>
-          <p className="decisions-summary__figure-label">
-            {headline.gameweeksWithNoDecision === 1
-              ? 'gameweek with no decision'
-              : 'gameweeks with no decision'}
-          </p>
-        </div>
-      </div>
-      <p className="decisions-summary__footnote">
-        <span className="num">{headline.gameweeksElapsed}</span>{' '}
-        {headline.gameweeksElapsed === 1 ? 'gameweek has' : 'gameweeks have'} elapsed this season.
-      </p>
-    </Surface>
+    <p className="decisions-summary">
+      <span className="num">{headline.gameweeksElapsed}</span>{' '}
+      {headline.gameweeksElapsed === 1 ? 'gameweek' : 'gameweeks'} this season ·{' '}
+      {hasDecisions ? (
+        <>
+          {headline.commits > 0 && (
+            <>
+              <span className="num">{headline.commits}</span>{' '}
+              {headline.commits === 1 ? 'commit' : 'commits'}
+            </>
+          )}
+          {headline.commits > 0 && headline.overrides > 0 && ', '}
+          {headline.overrides > 0 && (
+            <>
+              <span className="num">{headline.overrides}</span>{' '}
+              {headline.overrides === 1 ? 'override' : 'overrides'}
+            </>
+          )}
+        </>
+      ) : (
+        'no decisions recorded'
+      )}
+      {headline.gameweeksWithNoDecision > 0 && (
+        <>
+          {' · '}
+          <span className="num">{headline.gameweeksWithNoDecision}</span> with no decision
+        </>
+      )}
+    </p>
   )
 }
 

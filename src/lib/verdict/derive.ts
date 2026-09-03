@@ -16,6 +16,7 @@
  * scripts/generate-recommendations.ts uses for gross_points_rounded /
  * net_points_rounded (Math.round, never floor/ceil).
  */
+import { deriveCaptainConfidenceBand } from '../reasoning/derive.ts'
 import type { GameweekPick, VerdictRecommendationData, VerdictView } from './types.ts'
 
 function nameFor(id: number, names: ReadonlyMap<number, string>): string {
@@ -67,6 +68,35 @@ function sumGameweekPoints(picks: readonly GameweekPick[] | null): number | null
   return Math.round(total)
 }
 
+/**
+ * Ticket #194, section D — the captain's raw expected-points gap over the
+ * best non-captain starter, from the SAME starting-XI rows
+ * `sumGameweekPoints` above already reads (`data.gameweekPicks`). Applies
+ * the identical eleven-player guard for the identical reason: a lineup
+ * that isn't exactly eleven is evidence of broken upstream data, not a
+ * gap worth reporting a confidence band on. Returns null (never 0/NaN)
+ * when there's nothing safe to compare — no picks, a non-eleven lineup,
+ * no pick flagged captain, or a captain with no other starters to compare
+ * against (defensive; should not happen for a real eleven).
+ */
+function captainGap(picks: readonly GameweekPick[] | null): number | null {
+  if (!picks) return null
+  const lineup = picks.filter((pick) => pick.isLineup)
+  if (lineup.length !== LINEUP_SIZE) return null
+
+  const captain = lineup.find((pick) => pick.isCaptain)
+  if (!captain) return null
+
+  const others = lineup.filter((pick) => pick !== captain)
+  if (others.length === 0) return null
+
+  const nextBest = others.reduce(
+    (best, pick) => (pick.expectedPoints > best.expectedPoints ? pick : best),
+    others[0]
+  )
+  return Math.abs(captain.expectedPoints - nextBest.expectedPoints)
+}
+
 export function deriveVerdictView(
   data: VerdictRecommendationData,
   currentGameweekId: number
@@ -106,6 +136,9 @@ export function deriveVerdictView(
   const coinFlipNote =
     data.confidenceBand === 'coin-flip' ? 'The top options are too close to separate.' : null
 
+  const gap = captainGap(data.gameweekPicks)
+  const captainConfidenceBand = gap === null ? null : deriveCaptainConfidenceBand(gap)
+
   const missingHistoryIds = Array.from(
     new Set(data.coverage.filter((entry) => !entry.hasHistory).map((entry) => entry.playerId))
   )
@@ -128,6 +161,7 @@ export function deriveVerdictView(
     hitBasisLabel,
     confidenceWord,
     coinFlipNote,
+    captainConfidenceBand,
     coverageNote,
   }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router'
+import { useNavigate } from 'react-router'
 import { formatSyncTimestamp, toErrorMessage } from '../lib/format'
 import { deriveVerdictView } from '../lib/verdict/derive.ts'
 import { fetchVerdict } from '../lib/verdict/api.ts'
@@ -203,7 +203,7 @@ type OverrideLinkFetchState =
  * The override entry point (ticket #91, feature-list item 20) —
  * design-reference.md: "Registering an override carries deliberate
  * friction — a confirm step that shows what the model expected and what it
- * is being overridden with." This link is only the doorway to that flow;
+ * is being overridden with." This button is only the doorway to that flow;
  * the friction itself lives entirely on `/override` (src/screens/
  * OverrideScreen.tsx).
  *
@@ -211,19 +211,31 @@ type OverrideLinkFetchState =
  * own fetch and of VerdictCard's own recommendation read — same "a failed or
  * slow read here must never block or blank something else" principle
  * CommitControl's own comment states. Renders nothing while that read is in
- * flight or if it fails: a link that might be wrong (offering "Register
- * override" on an already-committed gameweek, say) is worse than a link
+ * flight or if it fails: a button that might be wrong (offering "Register
+ * override" on an already-committed gameweek, say) is worse than a button
  * that's briefly absent.
  *
  * DoD: "A gameweek with an existing commit row does not offer the override
  * entry point" — deriveOverrideAccess returns 'blocked-commit' and this
  * renders nothing at all in that case. "a gameweek with an existing
  * override row shows the registered override rather than the form" is
- * `/override`'s own job once reached; here the link's own label just
+ * `/override`'s own job once reached; here the button's own label just
  * reflects which case applies, so the label promises the state the screen
  * will actually show.
+ *
+ * Ticket #194, section D — react-router's Link (an anchor element under
+ * the hood) is replaced with a real `<button>` that navigates
+ * programmatically: "Why this and Register
+ * override become buttons, not links." Shares
+ * `.verdict-card__secondary-button` with the reasoning button below so
+ * the two render identically — "both share one neutral treatment"; coral
+ * is reserved for risk, so an override (which is not a failure —
+ * design-reference.md's own explicit rule) never takes it, and neither
+ * button takes cyan either, so Commit stays the only solid cyan control
+ * on the card. No arrow glyph.
  */
-function OverrideLink({ gameweekId, planIndex }: { gameweekId: number; planIndex: number }) {
+function OverrideButton({ gameweekId, planIndex }: { gameweekId: number; planIndex: number }) {
+  const navigate = useNavigate()
   const [fetchState, setFetchState] = useState<OverrideLinkFetchState>({ status: 'loading' })
 
   useEffect(() => {
@@ -250,9 +262,13 @@ function OverrideLink({ gameweekId, planIndex }: { gameweekId: number; planIndex
   if (fetchState.status !== 'ready' || fetchState.access === 'blocked-commit') return null
 
   return (
-    <Link className="verdict-card__override-link" to="/override">
-      {fetchState.access === 'registered' ? 'Override registered' : 'Register override'} →
-    </Link>
+    <button
+      type="button"
+      className="verdict-card__secondary-button"
+      onClick={() => navigate('/override')}
+    >
+      {fetchState.access === 'registered' ? 'Override registered' : 'Register override'}
+    </button>
   )
 }
 
@@ -266,7 +282,7 @@ function OverrideLink({ gameweekId, planIndex }: { gameweekId: number; planIndex
  * never block or blank the squad pitch below it, and vice versa. Plan A
  * only (`plan_index = 0`); Plan B/C rendering is item 19+, out of scope here.
  *
- * Ticket #91 adds the override entry point (item 20, see `OverrideLink`
+ * Ticket #91 adds the override entry point (item 20, see `OverrideButton`
  * above) alongside the commit control — the two are mutually exclusive per
  * gameweek, enforced by `deriveOverrideAccess` reading the same
  * `recommendation_decisions` table both controls write to.
@@ -287,10 +303,11 @@ function OverrideLink({ gameweekId, planIndex }: { gameweekId: number; planIndex
  * accepted, via `src/lib/commit/`. Rendered for every ready plan, stale or
  * fresh — see CommitControl's own comment for why staleness doesn't gate
  * it. Ticket #91 adds the override entry point alongside it (see
- * `OverrideLink` above). No undo/edit/delete, no accept-all — still out of
+ * `OverrideButton` above). No undo/edit/delete, no accept-all — still out of
  * scope.
  */
 function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
+  const navigate = useNavigate()
   const [state, setState] = useState<VerdictState>({ status: 'loading' })
 
   useEffect(() => {
@@ -318,9 +335,20 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
     // deliberately left out of the dependency list.
   }, [gameweekId])
 
+  // #194, section D — "the verdict card is the hero... give it a
+  // materially different glass treatment from every other panel — the
+  // strongest sheen, the widest bleed." `bleed` (AppShell.css) is now
+  // free for exactly this now that the pitch keeps its own narrow margin
+  // instead (see the dated correction on F25 in
+  // docs/ui-audit-2026-08-31.md); `verdict-card--hero` (VerdictCard.css)
+  // carries the stronger blur/saturate/sheen. Applied to every state
+  // (loading/none/error/ready) so the card never jumps size or material
+  // once its data resolves.
+  const heroClass = 'verdict-card verdict-card--hero bleed'
+
   if (state.status === 'loading') {
     return (
-      <Surface className="verdict-card verdict-card--loading" aria-hidden="true">
+      <Surface className={`${heroClass} verdict-card--loading`} level={3} focal aria-hidden="true">
         <div className="verdict-card__skeleton-line verdict-card__skeleton-line--headline" />
         <div className="verdict-card__skeleton-line verdict-card__skeleton-line--body" />
         <div className="verdict-card__skeleton-line verdict-card__skeleton-line--points" />
@@ -331,11 +359,11 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
 
   if (state.status === 'none') {
     return (
-      <Surface className="verdict-card" role="status">
+      <Surface className={heroClass} level={3} focal role="status">
         <p className="verdict-card__invitation-title">No recommendation yet for {gameweekName}</p>
         <p className="verdict-card__invitation-body">
-          Run <code className="num">scripts/generate-recommendations.ts</code> to produce this
-          gameweek's plan, then reload this page.
+          Run <code className="num">scripts/generate-recommendations.ts</code>, then reload this
+          page.
         </p>
       </Surface>
     )
@@ -343,7 +371,7 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
 
   if (state.status === 'error') {
     return (
-      <Surface className="verdict-card" role="alert">
+      <Surface className={heroClass} level={3} focal role="alert">
         <p className="verdict-card__error">
           Couldn't load the recommendation: {state.message}. Reload this page to try again.
         </p>
@@ -357,7 +385,7 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
     // F12/F39 — the one `focal` (cyan glow) panel on the home screen: the
     // verdict is what the app is for, so it is also the one element the
     // audit's demoted, opt-in glow (Surface.tsx) is reserved for here.
-    <Surface className="verdict-card" focal>
+    <Surface className={heroClass} level={3} focal>
       {view.isStale && (
         <p className="verdict-card__stale">
           Stale
@@ -389,7 +417,16 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
         </div>
       )}
 
-      <p className="verdict-card__confidence">Confidence: {view.confidenceWord}</p>
+      {/* #194, section D — "surface the captain confidence band next to
+          the plan confidence... so the two are read together." One line,
+          both bands, no threshold changes (view.captainConfidenceBand is
+          computed by the same deriveCaptainConfidenceBand this app
+          already ships — see derive.ts). Omitted entirely when there's
+          no safe captain gap to report, rather than showing a dash. */}
+      <p className="verdict-card__confidence">
+        Plan confidence: {view.confidenceWord}
+        {view.captainConfidenceBand && <> · Captain confidence: {view.captainConfidenceBand}</>}
+      </p>
       {view.coinFlipNote && <p className="verdict-card__confidence-note">{view.coinFlipNote}</p>}
 
       {view.coverageNote && <p className="verdict-card__coverage">{view.coverageNote}</p>}
@@ -410,18 +447,25 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
         hitCost={state.data.hitCost}
       />
 
-      {/* F31 (should-fix) — was a vertical stack of three actions (Commit,
-          then two visually-identical underlined links): three things
-          competing for the same weight. Now one quiet row beneath the
-          primary button, both entries at --text-label with a 44px hit
-          target (apple-design §16: "direct, specific labels beat safe
-          generic ones" — "Full reasoning" renamed to "Why this", which
-          names what's being asked rather than what the screen contains). */}
-      <div className="verdict-card__links">
-        <Link className="verdict-card__reasoning-link" to="/reasoning">
-          Why this →
-        </Link>
-        <OverrideLink gameweekId={state.data.gameweekId} planIndex={0} />
+      {/* F31 (should-fix), #194 section D — was a vertical stack of three
+          actions (Commit, then two visually-identical underlined links):
+          three things competing for the same weight. Now one row of real
+          buttons beneath the primary one, both smaller than Commit and in
+          the same neutral secondary treatment as each other (never
+          coral, never cyan — Commit stays the only solid cyan control).
+          apple-design §16: "direct, specific labels beat safe generic
+          ones" — "Full reasoning" renamed to "Why this", which names
+          what's being asked rather than what the screen contains. No
+          arrow glyphs. */}
+      <div className="verdict-card__secondary-row">
+        <button
+          type="button"
+          className="verdict-card__secondary-button"
+          onClick={() => navigate('/reasoning')}
+        >
+          Why this
+        </button>
+        <OverrideButton gameweekId={state.data.gameweekId} planIndex={0} />
       </div>
     </Surface>
   )

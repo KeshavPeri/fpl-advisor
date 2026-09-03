@@ -14,26 +14,11 @@
   never green or yellow (explicitly excluded, design-reference.md Colour).
 */
 
-.override-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.override-back {
-  font: var(--text-body);
-  font-weight: 550;
-  color: var(--accent-cyan);
-}
-
-.override-mark {
-  font: var(--text-label);
-  font-weight: 550;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
+/* #194, section C — the back-to-Home link and "Override" caption
+   (.override-header / .override-back / .override-mark) are deleted
+   outright: the persistent nav bar (App.tsx) is the navigation now.
+   .override-back-button below is a different control — the confirm
+   step's own cancel action — and is untouched. */
 
 /* ---- Loading / error / empty ---- */
 

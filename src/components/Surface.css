@@ -31,19 +31,24 @@
   border-top-color: var(--material-edge-2);
   box-shadow: inset 0 1px 0 0 var(--material-sheen-2);
 
-  /* THE ONE FILTER PANELS KEEP, AND IT IS NOT BLUR (F13, corrected by
-     the ticket-79 follow-up). A panel's entire backdrop is the static
-     two-radial-gradient wash in AppShell.css; blurring a smooth gradient
-     returns the same gradient, so a panel blur has never produced a
-     single visible pixel of difference — it only cost a compositor pass
-     on 60 panels and left a sampling halo at each panel's own edge.
-     saturate() is the opposite case: it acts on the wash's cyan/coral
-     chroma transmitted through the fill, and now that the fill passes
-     45% instead of 28%, it has appreciably more to act on. Blur lives on
-     .app-bar (AppBar.css) alone, the one surface with content moving
-     behind it. */
-  -webkit-backdrop-filter: saturate(var(--panel-saturate));
-  backdrop-filter: saturate(var(--panel-saturate));
+  /* BLUR IS BACK (#194 — see the dated correction on F13 in
+     docs/ui-audit-2026-08-31.md). The ticket-79 follow-up's reasoning —
+     "the entire backdrop is a static two-radial-gradient wash, and
+     blurring a smooth gradient returns the same gradient" — was correct
+     about the backdrop as it stood, and wrong to conclude blur should be
+     removed rather than that the backdrop needed real detail. AppShell
+     now paints a fixed, high-frequency grain layer behind everything
+     (`.app-shell__grain`, AppShell.css) — a panel's backdrop is that
+     grain composited under the ambient wash, not a smooth gradient any
+     more, and `.app-shell__backdrop` is `position: fixed` while panels
+     scroll, so what sits behind a given panel keeps changing as the page
+     moves. Blur now has real per-pixel texture to act on. --panel-blur
+     is deliberately lower than the nav bar's own --material-bar-blur
+     (16px vs 28px) and saturate stays lower too (150% vs 180%) — the bar
+     stays the glassiest surface in the app; see index.css.test.ts's
+     "nav bar is the glassiest surface" assertion. */
+  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(var(--panel-saturate));
+  backdrop-filter: blur(var(--panel-blur)) saturate(var(--panel-saturate));
 }
 
 /* F16 — padding="compact" pairs with the smaller radius step (F7); both

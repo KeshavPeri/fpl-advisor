@@ -28,7 +28,11 @@ function renderAt(pathname: string): string {
 describe('F17 — three top-level destinations, reachable from any route', () => {
   it('renders links to /, /chips and /decisions with the audit\'s exact labels', () => {
     const html = renderAt('/')
-    expect(html).toMatch(/href="\/"[\s\S]*?<span class="app-bar__label">This week<\/span>/)
+    // #194, section C — "This week" renamed to "Home"; the label lives on
+    // the `--home` item now, not necessarily first in DOM order (Home is
+    // last, so its own CSS rule can win the cascade tie for the circular
+    // shape — see AppBar.tsx's own comment).
+    expect(html).toMatch(/href="\/"[\s\S]*?<span class="app-bar__label">Home<\/span>/)
     expect(html).toMatch(/href="\/chips"[\s\S]*?<span class="app-bar__label">Chips<\/span>/)
     expect(html).toMatch(/href="\/decisions"[\s\S]*?<span class="app-bar__label">Record<\/span>/)
   })
@@ -114,7 +118,7 @@ describe('ticket-79 follow-up, correction B — the bar has icons, drawn in this
 
   it('every destination keeps an accessible name; the icons are decorative', () => {
     const html = renderAt('/')
-    for (const label of ['This week', 'Chips', 'Record']) {
+    for (const label of ['Home', 'Chips', 'Record']) {
       expect(html).toContain(`>${label}</span>`)
     }
     // Three links, three aria-hidden svgs — the name never comes from a glyph.
@@ -134,18 +138,55 @@ describe('ticket-79 follow-up, correction B — the bar has icons, drawn in this
     )
   })
 
-  it('adds no motion beyond the press feedback the foundations already define', () => {
+  it('adds no motion beyond the press feedback the foundations already define, plus the static Home-circle offset', () => {
     expect(css).not.toMatch(/@keyframes|animation:/)
     const transforms = css.match(/transform:\s*[^;]+;/g) ?? []
-    expect(transforms.sort()).toEqual(['transform: none;', 'transform: scale(0.96);', 'transform: translateX(-50%);'])
+    expect(transforms.sort()).toEqual([
+      'transform: none;',
+      'transform: scale(0.96);',
+      'transform: translate(-50%, -58%);',
+      'transform: translateX(-50%);',
+    ])
+  })
+})
+
+describe('#194, section C — one continuous silhouette, Home a circle at the centre', () => {
+  it('Home is absolutely positioned, circular, and equal width/height (var(--nav-home-size) both)', () => {
+    const rule = css.match(/\.app-bar__item--home\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/position:\s*absolute/)
+    expect(rule).toMatch(/border-radius:\s*50%/)
+    expect(rule).toMatch(/width:\s*var\(--nav-home-size\)/)
+    expect(rule).toMatch(/height:\s*var\(--nav-home-size\)/)
+  })
+
+  it('Home shares the bar\'s own material — same fill token, same blur/saturate tokens — so the two read as one substance', () => {
+    const rule = css.match(/\.app-bar__item--home\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/background:\s*var\(--material-bar\)/)
+    expect(rule).toMatch(/blur\(var\(--material-bar-blur\)\)\s*saturate\(var\(--material-bar-saturate\)\)/)
+  })
+
+  it('a spacer reserves the circle\'s own footprint so the side items never collide with it', () => {
+    const rule = css.match(/\.app-bar__home-spacer\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/width:\s*var\(--nav-home-size\)/)
+  })
+
+  it('one sharp type register across the whole bar — smaller/heavier/tighter, not layered with uppercase+wide-tracking too', () => {
+    const rule = css.match(/\.app-bar__label\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).not.toMatch(/text-transform:\s*uppercase/)
+    expect(rule).toMatch(/font-weight:\s*650/)
+    expect(rule).toMatch(/letter-spacing:\s*-0\.006em/)
   })
 })
 
 describe('ticket-79 follow-up, correction A — the bar is the glassiest surface here', () => {
-  it('the bar is the only surface carrying a backdrop blur', () => {
+  it('the bar carries the strongest backdrop blur in the app — every panel tier is strictly behind it (#194, section B)', () => {
     expect(css).toMatch(/backdrop-filter:\s*blur\(var\(--material-bar-blur\)\)/)
     const surfaceCss = readFileSync(path.join(here, 'Surface.css'), 'utf8')
-    expect(surfaceCss).not.toMatch(/backdrop-filter:[^;]*blur\(/)
+    // Panels carry blur again now (#194) — the bar's distinction is no
+    // longer "the only one with blur" but "the strongest one," asserted
+    // numerically in index.css.test.ts's "nav bar is the glassiest
+    // surface" test.
+    expect(surfaceCss).toMatch(/backdrop-filter:\s*blur\(var\(--panel-blur\)\)/)
   })
 
   it('the scrim no longer erases the one backdrop worth blurring', () => {
