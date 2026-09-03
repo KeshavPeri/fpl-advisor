@@ -11,7 +11,7 @@
   the honest recommendation-gap note, never by colour.
 */
 
-/* #194, section C — the header row (a "← Home" link plus a redundant
+/* #194, section C — the header row (a back-to-Home link plus a redundant
    "Decisions" caption) is deleted outright: the nav bar is the
    navigation now. See DecisionHistoryScreen.tsx's own header comment. */
 

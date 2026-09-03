@@ -15,7 +15,7 @@
   full because.
 */
 
-/* #194, section C — the header row (a "← Home" link plus a redundant
+/* #194, section C — the header row (a back-to-Home link plus a redundant
    "Chips" caption) is deleted outright: the nav bar is the navigation
    now, and a screen-name caption opposite a back-link duplicated
    information the bar already carries persistently. See
