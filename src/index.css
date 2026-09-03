@@ -19,7 +19,8 @@
   --surface-1: #131a2c;
   --surface-2: #1a2338;
 
-  /* ---- Elevation — F5, and the ticket-79 follow-up correction to it.
+  /* ---- Elevation — F5, the ticket-79 follow-up correction, and this
+     ticket's (#194) own correction to THAT correction.
 
      F5 (must-fix) was right that the old two-value scale was invisible:
      --panel-fill at 0.55 alpha measured 1.079:1 against the base ink,
@@ -28,49 +29,46 @@
      elevation it was supposed to whisper next to.
 
      Ticket #166 bought that contrast back with ALPHA: 0.55 -> 0.72 for
-     the standard panel, 0.62 -> 0.84 for the raised one. That worked as
-     a measurement and failed as a design. There are exactly two ways to
-     make a panel read as raised — shift its tint and luminosity, or
-     raise its opacity — and only the first is compatible with
-     translucency. Raising alpha buys elevation by SPENDING THE MATERIAL:
-     every panel got more opaque, the ambient wash stopped showing
-     through, and the app read as frosted rather than as glass. F5 asked
-     for visible elevation and F13 asked for real material; solving F5
-     with alpha defeats F13.
+     the standard panel, 0.62 -> 0.84 for the raised one. Spending alpha
+     spends the material: every panel got more opaque and the app read as
+     frosted rather than glass. The ticket-79 follow-up took alpha back
+     to a flat 0.55 across all three levels and paid for elevation with
+     the fills' hue and luminosity instead — but it OVERSHOT: the new
+     fills (rgba(21,28,46) / rgba(40,54,88) / rgba(61,82,130)) were bright
+     enough that the "glass over dark ink" read became "pale grey-blue
+     box." That is #194's own bug report (owner review, 3 Sep 2026): the
+     app looked more luminous and transparent BEFORE that follow-up.
 
-     The correction: ALPHA IS HELD CONSTANT AT 0.55 ACROSS ALL THREE
-     LEVELS and the entire elevation scale is carried by the fills' own
-     hue and luminosity instead. 0.55 is the pre-#166 --panel-fill value,
-     and it is a CEILING, not a target — no panel fill in this app may
-     exceed it, and the raised level (which is allowed up to 0.62) sits
-     under it too rather than using its headroom.
-
-     This is not a trade: each new fill is the exact colour that
-     composites over --surface-0 to the SAME result its higher-alpha
-     predecessor did, so every boundary ratio survives to within 0.003
-     while 0.17-0.29 of alpha is handed back to the material. Over the
-     base ink the elevation is identical; over the ambient wash
-     (AppShell.css) the panels now pass 45% of the cyan/coral gradient
-     instead of 28%/16%, which is the whole point — that transmitted
-     tint is what "material" means here, and it is what #166 spent.
+     Neither alpha nor fill luminosity may carry elevation — that was
+     true after ticket-79 and remains true. What was wrong was HOW DARK
+     "the fills' own hue" was allowed to land. This ticket takes the
+     fills back down toward the pre-#166 darkness (rgba(23,31,51) was the
+     single pre-#166 --panel-fill) and lets the light-catching top edge
+     (--material-edge-*, below) and the panel's own backdrop-filter blur
+     (restored on Surface.css by this ticket — see F13's dated correction
+     in docs/ui-audit-2026-08-31.md) carry elevation and material read
+     instead of fill brightness. Alpha stays fixed at 0.55 — still a
+     ceiling, never a target.
 
      Computed WCAG contrast (relative-luminance formula, alpha-composited
-     over --surface-0; verified in index.css.test.ts), before (#166) and
-     after (this ticket):
-                       fill alpha        contrast
-       L1 vs base      0.42 -> 0.55      1.062 -> 1.062
-       L2 vs base      0.72 -> 0.55      1.250 -> 1.248
-       L2 vs L1        —                 1.177 -> 1.175
-       L3 vs base      0.84 -> 0.55      1.551 -> 1.548
-       L3 vs L2        —                 1.241 -> 1.240
-       --panel-border vs L2 (its default use, Surface.css)  1.145 -> 1.145
-     Both required properties hold simultaneously: every adjacent
-     elevation step (1.175, 1.240) is still more visible than the border
-     between the levels (1.145), and no fill alpha exceeds its ceiling.
-     See decisions/ticket-79-followup.md. */
-  --material-1: rgba(21, 28, 46, 0.55);
-  --material-2: rgba(40, 54, 88, 0.55);
-  --material-3: rgba(61, 82, 130, 0.55);
+     over --surface-0; verified in index.css.test.ts), ticket-79's values
+     and this ticket's darker correction:
+                       ticket-79   ticket-194
+       L1 vs base       1.062  ->   1.044
+       L2 vs base       1.248  ->   1.118
+       L2 vs L1         1.175  ->   1.167
+       L3 vs base       1.548  ->   1.306
+       L3 vs L2         1.240  ->   1.169
+       --panel-border vs L2 (Surface.css's default use)     1.145 -> 1.136
+     Both required properties still hold: every adjacent elevation step
+     (1.167, 1.169) is more visible than the border between the levels
+     (1.136), and the composited luminance of L2 is strictly lower than
+     the ticket-79 value it replaces (0.01844 -> 0.01129) — that strict
+     decrease is what "the fills go back down" means, checked directly in
+     index.css.test.ts rather than only through the contrast ratio. */
+  --material-1: rgba(2, 3, 4, 0.55);
+  --material-2: rgba(28, 37, 61, 0.55);
+  --material-3: rgba(45, 60, 99, 0.55);
 
   /* The second non-alpha elevation mechanism, per F14: light catching
      the top edge. #166 gave all three levels the same 0.10 edge, which
@@ -94,20 +92,30 @@
   --material-sheen-2: rgba(255, 255, 255, 0.045);
   --material-sheen-3: rgba(255, 255, 255, 0.07);
 
-  /* NO --material-*-blur TOKENS ANY MORE, AND NO BLUR ON PANELS. F13
-     established the mechanism: the entire backdrop of every panel in
-     this app is .app-shell__backdrop, a static two-radial-gradient wash,
-     and a Gaussian blur of a smooth gradient returns the same gradient.
-     #166 responded by reducing the blur (22px -> 24/32px per level,
-     i.e. not reducing it) and keeping saturate(150%) — which, over a
-     flat backdrop, is exactly the recipe for fog. Panels now carry
-     saturate() and NO blur at all: saturate does real work (it amplifies
-     the chroma of the wash transmitted through the now-lower alpha),
-     blur does none, and dropping it also removes the edge-sampling halo
-     a backdrop blur leaves at a panel's own boundary. Blur belongs where
-     content passes behind glass, which in this app is one surface only.
-     See decisions/ticket-79-followup.md. */
+  /* PANEL BLUR IS BACK — #194's correction to the ticket-79 follow-up's
+     F13 reasoning, recorded with a dated correction in
+     docs/ui-audit-2026-08-31.md. That reasoning ("the whole backdrop is
+     a smooth gradient, so blurring it is a no-op") was true of the
+     backdrop AS IT STOOD, but drew the wrong conclusion from it: the fix
+     for "nothing behind the glass to blur" is to put something
+     high-frequency behind the glass, not to remove the blur. This ticket
+     does the former — `.app-shell__grain` (AppShell.tsx/.css) is a fixed,
+     low-opacity noise layer with real per-pixel detail — so panel blur
+     now has texture to act on as the page scrolls past it (the backdrop
+     is `position: fixed`, panels scroll, so what's behind a panel changes
+     continuously). --panel-blur is deliberately lower than the nav bar's
+     --material-bar-blur (16px vs 28px) and saturate stays lower too
+     (150% vs 180%) — the bar must stay the glassiest surface in the app;
+     panel blur reads as material, not as the bar's own live-content
+     glass. */
+  --panel-blur: 16px;
   --panel-saturate: 150%;
+  /* The verdict card's own "hero" tier (#194, section D) — materially
+     different from every other panel (the strongest sheen, the widest
+     bleed) but still short of the nav bar's glassiness, so the ordering
+     bar > hero > panel holds throughout the app. */
+  --material-hero-blur: 20px;
+  --material-hero-saturate: 165%;
 
   /* ---- The floating navigation bar — the one real glass in the app.
      It is the only surface with live content (shirts, text, figures)
@@ -124,6 +132,24 @@
   --material-bar: rgba(24, 32, 54, 0.5);
   --material-bar-blur: 28px;
   --material-bar-saturate: 180%;
+  /* #194, section C — the bar's centre item (Home) is a circle that
+     bulges above the bar's own top edge, sharing this same fill/blur so
+     the two read as one continuous silhouette rather than a pill plus a
+     separate floating button. */
+  --nav-home-size: 3.75rem;
+  /* #194, section A3 — how much space AppShell.css's column reserves
+     below its own content, and how tall AppBar.css's scroll-edge scrim
+     is. One number rather than deriving it from the bar's own height
+     plus the circle's overshoot plus a gap at every call site: the bar
+     is ~3.75rem tall including its padding and border, the Home circle
+     pokes roughly a quarter of --nav-home-size above that, and the bar
+     sits --space-3 off the safe area — 3.75rem + ~0.9rem + 0.75rem rounds
+     up to 6rem, plus one more --space-4 breathing gap above the last
+     panel so nothing ever grazes the bar. Deliberately generous (the
+     literal minimum is smaller) — this is the fix for #194's own bug
+     report that real content was legible under the bar, so the margin
+     errs wide rather than being re-derived to the pixel. */
+  --nav-bar-reserve: 7rem;
   /* How much of the scrolling content survives under the bar's scroll-
      edge scrim (AppBar.css). #166's scrim faded content to FULLY opaque
      --surface-0 before it ever reached the bar, which erased the one
