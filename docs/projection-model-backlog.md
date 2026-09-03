@@ -750,3 +750,85 @@ and 0.728/0.506 (post-#187) are both leaked model figures against honest oracles
 number is a valid measurement of this model's 5-gameweek ranking skill, and neither should be
 quoted as a baseline. The first trustworthy 5-gameweek figure is whatever the next full run
 produces against the fixed harness.
+
+### G13 addendum — ticket #193, 3 Sep 2026: the 3 Sep fix closed THREE lookups. There was a fourth, larger one, in the same function
+
+**The 3 Sep fix (commit `5a99d6e`) was correct and incomplete.** It closed the three point-in-time
+lookups listed above — the `feature_history` row, both `computeTeamStrengthAsOf` calls and the
+position prior — each of which had been keyed on the leg's own gameweek G+i. Backtest report 9,
+run the same day *with that fix in place*, still failed its oracle-ceiling check at the 5-gameweek
+horizon: model **0.619** against a genuine hindsight oracle's **0.506**. A model still beating its
+own ceiling means a leak still remained, and it did — in the same function, one paragraph below the
+three that were fixed.
+
+**The fourth leak: the leg's fixture count came from the player's own appearances.**
+`projectAndReconstructWindowGameweek` took each leg's fixture count from
+`aggregateActualForGameweek`'s `matchesFound` — the number of that **player's own**
+`player_match_stats` rows for that gameweek — and its opponents from those same rows. So when the
+player did not feature in a leg, `actualRows` was empty, `matchesFound` was 0, the projection was
+built from an empty fixture array, and the leg projected **exactly 0** against an actual of
+**exactly 0**. The harness was telling the model, in advance, which of the five weeks the player
+would miss.
+
+That is not a small leak at this horizon. A 5-gameweek points total is dominated by how many of the
+five weeks a player turns up for, and `docs/model-review-2026-09-02.md` §1f measures minutes as
+carrying roughly **85%** of the model's whole ranking signal. In report 9's own single-gameweek
+population, **6,913 of 12,567** rows with a matching actual entry were non-appearances.
+
+**The fix: the club's published schedule, never the player's appearance.** How many fixtures a club
+plays in a gameweek, and who it plays, are published *before* the horizon starts — legitimately
+known at G, exactly like the opponent identity this entry already said "was always correct and
+stays keyed on the leg". Whether *this particular player* is in the team is not. Ticket #193 adds
+`buildClubFixtureSchedule`, built from the same `player_match_stats` rows the job already fetches
+(no new Supabase read, no new column, no migration), keyed by `(team_code, gameweek)` and returning
+one entry per distinct `match_id` — so a double gameweek returns two. Unlike `buildTeamMatchRecords`
+it is deliberately **not** filtered on goals-resolvability: a match that happened is a match that
+was scheduled, and a schedule needs no goals. Each leg now derives its fixture count and opponents
+from that schedule at `(the START row's team_code, the leg's own gameweek)`. `actualRows` supplies
+the leg's actual points and nothing else.
+
+Three consequences the report now names and counts: legs whose fixture count came from the club
+schedule; legs where the club had **no** fixture (a genuine blank gameweek — 0 fixtures, a
+legitimate zero on both sides, never a fabricated neutral fixture); and legs where the club **did**
+play but the player did not feature — the exact size of the leak being closed. A window whose start
+row carries no `team_code` cannot resolve the schedule for any leg and is excluded by name
+(`unresolvedTeamCode`), reconciling like every other reason.
+
+**One approximation, stated not hidden.** The schedule is reconstructed from matches that were
+actually *played* — this job still has no independent fixture-schedule table for a past season
+(the same limitation G10 records for its team-slug inference). A fixture postponed after its
+horizon began is therefore indistinguishable from a club that never had one; both read as a blank
+gameweek. That is a known bound on this instrument, not a defect to fix inside it.
+
+**Nothing above the 5-gameweek heading in the report moved.** The single-gameweek section excludes
+non-featuring rows before anything is projected, so `matchesFound` is always at least 1 there and
+#140's multi-fixture approximation stands exactly as designed. MAE, mean signed error and the
+one-gameweek Spearman are unchanged by this ticket.
+
+**Report 9's and report 10's 5-gameweek sections are not comparable to each other**, for the same
+reason the note above gives for 0.672 and 0.728: report 9's 0.619 is a leaked figure. It should not
+be read as a regression when the number falls — a fall is this fix working. **And the
+oracle-ceiling bound stays exactly as it is.** It has now caught two distinct leaks in this one
+construction; it is the most productive check in this harness, and the standing instruction not to
+relax, widen, downgrade or remove it is reinforced, not weakened, by the fact that it fired twice.
+
+**MEASURED, 3 Sep 2026 — both falsification conditions hold.** Run against live Supabase data on
+the ticket branch (workflow run 33757203659), read from the uploaded report:
+
+| Falsification figure | Result |
+|---|---|
+| Legs where the club had a fixture but the player did not feature | **6,836** of 36,736 G+1..G+4 legs (**18.6%**) |
+| 5-gameweek model Spearman | **0.397** (n=9,184), down from report 9's leaked 0.619 |
+| 5-gameweek quality oracle Spearman | **0.506** — the model now sits BELOW its own ceiling |
+
+The leg arithmetic reconciles exactly: 36,232 legs with a fixture + 504 blank-gameweek legs =
+36,736 = 9,184 windows x 4 legs. The 0.222 fall cannot be an artefact of the new
+`unresolvedTeamCode` exclusion, which removes roughly 1% of rows — a population change that size
+cannot move a rank correlation that far. **0.397 is the first trustworthy 5-gameweek figure this
+project has produced**, and it is the number every later model decision should be read against. It
+sits close to `docs/model-review-2026-09-02.md`'s independent leak-free prediction of 0.425, which
+is the second, independent confirmation.
+
+**Still open after this ticket:** the ONE-gameweek oracle-ceiling failure (oracle 0.336 below model
+0.345). That is a separate problem with a separate cause and gets its own ticket — the Backtest job
+will still exit 1 after #193 merges, and that exit is not #193 failing.

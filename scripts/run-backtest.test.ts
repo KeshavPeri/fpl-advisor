@@ -39,6 +39,7 @@ import {
   averageMinutesPerMatch,
   buildBaselineVerdicts,
   bucketByPriorMatches,
+  buildClubFixtureSchedule,
   buildDefconMatches,
   buildDefconMatchesFromCounts,
   buildFeatureHistoryIndex,
@@ -103,6 +104,7 @@ import {
   incrementRecentMinutesWindowLength,
   inferTeamSlug,
   isFiveGameweekWindowTruncated,
+  lookupClubFixtureSchedule,
   MAE_LOWER_BOUND,
   MAE_UPPER_BOUND,
   MIN_BUCKET_SAMPLE_SIZE,
@@ -137,6 +139,7 @@ import {
   summarizeRankingByGameweekAndPosition,
   summarizeRankingByPosition,
   summarizeSeasonRanking,
+  sumClubScheduleLegCounts,
   teamStrengthRate,
   toActualMatchStatsInput,
   toRankingPair,
@@ -148,6 +151,7 @@ import {
   totalFiveGameweekExcluded,
   type ActualMatchStatsInput,
   type ActualSourceRow,
+  type ClubScheduleLegCounts,
   type FeatureHistoryRow,
   type FiveGameweekRow,
   type GenericRankingRow,
@@ -248,6 +252,11 @@ function fiveGwRow(
     projectedPoints: overrides.actualPoints,
     baselineMinutesPerMatch: 0,
     baselineXgXaPerMatch: 0,
+    // Ticket #193 — the club-schedule leg diagnostics; 0 by default, like
+    // every other "didn't happen for this constructed row" field here.
+    legsWithScheduleFixture: 0,
+    legsBlankGameweek: 0,
+    legsDidNotFeatureButClubHadFixture: 0,
     ...overrides,
   }
 }
@@ -451,6 +460,67 @@ describe('buildTeamMatchRecords — the max-across-players correction (ticket #1
       teamStatsRow({ matchId: 'm5', gameweek: 1, teamCode: null as unknown as number, opponentTeamCode: 90, teamGoalsConceded: 1 }),
     ]
     expect(buildTeamMatchRecords(rows)).toEqual([])
+  })
+})
+
+describe('buildClubFixtureSchedule — the PUBLISHED schedule, not the player\'s own appearances (ticket #193)', () => {
+  it('a single fixture: one club, one gameweek, one opponent — however many of its players\' rows the match produced', () => {
+    const schedule = buildClubFixtureSchedule([
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 1 }),
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 1 }),
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 1 }),
+      teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 20, opponentTeamCode: 10, teamGoalsConceded: 1 }),
+    ])
+    // Eleven players' rows for one match are still ONE fixture — the key is
+    // (match_id, team_code), never the row count.
+    expect(lookupClubFixtureSchedule(schedule, 10, 5)).toEqual([20])
+    expect(lookupClubFixtureSchedule(schedule, 20, 5)).toEqual([10])
+  })
+
+  it('a DOUBLE gameweek — two match_ids, one gameweek, one club — returns two opponents, so the leg projects two fixtures', () => {
+    const schedule = buildClubFixtureSchedule([
+      teamStatsRow({ matchId: 'dgw-a', gameweek: 7, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 0 }),
+      teamStatsRow({ matchId: 'dgw-a', gameweek: 7, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 0 }),
+      teamStatsRow({ matchId: 'dgw-b', gameweek: 7, teamCode: 10, opponentTeamCode: 30, teamGoalsConceded: 2 }),
+    ])
+    const fixtures = lookupClubFixtureSchedule(schedule, 10, 7)
+    expect(fixtures).toHaveLength(2)
+    expect([...fixtures].sort((a, b) => (a as number) - (b as number))).toEqual([20, 30])
+  })
+
+  it('a match whose team_goals_conceded is null on BOTH sides still appears — a schedule needs no goals at all (this is exactly where it differs from buildTeamMatchRecords)', () => {
+    const rows: MatchStatsForTeamStrength[] = [
+      teamStatsRow({ matchId: 'unresolved', gameweek: 3, teamCode: 70, opponentTeamCode: 80, teamGoalsConceded: null }),
+      teamStatsRow({ matchId: 'unresolved', gameweek: 3, teamCode: 80, opponentTeamCode: 70, teamGoalsConceded: null }),
+    ]
+    // buildTeamMatchRecords drops this match entirely — it cannot resolve a
+    // goals figure for either side.
+    expect(buildTeamMatchRecords(rows)).toEqual([])
+    // The schedule keeps it: the match was played, so it was scheduled.
+    const schedule = buildClubFixtureSchedule(rows)
+    expect(lookupClubFixtureSchedule(schedule, 70, 3)).toEqual([80])
+    expect(lookupClubFixtureSchedule(schedule, 80, 3)).toEqual([70])
+  })
+
+  it('a club with no rows in a gameweek returns nothing — its blank gameweek, never an invented neutral fixture', () => {
+    const schedule = buildClubFixtureSchedule([teamStatsRow({ matchId: 'm1', gameweek: 5, teamCode: 10, opponentTeamCode: 20, teamGoalsConceded: 1 })])
+    expect(lookupClubFixtureSchedule(schedule, 10, 6)).toEqual([]) // club played, but not that gameweek
+    expect(lookupClubFixtureSchedule(schedule, 99, 5)).toEqual([]) // a club with no rows at all
+  })
+
+  it('rows with a null teamCode are ignored entirely, never grouped under a fake key — same rule as buildTeamMatchRecords', () => {
+    const schedule = buildClubFixtureSchedule([
+      teamStatsRow({ matchId: 'm5', gameweek: 1, teamCode: null as unknown as number, opponentTeamCode: 90, teamGoalsConceded: 1 }),
+    ])
+    expect(schedule.size).toBe(0)
+  })
+
+  it('an unresolved opponent_team_code is kept as null, never dropped — the club still had a fixture, and resolveFixtureTeams is what decides whether it can be priced', () => {
+    const schedule = buildClubFixtureSchedule([teamStatsRow({ matchId: 'm6', gameweek: 4, teamCode: 10, opponentTeamCode: null, teamGoalsConceded: 1 })])
+    expect(lookupClubFixtureSchedule(schedule, 10, 4)).toEqual([null])
+    // One fixture, but not a priceable one: the neutral fallback, exactly as
+    // ticket #175's own gate already decides.
+    expect(resolveFixtureTeams(10, lookupClubFixtureSchedule(schedule, 10, 4))).toBe(false)
   })
 })
 
@@ -2646,30 +2716,46 @@ describe('buildFeatureHistoryIndex', () => {
 })
 
 describe('projectAndReconstructWindowGameweek', () => {
+  // Ticket #193: every leg now resolves its fixture count/opponent(s) from
+  // the club schedule keyed on (the START row's team_code, the leg's own
+  // gameweek), so a row reaching a projection needs a non-null team_code —
+  // hence the explicit `team_code` on rows below that predate this ticket.
+  // A one-fixture schedule with an unresolved opponent reproduces exactly
+  // the neutral single fixture these tests asserted before it.
+  const oneNeutralFixture = (teamCode: number, gameweek: number) =>
+    buildClubFixtureSchedule([teamStatsRow({ matchId: `sched-${teamCode}-${gameweek}`, gameweek, teamCode, opponentTeamCode: null })])
+
   it('missingFeatureHistoryRow when no feature_history row exists for this (player, gameweek) — the density guarantee failing would surface here', () => {
-    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, new Map(), new Map(), new Map(), [], [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, new Map(), new Map(), new Map(), [], [], new Map())
     expect(outcome).toEqual({ status: 'missingFeatureHistoryRow' })
   })
 
   it('unresolvedPosition when neither element_type nor the players-table fallback resolves', () => {
     const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: null })
     const index = buildFeatureHistoryIndex([row])
-    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), [], [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), [], [], new Map())
     expect(outcome).toEqual({ status: 'unresolvedPosition' })
   })
 
+  it('unresolvedTeamCode when the window\'s START row carries no club — the club schedule cannot be resolved for any leg, and a fixture is never guessed (ticket #193)', () => {
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, team_code: null, prior_matches: 3, prior_minutes: 270 })
+    const index = buildFeatureHistoryIndex([row])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), [sourceRow({ player_code: 1, gameweek: 5 })], [], oneNeutralFixture(1, 5))
+    expect(outcome).toEqual({ status: 'unresolvedTeamCode' })
+  })
+
   it('actualDataIncomplete when a matched actual row has team_goals_conceded unknown — never silently defaulted to a clean sheet', () => {
-    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: DEFENDER, prior_matches: 3 })
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: DEFENDER, team_code: 1, prior_matches: 3 })
     const index = buildFeatureHistoryIndex([row])
     const rows = [sourceRow({ player_code: 1, gameweek: 5, team_goals_conceded: null })]
-    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), rows, [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), rows, [], oneNeutralFixture(1, 5))
     expect(outcome).toEqual({ status: 'actualDataIncomplete' })
   })
 
   it('a leg with no matching actual rows at all (no data found) reconstructs to exactly 0 actual points — never excluded ("zeros for non-featuring weeks", ticket text)', () => {
-    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, team_code: 1, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
     const index = buildFeatureHistoryIndex([row])
-    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), [], [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), [], [], oneNeutralFixture(1, 5))
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
     expect(outcome.actualPoints).toBe(0)
@@ -2677,20 +2763,20 @@ describe('projectAndReconstructWindowGameweek', () => {
   })
 
   it('a leg with a matched but non-featuring row (0 minutes) also reconstructs to exactly 0 actual points', () => {
-    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, team_code: 1, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
     const index = buildFeatureHistoryIndex([row])
     const rows = [sourceRow({ player_code: 1, gameweek: 5, minutes_played: 0 })]
-    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), rows, [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), rows, [], oneNeutralFixture(1, 5))
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
     expect(outcome.actualPoints).toBe(0)
   })
 
   it('resolves position via element_type first, the players-table fallback only when it is null — same precedence as resolveRowPosition', () => {
-    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: null, prior_matches: 2 })
+    const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: null, team_code: 1, prior_matches: 2 })
     const index = buildFeatureHistoryIndex([row])
     const codeToPosition = new Map([[1, MIDFIELDER]])
-    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, codeToPosition, new Map(), [], [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, codeToPosition, new Map(), [], [], oneNeutralFixture(1, 5))
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
     expect(outcome.position).toBe(MIDFIELDER)
@@ -2708,14 +2794,23 @@ describe('classifyFiveGameweekRow', () => {
       new Map(),
       new Map(),
       [],
+      new Map(),
     )
     expect(classification).toEqual({ kind: 'excluded', reason: 'truncatedWindow' })
   })
 
   it('missingFeatureHistoryRow when the window\'s START gameweek has no feature_history row — every leg is built from that one row, so its absence excludes the whole window', () => {
     const startRow = { gameweekId: 1, position: FORWARD, projectedPoints: 3, actualPoints: 2, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.2 }
-    const classification = classifyFiveGameweekRow(1, startRow, 38, new Map(), new Map(), new Map(), new Map(), [])
+    const classification = classifyFiveGameweekRow(1, startRow, 38, new Map(), new Map(), new Map(), new Map(), [], new Map())
     expect(classification).toEqual({ kind: 'excluded', reason: 'missingFeatureHistoryRow' })
+  })
+
+  it('unresolvedTeamCode when the window\'s START row has no club — every leg would need it to resolve the club schedule, so the WHOLE window is excluded by name (ticket #193)', () => {
+    const playerCode = 903
+    const startRow = { gameweekId: 1, position: FORWARD, projectedPoints: 3, actualPoints: 2, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.2 }
+    const index = buildFeatureHistoryIndex([featureRow({ gameweek_id: 1, player_code: playerCode, element_type: FORWARD, team_code: null, prior_matches: 3, prior_minutes: 270 })])
+    const classification = classifyFiveGameweekRow(playerCode, startRow, 38, index, new Map(), new Map(), new Map(), [], new Map())
+    expect(classification).toEqual({ kind: 'excluded', reason: 'unresolvedTeamCode' })
   })
 
   it('propagates a window leg\'s own exclusion reason for the WHOLE window — a window is only as good as its worst-resolved leg', () => {
@@ -2724,11 +2819,11 @@ describe('classifyFiveGameweekRow', () => {
     // actual outcome is the one thing still read at the leg's own gameweek.
     const playerCode = 902
     const startRow = { gameweekId: 1, position: FORWARD, projectedPoints: 3, actualPoints: 2, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.2 }
-    const index = buildFeatureHistoryIndex([featureRow({ gameweek_id: 1, player_code: playerCode, element_type: FORWARD, prior_matches: 3, prior_minutes: 270 })])
+    const index = buildFeatureHistoryIndex([featureRow({ gameweek_id: 1, player_code: playerCode, element_type: FORWARD, team_code: 1, prior_matches: 3, prior_minutes: 270 })])
     const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([
       [`${playerCode}:3`, [sourceRow({ player_code: playerCode, gameweek: 3, team_goals_conceded: null })]],
     ])
-    const classification = classifyFiveGameweekRow(playerCode, startRow, 38, index, new Map(), new Map(), actualByPlayerGameweek, [])
+    const classification = classifyFiveGameweekRow(playerCode, startRow, 38, index, new Map(), new Map(), actualByPlayerGameweek, [], new Map())
     expect(classification).toEqual({ kind: 'excluded', reason: 'actualDataIncomplete' })
   })
 
@@ -2762,6 +2857,12 @@ describe('classifyFiveGameweekRow', () => {
 
     const legActualRow = (gw: number): ActualSourceRow => sourceRow({ player_code: playerCode, gameweek: gw, team_code: OWN, opponent_team_code: opponentOf(gw) })
     const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([2, 3, 4, 5].map((gw) => [`${playerCode}:${gw}`, [legActualRow(gw)]]))
+    // Ticket #193 — the leg's fixture comes from the club's published
+    // schedule, never from the actual rows above (which now supply the
+    // outcome and nothing else).
+    const clubFixtureSchedule = buildClubFixtureSchedule(
+      [2, 3, 4, 5].map((gw) => teamStatsRow({ matchId: `leg-${gw}`, gameweek: gw, teamCode: OWN, opponentTeamCode: opponentOf(gw) })),
+    )
 
     const classification = classifyFiveGameweekRow(
       playerCode,
@@ -2772,6 +2873,7 @@ describe('classifyFiveGameweekRow', () => {
       new Map(), // positionPriors empty — every leg falls back to fallbackPositionPrior(FORWARD)
       actualByPlayerGameweek,
       teamMatchRecords,
+      clubFixtureSchedule,
     )
     expect(classification.kind).toBe('measured')
     if (classification.kind !== 'measured') return
@@ -2797,6 +2899,11 @@ describe('classifyFiveGameweekRow', () => {
       position: FORWARD,
       baselineMinutesPerMatch: 90, // reused verbatim from startRow — never recomputed per leg
       baselineXgXaPerMatch: 0.3,
+      // Ticket #193 — all four legs took their fixture from the schedule,
+      // none was a blank gameweek, and the player featured in every one.
+      legsWithScheduleFixture: 4,
+      legsBlankGameweek: 0,
+      legsDidNotFeatureButClubHadFixture: 0,
     })
 
     // The guard has teeth: leg 2's own projection genuinely differs from
@@ -2808,15 +2915,60 @@ describe('classifyFiveGameweekRow', () => {
 
   it('a non-featuring leg contributes 0 actual points to the sum, never excludes the window ("that risk is part of what a transfer buys")', () => {
     const playerCode = 901
+    const OWN = 1
     const startRow = { gameweekId: 10, position: FORWARD, projectedPoints: 4, actualPoints: 3, baselineMinutesPerMatch: 80, baselineXgXaPerMatch: 0.25 }
-    const legRows = [10, 11, 12, 13, 14].map((gw) => featureRow({ gameweek_id: gw, player_code: playerCode, element_type: FORWARD, prior_matches: 5, prior_minutes: 450, prior_xg: 3 }))
+    const legRows = [10, 11, 12, 13, 14].map((gw) => featureRow({ gameweek_id: gw, player_code: playerCode, element_type: FORWARD, team_code: OWN, prior_matches: 5, prior_minutes: 450, prior_xg: 3 }))
     const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(legRows)
-    // No actual rows at all for any of gameweeks 11-14 — a blank stretch.
-    const classification = classifyFiveGameweekRow(playerCode, startRow, 38, featureHistoryByPlayerGameweek, new Map(), new Map(), new Map(), [])
+    // No actual rows at all for any of gameweeks 11-14, and (ticket #193) the
+    // club has no scheduled fixture in any of them either — a genuine blank
+    // stretch on both sides, a legitimate zero rather than a foreknown one.
+    const classification = classifyFiveGameweekRow(playerCode, startRow, 38, featureHistoryByPlayerGameweek, new Map(), new Map(), new Map(), [], new Map())
     expect(classification.kind).toBe('measured')
     if (classification.kind !== 'measured') return
     // Only the starting gameweek's actual (3) contributes — every other leg is 0.
     expect(classification.row.actualPoints).toBe(3)
+    expect(classification.row).toMatchObject({ legsWithScheduleFixture: 0, legsBlankGameweek: 4, legsDidNotFeatureButClubHadFixture: 0 })
+  })
+
+  it('counts the three club-schedule leg diagnostics separately — a scheduled fixture the player missed is the LEAK, a club with no fixture is a blank gameweek (ticket #193)', () => {
+    const playerCode = 904
+    const OWN = 1
+    const OPPONENT = 2
+    const G = 10
+    const startRow = { gameweekId: G, position: FORWARD, projectedPoints: 4, actualPoints: 3, baselineMinutesPerMatch: 80, baselineXgXaPerMatch: 0.25 }
+    const index = buildFeatureHistoryIndex([featureRow({ gameweek_id: G, player_code: playerCode, element_type: FORWARD, team_code: OWN, prior_matches: 5, prior_minutes: 450, prior_xg: 3 })])
+
+    // The club plays at G+1, G+2 and G+3, and has no fixture at G+4.
+    const clubFixtureSchedule = buildClubFixtureSchedule(
+      [11, 12, 13].map((gw) => teamStatsRow({ matchId: `m-${gw}`, gameweek: gw, teamCode: OWN, opponentTeamCode: OPPONENT })),
+    )
+    // The player features at G+1 only: G+2 is a 0-minute row, G+3 has no row
+    // at all. Both are legs his club played and he did not — the leak.
+    const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([
+      [`${playerCode}:11`, [sourceRow({ player_code: playerCode, gameweek: 11 })]],
+      [`${playerCode}:12`, [sourceRow({ player_code: playerCode, gameweek: 12, minutes_played: 0 })]],
+    ])
+
+    const classification = classifyFiveGameweekRow(playerCode, startRow, 38, index, new Map(), new Map(), actualByPlayerGameweek, [], clubFixtureSchedule)
+    expect(classification.kind).toBe('measured')
+    if (classification.kind !== 'measured') return
+    expect(classification.row).toMatchObject({
+      legsWithScheduleFixture: 3, // G+1, G+2, G+3
+      legsBlankGameweek: 1, // G+4
+      legsDidNotFeatureButClubHadFixture: 2, // G+2 (0 minutes) and G+3 (no row at all)
+    })
+  })
+})
+
+describe('sumClubScheduleLegCounts (ticket #193)', () => {
+  it('sums each counter across every measured five-gameweek row, 0 for an empty population', () => {
+    expect(sumClubScheduleLegCounts([])).toEqual({ legsWithScheduleFixture: 0, legsBlankGameweek: 0, legsDidNotFeatureButClubHadFixture: 0 })
+
+    const totals: ClubScheduleLegCounts = sumClubScheduleLegCounts([
+      fiveGwRow({ position: FORWARD, startGameweekId: 1, actualPoints: 5, legsWithScheduleFixture: 4, legsBlankGameweek: 0, legsDidNotFeatureButClubHadFixture: 1 }),
+      fiveGwRow({ position: FORWARD, startGameweekId: 2, actualPoints: 5, legsWithScheduleFixture: 3, legsBlankGameweek: 1, legsDidNotFeatureButClubHadFixture: 2 }),
+    ])
+    expect(totals).toEqual({ legsWithScheduleFixture: 7, legsBlankGameweek: 1, legsDidNotFeatureButClubHadFixture: 3 })
   })
 })
 
@@ -2845,10 +2997,14 @@ describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCe
   const rowAtG = () => featureRow({ gameweek_id: G, player_code: PLAYER, element_type: FORWARD, team_code: OWN, prior_matches: 3, prior_minutes: 200, prior_xg: 0.2, prior_xa: 0.1 })
   const rowAtLeg3 = () => featureRow({ gameweek_id: LEG3, player_code: PLAYER, element_type: FORWARD, team_code: OWN, prior_matches: 12, prior_minutes: 1080, prior_xg: 9, prior_xa: 6 })
 
+  /** Ticket #193 — one scheduled fixture for OWN at each named gameweek, against `opponent` (null ⇒ the neutral fallback these tests asserted before the schedule existed). */
+  const scheduleFor = (gameweeks: readonly number[], opponent: number | null = null) =>
+    buildClubFixtureSchedule(gameweeks.map((gw) => teamStatsRow({ matchId: `sched-${gw}`, gameweek: gw, teamCode: OWN, opponentTeamCode: opponent })))
+
   it('leg 3 is projected from G\'s feature_history row, NOT from its own — form inside the window is hindsight', () => {
     const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
     const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3 })]
-    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, [])
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, [], scheduleFor([LEG3]))
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
 
@@ -2870,7 +3026,7 @@ describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCe
     const startRow = { gameweekId: G, position: FORWARD, projectedPoints: 0, actualPoints: 0, baselineMinutesPerMatch: 0, baselineXgXaPerMatch: 0 }
     const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([11, 12, 13, 14].map((gw) => [`${PLAYER}:${gw}`, [sourceRow({ player_code: PLAYER, gameweek: gw })]]))
 
-    const classification = classifyFiveGameweekRow(PLAYER, startRow, 38, index, new Map(), new Map(), actualByPlayerGameweek, [])
+    const classification = classifyFiveGameweekRow(PLAYER, startRow, 38, index, new Map(), new Map(), actualByPlayerGameweek, [], scheduleFor([11, 12, 13, 14]))
     expect(classification.kind).toBe('measured')
     if (classification.kind !== 'measured') return
 
@@ -2878,7 +3034,7 @@ describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCe
     expect(classification.row.projectedPoints).toBeCloseTo(4 * perLeg, 10)
   })
 
-  it('leg 3\'s FIXTURE OPPONENT still comes from leg 3 — a published schedule is genuinely known at G', () => {
+  it('leg 3\'s FIXTURE OPPONENT still comes from leg 3\'s published schedule entry — a published schedule is genuinely known at G', () => {
     const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
     // Both opponents have ample prior history, of very different quality.
     const teamMatchRecords: TeamMatchRecord[] = []
@@ -2888,8 +3044,8 @@ describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCe
       teamMatchRecords.push({ matchId: `strong-${gw}`, gameweek: gw, teamCode: OPPONENT_OTHER, goalsConceded: 0, goalsScored: 3 })
     }
 
-    const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3, team_code: OWN, opponent_team_code: OPPONENT_LEG3 })]
-    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, teamMatchRecords)
+    const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3 })]
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, teamMatchRecords, scheduleFor([LEG3], OPPONENT_LEG3))
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
 
@@ -2920,9 +3076,10 @@ describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCe
       withInsideWindowResults.push({ matchId: `opp-in-${gw}`, gameweek: gw, teamCode: OPPONENT_LEG3, goalsConceded: 40, goalsScored: 0 })
     }
 
-    const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3, team_code: OWN, opponent_team_code: OPPONENT_LEG3 })]
-    const without = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, teamMatchRecords)
-    const with_ = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, withInsideWindowResults)
+    const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3 })]
+    const schedule = scheduleFor([LEG3], OPPONENT_LEG3)
+    const without = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, teamMatchRecords, schedule)
+    const with_ = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, withInsideWindowResults, schedule)
     expect(without.status).toBe('ok')
     expect(with_.status).toBe('ok')
     if (without.status !== 'ok' || with_.status !== 'ok') return
@@ -2945,7 +3102,7 @@ describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCe
     ])
 
     const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3 })]
-    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), positionPriors, legRows, [])
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), positionPriors, legRows, [], scheduleFor([LEG3]))
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
     expect(outcome.projectedPoints).toBeCloseTo(projectRow(rowAtG(), FORWARD, priorAtG, 1, []).expectedPoints, 10)
@@ -2955,7 +3112,7 @@ describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCe
   it('leg 3\'s ACTUAL OUTCOME still comes from leg 3 — that is the target being ranked, not an input', () => {
     const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
     const scoredTwice = [sourceRow({ player_code: PLAYER, gameweek: LEG3, goals: 2 })]
-    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), scoredTwice, [])
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), scoredTwice, [], scheduleFor([LEG3]))
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
     expect(outcome.actualPoints).toBe(aggregateActualForGameweek(FORWARD, [toActualMatchStatsInput(scoredTwice[0])]).totalPoints)
@@ -2964,7 +3121,112 @@ describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCe
 
   it('throws when the two gameweek arguments are swapped — a leg can never precede its own window start', () => {
     const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
-    expect(() => projectAndReconstructWindowGameweek(PLAYER, LEG3, G, index, new Map(), new Map(), [], [])).toThrow(/swapped/)
+    expect(() => projectAndReconstructWindowGameweek(PLAYER, LEG3, G, index, new Map(), new Map(), [], [], new Map())).toThrow(/swapped/)
+  })
+})
+
+describe('THE CLUB-SCHEDULE FIX — the second lookahead leak (ticket #193)', () => {
+  // The leg's fixture COUNT and OPPONENT(s) used to be read off the player's
+  // OWN player_match_stats rows for that gameweek. A player who did not
+  // feature had none, so the leg projected 0 fixtures — exactly 0 points —
+  // against an actual of exactly 0. The harness was telling the model, in
+  // advance, which of the five weeks the player would miss, and a
+  // five-gameweek total is dominated by precisely that. Both tests below fail
+  // if the fix is reverted to `outcome.matchesFound`.
+
+  const PLAYER = 960
+  const OWN = 1
+  const OPPONENT = 2
+  const OTHER_OPPONENT = 3
+  const G = 10
+  const LEG = 12
+
+  const rowAtG = () => featureRow({ gameweek_id: G, player_code: PLAYER, element_type: FORWARD, team_code: OWN, prior_matches: 8, prior_minutes: 700, prior_xg: 3.2, prior_xa: 1.8 })
+
+  it('THE PINNED DEFECT: a leg the player did not feature in, whose CLUB did play, projects a NON-ZERO figure — reverting to matchesFound makes this fail', () => {
+    const index = buildFeatureHistoryIndex([rowAtG()])
+    const clubFixtureSchedule = buildClubFixtureSchedule([teamStatsRow({ matchId: 'played-without-him', gameweek: LEG, teamCode: OWN, opponentTeamCode: null })])
+
+    // The player has ONE row for the leg and it is a 0-minute row: his club
+    // played, he did not. Under the old construction this leg projected 0.
+    const didNotFeature = [sourceRow({ player_code: PLAYER, gameweek: LEG, minutes_played: 0 })]
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG, index, new Map(), new Map(), didNotFeature, [], clubFixtureSchedule)
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+
+    // The club had a fixture, so ONE fixture is projected — the same figure
+    // the projection would carry if he had played, because whether he plays
+    // is exactly what the model is supposed to be estimating, not reading.
+    expect(outcome.fixtureCount).toBe(1)
+    expect(outcome.featured).toBe(false)
+    expect(outcome.projectedPoints).toBeGreaterThan(0)
+    expect(outcome.projectedPoints).toBeCloseTo(projectRow(rowAtG(), FORWARD, fallbackPositionPrior(FORWARD), 1, []).expectedPoints, 10)
+    // The actual side is untouched by any of this: a leg he missed is still 0.
+    expect(outcome.actualPoints).toBe(0)
+
+    // And the same leg with NO row at all — the far commoner shape of a
+    // non-appearance in this data — behaves identically.
+    const noRowsAtAll = projectAndReconstructWindowGameweek(PLAYER, G, LEG, index, new Map(), new Map(), [], [], clubFixtureSchedule)
+    expect(noRowsAtAll.status).toBe('ok')
+    if (noRowsAtAll.status !== 'ok') return
+    expect(noRowsAtAll.projectedPoints).toBeCloseTo(outcome.projectedPoints, 10)
+  })
+
+  it('the leg\'s OPPONENT comes from the club schedule, not the player\'s own rows — proven with a player who has no rows at all for that leg', () => {
+    const index = buildFeatureHistoryIndex([rowAtG()])
+    // Two possible opponents of very different quality, both with ample
+    // prior history so the fixture is priced for real, not neutrally.
+    const teamMatchRecords: TeamMatchRecord[] = []
+    for (let gw = 1; gw < G; gw++) {
+      teamMatchRecords.push({ matchId: `own-${gw}`, gameweek: gw, teamCode: OWN, goalsConceded: 1, goalsScored: 1 })
+      teamMatchRecords.push({ matchId: `weak-${gw}`, gameweek: gw, teamCode: OPPONENT, goalsConceded: 3, goalsScored: 0 })
+      teamMatchRecords.push({ matchId: `strong-${gw}`, gameweek: gw, teamCode: OTHER_OPPONENT, goalsConceded: 0, goalsScored: 3 })
+    }
+    const clubFixtureSchedule = buildClubFixtureSchedule([teamStatsRow({ matchId: 'sched', gameweek: LEG, teamCode: OWN, opponentTeamCode: OPPONENT })])
+
+    // NO actual rows whatsoever for this player at this leg — the schedule is
+    // the only possible source of an opponent.
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG, index, new Map(), new Map(), [], teamMatchRecords, clubFixtureSchedule)
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+
+    const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, OWN, G)
+    const esVsScheduled = computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, OPPONENT, G), SCALE)
+    const esVsOther = computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, OTHER_OPPONENT, G), SCALE)
+    const prior = fallbackPositionPrior(FORWARD)
+
+    expect(outcome.projectedPoints).toBeCloseTo(projectRow(rowAtG(), FORWARD, prior, 1, [esVsScheduled]).expectedPoints, 10)
+    // The schedule's opponent is genuinely distinguishable from the other
+    // one, and from the neutral fallback — this assertion has teeth.
+    expect(esVsOther).not.toBeCloseTo(esVsScheduled, 3)
+    expect(outcome.projectedPoints).not.toBeCloseTo(projectRow(rowAtG(), FORWARD, prior, 1, [esVsOther]).expectedPoints, 2)
+    expect(outcome.projectedPoints).not.toBeCloseTo(projectRow(rowAtG(), FORWARD, prior, 1, []).expectedPoints, 2)
+  })
+
+  it('a DOUBLE gameweek in the schedule projects TWO fixtures even for a player who only played one of them — the #140 approximation no longer leaks into the window', () => {
+    const index = buildFeatureHistoryIndex([rowAtG()])
+    const clubFixtureSchedule = buildClubFixtureSchedule([
+      teamStatsRow({ matchId: 'dgw-a', gameweek: LEG, teamCode: OWN, opponentTeamCode: null }),
+      teamStatsRow({ matchId: 'dgw-b', gameweek: LEG, teamCode: OWN, opponentTeamCode: null }),
+    ])
+    // He appears in only one of his club's two fixtures that gameweek.
+    const playedOnce = [sourceRow({ player_code: PLAYER, gameweek: LEG })]
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG, index, new Map(), new Map(), playedOnce, [], clubFixtureSchedule)
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+    expect(outcome.fixtureCount).toBe(2) // the club's count, not his own
+    expect(outcome.projectedPoints).toBeCloseTo(projectRow(rowAtG(), FORWARD, fallbackPositionPrior(FORWARD), 2, []).expectedPoints, 10)
+  })
+
+  it('a leg whose club has NO schedule entry projects exactly zero — the blank gameweek, never a fabricated neutral fixture', () => {
+    const index = buildFeatureHistoryIndex([rowAtG()])
+    const elsewhere = buildClubFixtureSchedule([teamStatsRow({ matchId: 'other-club', gameweek: LEG, teamCode: 99, opponentTeamCode: 98 })])
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG, index, new Map(), new Map(), [], [], elsewhere)
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+    expect(outcome.fixtureCount).toBe(0)
+    expect(outcome.projectedPoints).toBe(0)
+    expect(outcome.actualPoints).toBe(0)
   })
 })
 
@@ -2974,8 +3236,17 @@ describe('emptyFiveGameweekExclusionCounts / incrementFiveGameweekExclusion / to
     incrementFiveGameweekExclusion(counts, 'truncatedWindow')
     incrementFiveGameweekExclusion(counts, 'truncatedWindow')
     incrementFiveGameweekExclusion(counts, 'actualDataIncomplete')
-    expect(counts).toEqual({ truncatedWindow: 2, missingFeatureHistoryRow: 0, unresolvedPosition: 0, actualDataIncomplete: 1 })
+    expect(counts).toEqual({ truncatedWindow: 2, missingFeatureHistoryRow: 0, unresolvedPosition: 0, unresolvedTeamCode: 0, actualDataIncomplete: 1 })
     expect(totalFiveGameweekExcluded(counts)).toBe(3)
+  })
+
+  it('ticket #193\'s unresolvedTeamCode reason counts and reconciles like every other one', () => {
+    const counts = emptyFiveGameweekExclusionCounts()
+    incrementFiveGameweekExclusion(counts, 'unresolvedTeamCode')
+    incrementFiveGameweekExclusion(counts, 'unresolvedTeamCode')
+    expect(counts.unresolvedTeamCode).toBe(2)
+    expect(totalFiveGameweekExcluded(counts)).toBe(2)
+    expect(() => assertFiveGameweekReconciles(5, 3, counts)).not.toThrow()
   })
 
   it('assertFiveGameweekReconciles throws, naming both sides, on a mismatch', () => {
@@ -3043,15 +3314,17 @@ describe('summarizeFiveGameweekBaselines / computeGenericConstantBaselineSpearma
   })
 
   it('ranks baselineMinutesPerMatch/baselineXgXaPerMatch — the SAME per-row prior quantity as the one-gameweek section, computed at the starting gameweek — against the five-gameweek actual total', () => {
-    const rows: FiveGameweekRow[] = Array.from({ length: 20 }, (_, i) => ({
-      playerCode: i,
-      startGameweekId: 1,
-      position: FORWARD,
-      projectedPoints: i,
-      actualPoints: i, // perfectly correlated with baselineMinutesPerMatch below
-      baselineMinutesPerMatch: i,
-      baselineXgXaPerMatch: 0,
-    }))
+    const rows: FiveGameweekRow[] = Array.from({ length: 20 }, (_, i) =>
+      fiveGwRow({
+        playerCode: i,
+        startGameweekId: 1,
+        position: FORWARD,
+        projectedPoints: i,
+        actualPoints: i, // perfectly correlated with baselineMinutesPerMatch below
+        baselineMinutesPerMatch: i,
+        baselineXgXaPerMatch: 0,
+      }),
+    )
     const baselines = summarizeFiveGameweekBaselines(rows)
     const minutesBaseline = baselines.find((b) => b.label === PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL)!
     expect(minutesBaseline.seasonSpearman).toBeCloseTo(1, 10)
@@ -3168,6 +3441,7 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
       candidateCount: 1,
       measuredCount: 0,
       exclusions: emptyFiveGameweekExclusionCounts(),
+      clubSchedule: { legsWithScheduleFixture: 12, legsBlankGameweek: 3, legsDidNotFeatureButClubHadFixture: 5 },
       season: fgSeason,
       byPosition: fgByPosition,
       byStartGameweek: fgByGroup,
@@ -3207,6 +3481,18 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     expect(minutesIndex).toBeGreaterThan(ceilingIndex)
     expect(output).toContain(`window (ticket #185/#187): ${data.recentMinutesSource.fromStoredWindow}`)
     expect(output).toContain(`read as suspect): ${data.recentMinutesSource.fromAveragedFallback}`)
+  })
+
+  it('prints the three club-schedule fixture counters and the new unresolvedTeamCode exclusion line (ticket #193)', () => {
+    const output = generateReportMarkdown(data)
+    expect(output).toContain('### Club-schedule fixture diagnostics (ticket #193)')
+    expect(output).toContain(`came from the club schedule (the schedule had at least one entry that gameweek): ${data.fiveGameweek.clubSchedule.legsWithScheduleFixture}`)
+    expect(output).toContain(`a legitimate zero on both sides, never a defect): ${data.fiveGameweek.clubSchedule.legsBlankGameweek}`)
+    expect(output).toContain(`**this is the exact size of the leak this ticket closes**: ${data.fiveGameweek.clubSchedule.legsDidNotFeatureButClubHadFixture}`)
+    // The approximation is stated in the report itself, not only in the code.
+    expect(output).toContain('reconstructed from matches that were actually PLAYED')
+    // And the new exclusion reason reconciles by name alongside the others.
+    expect(output).toContain(`had no \`team_code\` (ticket #193`)
   })
 
   it('the oracle-ceiling check reports FAILED, with its failure text, when oracleCeiling.ok is false', () => {
@@ -3505,7 +3791,7 @@ describe('run-backtest.ts — the five-gameweek window reads model state at G, f
     for (const call of strengthCalls) expect(call).toMatch(/featureGameweekId\s*\)$/)
   })
 
-  it('nothing inside the function keys a lookup on legGameweekId — the leg reaches it only through actualRows', () => {
+  it('no MODEL-STATE lookup keys on legGameweekId — the leg reaches the projection only through its published fixture and its actual outcome', () => {
     expect(fn).not.toMatch(/windowKey\(playerCode, legGameweekId\)/)
     expect(fn).not.toMatch(/positionPriorKey\(legGameweekId/)
     expect(fn).not.toMatch(/computeTeamStrengthAsOf\([^)]*legGameweekId/)
@@ -3513,6 +3799,28 @@ describe('run-backtest.ts — the five-gameweek window reads model state at G, f
 
   it('classifyFiveGameweekRow passes the window\'s start gameweek as featureGameweekId, the leg\'s as legGameweekId', () => {
     expect(source).toMatch(/projectAndReconstructWindowGameweek\(\s*\n\s*playerCode,\s*\n\s*startRow\.gameweekId,\s*\n\s*gameweekId,/)
+  })
+
+  // Ticket #193 — the second leak. The leg's FIXTURE (count and opponents)
+  // is the one thing that must key on legGameweekId, and it must come from
+  // the club schedule rather than the player's own matched rows.
+  it('the leg\'s fixture comes from the club schedule, keyed on the LEG\'s own gameweek (ticket #193)', () => {
+    expect(fn).toMatch(/lookupClubFixtureSchedule\(clubFixtureSchedule, row\.team_code, legGameweekId\)/)
+  })
+
+  it('matchesFound appears nowhere in the arguments to projectRow inside this function — the leak that told the model which weeks the player would miss', () => {
+    const projectRowCalls = fn.match(/projectRow\([^)]*\)/g) ?? []
+    expect(projectRowCalls.length).toBe(1)
+    for (const call of projectRowCalls) expect(call).not.toMatch(/matchesFound/)
+    expect(fn).toMatch(/projectRow\(row, position, prior, fixtureCount, fixtureExpectedScores\)/)
+  })
+
+  it('the fixture opponents are never read off actualRows any more — that array supplies the leg\'s actual points and nothing else', () => {
+    expect(fn).not.toMatch(/actualRows\.map\(\(r\) => r\.opponent_team_code\)/)
+    // The one remaining use of actualRows: reconstructing the actual side.
+    const actualRowsUses = fn.match(/actualRows\.[a-zA-Z]+\(/g) ?? []
+    expect(actualRowsUses).toEqual(['actualRows.map('])
+    expect(fn).toMatch(/actualRows\.map\(toActualMatchStatsInput\)/)
   })
 })
 
