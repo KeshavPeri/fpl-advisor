@@ -119,6 +119,7 @@ import {
   reconstructActualMatchPoints,
   resolveFixtureTeams,
   resolveRowPosition,
+  SCALE,
   spearmanCorrelation,
   SPEARMAN_LOWER_BOUND,
   SPEARMAN_UPPER_BOUND,
@@ -157,6 +158,7 @@ import {
   type PositionRankingSummary,
   type RankingPair,
   type ReportData,
+  type TeamMatchRecord,
   type TeamStrengthRecord,
 } from './run-backtest.ts'
 
@@ -2645,14 +2647,14 @@ describe('buildFeatureHistoryIndex', () => {
 
 describe('projectAndReconstructWindowGameweek', () => {
   it('missingFeatureHistoryRow when no feature_history row exists for this (player, gameweek) — the density guarantee failing would surface here', () => {
-    const outcome = projectAndReconstructWindowGameweek(1, 5, new Map(), new Map(), new Map(), [], [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, new Map(), new Map(), new Map(), [], [])
     expect(outcome).toEqual({ status: 'missingFeatureHistoryRow' })
   })
 
   it('unresolvedPosition when neither element_type nor the players-table fallback resolves', () => {
     const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: null })
     const index = buildFeatureHistoryIndex([row])
-    const outcome = projectAndReconstructWindowGameweek(1, 5, index, new Map(), new Map(), [], [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), [], [])
     expect(outcome).toEqual({ status: 'unresolvedPosition' })
   })
 
@@ -2660,14 +2662,14 @@ describe('projectAndReconstructWindowGameweek', () => {
     const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: DEFENDER, prior_matches: 3 })
     const index = buildFeatureHistoryIndex([row])
     const rows = [sourceRow({ player_code: 1, gameweek: 5, team_goals_conceded: null })]
-    const outcome = projectAndReconstructWindowGameweek(1, 5, index, new Map(), new Map(), rows, [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), rows, [])
     expect(outcome).toEqual({ status: 'actualDataIncomplete' })
   })
 
   it('a leg with no matching actual rows at all (no data found) reconstructs to exactly 0 actual points — never excluded ("zeros for non-featuring weeks", ticket text)', () => {
     const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
     const index = buildFeatureHistoryIndex([row])
-    const outcome = projectAndReconstructWindowGameweek(1, 5, index, new Map(), new Map(), [], [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), [], [])
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
     expect(outcome.actualPoints).toBe(0)
@@ -2678,7 +2680,7 @@ describe('projectAndReconstructWindowGameweek', () => {
     const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: FORWARD, prior_matches: 3, prior_minutes: 270, prior_xg: 1 })
     const index = buildFeatureHistoryIndex([row])
     const rows = [sourceRow({ player_code: 1, gameweek: 5, minutes_played: 0 })]
-    const outcome = projectAndReconstructWindowGameweek(1, 5, index, new Map(), new Map(), rows, [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, new Map(), new Map(), rows, [])
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
     expect(outcome.actualPoints).toBe(0)
@@ -2688,7 +2690,7 @@ describe('projectAndReconstructWindowGameweek', () => {
     const row = featureRow({ gameweek_id: 5, player_code: 1, element_type: null, prior_matches: 2 })
     const index = buildFeatureHistoryIndex([row])
     const codeToPosition = new Map([[1, MIDFIELDER]])
-    const outcome = projectAndReconstructWindowGameweek(1, 5, index, codeToPosition, new Map(), [], [])
+    const outcome = projectAndReconstructWindowGameweek(1, 5, 5, index, codeToPosition, new Map(), [], [])
     expect(outcome.status).toBe('ok')
     if (outcome.status !== 'ok') return
     expect(outcome.position).toBe(MIDFIELDER)
@@ -2710,31 +2712,56 @@ describe('classifyFiveGameweekRow', () => {
     expect(classification).toEqual({ kind: 'excluded', reason: 'truncatedWindow' })
   })
 
-  it('propagates a window leg\'s own exclusion reason for the WHOLE window — a window is only as good as its worst-resolved leg', () => {
-    // Gameweek 2 (a G+1 leg) has no feature_history row at all.
+  it('missingFeatureHistoryRow when the window\'s START gameweek has no feature_history row — every leg is built from that one row, so its absence excludes the whole window', () => {
     const startRow = { gameweekId: 1, position: FORWARD, projectedPoints: 3, actualPoints: 2, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.2 }
     const classification = classifyFiveGameweekRow(1, startRow, 38, new Map(), new Map(), new Map(), new Map(), [])
     expect(classification).toEqual({ kind: 'excluded', reason: 'missingFeatureHistoryRow' })
   })
 
-  it('five projections summed, NEVER one projection × 5 — each leg is built from ITS OWN feature_history row, and the sum matches an independent leg-by-leg reconstruction', () => {
+  it('propagates a window leg\'s own exclusion reason for the WHOLE window — a window is only as good as its worst-resolved leg', () => {
+    // The start row resolves fine; leg G+2 (gameweek 3) has an actual row
+    // whose team_goals_conceded is unknown — a per-LEG gate, since the
+    // actual outcome is the one thing still read at the leg's own gameweek.
+    const playerCode = 902
+    const startRow = { gameweekId: 1, position: FORWARD, projectedPoints: 3, actualPoints: 2, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.2 }
+    const index = buildFeatureHistoryIndex([featureRow({ gameweek_id: 1, player_code: playerCode, element_type: FORWARD, prior_matches: 3, prior_minutes: 270 })])
+    const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([
+      [`${playerCode}:3`, [sourceRow({ player_code: playerCode, gameweek: 3, team_goals_conceded: null })]],
+    ])
+    const classification = classifyFiveGameweekRow(playerCode, startRow, 38, index, new Map(), new Map(), actualByPlayerGameweek, [])
+    expect(classification).toEqual({ kind: 'excluded', reason: 'actualDataIncomplete' })
+  })
+
+  it('five projections summed, NEVER one projection \u00d7 5 — every leg is built from G\'s feature_history row but its OWN fixture, and the sum matches an independent leg-by-leg reconstruction', () => {
     const playerCode = 900
+    const OWN = 1
     const startRow = { gameweekId: 1, position: FORWARD, projectedPoints: 7.5, actualPoints: 6, baselineMinutesPerMatch: 90, baselineXgXaPerMatch: 0.3 }
 
-    // Distinct prior_xg per leg (2..5) — if classifyFiveGameweekRow ever
-    // regressed to reusing gameweek 1's projection five times, this would
-    // diverge measurably from summing four DIFFERENT per-gameweek
-    // projections.
-    const legRows = [2, 3, 4, 5].map((gw) => featureRow({ gameweek_id: gw, player_code: playerCode, element_type: FORWARD, prior_matches: gw, prior_minutes: gw * 90, prior_xg: gw }))
-    const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(legRows)
+    // The ONE row every leg is projected from: the window's start gameweek.
+    const gRow = featureRow({ gameweek_id: 1, player_code: playerCode, element_type: FORWARD, team_code: OWN, prior_matches: 3, prior_minutes: 270, prior_xg: 1.2 })
+    // Rows sitting INSIDE the window, deliberately very different. Nothing
+    // may read them — they exist only so this test would notice if a leg
+    // started keying its feature lookup on its own gameweek again.
+    const insideWindowRows = [2, 3, 4, 5].map((gw) =>
+      featureRow({ gameweek_id: gw, player_code: playerCode, element_type: FORWARD, team_code: OWN, prior_matches: gw + 8, prior_minutes: (gw + 8) * 90, prior_xg: gw * 4 }),
+    )
+    const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex([gRow, ...insideWindowRows])
 
-    const legActualRow = (gw: number): ActualSourceRow => sourceRow({ player_code: playerCode, gameweek: gw })
-    const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([
-      [`${playerCode}:2`, [legActualRow(2)]],
-      [`${playerCode}:3`, [legActualRow(3)]],
-      [`${playerCode}:4`, [legActualRow(4)]],
-      [`${playerCode}:5`, [legActualRow(5)]],
-    ])
+    // Four DIFFERENT opponents, one per leg, of genuinely different strength
+    // — this is what still legitimately varies leg to leg, because the
+    // published schedule is known at G.
+    const opponentOf = (gw: number) => 10 + gw
+    const teamMatchRecords: TeamMatchRecord[] = []
+    for (let gw = -8; gw <= 0; gw++) {
+      teamMatchRecords.push({ matchId: `own-${gw}`, gameweek: gw, teamCode: OWN, goalsConceded: 1, goalsScored: 1 })
+      for (const leg of [2, 3, 4, 5]) {
+        // Opponent strength climbs steeply with the leg number.
+        teamMatchRecords.push({ matchId: `opp-${leg}-${gw}`, gameweek: gw, teamCode: opponentOf(leg), goalsConceded: 0, goalsScored: leg })
+      }
+    }
+
+    const legActualRow = (gw: number): ActualSourceRow => sourceRow({ player_code: playerCode, gameweek: gw, team_code: OWN, opponent_team_code: opponentOf(gw) })
+    const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([2, 3, 4, 5].map((gw) => [`${playerCode}:${gw}`, [legActualRow(gw)]]))
 
     const classification = classifyFiveGameweekRow(
       playerCode,
@@ -2744,17 +2771,22 @@ describe('classifyFiveGameweekRow', () => {
       new Map(),
       new Map(), // positionPriors empty — every leg falls back to fallbackPositionPrior(FORWARD)
       actualByPlayerGameweek,
-      [],
+      teamMatchRecords,
     )
     expect(classification.kind).toBe('measured')
     if (classification.kind !== 'measured') return
 
+    // Independent reconstruction: G's row and G's team strengths every time,
+    // the leg's own opponent every time.
     const prior = fallbackPositionPrior(FORWARD)
+    const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, OWN, startRow.gameweekId)
     let expectedProjected = startRow.projectedPoints
     let expectedActual = startRow.actualPoints
-    for (const row of legRows) {
-      expectedProjected += projectRow(row, FORWARD, prior, 1, []).expectedPoints
-      expectedActual += aggregateActualForGameweek(FORWARD, [toActualMatchStatsInput(legActualRow(row.gameweek_id))]).totalPoints
+    for (const gw of [2, 3, 4, 5]) {
+      const oppStrength = computeTeamStrengthAsOf(teamMatchRecords, opponentOf(gw), startRow.gameweekId)
+      const es = computeFixtureExpectedScore(ownStrength, oppStrength, SCALE)
+      expectedProjected += projectRow(gRow, FORWARD, prior, 1, [es]).expectedPoints
+      expectedActual += aggregateActualForGameweek(FORWARD, [toActualMatchStatsInput(legActualRow(gw))]).totalPoints
     }
 
     expect(classification.row.projectedPoints).toBeCloseTo(expectedProjected, 10)
@@ -2767,16 +2799,17 @@ describe('classifyFiveGameweekRow', () => {
       baselineXgXaPerMatch: 0.3,
     })
 
-    // The guard has teeth: leg 2's own projection genuinely differs from leg 5's.
-    const leg2 = projectRow(legRows[0], FORWARD, prior, 1, [])
-    const leg5 = projectRow(legRows[3], FORWARD, prior, 1, [])
-    expect(leg2.expectedPoints).not.toBeCloseTo(leg5.expectedPoints, 2)
+    // The guard has teeth: leg 2's own projection genuinely differs from
+    // leg 5's, purely because their fixtures differ.
+    const es2 = computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, opponentOf(2), 1), SCALE)
+    const es5 = computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, opponentOf(5), 1), SCALE)
+    expect(projectRow(gRow, FORWARD, prior, 1, [es2]).expectedPoints).not.toBeCloseTo(projectRow(gRow, FORWARD, prior, 1, [es5]).expectedPoints, 2)
   })
 
   it('a non-featuring leg contributes 0 actual points to the sum, never excludes the window ("that risk is part of what a transfer buys")', () => {
     const playerCode = 901
     const startRow = { gameweekId: 10, position: FORWARD, projectedPoints: 4, actualPoints: 3, baselineMinutesPerMatch: 80, baselineXgXaPerMatch: 0.25 }
-    const legRows = [11, 12, 13, 14].map((gw) => featureRow({ gameweek_id: gw, player_code: playerCode, element_type: FORWARD, prior_matches: 5, prior_minutes: 450, prior_xg: 3 }))
+    const legRows = [10, 11, 12, 13, 14].map((gw) => featureRow({ gameweek_id: gw, player_code: playerCode, element_type: FORWARD, prior_matches: 5, prior_minutes: 450, prior_xg: 3 }))
     const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(legRows)
     // No actual rows at all for any of gameweeks 11-14 — a blank stretch.
     const classification = classifyFiveGameweekRow(playerCode, startRow, 38, featureHistoryByPlayerGameweek, new Map(), new Map(), new Map(), [])
@@ -2784,6 +2817,154 @@ describe('classifyFiveGameweekRow', () => {
     if (classification.kind !== 'measured') return
     // Only the starting gameweek's actual (3) contributes — every other leg is 0.
     expect(classification.row.actualPoints).toBe(3)
+  })
+})
+
+describe('FIVE-GAMEWEEK WINDOW — THE LOOKAHEAD GUARD (the defect checkOracleCeiling caught, 3 Sep 2026)', () => {
+  // The app plans the whole G..G+4 horizon ONCE, at G. Three lookups inside
+  // projectAndReconstructWindowGameweek used to be keyed on the LEG's own
+  // gameweek G+i instead of the window's start G — the feature_history row,
+  // both computeTeamStrengthAsOf calls, and the position prior. Each one
+  // read point-in-time state from INSIDE the target window, which is
+  // hindsight the app does not have, and together they lifted the model's
+  // five-gameweek Spearman (0.728) above a genuine hindsight oracle's
+  // (0.506). Two things legitimately stay on the leg's own gameweek: that
+  // leg's actual outcome (the target) and its published fixture. Every test
+  // below fixes one of those five facts. See
+  // docs/projection-model-backlog.md G13.
+
+  const PLAYER = 950
+  const OWN = 1
+  const OPPONENT_LEG3 = 2
+  const OPPONENT_OTHER = 3
+  const G = 10
+  const LEG3 = 13 // G + 3
+
+  // Form at G: thin and quiet. Form at G+3: a different player entirely.
+  // Only the first may ever reach a projection.
+  const rowAtG = () => featureRow({ gameweek_id: G, player_code: PLAYER, element_type: FORWARD, team_code: OWN, prior_matches: 3, prior_minutes: 200, prior_xg: 0.2, prior_xa: 0.1 })
+  const rowAtLeg3 = () => featureRow({ gameweek_id: LEG3, player_code: PLAYER, element_type: FORWARD, team_code: OWN, prior_matches: 12, prior_minutes: 1080, prior_xg: 9, prior_xa: 6 })
+
+  it('leg 3 is projected from G\'s feature_history row, NOT from its own — form inside the window is hindsight', () => {
+    const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
+    const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3 })]
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, [])
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+
+    const prior = fallbackPositionPrior(FORWARD)
+    expect(outcome.projectedPoints).toBeCloseTo(projectRow(rowAtG(), FORWARD, prior, 1, []).expectedPoints, 10)
+
+    // And the two really are materially different — the assertion above is
+    // not passing because both rows happen to project the same.
+    const fromLeg3Row = projectRow(rowAtLeg3(), FORWARD, prior, 1, []).expectedPoints
+    expect(outcome.projectedPoints).not.toBeCloseTo(fromLeg3Row, 1)
+    expect(fromLeg3Row).toBeGreaterThan(outcome.projectedPoints)
+  })
+
+  it('the same holds end-to-end through classifyFiveGameweekRow — all four legs sum G\'s projection, never their own gameweeks\'', () => {
+    const insideWindow = [11, 12, 13, 14].map((gw) =>
+      featureRow({ gameweek_id: gw, player_code: PLAYER, element_type: FORWARD, team_code: OWN, prior_matches: 12, prior_minutes: 1080, prior_xg: 9, prior_xa: 6 }),
+    )
+    const index = buildFeatureHistoryIndex([rowAtG(), ...insideWindow])
+    const startRow = { gameweekId: G, position: FORWARD, projectedPoints: 0, actualPoints: 0, baselineMinutesPerMatch: 0, baselineXgXaPerMatch: 0 }
+    const actualByPlayerGameweek = new Map<string, ActualSourceRow[]>([11, 12, 13, 14].map((gw) => [`${PLAYER}:${gw}`, [sourceRow({ player_code: PLAYER, gameweek: gw })]]))
+
+    const classification = classifyFiveGameweekRow(PLAYER, startRow, 38, index, new Map(), new Map(), actualByPlayerGameweek, [])
+    expect(classification.kind).toBe('measured')
+    if (classification.kind !== 'measured') return
+
+    const perLeg = projectRow(rowAtG(), FORWARD, fallbackPositionPrior(FORWARD), 1, []).expectedPoints
+    expect(classification.row.projectedPoints).toBeCloseTo(4 * perLeg, 10)
+  })
+
+  it('leg 3\'s FIXTURE OPPONENT still comes from leg 3 — a published schedule is genuinely known at G', () => {
+    const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
+    // Both opponents have ample prior history, of very different quality.
+    const teamMatchRecords: TeamMatchRecord[] = []
+    for (let gw = 1; gw < G; gw++) {
+      teamMatchRecords.push({ matchId: `own-${gw}`, gameweek: gw, teamCode: OWN, goalsConceded: 1, goalsScored: 1 })
+      teamMatchRecords.push({ matchId: `weak-${gw}`, gameweek: gw, teamCode: OPPONENT_LEG3, goalsConceded: 3, goalsScored: 0 })
+      teamMatchRecords.push({ matchId: `strong-${gw}`, gameweek: gw, teamCode: OPPONENT_OTHER, goalsConceded: 0, goalsScored: 3 })
+    }
+
+    const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3, team_code: OWN, opponent_team_code: OPPONENT_LEG3 })]
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, teamMatchRecords)
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+
+    const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, OWN, G)
+    const esVsLeg3Opponent = computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, OPPONENT_LEG3, G), SCALE)
+    const esVsOtherOpponent = computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, OPPONENT_OTHER, G), SCALE)
+
+    const prior = fallbackPositionPrior(FORWARD)
+    expect(outcome.projectedPoints).toBeCloseTo(projectRow(rowAtG(), FORWARD, prior, 1, [esVsLeg3Opponent]).expectedPoints, 10)
+    // The wrong opponent would have been visibly wrong.
+    expect(esVsOtherOpponent).not.toBeCloseTo(esVsLeg3Opponent, 3)
+    expect(outcome.projectedPoints).not.toBeCloseTo(projectRow(rowAtG(), FORWARD, prior, 1, [esVsOtherOpponent]).expectedPoints, 2)
+  })
+
+  it('BOTH team strengths are measured as of G — results from inside the window never move a fixture', () => {
+    const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
+    const teamMatchRecords: TeamMatchRecord[] = []
+    for (let gw = 1; gw < G; gw++) {
+      teamMatchRecords.push({ matchId: `own-${gw}`, gameweek: gw, teamCode: OWN, goalsConceded: 1, goalsScored: 1 })
+      teamMatchRecords.push({ matchId: `opp-${gw}`, gameweek: gw, teamCode: OPPONENT_LEG3, goalsConceded: 1, goalsScored: 1 })
+    }
+    // Everything from G onward is deliberately enormous and lopsided: if
+    // either strength read were keyed on LEG3 rather than G, these records
+    // would land inside the comparison and the expected score would move.
+    const withInsideWindowResults: TeamMatchRecord[] = [...teamMatchRecords]
+    for (let gw = G; gw < LEG3; gw++) {
+      withInsideWindowResults.push({ matchId: `own-in-${gw}`, gameweek: gw, teamCode: OWN, goalsConceded: 0, goalsScored: 40 })
+      withInsideWindowResults.push({ matchId: `opp-in-${gw}`, gameweek: gw, teamCode: OPPONENT_LEG3, goalsConceded: 40, goalsScored: 0 })
+    }
+
+    const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3, team_code: OWN, opponent_team_code: OPPONENT_LEG3 })]
+    const without = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, teamMatchRecords)
+    const with_ = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), legRows, withInsideWindowResults)
+    expect(without.status).toBe('ok')
+    expect(with_.status).toBe('ok')
+    if (without.status !== 'ok' || with_.status !== 'ok') return
+
+    // Two identical prior records at G ⇒ exactly the neutral 0.5, and adding
+    // in-window results must not budge it.
+    expect(computeFixtureExpectedScore(computeTeamStrengthAsOf(withInsideWindowResults, OWN, G), computeTeamStrengthAsOf(withInsideWindowResults, OPPONENT_LEG3, G), SCALE)).toBe(0.5)
+    expect(with_.projectedPoints).toBeCloseTo(without.projectedPoints, 10)
+  })
+
+  it('the POSITION PRIOR is read at G, never at the leg\'s own gameweek', () => {
+    const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
+    const priorAtG = zeroPrior(FORWARD)
+    // A prior filed under LEG3 that is nothing like G's — reading it would
+    // change the projection, so this map proves which key was used.
+    const priorAtLeg3: PositionPrior = { rate: positionPriorRates([{ minutesPlayed: 900, xg: 12, xa: 9, saves: 0, cbi: 0, recoveries: 0 }]), defconHitRate: 0.9 }
+    const positionPriors = new Map<string, PositionPrior>([
+      [`${G}:${FORWARD}`, priorAtG],
+      [`${LEG3}:${FORWARD}`, priorAtLeg3],
+    ])
+
+    const legRows = [sourceRow({ player_code: PLAYER, gameweek: LEG3 })]
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), positionPriors, legRows, [])
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+    expect(outcome.projectedPoints).toBeCloseTo(projectRow(rowAtG(), FORWARD, priorAtG, 1, []).expectedPoints, 10)
+    expect(outcome.projectedPoints).not.toBeCloseTo(projectRow(rowAtG(), FORWARD, priorAtLeg3, 1, []).expectedPoints, 2)
+  })
+
+  it('leg 3\'s ACTUAL OUTCOME still comes from leg 3 — that is the target being ranked, not an input', () => {
+    const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
+    const scoredTwice = [sourceRow({ player_code: PLAYER, gameweek: LEG3, goals: 2 })]
+    const outcome = projectAndReconstructWindowGameweek(PLAYER, G, LEG3, index, new Map(), new Map(), scoredTwice, [])
+    expect(outcome.status).toBe('ok')
+    if (outcome.status !== 'ok') return
+    expect(outcome.actualPoints).toBe(aggregateActualForGameweek(FORWARD, [toActualMatchStatsInput(scoredTwice[0])]).totalPoints)
+    expect(outcome.actualPoints).toBeGreaterThan(0)
+  })
+
+  it('throws when the two gameweek arguments are swapped — a leg can never precede its own window start', () => {
+    const index = buildFeatureHistoryIndex([rowAtG(), rowAtLeg3()])
+    expect(() => projectAndReconstructWindowGameweek(PLAYER, LEG3, G, index, new Map(), new Map(), [], [])).toThrow(/swapped/)
   })
 })
 
@@ -3302,6 +3483,36 @@ describe('run-backtest.ts — the join is on player_code, never player_id', () =
 
   it('selects match_id from player_match_stats — ticket #140, team-slug inference for blank-gameweek detection only, never used for point reconstruction', () => {
     expect(source).toMatch(/match_id/)
+  })
+})
+
+describe('run-backtest.ts — the five-gameweek window reads model state at G, fixtures at G+i (the G13 lookahead fix)', () => {
+  // A shape test, not a behaviour test: the unit tests above prove the
+  // behaviour, this proves nobody reintroduced the leak by editing the three
+  // lookups back to the leg's own gameweek. See docs/projection-model-backlog.md G13.
+  const fn = source.slice(source.indexOf('export function projectAndReconstructWindowGameweek'), source.indexOf('export interface FiveGameweekRow'))
+
+  it('takes both gameweeks under names that cannot be confused', () => {
+    expect(fn).toMatch(/featureGameweekId: number/)
+    expect(fn).toMatch(/legGameweekId: number/)
+  })
+
+  it('all three point-in-time lookups key on featureGameweekId — the window\'s START', () => {
+    expect(fn).toMatch(/featureHistoryByPlayerGameweek\.get\(windowKey\(playerCode, featureGameweekId\)\)/)
+    expect(fn).toMatch(/positionPriors\.get\(positionPriorKey\(featureGameweekId, position\)\)/)
+    const strengthCalls = fn.match(/computeTeamStrengthAsOf\([^)]*\)/g) ?? []
+    expect(strengthCalls.length).toBe(2) // own club and opponent
+    for (const call of strengthCalls) expect(call).toMatch(/featureGameweekId\s*\)$/)
+  })
+
+  it('nothing inside the function keys a lookup on legGameweekId — the leg reaches it only through actualRows', () => {
+    expect(fn).not.toMatch(/windowKey\(playerCode, legGameweekId\)/)
+    expect(fn).not.toMatch(/positionPriorKey\(legGameweekId/)
+    expect(fn).not.toMatch(/computeTeamStrengthAsOf\([^)]*legGameweekId/)
+  })
+
+  it('classifyFiveGameweekRow passes the window\'s start gameweek as featureGameweekId, the leg\'s as legGameweekId', () => {
+    expect(source).toMatch(/projectAndReconstructWindowGameweek\(\s*\n\s*playerCode,\s*\n\s*startRow\.gameweekId,\s*\n\s*gameweekId,/)
   })
 })
 

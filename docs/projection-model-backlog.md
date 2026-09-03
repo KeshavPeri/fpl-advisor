@@ -691,31 +691,62 @@ waits for a future batch.
 
 ---
 
-## G13 — Ticket #183's 5-gameweek quality oracle was mis-specified; the specification defect is the
-## lesson, not the number
+## G13 — CORRECTED, 3 Sep 2026. The 5-gameweek oracle was NOT mis-specified. The model side was
+## reading point-in-time state from inside the target window, at three separate lookups
 
-Ticket #183 specified its 5-gameweek quality oracle as "quality estimated from actual results
-outside the target window" — without requiring that estimate be expressed in the target metric's
-own units.
+**This entry previously recorded the wrong cause and is superseded by what follows.** It said
+ticket #183's 5-gameweek quality oracle was specified in the wrong units — a per-match *rate*
+scored against a *totals* target — and that this explained the impossible-looking ordering. That
+diagnosis was wrong. The oracle was correctly specified. The defect was on the model side, and it
+was a lookahead leak.
 
-**The result was an impossible-looking ordering.** A per-match *rate* oracle, scored against a
-*totals* target, produced **model 0.672 > oracle 0.507** — an oracle built to know the answer
-scoring below the model it was meant to bound. The number was never a model finding; the metric
-itself was wrong, comparing a rate to a total as if they were the same quantity.
+**What was actually wrong.** `scripts/run-backtest.ts` builds a 5-gameweek window by projecting
+each leg G..G+4 separately and summing. The app it is measuring plans that whole horizon **once,
+at G**, from the state visible at G. But `projectAndReconstructWindowGameweek` keyed three
+point-in-time lookups on the **leg's** own gameweek G+i instead of the window's **start** G:
 
-**The review's independent reconstruction of the same comparison, done in the correct units,
-reads the expected ordering.** `docs/model-review-2026-09-02.md`'s 5-gameweek quality oracle
-(leave-target-out season points-per-match, expressed as a total over the 5-GW window) reads
-**model 0.425 vs oracle 0.485** — the oracle above the model, as an oracle with genuine lookahead
-on quality should be.
+1. `featureHistoryByPlayerGameweek.get(windowKey(playerCode, gameweekId))` — the player's
+   `prior_*` form, minutes and xG/xA as of G+i.
+2. `computeTeamStrengthAsOf(teamMatchRecords, ..., gameweekId)`, at **both** call sites — his own
+   club's and his opponent's strength as of G+i.
+3. `positionPriors.get(positionPriorKey(gameweekId, position))` — the position baseline as of G+i.
 
-**The fix, and who does it.** Ticket #89 reconciles the two constructions and corrects the oracle
-to estimate a *total* — out-of-window points-per-match × out-of-window appearance rate — in the
-same units as the 5-GW target it is meant to bound. Ticket #187 is running concurrently in this
-same batch (2 Sep 2026) and is the one doing this oracle fix; its outcome is not yet known and is
-not asserted here — this entry records the defect and the two figure pairs as specified, not
-#187's result.
+Every one of those reads state from **inside the window being predicted**. A leg-4 projection knew
+how the player and both clubs had been going for three gameweeks the app had not yet lived
+through. The published fixture *schedule* for G..G+4 is genuinely known at G — who you play and
+how often — and that part was always correct and stays keyed on the leg. The *form* of everyone in
+it is not.
 
-**The general lesson, for any future oracle or bound in this repo:** a bound is only a bound if it
-is computed in the same units as the thing it bounds. A rate is not a total, however cleanly it
-can be described in one sentence.
+**Why it produced an impossible ordering.** A hindsight oracle bounds a model only if the model has
+no hindsight of its own. With three leaks feeding it, the model scored **0.728** against a genuine
+hindsight oracle's **0.506** — the model beating the ceiling built to bound it. That is not a model
+finding and never was; it is `checkOracleCeiling` doing exactly its job. **The bound is the thing
+that caught this, and it must not be relaxed or removed.**
+
+**Ticket #187's oracle rewrite was a no-op against the real defect.** #187 read the same
+impossible ordering, accepted the units diagnosis this entry used to carry, and rewrote the
+5-gameweek oracle to `out-of-window points-per-match × out-of-window appearance rate × horizon`.
+That rewrite is defensible on its own terms and is left in place — but it addressed a side of the
+comparison that was not broken, so the ordering it was meant to fix survived it. The fix is on the
+model side: `projectAndReconstructWindowGameweek` now takes `featureGameweekId` (G) and
+`legGameweekId` (G+i) as separate, individually-documented arguments, and the three lookups above
+read `featureGameweekId`.
+
+**This also settles #187's own flagged residual.** `decisions/ticket-187.md` recorded, as an
+explicit unproven hypothesis, that the gap between `docs/model-review-2026-09-02.md`'s independent
+prediction (0.425) and the shipped run (0.672) might be the review's Python taking a "one
+projection × 5" shortcut. It was the other way round: the review's reconstruction had no lookahead
+and this harness did. That hypothesis is closed.
+
+**The general lesson about bounds and units still stands, and is still true** — a bound is only a
+bound if it is computed in the same units as the thing it bounds; a rate is not a total. It simply
+is not what happened here, and reaching for it first cost a ticket. **The second lesson, which is
+the one this episode actually teaches:** when a hindsight bound is breached, suspect the *model*
+side first. The oracle is usually the simpler construction and the easier one to re-read, which is
+exactly why it attracts the blame.
+
+**A note on how to read the two figure pairs this entry used to present.** 0.672/0.507 (#183's run)
+and 0.728/0.506 (post-#187) are both leaked model figures against honest oracles. Neither model
+number is a valid measurement of this model's 5-gameweek ranking skill, and neither should be
+quoted as a baseline. The first trustworthy 5-gameweek figure is whatever the next full run
+produces against the fixed harness.

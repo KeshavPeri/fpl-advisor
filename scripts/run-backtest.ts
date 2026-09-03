@@ -2497,15 +2497,25 @@ export function buildBaselineVerdicts(modelSeasonSpearman: number | null, baseli
 // review's recommendation R2.
 //
 // FIVE PROJECTIONS SUMMED, NEVER ONE PROJECTION TIMES FIVE (ticket text).
-// For a window's gameweeks G+1..G+4, this section builds a FRESH
-// FeatureHistoryRow-driven projection at each one, from that gameweek's own
-// `feature_history` row (strictly-before-that-gameweek totals, by
-// feature_history's own construction — see file header, "THE JOIN") — never
-// the starting gameweek's row reused or scaled. The G leg of the window
-// reuses the corresponding `measured` row's own `projectedPoints`/
-// `actualPoints` directly (computed by the untouched section above via the
-// exact same pipeline) rather than recomputing it a second, potentially
-// divergent way.
+// EVERYTHING IS PLANNED AT G. The app picks a transfer once, at the window's
+// start gameweek G, and lives with it for G..G+4. So every leg of the window
+// is projected from the model state visible AT G — G's `feature_history` row
+// (strictly-before-G totals, by feature_history's own construction — see
+// file header, "THE JOIN"), G's position prior, and both teams' strength as
+// of G — and only the FIXTURE identity varies leg by leg, because the
+// published schedule for G..G+4 is genuinely known at G. The G leg reuses
+// the corresponding `measured` row's own `projectedPoints`/`actualPoints`
+// directly (computed by the untouched section above via the exact same
+// pipeline) rather than recomputing it a second, potentially divergent way.
+//
+// THIS WAS WRONG UNTIL 3 SEP 2026 AND IS WHY THE ORACLE CEILING TRIPPED.
+// The legs used to be projected from G+i's OWN feature_history row, position
+// prior and team strength — point-in-time state from INSIDE the target
+// window, i.e. hindsight the app does not have when it plans at G. That
+// inflated the model's five-gameweek Spearman to 0.728 against a genuine
+// hindsight oracle's 0.506, which is what `checkOracleCeiling` reported. See
+// `projectAndReconstructWindowGameweek`'s own comment for the exact split of
+// which argument serves which side, and docs/projection-model-backlog.md G13.
 //
 // TRUNCATED WINDOWS — EXCLUDED, NOT SHORTENED (ticket text: "decide exclude
 // vs. shorter-window reporting, state which"). A starting gameweek G whose
@@ -2613,33 +2623,75 @@ export type WindowGameweekOutcome =
   | { status: 'actualDataIncomplete' }
 
 /**
- * Projects and reconstructs ONE window leg — a (player, gameweek) pair that
- * may or may not be the window's own starting gameweek. Every function
- * called here is imported/defined ABOVE this section, unmodified:
- * `resolveRowPosition` (same two-source resolution the section above uses,
- * same `codeToPosition` fallback), `aggregateActualForGameweek`/
+ * Projects and reconstructs ONE window leg — the (player, G+i) pair for leg
+ * `i` of a window that starts at gameweek G.
+ *
+ * TWO GAMEWEEK ARGUMENTS, AND WHICH SIDE EACH ONE SERVES. The app plans the
+ * whole five-gameweek horizon ONCE, at G, from the state it can actually see
+ * at G. So the two gameweek parameters below are NOT interchangeable and
+ * must never be collapsed into one:
+ *
+ *   `featureGameweekId` — THE WINDOW'S START, G. Every point-in-time piece
+ *   of MODEL STATE is keyed on it, because G's state is all the app has when
+ *   it plans the horizon. Exactly three lookups, all of them here:
+ *     1. the `feature_history` row (`prior_*` form, minutes, xG/xA, and the
+ *        `element_type`/`team_code` read off it),
+ *     2. both `computeTeamStrengthAsOf` calls — own club's and opponent's
+ *        strength,
+ *     3. the (gameweek, position) entry in `positionPriors`.
+ *   Keying any of these on the leg's own gameweek instead reads state from
+ *   INSIDE the target window — hindsight the app does not have — and that is
+ *   not a small leak: it inflated the model's five-gameweek Spearman to
+ *   0.728 against a genuine hindsight oracle's 0.506, which is the ordering
+ *   `checkOracleCeiling` refuses. See docs/projection-model-backlog.md G13.
+ *
+ *   `legGameweekId` — THIS LEG'S OWN GAMEWEEK, G+i. Only what a PUBLISHED
+ *   FIXTURE SCHEDULE legitimately tells you at G is keyed on it, and both of
+ *   those reach this function through `actualRows`, which the caller has
+ *   already selected for G+i:
+ *     - that leg's real outcome — the target being ranked, not an input, and
+ *     - `opponentTeamCodes`/`resolveFixtureTeams` — WHO the club plays that
+ *       week and how many times (a double gameweek shows up as two rows).
+ *   The schedule for G..G+4 is public at G; the form of the clubs in it is
+ *   not. Hence the split: the fixture's IDENTITY is the leg's, while both
+ *   sides' STRENGTH is measured as of G.
+ *
+ * Every function called here is imported/defined ABOVE this section,
+ * unmodified: `resolveRowPosition` (same two-source resolution the section
+ * above uses, same `codeToPosition` fallback), `aggregateActualForGameweek`/
  * `reconstructActualMatchPoints` (via `toActualMatchStatsInput`, so a
  * non-featuring or no-data leg naturally reconstructs to 0 points — see this
  * section's own header, "ZEROS FOR NON-FEATURING WEEKS"), `resolveFixtureTeams`/
  * `computeTeamStrengthAsOf`/`computeFixtureExpectedScore` (the SAME
  * point-in-time fixture construction ticket #175 built, degrading to the
- * neutral fixture exactly as it already does when a team cannot be
+ * neutral fixture exactly as it already does when a club cannot be
  * resolved — never a second, divergent fixture rule), and `projectRow`
- * itself. No lookahead: `row` is this gameweek's OWN feature_history row
- * (strictly-before-gameweek totals by that table's own construction), and
- * `computeTeamStrengthAsOf` is called with `gameweekId` — this leg's own
- * gameweek — exactly as the section above already does.
+ * itself.
  */
 export function projectAndReconstructWindowGameweek(
   playerCode: number,
-  gameweekId: number,
+  /** G — the window's START gameweek. Keys the feature_history row, both team-strength reads and the position prior. See this function's own comment. */
+  featureGameweekId: number,
+  /** G+i — this leg's OWN gameweek. Serves only the fixture schedule and the actual outcome, both of which arrive via `actualRows`. See this function's own comment. */
+  legGameweekId: number,
   featureHistoryByPlayerGameweek: ReadonlyMap<string, FeatureHistoryRow>,
   codeToPosition: ReadonlyMap<number, Position>,
   positionPriors: ReadonlyMap<string, PositionPrior>,
   actualRows: readonly ActualSourceRow[],
   teamMatchRecords: readonly TeamMatchRecord[],
 ): WindowGameweekOutcome {
-  const row = featureHistoryByPlayerGameweek.get(windowKey(playerCode, gameweekId))
+  // A leg can never sit before the window that contains it. This guard is
+  // cheap and it is the one place the two arguments are compared, so a
+  // future caller that swaps them at the call site fails loudly here rather
+  // than silently reintroducing the G13 lookahead.
+  if (legGameweekId < featureGameweekId) {
+    throw new BacktestError(
+      `window leg gameweek ${legGameweekId} precedes its own window start ${featureGameweekId} for player ${playerCode} — the two gameweek arguments to projectAndReconstructWindowGameweek are almost certainly swapped.`,
+      'fiveGameweekWindow',
+    )
+  }
+
+  const row = featureHistoryByPlayerGameweek.get(windowKey(playerCode, featureGameweekId))
   if (row === undefined) return { status: 'missingFeatureHistoryRow' }
 
   const resolution = resolveRowPosition(row, codeToPosition)
@@ -2650,17 +2702,18 @@ export function projectAndReconstructWindowGameweek(
   const outcome = aggregateActualForGameweek(position, actualInputs)
   if (!outcome.teamGoalsConcededKnown) return { status: 'actualDataIncomplete' }
 
+  // Fixture IDENTITY from the leg (via actualRows), fixture STRENGTH as of G.
   const opponentTeamCodes = actualRows.map((r) => r.opponent_team_code)
   const fixtureTeamsResolved = resolveFixtureTeams(row.team_code, opponentTeamCodes)
   let fixtureExpectedScores: number[] = []
   if (fixtureTeamsResolved) {
-    const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, row.team_code as number, gameweekId)
+    const ownStrength = computeTeamStrengthAsOf(teamMatchRecords, row.team_code as number, featureGameweekId)
     fixtureExpectedScores = opponentTeamCodes.map((code) =>
-      computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, code as number, gameweekId), SCALE),
+      computeFixtureExpectedScore(ownStrength, computeTeamStrengthAsOf(teamMatchRecords, code as number, featureGameweekId), SCALE),
     )
   }
 
-  const prior = positionPriors.get(positionPriorKey(gameweekId, position)) ?? fallbackPositionPrior(position)
+  const prior = positionPriors.get(positionPriorKey(featureGameweekId, position)) ?? fallbackPositionPrior(position)
   const projection = projectRow(row, position, prior, outcome.matchesFound, fixtureExpectedScores)
 
   return { status: 'ok', position, projectedPoints: projection.expectedPoints, actualPoints: outcome.totalPoints }
@@ -2695,6 +2748,14 @@ export type FiveGameweekClassification =
  * — any non-'ok' leg excludes the WHOLE window under that leg's own reason
  * (a window is only as good as its worst-resolved leg; never a partial sum
  * silently missing a leg).
+ *
+ * `startRow.gameweekId` is G, and it is passed to every leg as that
+ * function's `featureGameweekId` — the model state each leg is built from is
+ * the state at G, never the state at G+i, because that is the only state the
+ * app has when it plans the whole horizon at G. The leg's own gameweek goes
+ * in as `legGameweekId` and selects that leg's `actualRows` (its outcome and
+ * its published fixture). See `projectAndReconstructWindowGameweek`'s own
+ * comment for why each side gets which.
  */
 export function classifyFiveGameweekRow(
   playerCode: number,
@@ -2719,6 +2780,7 @@ export function classifyFiveGameweekRow(
     const actualRows = actualByPlayerGameweek.get(windowKey(playerCode, gameweekId)) ?? []
     const outcome = projectAndReconstructWindowGameweek(
       playerCode,
+      startRow.gameweekId,
       gameweekId,
       featureHistoryByPlayerGameweek,
       codeToPosition,
@@ -3671,8 +3733,8 @@ function buildFiveGameweekSections(data: ReportData): string[] {
       `- excluded — **truncated window** (starting gameweek + 4 exceeds gameweek ${fg.lastGameweekInData}, i.e. a starting gameweek ` +
       `above ${fg.lastGameweekInData - FIVE_GAMEWEEK_HORIZON + 1} — excluded rather than reported as a shorter sum, per ` +
       `\`docs/model-review-2026-09-02.md\`'s own R2 rule): ${fg.exclusions.truncatedWindow}\n` +
-      `- excluded — a window leg's \`feature_history\` row was missing (should not occur given that table's own density guarantee; a data-integrity check, not an expected case): ${fg.exclusions.missingFeatureHistoryRow}\n` +
-      `- excluded — a window leg's position could not be resolved: ${fg.exclusions.unresolvedPosition}\n` +
+      `- excluded — the window's START gameweek \`feature_history\` row was missing (every leg is built from it, never from the leg's own row — see \`projectAndReconstructWindowGameweek\`; should not occur at all, since a candidate row is by construction a measured row at that same gameweek): ${fg.exclusions.missingFeatureHistoryRow}\n` +
+      `- excluded — the position on the window's START gameweek row could not be resolved: ${fg.exclusions.unresolvedPosition}\n` +
       `- excluded — a window leg's actual data was incomplete (\`team_goals_conceded\` unknown, the same ~2% gap the section above excludes for, re-applied per leg): ${fg.exclusions.actualDataIncomplete}\n` +
       `- **five-gameweek rows measured**: ${fg.measuredCount}\n\n` +
       `Reconciliation: ${fg.measuredCount} measured + ${totalFiveGameweekExcluded(fg.exclusions)} excluded = ` +
