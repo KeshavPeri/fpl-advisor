@@ -24,22 +24,25 @@
   z-index: 10;
 
   display: flex;
+  align-items: center;
   gap: var(--space-1);
   padding: var(--space-1);
   width: calc(100% - var(--space-8));
   max-width: 22rem;
+  /* #194, section C — the Home circle (below) is absolutely positioned
+     and overlaps this box's own top edge on purpose, so the two read as
+     one continuous shape rather than as a button clipped by its parent. */
+  overflow: visible;
 
   border-radius: 22px;
   /* The glass. --material-bar is 0.50 alpha — deliberately LOWER than
      the 0.55 every panel shares, making this the most translucent
-     surface in the app; it carries the only backdrop blur; it saturates
-     hardest (180% vs the panels' 150%); and it takes the brightest
-     light-catching edge (--material-edge-3). Those four together are
-     what make the bar read as a different, more material substance than
-     the panels rather than as another panel that happens to float. The
-     blur is real here and only here: content scrolls behind this
-     element, so there is genuine high-frequency detail for it to soften
-     (F13/P10). */
+     surface in the app; it carries the strongest backdrop blur; it
+     saturates hardest (180% vs the panels' 150%, section B); and it
+     takes the brightest light-catching edge (--material-edge-3). Those
+     four together are what make the bar read as a different, more
+     material substance than the panels rather than as another panel
+     that happens to float. */
   background: var(--material-bar);
   -webkit-backdrop-filter: blur(var(--material-bar-blur)) saturate(var(--material-bar-saturate));
   backdrop-filter: blur(var(--material-bar-blur)) saturate(var(--material-bar-saturate));
@@ -48,6 +51,15 @@
   box-shadow:
     inset 0 1px 0 0 var(--material-sheen-3),
     0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+/* #194, section C — reserves the width the absolutely positioned Home
+   circle occupies, so the two side items (flex: 1 each) never grow into
+   its footprint. Same width as the circle itself, not a hand-picked
+   value. */
+.app-bar__home-spacer {
+  width: var(--nav-home-size);
+  flex-shrink: 0;
 }
 
 /* The scroll-edge scrim. It fades content toward the base ink as it
@@ -69,11 +81,14 @@
   left: 0;
   right: 0;
   bottom: 0;
-  /* Bar height (~59px incl. padding) + its own gap above the safe area +
-     a margin of extra fade so the transition reads as gradual rather
-     than as a second hard edge. Approximate on purpose — a decorative
-     fade, not a measurement anything else depends on. */
-  height: calc(env(safe-area-inset-bottom) + 6.5rem);
+  /* #194, section A3 (rendering fault) — reads the same --nav-bar-reserve
+     token AppShell.css's own column padding-bottom reads, plus a small
+     extra margin so the fade reads as gradual rather than as a second
+     hard edge right where the reserved space ends. The two can no longer
+     drift apart the way a `4rem` column constant and a separately
+     hand-typed `6.5rem` scrim height could — see index.css's own comment
+     on --nav-bar-reserve for the derivation. */
+  height: calc(env(safe-area-inset-bottom) + var(--nav-bar-reserve) + var(--space-4));
   z-index: 9;
   pointer-events: none;
   opacity: var(--scrim-strength);
@@ -87,12 +102,12 @@
 }
 
 .app-bar__item {
-  flex: 1;
   min-height: 44px;
   display: flex;
   /* Icon over label. The stack is what earns the icons their space: at
-     22px + 13px the item still clears the 44px iOS floor on its own
-     content, so nothing is padded out to fake a tap target. */
+     22px + the label's own line the item still clears the 44px iOS
+     floor on its own content, so nothing is padded out to fake a tap
+     target. */
   flex-direction: column;
   align-items: center;
   justify-content: center;
@@ -113,10 +128,49 @@
     background-color var(--dur-press) ease;
 }
 
+.app-bar__item--side {
+  flex: 1;
+}
+
+/* #194, section C — Home: a circle overlapping the bar's own top edge,
+   sharing its exact material (fill, blur, saturation, edge light) so the
+   two read as one continuous, lit shape rather than a button welded onto
+   a pill. Positioned relative to `.app-bar` (which is `overflow: visible`
+   for exactly this). `translate(-50%, -58%)` centres it horizontally and
+   lifts it so a bit under half of its own height pokes above the bar —
+   enough to read as "bulging outward," not so much that it looks
+   detached from the pill beneath it. */
+.app-bar__item--home {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -58%);
+  width: var(--nav-home-size);
+  height: var(--nav-home-size);
+  border-radius: 50%;
+  background: var(--material-bar);
+  -webkit-backdrop-filter: blur(var(--material-bar-blur)) saturate(var(--material-bar-saturate));
+  backdrop-filter: blur(var(--material-bar-blur)) saturate(var(--material-bar-saturate));
+  border: 1px solid var(--panel-border);
+  border-top-color: var(--material-edge-3);
+  box-shadow:
+    inset 0 1px 0 0 var(--material-sheen-3),
+    0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* #194, section C — one sharp register for every label in the bar,
+   chosen over the previous 13px/550/positive-tracking combination (which
+   the ticket names as "the weakest thing about the bar," reading soft).
+   Smaller, heavier, tighter — the other legitimate register named
+   (small uppercase, wide tracking) is deliberately not layered on top of
+   this one; the ticket is explicit that a bar commits to one axis of
+   sharpening, not both. */
 .app-bar__label {
-  font: var(--text-label);
-  font-weight: 550;
-  letter-spacing: var(--tracking-label);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  font-weight: 650;
+  letter-spacing: -0.006em;
 }
 
 .app-bar__icon {
@@ -146,6 +200,20 @@
 
 .app-bar__item[aria-current='page'] .app-bar__label {
   font-weight: 620;
+}
+
+/* Home overrides the generic active-state fill above: it must keep
+   sharing --material-bar (the whole point of section C's "one continuous
+   silhouette") rather than swap to the cyan-dim pill every side item
+   uses, which would otherwise win — `[aria-current='page']` alone has
+   higher specificity than `.app-bar__item--home` alone, and Home is the
+   default route, so this is the common case, not an edge case. A cyan
+   ring on the circle's own edge (the app's existing solid/hollow idiom —
+   PlayerShirt.css's captaincy and availability rings) replaces the fill
+   swap as the colour signal. */
+.app-bar__item--home[aria-current='page'] {
+  background: var(--material-bar);
+  border-color: var(--accent-cyan-line);
 }
 
 .app-bar__item:active {

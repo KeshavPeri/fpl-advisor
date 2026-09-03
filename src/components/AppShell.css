@@ -72,6 +72,29 @@
   opacity: 1;
 }
 
+/* #194, section B — a fixed, high-frequency grain layer behind every panel
+   (docs/ui-audit-2026-08-31.md's dated correction to F13): the ambient
+   wash alone is a smooth gradient with nothing for a panel's restored
+   backdrop-filter blur (Surface.css) to act on, so this supplies real
+   per-pixel texture instead. An inline SVG fractalNoise turbulence,
+   desaturated (feColorMatrix saturate 0) so it never introduces a colour
+   of its own, tiled at a small size so it reads as fine grain rather than
+   as a visible repeating tile. Low opacity and `mix-blend-mode: overlay`
+   keep it a texture, not a visible pattern — it should read as "the dark
+   has grain," never as "there is a grid printed on the screen." Fixed and
+   z-index: -1, same layer group as the two wash layers above, so it never
+   scrolls with the page and never intercepts a tap. */
+.app-shell__grain {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 120px 120px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .app-shell__backdrop--escalated {
     transition: opacity var(--dur-enter) ease;
@@ -88,11 +111,16 @@
   display: flex;
   flex-direction: column;
   padding-top: calc(env(safe-area-inset-top) + var(--space-6));
-  /* F17 — room for the floating bar (~52px) plus its own gap above the
-     safe area, so the last panel on every screen is never covered by it.
-     Was `calc(env(safe-area-inset-bottom) + var(--space-6))`; +4rem is
-     the bar's reserved height. */
-  padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-6) + 4rem);
+  /* #194, section A3 (rendering fault) — the owner's own iPhone showed
+     page content legible under the floating bar on both Home and Chips:
+     the previous `+ 4rem` constant (F17) under-measured the bar's real
+     rendered height once the bar grew a circular centre item that pokes
+     above its own top edge (section C). `--nav-bar-reserve` (index.css)
+     is the single, deliberately generous constant both this padding and
+     AppBar.css's own scroll-edge scrim now read, so the two can never
+     drift out of sync with each other the way a literal `4rem` here and
+     a separately-eyeballed scrim height could. */
+  padding-bottom: calc(env(safe-area-inset-bottom) + var(--nav-bar-reserve));
   padding-left: calc(env(safe-area-inset-left) + var(--space-4));
   padding-right: calc(env(safe-area-inset-right) + var(--space-4));
   /* F18 — this was a flat var(--space-6) applied identically between
@@ -119,4 +147,21 @@
 .bleed {
   margin-left: calc(-1 * (env(safe-area-inset-left) + var(--space-4)));
   margin-right: calc(-1 * (env(safe-area-inset-right) + var(--space-4)));
+}
+
+/* #194, section D — the verdict card's own "widest bleed on the screen"
+   treatment, now that the pitch no longer claims full-bleed (see
+   .bleed-narrow below and docs/ui-audit-2026-08-31.md's dated correction
+   to F25). Reused verbatim from .bleed — a second class only so the two
+   call sites read their own intent at the point of use. */
+
+/* #194, section E — the pitch keeps a narrow side margin rather than
+   running to the screen edge (owner decision, 3 Sep 2026, departing from
+   the audit's F25 full-bleed proposal — see that finding's own dated
+   correction). Cancels only half of the column's own --space-4 inset,
+   leaving --space-2 (8px) of margin plus the safe-area inset, rather than
+   .bleed's full cancellation down to 0. */
+.bleed-narrow {
+  margin-left: calc(-1 * (env(safe-area-inset-left) + var(--space-4) - var(--space-2)));
+  margin-right: calc(-1 * (env(safe-area-inset-right) + var(--space-4) - var(--space-2)));
 }

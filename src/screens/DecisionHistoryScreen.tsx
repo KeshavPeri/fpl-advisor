@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { fetchDecisionHistorySource } from '../lib/decisions/api.ts'
@@ -83,13 +82,6 @@ function DecisionHistoryScreen() {
 
   return (
     <AppShell>
-      <div className="decisions-header">
-        <Link className="decisions-back" to="/">
-          ← Home
-        </Link>
-        <p className="decisions-mark">Decisions</p>
-      </div>
-
       {screenState.status === 'loading' && (
         <Surface className="decisions-loading" aria-hidden="true">
           <div className="decisions-skeleton-line decisions-skeleton-line--title" />

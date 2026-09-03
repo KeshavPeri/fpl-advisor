@@ -1,5 +1,4 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Link } from 'react-router'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { fetchChipSourceData } from '../lib/chips/api.ts'
@@ -66,13 +65,6 @@ function ChipsScreen() {
 
   return (
     <AppShell>
-      <div className="chips-header">
-        <Link className="chips-back" to="/">
-          ← Home
-        </Link>
-        <p className="chips-mark">Chips</p>
-      </div>
-
       {screenState.status === 'loading' && (
         <Surface className="chips-loading" aria-hidden="true">
           <div className="chips-skeleton-line chips-skeleton-line--title" />

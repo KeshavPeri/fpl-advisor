@@ -12,7 +12,10 @@ import './AppBar.css'
  * Three top-level destinations, per the audit's P3 table — three is the
  * right number for a persistent bar: under the five-item ceiling, and
  * every item is a *place* rather than an *action*:
- *   - "This week" (/) — the screen the app exists for.
+ *   - "Home" (/) — the screen the app exists for. Renamed from "This
+ *     week" (#194, section C) — the label named the screen's cadence, not
+ *     the destination, and this is a single-user app on Keshav's own
+ *     phone: "Home" is what he already calls it.
  *   - "Chips" (/chips) — standing season state, checked periodically,
  *     not reached from any single decision.
  *   - "Record" (/decisions) — the track record, a destination in its own
@@ -20,6 +23,12 @@ import './AppBar.css'
  * /reasoning, /override and /squad stay contextual, reached from the
  * surfaces they belong to (the verdict card, the pitch, the incomplete
  * banner) rather than from here.
+ *
+ * #194, section C — Home moved from the left end to the centre, rendered
+ * as a circle that bulges above the bar's own top edge rather than as a
+ * third equal pill: "one continuous silhouette... Home at the centre as
+ * a circle, with Chips and Record contouring outward from it to each end
+ * of the bar." See AppBar.css for the shape mechanism.
  *
  * ICONS — correction B to #166, which shipped this bar text-only. The
  * audit's reasoning for text alone (the app draws no icons, so inventing
@@ -70,18 +79,29 @@ function AppBar() {
           a tap either for content beneath it or for the bar itself,
           which paints above it (z-index 10 vs 9). */}
       <div className="app-bar__scrim" aria-hidden="true" />
+      {/* #194, section C — one continuous silhouette rather than three
+          equal pills: Home is a circle at the centre, sharing the bar's
+          own fill/blur/edge so it reads as one lit material bulging above
+          the pill rather than a separate floating button welded on top.
+          Chips and Record are ordinary flex items either side; a plain
+          spacer (`app-bar__home-spacer`) reserves the width the absolutely
+          positioned Home circle occupies so the two side items never
+          collide with it. Home is last in DOM order (after the spacer) so
+          its own rule can win the cascade tie with `.app-bar__item` at
+          equal specificity without `!important` — see AppBar.css. */}
       <nav className="app-bar" aria-label="Primary">
-        <NavLink to="/" end className="app-bar__item">
-          <ThisWeekIcon className="app-bar__icon" />
-          <span className="app-bar__label">This week</span>
-        </NavLink>
-        <NavLink to="/chips" className="app-bar__item">
+        <NavLink to="/chips" className="app-bar__item app-bar__item--side">
           <ChipsIcon className="app-bar__icon" />
           <span className="app-bar__label">Chips</span>
         </NavLink>
-        <NavLink to="/decisions" className="app-bar__item">
+        <span className="app-bar__home-spacer" aria-hidden="true" />
+        <NavLink to="/decisions" className="app-bar__item app-bar__item--side">
           <RecordIcon className="app-bar__icon" />
           <span className="app-bar__label">Record</span>
+        </NavLink>
+        <NavLink to="/" end className="app-bar__item app-bar__item--home">
+          <ThisWeekIcon className="app-bar__icon" />
+          <span className="app-bar__label">Home</span>
         </NavLink>
       </nav>
     </>

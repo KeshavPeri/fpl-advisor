@@ -11,27 +11,9 @@
   the honest recommendation-gap note, never by colour.
 */
 
-.decisions-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.decisions-back {
-  font: var(--text-body);
-  font-weight: 550;
-  color: var(--accent-cyan);
-}
-
-.decisions-mark {
-  font: var(--text-label);
-  font-weight: 550;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-  margin: 0;
-}
+/* #194, section C — the header row (a "← Home" link plus a redundant
+   "Decisions" caption) is deleted outright: the nav bar is the
+   navigation now. See DecisionHistoryScreen.tsx's own header comment. */
 
 /* ---- Loading / error ---- */
 
