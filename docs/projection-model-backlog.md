@@ -812,6 +812,23 @@ oracle-ceiling bound stays exactly as it is.** It has now caught two distinct le
 construction; it is the most productive check in this harness, and the standing instruction not to
 relax, widen, downgrade or remove it is reinforced, not weakened, by the fact that it fired twice.
 
+**MEASURED, 3 Sep 2026 — both falsification conditions hold.** Run against live Supabase data on
+the ticket branch (workflow run 33757203659), read from the uploaded report:
+
+| Falsification figure | Result |
+|---|---|
+| Legs where the club had a fixture but the player did not feature | **6,836** of 36,736 G+1..G+4 legs (**18.6%**) |
+| 5-gameweek model Spearman | **0.397** (n=9,184), down from report 9's leaked 0.619 |
+| 5-gameweek quality oracle Spearman | **0.506** — the model now sits BELOW its own ceiling |
+
+The leg arithmetic reconciles exactly: 36,232 legs with a fixture + 504 blank-gameweek legs =
+36,736 = 9,184 windows x 4 legs. The 0.222 fall cannot be an artefact of the new
+`unresolvedTeamCode` exclusion, which removes roughly 1% of rows — a population change that size
+cannot move a rank correlation that far. **0.397 is the first trustworthy 5-gameweek figure this
+project has produced**, and it is the number every later model decision should be read against. It
+sits close to `docs/model-review-2026-09-02.md`'s independent leak-free prediction of 0.425, which
+is the second, independent confirmation.
+
 **Still open after this ticket:** the ONE-gameweek oracle-ceiling failure (oracle 0.336 below model
 0.345). That is a separate problem with a separate cause and gets its own ticket — the Backtest job
 will still exit 1 after #193 merges, and that exit is not #193 failing.
