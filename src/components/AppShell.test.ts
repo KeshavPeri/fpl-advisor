@@ -94,13 +94,33 @@ describe('#194, section E — .bleed-narrow retains a margin, departing from F25
   })
 })
 
-describe('#194, section B — the grain layer', () => {
-  it('is fixed, behind content, and built from an inline SVG turbulence filter (no new asset/dependency)', () => {
-    const rule = css.match(/\.app-shell__grain\s*\{[^}]*\}/)?.[0] ?? ''
+describe('#202, section A — the grain layer is folded into app-shell__backdrop itself', () => {
+  it('app-shell__backdrop is fixed, behind content, and carries an inline SVG turbulence layer (no new asset/dependency)', () => {
+    const rule = css.match(/\.app-shell__backdrop\s*\{[^}]*\}/)?.[0] ?? ''
     expect(rule).toMatch(/position:\s*fixed/)
     expect(rule).toMatch(/z-index:\s*-1/)
-    expect(rule).toMatch(/background-image:\s*url\("data:image\/svg\+xml/)
+    expect(rule).toMatch(/background-image:[\s\S]*?url\("data:image\/svg\+xml/)
     expect(rule).toMatch(/feTurbulence/)
+    expect(rule).toMatch(/background-blend-mode:\s*overlay/)
+  })
+
+  it('carries more than two colour sources (four radial-gradient centres, still only cyan/coral tokens)', () => {
+    const rule = css.match(/\.app-shell__backdrop\s*\{[^}]*\}/)?.[0] ?? ''
+    const gradientCount = (rule.match(/radial-gradient\(/g) ?? []).length
+    expect(gradientCount).toBeGreaterThan(2)
+    expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}\b/) // no hard-coded hue, tokens only
+  })
+
+  it('a separate app-shell__grain rule no longer exists — it is one layer of app-shell__backdrop now', () => {
+    expect(css).not.toMatch(/\.app-shell__grain/)
+  })
+
+  it('translates on scroll via a ref-applied transform, gated behind prefers-reduced-motion, transform-only', () => {
+    const tsx = readFileSync(path.join(here, 'AppShell.tsx'), 'utf8')
+    expect(tsx).toMatch(/prefersReducedMotion/)
+    expect(tsx).toMatch(/translate3d\(0,/)
+    expect(tsx).toMatch(/window\.scrollY/)
+    expect(tsx).toMatch(/requestAnimationFrame/)
   })
 })
 

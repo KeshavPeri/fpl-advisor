@@ -236,24 +236,30 @@ describe('F5 — the elevation scale is genuinely separable (computed WCAG contr
   // over that panel's fill (level 2, --panel-fill's default).
   const borderOverL2L = relativeLuminance(over(border, over(material2, base)))
 
-  it('L1 (recessed) is present against the base ink without being a card — 1.04:1', () => {
-    expect(contrast(l1L, baseL)).toBeCloseTo(1.04, 1)
+  // Ticket #202, section B — darkened again (see index.css's own comment
+  // on --material-1/2/3), so these ratios move down from the ticket-194
+  // values this block used to assert (1.04/1.12/1.17/1.31/1.17). The
+  // properties being proven — separable, and every step beats the
+  // border — are unchanged; only the numbers are, tracking the literal
+  // committed tokens rather than a stale hand-typed snapshot of them.
+  it('L1 (recessed) is present against the base ink without being a card', () => {
+    expect(contrast(l1L, baseL)).toBeCloseTo(1.05, 1)
   })
 
-  it('L2 (the standard panel) is clearly visible against base — 1.12:1', () => {
-    expect(contrast(l2L, baseL)).toBeCloseTo(1.12, 1)
+  it('L2 (the standard panel) is clearly visible against base', () => {
+    expect(contrast(l2L, baseL)).toBeCloseTo(1.08, 1)
   })
 
-  it('L2 is visible against L1 — 1.17:1', () => {
-    expect(contrast(l2L, l1L)).toBeCloseTo(1.17, 1)
+  it('L2 is visible against L1', () => {
+    expect(contrast(l2L, l1L)).toBeCloseTo(1.13, 1)
   })
 
-  it('L3 (the loudest surface on a screen) is clearly visible against base — 1.31:1', () => {
-    expect(contrast(l3L, baseL)).toBeCloseTo(1.31, 1)
+  it('L3 (the loudest surface on a screen) is clearly visible against base', () => {
+    expect(contrast(l3L, baseL)).toBeCloseTo(1.25, 1)
   })
 
-  it('L3 is visible against L2 — 1.17:1', () => {
-    expect(contrast(l3L, l2L)).toBeCloseTo(1.17, 1)
+  it('L3 is visible against L2', () => {
+    expect(contrast(l3L, l2L)).toBeCloseTo(1.16, 1)
   })
 
   it('every adjacent elevation pair is more visible than the border between them (was inverted: 1.079:1 fill vs 1.260:1 border)', () => {
@@ -314,16 +320,40 @@ describe('ticket-194 — the fills go back down toward pre-#166 darkness', () =>
     expect(surfaceCss).toMatch(/backdrop-filter:\s*blur\(var\(--panel-blur\)\)\s*saturate\(var\(--panel-saturate\)\)/)
   })
 
-  it('a fixed, high-frequency grain layer exists in AppShell, behind the panels', () => {
-    const appShellTsx = readFileSync(path.join(srcDir, 'components', 'AppShell.tsx'), 'utf8')
+  it('a fixed, high-frequency grain layer exists in AppShell, behind the panels (folded into app-shell__backdrop by #202)', () => {
     const appShellCss = readFileSync(path.join(srcDir, 'components', 'AppShell.css'), 'utf8')
-    expect(appShellTsx).toMatch(/app-shell__grain/)
     const rule = extractRules(stripCommentsAndImports(appShellCss)).find(
-      (r) => r.selector === '.app-shell__grain'
+      (r) => r.selector === '.app-shell__backdrop'
     )
     expect(rule).toBeDefined()
     expect(rule!.body).toMatch(/position:\s*fixed/)
-    expect(rule!.body).toMatch(/background-image:\s*url\(/)
+    expect(rule!.body).toMatch(/background-image:[\s\S]*url\(/)
+  })
+})
+
+/**
+ * Ticket #202, section B — "the composited relative luminance of
+ * --material-2 over --surface-0 is strictly lower than its current
+ * value" (DoD). "Current" pinned as ticket-194's own committed value
+ * (rgba(28, 37, 61, 0.55)), the same hand-recorded-baseline technique the
+ * ticket-194 block above uses against ticket-79's value — so this test
+ * still catches a regression even if --material-2 is later edited back
+ * toward it.
+ */
+describe('ticket-202 — the fills darken once more, now that section A gives blur something real to act on', () => {
+  const base = parseColor(extractToken('surface-0'))
+  const TICKET_194_MATERIAL_2_LUMINANCE = 0.011288044961600179
+
+  it('the composited relative luminance of --material-2 over --surface-0 is strictly lower than the ticket-194 value', () => {
+    const material2 = parseColor(extractToken('material-2'))
+    const l2 = relativeLuminance(over(material2, base))
+    expect(l2).toBeLessThan(TICKET_194_MATERIAL_2_LUMINANCE)
+  })
+
+  it('no --material-* fill alpha exceeds 0.55', () => {
+    for (const token of ['material-1', 'material-2', 'material-3']) {
+      expect(parseColor(extractToken(token)).a).toBeLessThanOrEqual(0.55)
+    }
   })
 })
 
@@ -401,16 +431,68 @@ describe('F2 — --text-tertiary meets WCAG AA (4.5:1) at its smallest used size
   const l2L = relativeLuminance(over(material2, base))
   const tertiaryL = relativeLuminance(parseColor(extractToken('text-tertiary')))
 
-  it('meets AA on the standard (L2) panel — 5.65:1 (was 5.05:1 before ticket #194 darkened --material-2)', () => {
+  it('meets AA on the standard (L2) panel — 5.84:1 (ticket #202 darkened --material-2 again, further from base than the 5.65:1 ticket #194 shipped)', () => {
     const ratio = contrast(tertiaryL, l2L)
     expect(ratio).toBeGreaterThanOrEqual(4.5)
-    expect(ratio).toBeCloseTo(5.65, 1)
+    expect(ratio).toBeCloseTo(5.84, 1)
   })
 
   it('meets AA on base ink — 6.31:1', () => {
     const ratio = contrast(tertiaryL, baseL)
     expect(ratio).toBeGreaterThanOrEqual(4.5)
     expect(ratio).toBeCloseTo(6.31, 1)
+  })
+})
+
+/**
+ * Ticket #202, section E — the rendering fault that survived #194.
+ * `position: sticky` was never actually in VerdictCard.css (grep confirms
+ * it, and VerdictCard.test.ts already asserted it) — #194's DoD checked
+ * for a keyword that was never the real cause. The real cause: per the
+ * CSS Overflow spec, `overflow-x: hidden` (or `clip`) with `overflow-y`
+ * left at its default `visible` silently computes `overflow-y: auto`
+ * instead — turning the element into its own scroll container rather
+ * than leaving the document to scroll normally. iOS Safari is well
+ * documented to mishandle `position: fixed` (and, by extension,
+ * backdrop-filter compositing) when the page's real scrolling happens
+ * inside a nested `overflow: auto` box instead of the true document
+ * scroll — content can render pinned to the wrong reference point,
+ * including above the safe-area inset, which is exactly the symptom
+ * reported. `html`/`body` (this file) and `.app-shell` (AppShell.css)
+ * both carried the unpaired rule. This is checked two ways: the specific
+ * fix on the two known rules, and a generic sweep of every stylesheet in
+ * the app for the same unpaired pattern, so a REGRESSION anywhere else
+ * fails loudly rather than waiting for a fourth round to rediscover it.
+ */
+describe('ticket #202, section E — no element sets overflow-x without also setting overflow-y (the visible-becomes-auto coupling)', () => {
+  it('html, body pairs overflow-x: clip with an explicit overflow-y: visible', () => {
+    const rule = extractRules(stripCommentsAndImports(indexCssRaw)).find(
+      (r) => r.selector.replace(/\s+/g, ' ').trim() === 'html, body'
+    )
+    expect(rule).toBeDefined()
+    expect(rule!.body).toMatch(/overflow-x:\s*clip/)
+    expect(rule!.body).toMatch(/overflow-y:\s*visible/)
+    expect(rule!.body).not.toMatch(/overflow-x:\s*hidden/)
+  })
+
+  it('no stylesheet in src/ sets overflow-x (or overflow-y) to a non-visible value without pairing the other axis in the same rule', () => {
+    const cssFiles = collectCssFiles(srcDir)
+    expect(cssFiles.length).toBeGreaterThan(10)
+
+    const offenders: string[] = []
+    for (const file of cssFiles) {
+      const raw = readFileSync(file, 'utf8')
+      for (const rule of extractRules(stripCommentsAndImports(raw))) {
+        const hasX = /overflow-x\s*:\s*(hidden|clip|scroll|auto)/.test(rule.body)
+        const hasY = /overflow-y\s*:\s*(hidden|clip|scroll|auto|visible)/.test(rule.body)
+        const hasShorthand = /(^|;)\s*overflow\s*:/.test(rule.body)
+        if (hasX && !hasY && !hasShorthand) {
+          offenders.push(`${path.relative(srcDir, file)}: "${rule.selector}"`)
+        }
+      }
+    }
+
+    expect(offenders).toEqual([])
   })
 })
 

@@ -36,15 +36,37 @@
   padding: var(--space-4) 0;
 }
 
+/* Ticket #202, section D — "the real cause of 'the squad looks narrow' is
+   `justify-content: center` on `.pitch__row`." A five-defender row nearly
+   fills the width; a three-player row (most rows, most formations)
+   clustered in the middle at ~57% of it, leaving a wide empty gutter on
+   both sides — the row's own box was always full width (`.pitch__field`
+   sets `align-items: stretch` below, so every row already stretches to
+   the field's full width regardless of its player count; that part was
+   never the bug), but `justify-content: center` bunched its CONTENTS
+   into the middle of that width instead of spreading them across it, so
+   most rows read narrow no matter how big the shirts were.
+
+   `justify-content: space-evenly` distributes the free space (after the
+   row's own `gap`) into equal-sized slices before, between, and after
+   every child — which is what makes a 1-player row (the goalkeeper)
+   still centre itself (one child, one slice each side, equal, so it
+   sits in the middle) while a 3- or 5-player row spreads edge-to-edge
+   with even breathing room, all without the row's own width ever
+   depending on how many players are in it (Pitch.layout.test.ts). */
 .pitch__row {
   display: flex;
-  justify-content: center;
+  justify-content: space-evenly;
   align-items: flex-start;
   flex-wrap: wrap;
-  /* F26 (must-fix) — was var(--space-3) (12px); --space-4 (16px) is the
-     audit's exact proposed value and already an existing token, no calc()
-     needed here. */
-  gap: var(--space-4);
+  /* Ticket #202, section D — tightened from var(--space-4) (16px, F26's
+     value) to var(--space-3) (12px): the wider PlayerShirt (64px,
+     PlayerShirt.css) needs the room back to keep a five-defender row
+     inside the pitch's own narrow-bleed width (Pitch.layout.test.ts
+     asserts the exact percentage) — and a tighter gap suits
+     `space-evenly` distribution better anyway, since that property
+     itself is now doing the job of spreading the row, not the gap. */
+  gap: var(--space-3);
 }
 
 /* F28 (must-fix) — the bench is no longer a panel: it sits on the base
@@ -56,7 +78,16 @@
 .pitch__bench {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* Ticket #202, section D — was `align-items: center`, which shrink-wrapped
+     `.pitch__bench-row` to its own content width (the same "centred cluster"
+     shape `.pitch__row` had, one level up). `stretch` — the same value
+     `.pitch__field` already uses above — lets the bench row's own width
+     come from this container's full width regardless of how many
+     substitutes are on it, so `justify-content: space-evenly` on the row
+     below has a full-width box to distribute across, the same mechanism
+     the starting XI now uses. `.pitch__bench-title`'s own `text-align`
+     stays centred through ordinary block layout, unaffected by this. */
+  align-items: stretch;
   gap: var(--space-4);
   padding: 0 var(--space-4);
 }
@@ -66,12 +97,18 @@
   font-weight: 550;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  text-align: center;
   color: var(--text-tertiary);
 }
 
+/* Ticket #202, section D — "the bench... spreads across the full width the
+   same way the pitch rows now do." Same `justify-content: space-evenly`
+   swap as `.pitch__row`, same reasoning: a 1-substitute bench still
+   centres itself, a full 4-substitute bench spreads edge-to-edge instead
+   of clustering in the middle of a container that was always full width. */
 .pitch__bench-row {
   display: flex;
-  justify-content: center;
+  justify-content: space-evenly;
   flex-wrap: wrap;
   gap: var(--space-3);
 }
