@@ -1008,3 +1008,95 @@ isn't, structurally, not by bad luck on one report.
 That half is untouched, correct, and stays exactly as it is — this entry's proposal is scoped to the
 one-gameweek assertion only, and only option 1 above should be attempted without also re-deriving
 this diagnosis on a fresh live run first.
+
+---
+
+## G15 — Ticket #203, 4 Sep 2026: learned-model training substrate (R6, first slice) — the
+## column list and the gate, recorded
+
+**Substrate only. No model is trained here, no model is evaluated here, and baseline-v1 is
+untouched.** This mirrors the #146 → #154 pattern exactly: store the substrate in one ticket,
+consume it (train + evaluate) in the next. Nothing in this entry changes any live projection,
+recommendation, or backtest number — the next backtest run will look exactly like report 10.
+
+**Why now.** Report 10 (4 Sep 2026) measured the model losing to a naive "rank by prior minutes
+per match" baseline on the five-gameweek target at midfield (0.412 vs 0.464) and forward (0.452 vs
+0.476) — see `docs/model-review-2026-09-02.md`'s question 4 and this file's own R6 recommendation.
+The remaining headroom is player-quality resolution that shrunk in-season xG/xA cannot supply. The
+response is a small learned model on the columns this repo already ingests, written behind the
+`player_projections` CSV seam as a second `model_version` — never OpenFPL's 196-206 undocumented
+features (`product-brief.md` §6d: "the ticket shape this pipeline handles worst").
+
+### The gate — stated here so a later ticket is judged against exactly this table, not a recollection
+
+The review's original gate ("beat the repaired baseline's per-position Spearman on the
+five-gameweek target") is **too weak and must not be used** — report 10 shows the naive minutes
+baseline already beating the repaired baseline. The gate for learned-v1 is the **naive baseline**,
+per position, on the five-gameweek target, on the same measured population with the same
+exclusions:
+
+| Position | Must beat |
+|---|---|
+| Goalkeeper | 0.240 (the model's own figure — it beats the baseline here) |
+| Defender | 0.374 (the model's own figure, for the same reason) |
+| Midfielder | **0.464** (the naive minutes baseline) |
+| Forward | **0.476** (the naive minutes baseline) |
+
+The hindsight ceiling for reference is 0.201 / 0.479 / 0.521 / 0.562 (GK/DEF/MID/FWD). The winnable
+band at midfield and forward is roughly 0.06 to 0.09 of Spearman, and that is the whole prize.
+
+### The column list actually assembled, in `public.training_features`
+
+One row per (`season`, `gameweek_id`, `player_code`), admitted only when `prior_matches > 0` (no
+row-of-zeros for a debut gameweek, unlike `feature_history`). See
+`supabase/migrations/20260904090000_training_features.sql` for the full column-by-column "because"
+— summarised here as the record the ticket's DoD asks for:
+
+- **`element_type`, `team_code`** — position and own club, copied through from `feature_history`.
+- **`prior_matches`** — evidence volume, copied through, so a consumer can bucket by history depth
+  the way G10's own cold-start bucketing already did for defcon.
+- **`xg_rate_per90`, `xa_rate_per90`** — plain, UNSHRUNK per-90 rates computed from
+  `feature_history`'s own `prior_xg`/`prior_xa`/`prior_minutes` — deliberately NOT
+  `src/lib/projection/rates.ts`'s shrunk rate (Tier 2: shrinkage and the position prior are
+  baseline-v1-specific, moving modelling choices; baking them in would tie a "learned" model to
+  baseline-v1's own current tuning instead of letting it see the raw signal).
+- **`prior_recent_minutes`** (copied through) **and `season_avg_minutes`** (computed:
+  `prior_minutes / prior_matches`) — the minutes structure, both the true last-five-match window and
+  the season-long share. `docs/model-review-2026-09-02.md` §1f found the plain season-average
+  *beats* the 5-match window for midfielders at the 5-gameweek horizon (0.473 vs 0.444) — a learned
+  model gets to see both and find its own blend, rather than the live model's own fixed shrink.
+- **`prior_shots_on_target`** — a NEW strictly-before cumulative total, computed directly from
+  `player_match_stats.shots_on_target` (not stored on `feature_history`), using the identical
+  strictly-before rule `feature_history`'s own `prior_*` totals use.
+- **`prior_defcon_qualifying_matches`, `prior_defcon_hits`** — the two defensive-contribution
+  counters, copied through from `feature_history`.
+- **`opponent_team_codes`** — this gameweek's own scheduled fixture(s), an array (covers a double
+  gameweek). Schedule, not result — legitimately knowable in advance; see G14 above for why fixture
+  identity is not hindsight the way a result is. Built via `scripts/run-backtest.ts`'s
+  `buildClubFixtureSchedule`/`lookupClubFixtureSchedule`, reused unmodified.
+- **`team_strength_matches`, `team_strength_goals_scored`, `team_strength_goals_conceded`** — the
+  player's own club's point-in-time raw record (never a derived expected-score ratio — that
+  construction's `SCALE` constant is itself a calibrated, revisitable choice, see G8/G12), via
+  `scripts/run-backtest.ts`'s `buildTeamMatchRecords`/`computeTeamStrengthAsOf`, reused unmodified
+  (Tier 2: reusing already-reviewed, already-tested-at-scale logic rather than a second
+  hand-written implementation that could silently drift from the first).
+
+**Four named columns dropped — not ingested anywhere in this repo, per the ticket's own
+instruction not to add a new ingest.** The ticket named five "shots/chances/touches" candidates:
+total shots, shots on target, chances created, big chances missed, and touches in the opposition
+box. Checked directly against `public.player_match_stats`'s actual schema (every migration through
+`20260902090000`) and against `scripts/ingest-core-insights.ts`'s own
+`MATCH_STATS_REQUIRED_COLUMNS`/`MatchStatRow`: only `shots_on_target` exists. There is no
+total-shots column, and no `chances_created` / `big_chances_missed` / `touches_in_opposition_box`
+column at all — also confirmed by `tickets/drafts/58-complete-match-stats-and-dense-history.md`'s
+own explicit list of source columns this repo has deliberately never ingested. All four are simply
+absent from `training_features`; no new ingest was added to obtain them.
+
+### What this ticket does not do
+
+No model is trained or evaluated. `baseline-v1`, everything under `src/lib/projection/`,
+`scripts/project-points.ts`, `scripts/run-backtest.ts` and the projections CSV are all untouched.
+The next backtest run looks exactly like report 10. The follow-up ticket that actually trains and
+evaluates `learned-v1` against the gate above is the next slice — this entry exists so that ticket
+is judged against exactly this column list and exactly this gate table, not a recollection of
+either.
