@@ -17,11 +17,17 @@
   #175/#193); a second hand-written implementation of the same point-in-time logic is a second thing
   that could silently drift with no test to catch it. Import-only — `scripts/run-backtest.ts` itself
   is untouched.
-- **Tier 2.** `opponent_team_codes` and per-club team-strength are keyed to the row's *own*
-  gameweek (schedule identity), not "strictly before." **Because** G14 already established that
-  fixture identity (who you play) is legitimately known in advance and is not the same kind of
-  information as a match result — this is deliberate, not an accidental relaxation of the
-  strictly-before rule that governs every other column in the table.
+- **Tier 2.** `opponent_team_codes` is keyed to the row's *own* gameweek (schedule identity), not
+  "strictly before." **Because** G14 already established that fixture identity (who you play) is
+  legitimately known in advance and is not the same kind of information as a match result — this is
+  deliberate, not an accidental relaxation of the strictly-before rule that governs every other
+  column in the table. **Correction (caught by QA, 4 Sep 2026):** an earlier version of this entry
+  also grouped `team_strength_*` under this same schedule-keyed exception. That was wrong —
+  `computeTeamStrengthAsOf` filters strictly on `gameweek < beforeGameweek`, so team-strength is in
+  fact computed strictly-before the row's own gameweek, the same as every other non-schedule column.
+  Only `opponent_team_codes` (fixture identity, not a match result) is the exception. The migration's
+  own `COMMENT ON COLUMN` text for the team-strength columns was correct throughout; only this log
+  entry had the error, and the underlying code and tests were never affected.
 
 ## ROUTINE
 
