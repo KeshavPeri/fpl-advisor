@@ -79,15 +79,16 @@ const ROW_GAP = declaredLength(pitchCss, '.pitch__row', 'gap')
 const FIELD_ROW_TO_ROW_GAP = declaredLength(pitchCss, '.pitch__field', 'gap')
 const NAME_PRICE_GAP = declaredLength(playerShirtCss, '.player-shirt', 'gap')
 
-// The pre-#194 values (ticket #169's own F26/F27 fixes) — hand-recorded
-// baselines, the same technique index.css.test.ts uses to pin the
-// ticket-79 --material-2 luminance this ticket must beat.
-const PREVIOUS_STARTING_SHIRT_WIDTH = 56 // calc(var(--space-12) + var(--space-2))
-const PREVIOUS_FIELD_ROW_TO_ROW_GAP = 40 // calc(var(--space-6) + var(--space-4))
-const PREVIOUS_NAME_PRICE_GAP = 4 // var(--space-1)
+// Hand-recorded baselines, the same technique index.css.test.ts uses to
+// pin luminance values a later ticket must beat. #194's own shipped
+// values (pre-#202): 60px shirt (space-12 + space-3), 32px row-to-row gap
+// (--space-8), 2px name-price gap (calc(space-1 / 2)).
+const PREVIOUS_STARTING_SHIRT_WIDTH = 60
+const PREVIOUS_FIELD_ROW_TO_ROW_GAP = 32
+const PREVIOUS_NAME_PRICE_GAP = 2
 
-describe('#194, section E — the pitch is wider, tighter, and the bench stays subordinate', () => {
-  it('the starting-XI shirt width is strictly greater than its pre-#194 value', () => {
+describe('#194/#202, section E/D — the pitch is wider, tighter, and the bench stays subordinate', () => {
+  it('the starting-XI shirt width is strictly greater than its pre-#202 value', () => {
     expect(STARTING_SHIRT_WIDTH).toBeGreaterThan(PREVIOUS_STARTING_SHIRT_WIDTH)
   })
 
@@ -100,11 +101,11 @@ describe('#194, section E — the pitch is wider, tighter, and the bench stays s
     expect(pitchTsx).not.toMatch(/import Surface/)
   })
 
-  it('the row-to-row gap is strictly smaller than its pre-#194 value', () => {
-    expect(FIELD_ROW_TO_ROW_GAP).toBeLessThan(PREVIOUS_FIELD_ROW_TO_ROW_GAP)
+  it('the row-to-row gap is not strictly greater than its pre-#202 value (#202 keeps #194\'s tightened rhythm)', () => {
+    expect(FIELD_ROW_TO_ROW_GAP).toBeLessThanOrEqual(PREVIOUS_FIELD_ROW_TO_ROW_GAP)
   })
 
-  it('the name-to-price vertical gap is strictly smaller than its pre-#194 value', () => {
+  it('the name-to-price vertical gap is strictly smaller than its pre-#202 value', () => {
     expect(NAME_PRICE_GAP).toBeLessThan(PREVIOUS_NAME_PRICE_GAP)
   })
 
@@ -126,5 +127,50 @@ describe('#194, section E — the pitch is wider, tighter, and the bench stays s
     const rowWidth = 5 * STARTING_SHIRT_WIDTH + 4 * ROW_GAP
     expect(rowWidth).toBeLessThanOrEqual(remaining)
     expect(rowWidth / remaining).toBeGreaterThanOrEqual(0.96)
+  })
+})
+
+/**
+ * Ticket #202, section D — "`.pitch__row` no longer uses `justify-content:
+ * center`; a three-player row and a five-player row occupy the same
+ * width. A test asserts the computed row width does not vary with the
+ * player count." No rendering harness is available here (see this file's
+ * own header and PlayerShirt.truncation.test.ts's), so "the computed row
+ * width does not vary with player count" is proven the only way it can be
+ * from source: `.pitch__row` never declares its own `width` at all —
+ * meaning its rendered width can only ever come from `.pitch__field`'s
+ * `align-items: stretch` (which stretches every row, regardless of its
+ * own content, to the field's full cross-axis width) — so by
+ * construction there is no path from "how many players are in this row"
+ * to "how wide the row's own box is." What DOES vary with player count
+ * is the row's *contents*' footprint, which is exactly the thing
+ * `justify-content: space-evenly` (not `center`) now distributes across
+ * that fixed-width box instead of clustering in its middle.
+ */
+describe('#202, section D — .pitch__row distributes players across the full row width', () => {
+  it('no longer centres its contents', () => {
+    const rowRule = ruleBody(pitchCss, '.pitch__row')
+    expect(rowRule).not.toMatch(/justify-content:\s*center/)
+  })
+
+  it('distributes with space-evenly, so a 1-player row still centres and a 3/5-player row spans edge to edge', () => {
+    const rowRule = ruleBody(pitchCss, '.pitch__row')
+    expect(rowRule).toMatch(/justify-content:\s*space-evenly/)
+  })
+
+  it('declares no width of its own — its box comes only from .pitch__field\'s align-items: stretch, so it cannot vary with player count', () => {
+    const rowRule = ruleBody(pitchCss, '.pitch__row')
+    expect(rowRule).not.toMatch(/\bwidth\s*:/)
+    const fieldRule = ruleBody(pitchCss, '.pitch__field')
+    expect(fieldRule).toMatch(/align-items:\s*stretch/)
+  })
+
+  it('the bench row spreads the same way, on a bench container that now also stretches to full width', () => {
+    const benchRowRule = ruleBody(pitchCss, '.pitch__bench-row')
+    expect(benchRowRule).not.toMatch(/justify-content:\s*center/)
+    expect(benchRowRule).toMatch(/justify-content:\s*space-evenly/)
+    expect(benchRowRule).not.toMatch(/\bwidth\s*:/)
+    const benchRule = ruleBody(pitchCss, '.pitch__bench')
+    expect(benchRule).toMatch(/align-items:\s*stretch/)
   })
 })

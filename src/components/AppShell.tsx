@@ -1,5 +1,25 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import './AppShell.css'
+
+/**
+ * Ticket #202, section A — "parallax it against the scroll... a slow
+ * counter-movement makes what sits behind a panel change continuously as
+ * the page moves." The backdrop is already `position: fixed` (scrolls at
+ * 0x by default, which is already a full parallax relative to the
+ * scrolling column), so this adds a small NONZERO drift instead of
+ * leaving it perfectly static: as the page scrolls down, the backdrop
+ * eases downward by a small fraction of that distance, which continuously
+ * changes what sits behind any one panel rather than presenting the same
+ * frozen frame all the way down a long screen (the reasoning screen's 12
+ * panels, say). Clamped so the drift stays a subtle depth cue on a short
+ * scroll and never runs away on a long one.
+ */
+const PARALLAX_FACTOR = 0.05
+const PARALLAX_MAX_PX = 28
+
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
 
 interface AppShellProps {
   children?: ReactNode
@@ -40,23 +60,55 @@ interface AppShellProps {
  * don't interpolate, so two full layers plus an opacity transition is
  * the reliable mechanism, not one layer whose gradient values change).
  *
- * Ticket #194: `app-shell__grain` is a third fixed layer, always
- * rendered, behind the column exactly like the two wash layers above —
- * see AppShell.css and docs/ui-audit-2026-08-31.md's dated correction to
- * F13 for why panel blur needs this to have anything real to act on.
+ * Ticket #202, section A: the grain layer #194 added as a separate
+ * `app-shell__grain` div is now folded into `app-shell__backdrop` itself
+ * as one more layer of its own background (AppShell.css) — one material
+ * with real per-pixel detail and several colour centres, not three
+ * independent divs. This component now also drives that backdrop's
+ * scroll parallax (see the module-level comment on PARALLAX_FACTOR):
+ * `window.scrollY` is read because the section E fix (src/index.css,
+ * this file's own sibling — `html`/`body`'s `overflow-x: clip` in place
+ * of `overflow-x: hidden`) keeps the DOCUMENT as the real scroller rather
+ * than turning it into a nested `overflow: auto` container, which is
+ * what `window.scrollY` needs to be meaningful at all.
  */
 function AppShell({ children, escalated = false }: AppShellProps) {
   const rootClasses = ['app-shell', escalated ? 'app-shell--escalated' : ''].filter(Boolean).join(' ')
+  const backdropRef = useRef<HTMLDivElement>(null)
+  const escalatedBackdropRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    let frame = 0
+
+    function applyParallax() {
+      frame = 0
+      // Checked every frame rather than once at mount, so a change to
+      // the OS setting while the app is open takes effect immediately —
+      // and, if it's on, the two backdrop layers simply keep whatever
+      // transform they last had (none, on first paint), never move.
+      if (prefersReducedMotion()) return
+      const offset = Math.max(-PARALLAX_MAX_PX, Math.min(PARALLAX_MAX_PX, window.scrollY * PARALLAX_FACTOR))
+      const transform = `translate3d(0, ${offset}px, 0)`
+      if (backdropRef.current) backdropRef.current.style.transform = transform
+      if (escalatedBackdropRef.current) escalatedBackdropRef.current.style.transform = transform
+    }
+
+    function onScroll() {
+      if (frame) return
+      frame = requestAnimationFrame(applyParallax)
+    }
+
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [])
 
   return (
     <div className={rootClasses}>
-      <div className="app-shell__backdrop" aria-hidden="true" />
-      <div className="app-shell__backdrop--escalated" aria-hidden="true" />
-      {/* #194, section B — a fixed, high-frequency grain layer, so a
-          panel's restored backdrop-filter blur (Surface.css) has real
-          per-pixel detail to act on instead of the smooth wash alone
-          (docs/ui-audit-2026-08-31.md's dated correction to F13). */}
-      <div className="app-shell__grain" aria-hidden="true" />
+      <div className="app-shell__backdrop" ref={backdropRef} aria-hidden="true" />
+      <div className="app-shell__backdrop--escalated" ref={escalatedBackdropRef} aria-hidden="true" />
       <div className="app-shell__column">{children}</div>
     </div>
   )

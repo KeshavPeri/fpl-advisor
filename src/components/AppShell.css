@@ -6,8 +6,19 @@
   justify-content: center;
   /* Ticket #44, finding 4 — same defence-in-depth as src/index.css;
      the real fix for the pitch row overflow lives in Pitch.css and
-     PlayerShirt.css. */
-  overflow-x: hidden;
+     PlayerShirt.css.
+
+     Ticket #202, section E — `overflow-x: hidden` alone (overflow-y left
+     at its initial `visible`) silently computes `overflow-y: auto` per
+     the CSS Overflow spec's visible/non-visible axis coupling, which
+     turns this element into its own scroll container instead of letting
+     the document scroll normally — the root cause this ticket traces for
+     "content pinned to the wrong place while scrolling on iOS" (see
+     src/index.css's identical fix on `html, body` for the full
+     reasoning). `overflow-x: clip` keeps the same no-horizontal-scroll
+     guarantee without the coupling. */
+  overflow-x: clip;
+  overflow-y: visible;
 }
 
 /* Ticket #26 — the ambient wash, pinned to the viewport instead of
@@ -31,16 +42,58 @@
    --accent-*-ambient tokens (src/index.css) rather than --accent-*-dim,
    which stayed unchanged — same shape and position as before, just
    slightly more present, so glass panels moving over it read more
-   clearly without introducing banding or a second focal point. */
+   clearly without introducing banding or a second focal point.
+
+   Ticket #202, section A — the enabling change the rest of this ticket
+   depends on. Two rounds (#166, #171, #194) tuned the GLASS — alpha,
+   then fill colour, then blur — and #194 was right that the missing
+   piece was texture behind the glass, but its own fix (a separate fixed
+   grain div, two smooth gradients) still amounts to a wash with almost
+   no structure: two soft colour centres and one faint noise layer is not
+   "high-frequency detail" at the scale a panel actually sits over. This
+   rewrite does two things at once:
+
+   1. FOUR colour centres instead of two, at genuinely different scales
+      (two large ellipses near the top, matching the original wash's
+      footprint, plus two much smaller ones lower on the page) — still
+      only cyan and coral (--accent-*-ambient, unchanged tokens, no new
+      hue), just arranged so no single screen-height of scroll sits over
+      a featureless gradient.
+   2. The grain layer folded INTO this same element as its own
+      background-image layer (composited with `background-blend-mode:
+      overlay` against the colour centres beneath it) rather than a
+      separate sibling — one layered material, not three independent
+      divs happening to share a stacking position. `background-size`/
+      `background-repeat` are set per layer (longhand properties, not the
+      `background` shorthand) so the grain can tile at its own small
+      scale while every gradient stays `no-repeat` at its own scale.
+      The turbulence SVG's own `<rect>` now carries `opacity='0.5'`
+      (baked into the image, since a background-image layer inside one
+      element's layered background has no separate per-layer opacity
+      control the way the old standalone div's `opacity: 0.05` gave it —
+      `background-blend-mode: overlay` alone would otherwise read far
+      stronger than the old 5%-opacity div did).
+
+   `will-change: transform` — this element now receives a scroll-linked
+   transform every frame (AppShell.tsx); the hint costs nothing while
+   idle and avoids a layout/paint promotion decision being made fresh on
+   the first scroll frame. */
 .app-shell__backdrop {
   position: fixed;
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  background:
+  will-change: transform;
+  background-color: var(--surface-0);
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E"),
     radial-gradient(ellipse 130% 55% at 50% -8%, var(--accent-cyan-ambient), transparent 60%),
     radial-gradient(ellipse 90% 40% at 85% 30%, var(--accent-coral-ambient), transparent 65%),
-    var(--surface-0);
+    radial-gradient(ellipse 55% 26% at 10% 78%, var(--accent-cyan-ambient), transparent 70%),
+    radial-gradient(ellipse 34% 18% at 72% 94%, var(--accent-coral-ambient), transparent 72%);
+  background-repeat: repeat, no-repeat, no-repeat, no-repeat, no-repeat;
+  background-size: 120px 120px, auto, auto, auto, auto;
+  background-blend-mode: overlay, normal, normal, normal, normal;
 }
 
 /* F19 — a second, always-present wash layer carrying the escalated
@@ -61,6 +114,7 @@
   inset: 0;
   z-index: -1;
   pointer-events: none;
+  will-change: transform;
   opacity: 0;
   transition: opacity var(--dur-ambient) ease;
   background:
@@ -70,29 +124,6 @@
 
 .app-shell--escalated .app-shell__backdrop--escalated {
   opacity: 1;
-}
-
-/* #194, section B — a fixed, high-frequency grain layer behind every panel
-   (docs/ui-audit-2026-08-31.md's dated correction to F13): the ambient
-   wash alone is a smooth gradient with nothing for a panel's restored
-   backdrop-filter blur (Surface.css) to act on, so this supplies real
-   per-pixel texture instead. An inline SVG fractalNoise turbulence,
-   desaturated (feColorMatrix saturate 0) so it never introduces a colour
-   of its own, tiled at a small size so it reads as fine grain rather than
-   as a visible repeating tile. Low opacity and `mix-blend-mode: overlay`
-   keep it a texture, not a visible pattern — it should read as "the dark
-   has grain," never as "there is a grid printed on the screen." Fixed and
-   z-index: -1, same layer group as the two wash layers above, so it never
-   scrolls with the page and never intercepts a tap. */
-.app-shell__grain {
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  opacity: 0.05;
-  mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size: 120px 120px;
 }
 
 @media (prefers-reduced-motion: reduce) {

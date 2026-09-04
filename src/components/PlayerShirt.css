@@ -16,22 +16,29 @@
   flex-direction: column;
   align-items: center;
   /* #194, section E — "close the vertical gap between each player's name
-     and his price. That gap is what makes each shirt block tall."
-     Was var(--space-1) (4px, applied uniformly between all three
-     children by this one flex `gap`); halved rather than replaced with a
-     new token, since this file's own convention (see the header comment)
-     is calc() composed from two existing tokens rather than a bare new
-     value. */
-  gap: calc(var(--space-1) / 2);
+     and his price. That gap is what makes each shirt block tall." Was
+     var(--space-1) (4px); #194 halved it to calc(var(--space-1) / 2) =
+     2px. Ticket #202, section D — "move the price closer to the name" —
+     halves it again: calc(var(--space-1) / 4) = 1px, kept as a calc()
+     composed from an existing token rather than a bare new value, per
+     this file's own convention (see the header comment). Still applied
+     uniformly between all three children (badge/name/price) by this one
+     flex `gap` — the badge-to-name gap tightens by the same amount, which
+     reads as the whole block drawing together rather than the name/price
+     pair alone shifting. */
+  gap: calc(var(--space-1) / 4);
   /* #194, section E — was calc(var(--space-12) + var(--space-2)) = 56px
-     (ticket #169's own F26 fix). Widened again: "widen the shirts... to
-     use the width currently wasted. Today a five-defender row is 344px
-     inside a 393px viewport" — that 344px figure IS this file's own
-     56px value, so this ticket's job is to move past it. 60px
-     (48 + 12) — the largest step that still fits five shirts plus their
-     gaps inside the pitch's own narrow-bleed width at 393px with room to
-     spare (Pitch.layout.test.ts asserts the exact percentage). */
-  width: calc(var(--space-12) + var(--space-3));
+     (ticket #169's own F26 fix), widened to calc(var(--space-12) +
+     var(--space-3)) = 60px. Ticket #202, section D — the real cause of
+     "the squad looks narrow" was `.pitch__row`'s `justify-content:
+     center` (Pitch.css), not shirt size alone, but freeing that width
+     via a full-width row distribution (Pitch.css) is exactly the room
+     this ticket also spends on wider shirts: calc(var(--space-12) +
+     var(--space-4)) = 64px, the largest step that still fits five shirts
+     plus their gaps inside the pitch's own narrow-bleed width at 393px
+     with room to spare once Pitch.css's row gap also tightens
+     (Pitch.layout.test.ts asserts the exact percentage). */
+  width: calc(var(--space-12) + var(--space-4));
   /* Ticket #44, finding 4 — the actual cause of the horizontal-scroll
      bug: without this, a flex item's automatic minimum width is its
      content's min-content size, not its explicit `width` above. Before
@@ -68,7 +75,7 @@
   justify-content: center;
   width: 100%;
   /* Kept square with .player-shirt's own width, above. */
-  height: calc(var(--space-12) + var(--space-3));
+  height: calc(var(--space-12) + var(--space-4));
   border-radius: var(--radius-control);
   background: var(--material-1);
   border: 2px solid transparent;
@@ -168,54 +175,49 @@
   color: var(--accent-cyan);
 }
 
-/* Ticket #44, finding 2 — `name` is already FPL's own `web_name`
-   (src/lib/squad/api.ts), the domain's own short form; this ticket does
-   not touch what's displayed, only how. At the previous 48px width,
-   single-line-plus-ellipsis truncation still cut some real names mid-word
-   ("Bruno…", "Pedro…"). Replaced with up to two lines instead of a single
-   truncated one: `-webkit-line-clamp` (not `text-overflow: ellipsis`) is
-   the only overflow mechanism, so a mid-word ellipsis is structurally
-   impossible, not just unlikely. `min-height: var(--space-8)` reserves the
-   same two-line height for every player regardless of whether their own
-   name needs one line or two, which is what keeps all 15 slots' row
-   height uniform. See PlayerShirt.truncation.test.ts for the check against
-   the longest realistic name this needs to survive.
+/* Ticket #44, finding 2 / #194, section A4 / ticket #202, section D — three
+   attempts at this rule, and the wrap-based ones both failed on device the
+   same way. `name` is already FPL's own `web_name` (src/lib/squad/api.ts),
+   the domain's own short form; no ticket in this history has touched what's
+   displayed, only how.
 
-   Ticket #169 — font-size stays --text-label-tight (11px) rather than
-   moving back to the audit's suggested --text-label (13px): F26 flags
-   that move as needing re-verification against real long web_names at the
-   new 56px width, and this ticket has no browser harness available to
-   redo ticket #44's own empirical check (see that ticket's own comment on
-   PlayerShirt.truncation.test.ts for why it isn't automated). Left as a
-   Tier 3 judgement call, reported to the orchestrator rather than guessed
-   past — see this ticket's report. #194 widened the shirt to 60px
-   (above) without revisiting this call, for the same reason: still no
-   browser harness in this environment to re-run the empirical check.
+   Ticket #44 chose single-line `text-overflow: ellipsis` first and found it
+   could cut a name mid-word ("Bruno…"), so it switched to a two-line
+   `-webkit-line-clamp` wrap instead. #194 found THAT choice had its own
+   mid-word failure — `hyphens: auto` was inserting browser-dictionary
+   hyphens ("B.Fernan-des") — and turned hyphenation off, leaving
+   `overflow-wrap`/`word-break` as the wrap mechanism. But turning off
+   hyphenation does not turn off wrapping: with no hyphen character to
+   signal a machine-inserted break, `overflow-wrap: break-word` still
+   breaks the word at whatever character the line ran out of room for
+   ("B.Fernande" / "s") — the owner's own report for THIS ticket names
+   exactly that: "B.Fernande / s", "Verbrug / gen", "I.Sanga / ré". A
+   mid-word wrap with no hyphen is not less wrong than a mid-word hyphen;
+   it is the same defect with the connecting mark removed.
 
-   #194, section A4 (rendering fault) — `hyphens: auto` is the actual
-   cause of "B.Fernan-des", "Ver-brugg…", "João Pe-dro", "I.San-garé" on
-   the owner's phone: the browser's own hyphenation dictionary was
-   choosing break points mid-word inside names this rule never intended
-   to hyphenate (real FPL web_names, not compound words with natural
-   hyphens). `hyphens: none` restores the two-line WRAP as the only
-   overflow mechanism — a name still wraps at a word boundary or, failing
-   that, wherever `overflow-wrap: break-word` forces a raw break, but the
-   browser never INSERTS a hyphen character earlier than that to make a
-   line fit. See PlayerShirt.truncation.test.ts. */
+   The DoD this time is explicit that wrapping itself is the mechanism to
+   remove: "One line, no wrapping, no hyphenation... truncate with an
+   ellipsis if it still does not fit." `white-space: nowrap` plus
+   `text-overflow: ellipsis` is exactly the mechanism #44 rejected — but
+   #44 rejected it at 48px-wide shirts with #44's OWN (smaller) width
+   budget; PlayerShirt has since widened twice (48 -> 56 -> 60px, and this
+   ticket's own section D widens it again, see `.player-shirt` above) and
+   the failure mode #44 hit (an ellipsis landing inside a word rather than
+   after it) is a width problem, not a property-choice problem — a name
+   still ends with "…", never mid-character-then-nothing, so it can never
+   read as a broken word the way the wrap-based approaches did. Kept to a
+   single line via `min-height` sized to one line's own height (not two),
+   so every one of the 15 pitch slots still reserves identical vertical
+   space regardless of whether a given name needed truncating. */
 .player-shirt__name {
   width: 100%;
-  min-height: var(--space-8);
+  min-height: calc(0.6875rem * 1.25);
   font: var(--text-label-tight);
   color: var(--text-primary);
   text-align: center;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  white-space: nowrap;
   overflow: hidden;
-  overflow-wrap: break-word;
-  word-break: break-word;
-  -webkit-hyphens: none;
-  hyphens: none;
+  text-overflow: ellipsis;
 }
 
 /* Ticket #44, finding 7 — the one number each player carries should
