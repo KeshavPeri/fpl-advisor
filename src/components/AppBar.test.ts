@@ -77,11 +77,16 @@ describe('every 44px minimum tap target and no hand-typed cubic-bezier', () => {
 })
 
 describe('ticket-79 follow-up, correction B — the bar has icons, drawn in this repo', () => {
-  it('every destination renders one inline SVG glyph alongside its label', () => {
+  it('every destination renders one inline SVG glyph alongside its label, plus the dome-rim arc (ticket #202, section C)', () => {
     const html = renderAt('/')
-    const svgCount = (html.match(/<svg /g) ?? []).length
-    expect(svgCount).toBe(3)
-    expect(html).toMatch(/<svg [^>]*class="app-bar__icon"/)
+    const iconCount = (html.match(/<svg [^>]*class="app-bar__icon"/g) ?? []).length
+    expect(iconCount).toBe(3)
+    // Ticket #202 adds a fourth, non-icon SVG — the dome's own visible
+    // rim, the one curve a plain CSS `border` cannot draw around the
+    // masked union shape (see AppBar.css's own header comment).
+    const totalSvgCount = (html.match(/<svg /g) ?? []).length
+    expect(totalSvgCount).toBe(4)
+    expect(html).toMatch(/<svg [^>]*class="app-bar__dome-rim"/)
   })
 
   it('no icon library, no new dependency — NavIcons.tsx imports nothing but react types', () => {
@@ -116,14 +121,15 @@ describe('ticket-79 follow-up, correction B — the bar has icons, drawn in this
     expect(css).toMatch(/\.app-bar__icon\s*\{[^}]*stroke-width:\s*var\(--nav-stroke\)/)
   })
 
-  it('every destination keeps an accessible name; the icons are decorative', () => {
+  it('every destination keeps an accessible name; the icons (and the dome-rim arc) are decorative', () => {
     const html = renderAt('/')
     for (const label of ['Home', 'Chips', 'Record']) {
       expect(html).toContain(`>${label}</span>`)
     }
-    // Three links, three aria-hidden svgs — the name never comes from a glyph.
+    // Three icon glyphs plus the dome-rim arc, all aria-hidden — the
+    // name never comes from a glyph.
     const hidden = (html.match(/<svg [^>]*aria-hidden="true"/g) ?? []).length
-    expect(hidden).toBe(3)
+    expect(hidden).toBe(4)
     expect(html).toMatch(/<svg [^>]*focusable="false"/)
   })
 
@@ -138,31 +144,55 @@ describe('ticket-79 follow-up, correction B — the bar has icons, drawn in this
     )
   })
 
-  it('adds no motion beyond the press feedback the foundations already define, plus the static Home-circle offset', () => {
+  it('adds no keyframe/animation motion — only the press feedback the foundations already define, plus static positioning offsets', () => {
     expect(css).not.toMatch(/@keyframes|animation:/)
     const transforms = css.match(/transform:\s*[^;]+;/g) ?? []
+    // Ticket #202, section C — `.app-bar`, `.app-bar__item--home` and
+    // `.app-bar__dome-rim` all centre themselves with the same
+    // `translateX(-50%)` now (the old Home-specific `translate(-50%,
+    // -58%)` is gone along with Home's own independent box — see this
+    // file's header comment and AppBar.css's).
     expect(transforms.sort()).toEqual([
       'transform: none;',
       'transform: scale(0.96);',
-      'transform: translate(-50%, -58%);',
+      'transform: translateX(-50%);',
+      'transform: translateX(-50%);',
       'transform: translateX(-50%);',
     ])
   })
 })
 
-describe('#194, section C — one continuous silhouette, Home a circle at the centre', () => {
-  it('Home is absolutely positioned, circular, and equal width/height (var(--nav-home-size) both)', () => {
+describe('#202, section C — one continuous piece of glass: a CSS mask union, not two overlapping bordered shapes', () => {
+  it('.app-bar itself carries the union mask (a pill-rect layer unioned with a fixed-radius circle layer)', () => {
+    const rule = css.match(/\.app-bar\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/mask-image:/)
+    expect(rule).toMatch(/-webkit-mask-image:/)
+    expect(rule).toMatch(/radial-gradient\(\s*circle calc\(var\(--nav-home-size\) \/ 2\)/)
+    expect(rule).toMatch(/mask-composite:\s*add/)
+  })
+
+  it('the mask box spans the full union bounding height — bump overshoot plus the pill\'s own height', () => {
+    const rule = css.match(/\.app-bar\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/height:\s*calc\(var\(--nav-bump-overshoot\)\s*\+\s*var\(--nav-bar-height\)\)/)
+  })
+
+  it('Home is no longer its own bordered, backdrop-filtered box — it carries neither a background nor a backdrop-filter of its own', () => {
     const rule = css.match(/\.app-bar__item--home\s*\{[^}]*\}/)?.[0] ?? ''
     expect(rule).toMatch(/position:\s*absolute/)
     expect(rule).toMatch(/border-radius:\s*50%/)
     expect(rule).toMatch(/width:\s*var\(--nav-home-size\)/)
     expect(rule).toMatch(/height:\s*var\(--nav-home-size\)/)
+    expect(rule).not.toMatch(/background:/)
+    expect(rule).not.toMatch(/backdrop-filter:/)
+    expect(rule).not.toMatch(/border:/)
   })
 
-  it('Home shares the bar\'s own material — same fill token, same blur/saturate tokens — so the two read as one substance', () => {
-    const rule = css.match(/\.app-bar__item--home\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(rule).toMatch(/background:\s*var\(--material-bar\)/)
-    expect(rule).toMatch(/blur\(var\(--material-bar-blur\)\)\s*saturate\(var\(--material-bar-saturate\)\)/)
+  it('the dome-rim arc\'s path data is derived from the same two tokens the mask uses, not a hand-typed guess', () => {
+    const tsx = readFileSync(path.join(here, 'AppBar.tsx'), 'utf8')
+    expect(tsx).toMatch(/NAV_HOME_SIZE_PX\s*=\s*3\.75\s*\*\s*16/)
+    expect(tsx).toMatch(/NAV_BUMP_OVERSHOOT_PX\s*=\s*0\.9375\s*\*\s*16/)
+    expect(tsx).toMatch(/DOME_ARC_PATH/)
+    expect(tsx).toMatch(/large-arc-flag 0/) // documented, not just coded
   })
 
   it('a spacer reserves the circle\'s own footprint so the side items never collide with it', () => {
@@ -175,6 +205,39 @@ describe('#194, section C — one continuous silhouette, Home a circle at the ce
     expect(rule).not.toMatch(/text-transform:\s*uppercase/)
     expect(rule).toMatch(/font-weight:\s*650/)
     expect(rule).toMatch(/letter-spacing:\s*-0\.006em/)
+  })
+})
+
+describe('#202, section C — the active destination carries a cyan fill and an outer bloom', () => {
+  it('the active item has a box-shadow the inactive items do not', () => {
+    const activeRule = css.match(/\.app-bar__item\[aria-current='page'\]\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(activeRule).toMatch(/box-shadow:\s*var\(--nav-active-glow\)/)
+    const inactiveRule = css.match(/\.app-bar__item\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(inactiveRule).not.toMatch(/box-shadow:\s*var\(--nav-active-glow\)/)
+  })
+
+  it('the active item takes the cyan accent (not just a neutral primary-text swap)', () => {
+    const activeRule = css.match(/\.app-bar__item\[aria-current='page'\]\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(activeRule).toMatch(/color:\s*var\(--accent-cyan\)/)
+    expect(activeRule).toMatch(/background:\s*var\(--accent-cyan-dim\)/)
+  })
+
+  it('the glow token is defined once, in index.css, not re-typed here', () => {
+    const indexCss = readFileSync(path.join(here, '..', 'index.css'), 'utf8')
+    expect(indexCss).toMatch(/--nav-active-glow:/)
+    expect(css).not.toMatch(/--nav-active-glow:\s*0 0/) // not redefined locally
+  })
+
+  it('applies identically to Home as to the two side items — no Home-specific override survives (the old "protect --material-bar" workaround is gone along with Home\'s own background)', () => {
+    expect(css).not.toMatch(/\.app-bar__item--home\[aria-current='page'\]/)
+  })
+})
+
+describe('#202, section C — the icon strokes are heavier than before', () => {
+  it('the resting and active stroke weights are both raised, one consistent increment apart', () => {
+    const barRule = css.match(/\.app-bar\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(barRule).toMatch(/--nav-stroke:\s*1\.75/)
+    expect(barRule).toMatch(/--nav-stroke-active:\s*2\.25/)
   })
 })
 

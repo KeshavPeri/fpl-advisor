@@ -66,31 +66,50 @@
      the ticket-79 value it replaces (0.01844 -> 0.01129) — that strict
      decrease is what "the fills go back down" means, checked directly in
      index.css.test.ts rather than only through the contrast ratio. */
-  --material-1: rgba(2, 3, 4, 0.55);
-  --material-2: rgba(28, 37, 61, 0.55);
-  --material-3: rgba(45, 60, 99, 0.55);
+  /* Ticket #202, section B — "panel fills go back toward the base ink's
+     darkness." The diagnosis this round is built on (AppShell.css's own
+     header comment, and this ticket's report): two rounds tuned these
+     fills against a backdrop with nothing behind it to blur, so no
+     amount of fill-tuning alone could make the material read as glass.
+     #194 already established alpha must stay a ceiling, never the
+     elevation mechanism, and darkened these once. This ticket darkens
+     them again on the same principle, now that section A gives the blur
+     something real to act on: a darker fill lets more of that real
+     detail transmit through, which is what a genuinely translucent
+     material does. Composited luminance is strictly lower than every
+     prior value — checked directly in index.css.test.ts, not just via
+     contrast ratio. */
+  --material-1: rgba(1, 2, 3, 0.55);
+  --material-2: rgba(23, 31, 53, 0.55);
+  --material-3: rgba(40, 54, 90, 0.55);
 
   /* The second non-alpha elevation mechanism, per F14: light catching
      the top edge. #166 gave all three levels the same 0.10 edge, which
      makes an edge a constant and therefore carries no elevation. A
      higher surface catches more light, so the edge now brightens with
-     the level — 1.123:1 / 1.261:1 / 1.453:1 against each level's own
-     fill. Only the TOP border side takes this value (Surface.css); the
-     other three keep --panel-border. That asymmetry is what separates a
-     lit object from a ruled box, and it is why the edge being brighter
-     than an elevation step is not the inversion F5 named: the "border
-     between two levels" the audit measured is --panel-border, unchanged
-     at 1.145:1 and still quieter than every step. */
-  --material-edge-1: rgba(190, 205, 235, 0.06);
-  --material-edge-2: rgba(190, 205, 235, 0.1);
-  --material-edge-3: rgba(190, 205, 235, 0.16);
+     the level. Only the TOP border side takes this value (Surface.css);
+     the other three keep --panel-border. That asymmetry is what
+     separates a lit object from a ruled box, and it is why the edge
+     being brighter than an elevation step is not the inversion F5
+     named: the "border between two levels" the audit measured is
+     --panel-border, unchanged and still quieter than every step.
+
+     Ticket #202, section B — "every surface gets a bright specular top
+     rim... plus an inner sheen, both scaling with the elevation level."
+     That non-alpha mechanism already existed (F14/#194); this ticket
+     raises its own brightness a further step (0.06/0.10/0.16 becomes
+     0.09/0.15/0.22) now that the darker fills above give a brighter edge
+     more to contrast against, so "specular" is an honest word for it. */
+  --material-edge-1: rgba(190, 205, 235, 0.09);
+  --material-edge-2: rgba(190, 205, 235, 0.15);
+  --material-edge-3: rgba(190, 205, 235, 0.22);
   /* The inner highlight that softens each top edge into its fill, so the
      edge reads as a gradient of light rather than as a drawn hairline.
-     Scales with the level for the same reason the edge does; was a
-     single hard-typed rgba(255,255,255,0.04) in Surface.css. */
-  --material-sheen-1: rgba(255, 255, 255, 0.03);
-  --material-sheen-2: rgba(255, 255, 255, 0.045);
-  --material-sheen-3: rgba(255, 255, 255, 0.07);
+     Scales with the level for the same reason the edge does. Raised
+     alongside the edge above, same ticket, same reasoning. */
+  --material-sheen-1: rgba(255, 255, 255, 0.04);
+  --material-sheen-2: rgba(255, 255, 255, 0.065);
+  --material-sheen-3: rgba(255, 255, 255, 0.1);
 
   /* PANEL BLUR IS BACK — #194's correction to the ticket-79 follow-up's
      F13 reasoning, recorded with a dated correction in
@@ -139,6 +158,41 @@
      the two read as one continuous silhouette rather than a pill plus a
      separate floating button. */
   --nav-home-size: 3.75rem;
+  /* Ticket #202, section C — #194 shipped the bump as two independently
+     bordered shapes (the pill, the circle) that merely overlap, which is
+     why it reads as "a ring drawn on a bar" rather than one piece of
+     glass: each shape's own border traces its own full outline, so the
+     seam where they cross shows a doubled edge. This ticket makes the
+     bar's own box, mask and border-radius describe ONE silhouette (pill
+     ∪ circle) instead — see AppBar.css's own header comment for the
+     mechanism (a `mask-image` union of a rect and a fixed-radius circle,
+     plus a small SVG arc tracing exactly the dome the native `border`
+     geometrically cannot follow). These two tokens are the ONLY numbers
+     that silhouette is built from, named explicitly rather than left
+     emergent from padding sums, so the CSS mask and the SVG arc's path
+     data (AppBar.tsx) can be derived from — and stay in sync with — the
+     same two values instead of two separately hand-tuned ones.
+     `--nav-bar-height` is the pill's own thickness (was emergent from
+     `--space-1` padding + the 44px item floor, ≈3.25rem; now explicit).
+     `--nav-bump-overshoot` is how much of the circle's own diameter
+     shows above the pill's flat top line — kept at the same ≈15px this
+     bar already shipped with (this file's own prior comment: "pokes
+     roughly a quarter of --nav-home-size"), because the owner's own
+     sketch and #194's shape were both judged close to right; only the
+     CONTINUITY was wrong (see the ticket's own "the shape is nearly
+     right and the execution is not"). */
+  --nav-bar-height: 3.25rem;
+  --nav-bump-overshoot: 0.9375rem;
+  /* Ticket #202, section C — "bring back the glow on Home... a soft
+     outer bloom." A box-shadow spread rather than a second blurred
+     pseudo-element, so it composites correctly with the bar's own
+     backdrop-filter (a blurred sibling element would blur the CONTENT
+     behind it too, not just glow outward) and survives the mask-based
+     silhouette (AppBar.css) without needing its own separate clip. Two
+     layers: a tight, brighter ring right at the edge and a soft, wide
+     bloom — the same "tight + wide" pairing a real light source's glow
+     falls off with, rather than one flat-edged shadow ring. */
+  --nav-active-glow: 0 0 0 1px var(--accent-cyan-line), 0 0 20px 6px var(--accent-cyan-ambient);
   /* #194, section A3 — how much space AppShell.css's column reserves
      below its own content, and how tall AppBar.css's scroll-edge scrim
      is. One number rather than deriving it from the bar's own height
@@ -175,8 +229,13 @@
   --panel-fill: var(--material-2);
   --panel-fill-raised: var(--material-3);
   /* F5 — demoted from 0.14 to a true whisper, so it no longer out-shouts
-     the fill it sits on (see the boundary numbers above). */
-  --panel-border: rgba(148, 163, 194, 0.08);
+     the fill it sits on (see the boundary numbers above). Ticket #202
+     takes it down once more, 0.08 -> 0.06: the darker fills above (section
+     B) pulled every elevation step closer to base ink, so the border has
+     to quiet down with them to keep failing the same test it always has —
+     every adjacent elevation step still strictly more visible than this
+     border, checked in index.css.test.ts. */
+  --panel-border: rgba(148, 163, 194, 0.06);
   /* Unchanged by this ticket — same ink hue at higher alpha, for small
      details on already-lifted material (the shirt outline) that need
      more definition than a whisper. */
@@ -333,11 +392,35 @@ body {
      flex item (the pitch shirt's name) whose min-content width could
      exceed its column, forcing the row — and the whole page — wider
      than the viewport at narrow widths. That's fixed at the source in
-     PlayerShirt.css (the name wraps instead of forcing a single
-     unbreakable line) and Pitch.css (`min-width: 0` on the shirt column,
+     PlayerShirt.css and Pitch.css (`min-width: 0` on the shirt column,
      the standard flex-item fix for this exact failure mode). This rule
-     stays as defence in depth against the next thing that does the same. */
-  overflow-x: hidden;
+     stays as defence in depth against the next thing that does the same.
+
+     Ticket #202, section E — the rendering fault that survived #194.
+     `overflow-x: hidden` alone, with `overflow-y` left at its initial
+     `visible`, does NOT do what it looks like it does: per the CSS
+     Overflow spec, when one axis is a non-`visible` value and the other
+     is `visible`, the `visible` axis computes to `auto` instead — so this
+     rule was silently turning `html`/`body` into an `overflow-y: auto`
+     scroll container rather than leaving the document to scroll normally.
+     `.app-shell` (AppShell.css) carried the identical rule with the
+     identical silent side effect. iOS Safari's `position: fixed`
+     handling is well documented to misbehave when the page's real
+     scrolling happens inside a nested `overflow: auto` box instead of the
+     true document scroll — elements can render pinned to the wrong
+     reference point, including above the safe-area inset — which matches
+     the symptom exactly (VerdictCard's action row, #194's own DoD
+     required `position: sticky` be gone from VerdictCard.css, and it was
+     — grep confirms no `sticky` anywhere in this codebase — so the fault
+     was never the literal keyword, it was this). `overflow-x: clip`
+     doesn't trigger that visible-becomes-auto coupling (it doesn't create
+     a scrollable box on either axis, unlike `hidden`), so it keeps the
+     exact same "no horizontal scroll" defence without making this element
+     a scroll container. `overflow-y: visible` is written explicitly
+     rather than left implicit, so the intent survives the next person
+     who reads this rule without needing to know the coupling exists. */
+  overflow-x: clip;
+  overflow-y: visible;
 }
 
 body {

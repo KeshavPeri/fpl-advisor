@@ -5,17 +5,64 @@
   decisions/ticket-79-followup.md for the ticket-79 follow-up corrections
   applied here (the scrim no longer erases the bar's own backdrop; the
   bar is now measurably the most translucent surface in the app).
+
+  Ticket #202, section C — "the shape is nearly right and the execution
+  is not... it must read as one continuous piece of glass, not a bar with
+  a ring drawn on it." #194 built the bump as TWO independently bordered
+  shapes (this pill, plus `.app-bar__item--home`'s own circle) that
+  merely overlap — each shape's own 1px border traces its OWN full
+  outline, so the seam where they cross paints a doubled edge, which is
+  exactly "a ring drawn on a bar."
+
+  This rewrite makes `.app-bar` describe ONE silhouette — the geometric
+  union of the pill and a fixed-radius circle at top-centre — rather than
+  two overlapping ones:
+
+  1. The box itself grows tall enough to contain both the pill
+     (`--nav-bar-height`) and the circle's overshoot above it
+     (`--nav-bump-overshoot`, index.css) — the union shape's own bounding
+     box, not the pill's box with the circle spilling out of it.
+  2. `mask-image` unions a plain rect (the pill, from the overshoot line
+     down) with a fixed-size circle (`radial-gradient(circle
+     calc(var(--nav-home-size) / 2) at 50% calc(var(--nav-home-size) / 2)
+     ...)`) centred at top — ONE fill (background, blur, saturation, the
+     bar's own edge/sheen) now paints across BOTH regions as a single
+     material, with no second element's independent background to seam
+     against. `mask-composite: add` is the union operator; both layers
+     use fixed lengths (not percentages) for the circle, so it stays a
+     true circle at any bar width, and the pill's own straight/rounded
+     geometry comes from ordinary `border-radius` (fluid-width-safe by
+     construction), not from the mask.
+  3. `.app-bar__item--home` (below) is no longer its own bordered,
+     backdrop-filtered box — it is plain content (icon + label)
+     positioned inside the already-unified glass, so there is nothing
+     left to seam against in the first place.
+  4. A small, fixed-size inline SVG (AppBar.tsx) draws the one stroke a
+     plain CSS `border` geometrically cannot: the dome's own curve.
+     `border-radius` correctly rounds the pill's straight sides and
+     bottom caps (they sit at this box's real corners); a `border`
+     source, though, is drawn around the box's own rectangular edges,
+     which only ever gives a flat line at the very top of a much taller
+     box — never a curve following the circle bulging out of it. The SVG
+     arc is generated from the exact same `--nav-home-size` /
+     `--nav-bump-overshoot` values the mask uses (its `d` is computed
+     from them in AppBar.tsx, not hand-typed against a guess), so the
+     stroke and the fill's own edge coincide.
 */
 .app-bar {
   /* Icon geometry, kept here rather than in NavIcons.tsx so one grid and
      one stroke weight are enforced in one place for all three glyphs —
      and so the active state can thicken the stroke without the component
-     knowing anything about state. 22px on a 24 viewBox with a 1.5 stroke
-     renders a ~1.4px line, which sits with the app's hairline borders and
-     Geist's own stems rather than above them. */
+     knowing anything about state. Ticket #202, section C — "the icons
+     are too thin... sharpen them: heavier strokes." Raised from 1.5/2 to
+     1.75/2.25: still under 2px at rest (below the hairline-border
+     threshold this app otherwise reserves for structure, not icons), but
+     a real step up, and the active state keeps a consistent +0.5
+     increment over the resting weight rather than growing to a
+     different, un-related number. */
   --nav-icon-size: 22px;
-  --nav-stroke: 1.5;
-  --nav-stroke-active: 2;
+  --nav-stroke: 1.75;
+  --nav-stroke-active: 2.25;
 
   position: fixed;
   left: 50%;
@@ -23,18 +70,26 @@
   bottom: calc(env(safe-area-inset-bottom) + var(--space-3));
   z-index: 10;
 
+  /* Ticket #202, section C — the box now spans the union shape's full
+     bounding height (bump overshoot + pill), not just the pill; see the
+     header comment above. `display: flex; flex-direction: column` with
+     `.app-bar__row`'s own `margin-top: auto` (below) pins the actual
+     pill CONTENT to the box's bottom edge, so the extra headroom this
+     grows by is exactly where the mask reveals the circle and nowhere
+     content sits. */
   display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1);
+  flex-direction: column;
+  height: calc(var(--nav-bump-overshoot) + var(--nav-bar-height));
   width: calc(100% - var(--space-8));
   max-width: 22rem;
-  /* #194, section C — the Home circle (below) is absolutely positioned
-     and overlaps this box's own top edge on purpose, so the two read as
-     one continuous shape rather than as a button clipped by its parent. */
-  overflow: visible;
 
-  border-radius: 22px;
+  /* The pill's own true radius — see the header comment on why this is
+     an explicit value (matching --nav-bar-height exactly) rather than a
+     large round number relying on the browser's own corner-overlap
+     clamping, which would clamp against this box's full (taller) height
+     instead of the pill's own thickness and over-round the caps. */
+  border-radius: calc(var(--nav-bar-height) / 2);
+
   /* The glass. --material-bar is 0.50 alpha — deliberately LOWER than
      the 0.55 every panel shares, making this the most translucent
      surface in the app; it carries the strongest backdrop blur; it
@@ -51,10 +106,48 @@
   box-shadow:
     inset 0 1px 0 0 var(--material-sheen-3),
     0 8px 32px rgba(0, 0, 0, 0.45);
+
+  /* The union mask — see the header comment for the full mechanism.
+     Layer 1: a hard-edged rect from the overshoot line down (the pill).
+     Layer 2: a fixed-radius circle centred at top (the bump), unioned
+     (`add`) onto layer 1's result. Both expressed in fixed lengths, so
+     neither distorts at any fluid bar width. */
+  -webkit-mask-image:
+    linear-gradient(to bottom, transparent calc(var(--nav-bump-overshoot) - 1px), black var(--nav-bump-overshoot)),
+    radial-gradient(
+      circle calc(var(--nav-home-size) / 2) at 50% calc(var(--nav-home-size) / 2),
+      black calc(var(--nav-home-size) / 2 - 1px),
+      transparent calc(var(--nav-home-size) / 2)
+    );
+  mask-image:
+    linear-gradient(to bottom, transparent calc(var(--nav-bump-overshoot) - 1px), black var(--nav-bump-overshoot)),
+    radial-gradient(
+      circle calc(var(--nav-home-size) / 2) at 50% calc(var(--nav-home-size) / 2),
+      black calc(var(--nav-home-size) / 2 - 1px),
+      transparent calc(var(--nav-home-size) / 2)
+    );
+  -webkit-mask-composite: source-over;
+  mask-composite: add;
+}
+
+/* Ticket #202, section C — the pill's actual content row, pinned to the
+   bottom of `.app-bar`'s now-taller box (`margin-top: auto` pushes it
+   down, the same trick a flex column uses to bottom-align one child
+   without absolute positioning). This is what `.app-bar` itself used to
+   be directly; splitting it out is what lets the union mask above own
+   the FULL box while this row only ever occupies the pill's own
+   `--nav-bar-height` slice of it. */
+.app-bar__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--nav-bar-height);
+  padding: 0 var(--space-1);
+  margin-top: auto;
 }
 
 /* #194, section C — reserves the width the absolutely positioned Home
-   circle occupies, so the two side items (flex: 1 each) never grow into
+   item occupies, so the two side items (flex: 1 each) never grow into
    its footprint. Same width as the circle itself, not a hand-picked
    value. */
 .app-bar__home-spacer {
@@ -125,37 +218,60 @@
   transition:
     transform var(--dur-press) var(--ease-out),
     color var(--dur-press) ease,
-    background-color var(--dur-press) ease;
+    background-color var(--dur-press) ease,
+    box-shadow var(--dur-press) ease;
 }
 
 .app-bar__item--side {
   flex: 1;
 }
 
-/* #194, section C — Home: a circle overlapping the bar's own top edge,
-   sharing its exact material (fill, blur, saturation, edge light) so the
-   two read as one continuous, lit shape rather than a button welded onto
-   a pill. Positioned relative to `.app-bar` (which is `overflow: visible`
-   for exactly this). `translate(-50%, -58%)` centres it horizontally and
-   lifts it so a bit under half of its own height pokes above the bar —
-   enough to read as "bulging outward," not so much that it looks
-   detached from the pill beneath it. */
+/* Ticket #202, section C — Home is no longer its own bordered,
+   backdrop-filtered circle (that independent box was the "ring drawn on
+   a bar" the ticket names — see this file's own header comment for the
+   mechanism that replaces it). It is now plain content (icon + label)
+   positioned inside `.app-bar`'s own already-unified glass, sized and
+   placed to sit exactly where the parent's mask reveals the circle:
+   `top: 0` and `width`/`height: var(--nav-home-size)` match the mask's
+   own circle bounding box (0 to --nav-home-size from the parent's own
+   top) precisely, using the identical token — the two cannot drift out
+   of sync with each other the way two independently hand-typed
+   positions could. */
 .app-bar__item--home {
   position: absolute;
   left: 50%;
-  top: 50%;
-  transform: translate(-50%, -58%);
+  top: 0;
+  transform: translateX(-50%);
   width: var(--nav-home-size);
   height: var(--nav-home-size);
   border-radius: 50%;
-  background: var(--material-bar);
-  -webkit-backdrop-filter: blur(var(--material-bar-blur)) saturate(var(--material-bar-saturate));
-  backdrop-filter: blur(var(--material-bar-blur)) saturate(var(--material-bar-saturate));
-  border: 1px solid var(--panel-border);
-  border-top-color: var(--material-edge-3);
-  box-shadow:
-    inset 0 1px 0 0 var(--material-sheen-3),
-    0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* Ticket #202, section C — the dome's own visible rim, the one curve a
+   plain CSS `border` cannot draw around a masked shape (see this file's
+   header comment). Small, fixed pixel size (matches --nav-home-size /
+   --nav-bump-overshoot exactly, AppBar.tsx computes its `d` from the
+   same two tokens) — never stretched, so its arc never distorts
+   regardless of the bar's own fluid width. Decorative only
+   (aria-hidden, AppBar.tsx); the accessible name still comes from the
+   Home link's own visible text label. */
+.app-bar__dome-rim {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  width: var(--nav-home-size);
+  height: var(--nav-bump-overshoot);
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* Weight lives here, not as an inline SVG attribute, for the same reason
+   NavIcons.tsx's own stroke-width does (.app-bar__icon, below): one place
+   to look for every stroke weight in the bar. */
+.app-bar__dome-rim-path {
+  stroke: var(--material-edge-3);
+  stroke-width: 1;
 }
 
 /* #194, section C — one sharp register for every label in the bar,
@@ -185,13 +301,24 @@
   flex-shrink: 0;
 }
 
-/* The current destination, marked three ways so it never depends on
-   colour alone: a heavier stroke, a heavier label, and (the colour one)
-   primary text on a dim cyan pill. Desaturate the whole app and the
-   active item is still the one drawn in bolder line. */
+/* The current destination, marked four ways so it never depends on
+   colour alone: a heavier stroke, a heavier label, a dim cyan fill, and
+   an outer bloom. Desaturate the whole app and the active item is still
+   the one drawn in bolder line.
+
+   Ticket #202, section C — "bring back the glow on Home... a soft outer
+   bloom. Its absence is the owner's most specific complaint." #194's own
+   Home-specific override (kept the circle on plain --material-bar,
+   substituted a border-colour ring for the fill swap every side item
+   got) is gone: Home no longer carries its own independent background
+   to protect from this rule (see .app-bar__item--home above), so the
+   ONE generic active rule now applies identically to all three
+   destinations — the cyan fill AND the bloom the ticket asks for,
+   consistently, rather than Home being a special case again. */
 .app-bar__item[aria-current='page'] {
-  color: var(--text-primary);
+  color: var(--accent-cyan);
   background: var(--accent-cyan-dim);
+  box-shadow: var(--nav-active-glow);
 }
 
 .app-bar__item[aria-current='page'] .app-bar__icon {
@@ -202,20 +329,6 @@
   font-weight: 620;
 }
 
-/* Home overrides the generic active-state fill above: it must keep
-   sharing --material-bar (the whole point of section C's "one continuous
-   silhouette") rather than swap to the cyan-dim pill every side item
-   uses, which would otherwise win — `[aria-current='page']` alone has
-   higher specificity than `.app-bar__item--home` alone, and Home is the
-   default route, so this is the common case, not an edge case. A cyan
-   ring on the circle's own edge (the app's existing solid/hollow idiom —
-   PlayerShirt.css's captaincy and availability rings) replaces the fill
-   swap as the colour signal. */
-.app-bar__item--home[aria-current='page'] {
-  background: var(--material-bar);
-  border-color: var(--accent-cyan-line);
-}
-
 .app-bar__item:active {
   transform: scale(0.96);
 }
@@ -224,7 +337,8 @@
   .app-bar__item {
     transition:
       color var(--dur-press) ease,
-      background-color var(--dur-press) ease;
+      background-color var(--dur-press) ease,
+      box-shadow var(--dur-press) ease;
   }
 
   .app-bar__item:active {

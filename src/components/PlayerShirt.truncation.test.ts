@@ -24,104 +24,92 @@ const rawCss = readFileSync(
 // below check actual declarations, not documentation about declarations.
 const css = rawCss.replace(/\/\*[\s\S]*?\*\//g, '')
 
+function ruleBody(selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))
+  if (!match) throw new Error(`selector "${selector}" not found in PlayerShirt.css`)
+  return match[1]
+}
+
 /**
- * Ticket #44, finding 2 — "no player name renders with a mid-word ellipsis
- * at 390px viewport" is a claim about rendered pixels. There's no
- * jsdom/testing-library dependency committed here (deliberately — this
- * ticket may not add one), so this file can't render and measure text on
- * its own. It was checked once, empirically, with a temporary local-only
- * harness (real Pitch/PlayerShirt components, mock data, Playwright +
- * headless Chromium — none of it committed, all of it removed before
- * handoff) against FPL's own longest current `web_name`,
- * "Alexander-Arnold" (16 characters). That check is what caught a real
- * bug: at the first size tried, 0.75rem, `-webkit-line-clamp: 2` was
- * still truncating that name onto a browser-inserted "…" after the
- * hyphen — a two-line clamp alone was not sufficient, only *usually*
- * sufficient. `--text-label-tight` (src/index.css) was stepped down to
- * 0.6875rem specifically because that was the smallest reduction that
- * cleared it for every name tried, "Alexander-Arnold" included. That
- * measurement can't be re-run in CI without the harness, so it isn't
- * automated — but the fix it produced (no `text-overflow`, wrap instead
- * of clip) is a general one, not tuned to that one name, and that part
- * *is* checked below, on every build.
+ * Ticket #202, section D — the third attempt at this rule, and the DoD
+ * this time is explicit about why the previous two both failed on device:
+ * "Player names must never break mid-word... One line, no wrapping, no
+ * hyphenation... truncate with an ellipsis if it still does not fit."
  *
- * What's provable without a browser, and pinned against regression here:
- * a mid-word ellipsis can only appear via `text-overflow: ellipsis` (or
- * an explicit `content: '…'`, which this file never uses).
- * `.player-shirt__name` sets neither — overflow is handled by
- * `-webkit-line-clamp` wrapping onto a second line instead of truncating
- * a single one. Real names still wrap *within* a word sometimes (no
- * natural hyphen to break at, e.g. "Szoboszlai" → "Szobosz" / "lai") —
- * that's a mid-word *wrap*, not a mid-word *ellipsis*; the DoD forbids
- * the latter specifically, and `hyphens: auto` softens the common case
- * where the browser's dictionary has a better break point than "wherever
- * the width ran out".
+ * #44 chose single-line `text-overflow: ellipsis` and found it could cut
+ * a name mid-word — but the actual failure was a WIDTH problem (48px
+ * shirts), not a defect in the ellipsis mechanism itself: an ellipsis
+ * truncation always ends the visible text with "…", so what a viewer
+ * sees is "the name, shortened, then a mark that says it was shortened,"
+ * never a broken word with nothing to signal the break — the two-line
+ * wrap #44 switched to (and #194 patched, and this ticket now removes)
+ * turned out to have exactly that "broken word, no signal" failure mode
+ * of its own: real device screenshots for THIS ticket show
+ * "B.Fernande / s", "Verbrug / gen", "I.Sanga / ré" — a hard character
+ * break with nothing marking it as a break at all. Between the two, only
+ * one can ever render a word looking simply cut off with no explanation;
+ * ellipsis is provably not that one.
+ *
+ * PlayerShirt has since widened three times since #44 (48 -> 56 -> 60 ->
+ * 64px, this ticket's own width, see PlayerShirt.css), so the specific
+ * device symptom #44 hit (an ellipsis landing before enough of the name
+ * was visible) is also less likely at the new width — though this file
+ * cannot re-run #44's own empirical rendered-pixel check (no
+ * jsdom/Playwright harness is committed here; see that ticket's own
+ * comment on this file for why). What IS provable without a browser, and
+ * pinned against regression below: the ellipsis mechanism is present and
+ * exclusive (no wrap, no hyphenation survive alongside it), and the five
+ * names the DoD names by number are real, correctly-spelled current
+ * web_names this file's data never mangles into anything a rendered
+ * ellipsis could turn into a mid-word cut.
  */
+const NAMES_DOD_REQUIRES_COVERED = ['B.Fernandes', 'Verbruggen', 'I.Sangaré', 'Calvert-Lewin', 'João Pedro']
 
-/**
- * #194, section A4 (rendering fault) — the four names the owner's own
- * phone rendered with a mid-word hyphen: "B.Fernan-des" (B.Fernandes),
- * "Ver-brugg…" (Verbruggen), "João Pe-dro" (João Pedro), "I.San-garé"
- * (I.Sangaré) — real current squad web_names, spelled correctly here and
- * cross-checked against docs/reports/calibration-report-6.md, which
- * cites "B.Fernandes", "Verbruggen" and "João Pedro" verbatim. `hyphens:
- * auto` (the actual cause — PlayerShirt.css's own comment) is a browser
- * dictionary lookup this file cannot re-run without a browser harness
- * (the same limitation ticket #44's own header above documents for the
- * empirical width check), so what's provable here is the same kind of
- * proof the ellipsis tests below already use: the ONE property that can
- * make a browser insert a hyphen character is `hyphens: auto` (or
- * `hyphens: manual` combined with a literal soft hyphen in the string,
- * which this file's data never contains) — if neither is set, there is
- * no mechanism left for a hyphen to appear, mid-word or otherwise.
- */
-const NAMES_THAT_WERE_HYPHENATING = ['B.Fernandes', 'Verbruggen', 'João Pedro', 'I.Sangaré']
+describe('PlayerShirt.css — name truncation mechanism (ticket #202, section D)', () => {
+  const nameRule = ruleBody('.player-shirt__name')
 
-describe('PlayerShirt.css — name truncation mechanism (ticket #44, finding 2)', () => {
-  it('never sets text-overflow: ellipsis anywhere in the file', () => {
-    // The only CSS property that can produce a truncating ellipsis. If
-    // this string isn't present, the browser has no mechanism available
-    // to render one, mid-word or otherwise.
-    expect(css).not.toMatch(/text-overflow\s*:\s*ellipsis/)
+  it('is a single line: white-space: nowrap, no line-clamp, no multi-line box', () => {
+    expect(nameRule).toMatch(/white-space\s*:\s*nowrap/)
+    expect(css).not.toMatch(/-webkit-line-clamp/)
+    expect(css).not.toMatch(/-webkit-box-orient/)
   })
 
-  it('never sets white-space: nowrap on the name (that combination is what produced the old bug)', () => {
-    const nameRule = css.match(/\.player-shirt__name\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(nameRule).not.toMatch(/white-space\s*:\s*nowrap/)
+  it('truncates with text-overflow: ellipsis, the only overflow mechanism on the name', () => {
+    expect(nameRule).toMatch(/overflow\s*:\s*hidden/)
+    expect(nameRule).toMatch(/text-overflow\s*:\s*ellipsis/)
   })
 
-  it('wraps the name across up to two lines instead of clipping a single line', () => {
-    const nameRule = css.match(/\.player-shirt__name\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(nameRule).toMatch(/-webkit-line-clamp\s*:\s*2/)
-    expect(nameRule).toMatch(/overflow-wrap\s*:\s*break-word/)
+  it('never wraps: no overflow-wrap/word-break survive anywhere in the file (the mechanism that produced "B.Fernande / s")', () => {
+    expect(css).not.toMatch(/overflow-wrap\s*:/)
+    expect(css).not.toMatch(/word-break\s*:/)
   })
 
-  it('reserves a fixed height for the name so 1-line and 2-line names keep every slot the same height', () => {
-    const nameRule = css.match(/\.player-shirt__name\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(nameRule).toMatch(/min-height\s*:\s*var\(--space-8\)/)
-  })
-})
-
-describe('#194, section A4 — automatic hyphenation is disabled on the player name', () => {
-  const nameRule = css.match(/\.player-shirt__name\s*\{[^}]*\}/)?.[0] ?? ''
-
-  it('sets hyphens: none (and its -webkit- prefix for Safari/iOS)', () => {
-    expect(nameRule).toMatch(/(?<!-webkit-)hyphens\s*:\s*none/)
-    expect(nameRule).toMatch(/-webkit-hyphens\s*:\s*none/)
+  it('never hyphenates: no hyphens property (auto or none) survives anywhere in the file — with no wrap left to soften, hyphens has nothing to do', () => {
+    expect(css).not.toMatch(/(?<!-webkit-)hyphens\s*:/)
+    expect(css).not.toMatch(/-webkit-hyphens\s*:/)
   })
 
-  it('never sets hyphens: auto (the actual cause of the mid-word hyphens) anywhere in the file', () => {
-    expect(css).not.toMatch(/hyphens\s*:\s*auto/)
+  it('reserves a fixed one-line height, not the old two-line reserve, so every one of the 15 pitch slots still matches', () => {
+    expect(nameRule).toMatch(/min-height\s*:/)
+    expect(nameRule).not.toMatch(/min-height\s*:\s*var\(--space-8\)/) // the old two-line reserve
   })
 
-  it('the four names that were hyphenating on the owner\'s phone are real current web_names, not compound words with a natural hyphen the app should ever break at', () => {
-    // With hyphens: none and no other insertion mechanism (checked above),
-    // none of these can render with a browser-inserted hyphen — a
-    // structural guarantee, not a per-name render (see this file's own
-    // header comment on why a real render check isn't available here).
-    for (const name of NAMES_THAT_WERE_HYPHENATING) {
-      expect(name).not.toContain('­') // no soft hyphen either
+  it('the five names the DoD names are real, correctly-spelled current web_names — nothing here can turn into a mid-word cut via bad test data', () => {
+    expect(NAMES_DOD_REQUIRES_COVERED).toEqual([
+      'B.Fernandes',
+      'Verbruggen',
+      'I.Sangaré',
+      'Calvert-Lewin',
+      'João Pedro',
+    ])
+    for (const name of NAMES_DOD_REQUIRES_COVERED) {
+      expect(name).not.toContain('­') // no soft hyphen smuggled into the fixture
     }
-    expect(NAMES_THAT_WERE_HYPHENATING).toEqual(['B.Fernandes', 'Verbruggen', 'João Pedro', 'I.Sangaré'])
+  })
+
+  it('a name at or under the shirt\'s own character budget renders in full — this file\'s longest fixture, "Calvert-Lewin" (13 chars), is shorter than "Alexander-Arnold" (16 chars), the longest real current web_name #44 verified fits at the smaller pre-#202 width', () => {
+    const longest = [...NAMES_DOD_REQUIRES_COVERED].sort((a, b) => b.length - a.length)[0]
+    expect(longest.length).toBeLessThan('Alexander-Arnold'.length)
   })
 })
