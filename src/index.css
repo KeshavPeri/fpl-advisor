@@ -118,12 +118,16 @@
      backdrop AS IT STOOD, but drew the wrong conclusion from it: the fix
      for "nothing behind the glass to blur" is to put something
      high-frequency behind the glass, not to remove the blur. This ticket
-     does the former — `.app-shell__grain` (AppShell.tsx/.css) is a fixed,
-     low-opacity noise layer with real per-pixel detail — so panel blur
-     now has texture to act on as the page scrolls past it (the backdrop
-     is `position: fixed`, panels scroll, so what's behind a panel changes
-     continuously). --panel-blur is deliberately lower than the nav bar's
-     --material-bar-blur (16px vs 28px) and saturate stays lower too
+     does the former — a fixed, low-opacity noise layer with real
+     per-pixel detail, one of several layers on `.app-shell__backdrop`
+     itself (AppShell.tsx/.css; folded there from a separate
+     `.app-shell__grain` div by ticket #202, which also gave that same
+     element several colour centres instead of two and a small scroll
+     parallax) — so panel blur now has texture to act on as the page
+     scrolls past it (the backdrop is `position: fixed`, panels scroll, so
+     what's behind a panel changes continuously). --panel-blur is
+     deliberately lower than the nav bar's --material-bar-blur (16px vs
+     28px) and saturate stays lower too
      (150% vs 180%) — the bar must stay the glassiest surface in the app;
      panel blur reads as material, not as the bar's own live-content
      glass. */

@@ -37,16 +37,19 @@
      blurring a smooth gradient returns the same gradient" — was correct
      about the backdrop as it stood, and wrong to conclude blur should be
      removed rather than that the backdrop needed real detail. AppShell
-     now paints a fixed, high-frequency grain layer behind everything
-     (`.app-shell__grain`, AppShell.css) — a panel's backdrop is that
-     grain composited under the ambient wash, not a smooth gradient any
-     more, and `.app-shell__backdrop` is `position: fixed` while panels
-     scroll, so what sits behind a given panel keeps changing as the page
-     moves. Blur now has real per-pixel texture to act on. --panel-blur
-     is deliberately lower than the nav bar's own --material-bar-blur
-     (16px vs 28px) and saturate stays lower too (150% vs 180%) — the bar
-     stays the glassiest surface in the app; see index.css.test.ts's
-     "nav bar is the glassiest surface" assertion. */
+     paints a fixed, high-frequency grain layer behind everything — one of
+     `.app-shell__backdrop`'s own several background layers as of ticket
+     #202 (folded in from the standalone `.app-shell__grain` div #194
+     shipped; see AppShell.css) — so a panel's backdrop is that grain
+     composited under the ambient wash's now-several colour centres, not a
+     smooth gradient at all. `.app-shell__backdrop` is also `position:
+     fixed` while panels scroll AND (#202) carries its own small scroll
+     parallax, so what sits behind a given panel keeps changing as the
+     page moves. Blur now has real per-pixel texture to act on.
+     --panel-blur is deliberately lower than the nav bar's own
+     --material-bar-blur (16px vs 28px) and saturate stays lower too (150%
+     vs 180%) — the bar stays the glassiest surface in the app; see
+     index.css.test.ts's "nav bar is the glassiest surface" assertion. */
   -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(var(--panel-saturate));
   backdrop-filter: blur(var(--panel-blur)) saturate(var(--panel-saturate));
 }
