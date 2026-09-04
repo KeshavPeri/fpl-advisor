@@ -3450,6 +3450,7 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
       oracleOneGw: { season: fgSeason, byPosition: fgByPosition, insufficientData: 0 },
       oracleFiveGw: { season: fgSeason, byPosition: fgByPosition, insufficientData: 0 },
       oracleCeiling: { ok: true, failures: [] },
+      oneGwNeutralFixtureModel: { season: fgSeason, byPosition: fgByPosition },
     },
   }
 
@@ -3493,6 +3494,16 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     expect(output).toContain('reconstructed from matches that were actually PLAYED')
     // And the new exclusion reason reconciles by name alongside the others.
     expect(output).toContain(`had no \`team_code\` (ticket #193`)
+  })
+
+  it('prints the ticket #197 neutral-fixture diagnostic, after the oracle-ceiling check, never as a check or assertion', () => {
+    const output = generateReportMarkdown(data)
+    const ceilingIndex = output.indexOf('### Oracle-ceiling check: PASSED')
+    const diagnosticIndex = output.indexOf('### Diagnostic (ticket #197): one-gameweek model with every fixture forced neutral')
+    expect(diagnosticIndex).toBeGreaterThan(ceilingIndex)
+    expect(output).toContain('REPORTED ONLY — never a check, never gates this report, never asserted')
+    // fgSeason is built from an empty rows array (spearman null with <2 pairs) — same 'n/a' formatting fmtSpearman uses throughout this file.
+    expect(output).toContain('season: Spearman **n/a**')
   })
 
   it('the oracle-ceiling check reports FAILED, with its failure text, when oracleCeiling.ok is false', () => {
