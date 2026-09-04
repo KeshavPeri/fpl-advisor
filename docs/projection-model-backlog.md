@@ -1146,3 +1146,78 @@ one-gameweek assertion. That exit is the check working, not a regression.**
 
 **What follow-up work should NOT do:** relax, widen, or remove the five-gameweek check (per position or
 aggregate) to make the job pass again. The check is correct; the model is what needs investigating.
+
+---
+
+## G16 — Ticket #207, 4 Sep 2026: the minutes model v2 (#191) is REVERTED — pre-registration worked
+## exactly as intended, and it said no
+
+**#191's own definition of done pre-registered its revert condition, and #207 acts on it.** #191
+(commit `e652df7`) replaced the plain windowed mean in `src/lib/projection/minutes.ts` with a
+start-probability x minutes-given-start split that dropped the single lowest value from a full
+five-match window, stating up front: "if any position moves away from 1.00 [on the
+appearance-ratio calibration check], revert rather than tune." Three of four positions did, the
+day it shipped. The revert was deferred at the time, openly, on the grounds that the backtest was
+the better instrument for the question and was broken. That instrument is now honest (ticket
+#201), and all three lines of evidence agree.
+
+**1. The pre-registered calibration criterion, failed and still failing.** Appearance ratios by
+position:
+
+| Report | GK | DEF | MID | FWD |
+|---|---|---|---|---|
+| 7 — before #191 | 1.06 | 1.00 | 0.96 | 0.92 |
+| 8 — after #191 | 1.05 | 0.98 | 0.93 | 0.89 |
+| 9 — after #191, five days on | 1.05 | 0.98 | 0.94 | 0.89 |
+
+Three positions moved away from 1.00 and stayed there. Two independent readings, same answer.
+
+**2. The honest backtest, both horizons.** Ticket #201 reconstructed the pre-#191 minutes model
+inside the harness and ran both side by side over the identical population, with every other
+input held constant (backtest report 11):
+
+| Ranking | Pre-#191 | Shipped (#191) |
+|---|---|---|
+| One gameweek, season | 0.354 | 0.345 |
+| Five gameweek, season | 0.407 | 0.397 |
+| One gameweek, midfield | 0.411 | 0.400 |
+| One gameweek, defence | 0.296 | 0.286 |
+| Five gameweek, midfield | 0.421 | 0.412 |
+| Five gameweek, defence | 0.385 | 0.374 |
+
+The shipped model wins only at goalkeeper on one gameweek (0.157 against 0.149) and at goalkeeper
+and forward on five (0.240/0.452 against 0.228/0.442). It loses the season aggregate at both
+horizons and loses midfield and defence at both.
+
+**3. The independent prediction.** `docs/model-review-2026-09-02.md` §3 predicted a correct
+live-window minutes model would score 0.354 at one gameweek, from a reconstruction built
+separately in Python with no lookahead. The pre-#191 construction scores exactly that. #191 moved
+the model away from the review's predicted state, not toward it.
+
+At five gameweeks the naive "prior minutes per match" baseline scores 0.407 and the shipped model
+scores 0.397 — the model currently loses to a one-line ranker. The pre-#191 model scores 0.407.
+Reverting closes that deficit entirely.
+
+**What #207 did.** `src/lib/projection/minutes.ts` restored to its exact pre-`e652df7` state — the
+plain mean of the recent-minutes window, no `dropSingleLowest`, no
+`splitFeaturedFromSample`/start-minutes-given-start. `estimateMinutes`'s exported signature and
+`MinutesEstimate` shape are unchanged, so no consumer needed editing. `src/lib/projection/
+expectedPoints.test.ts` and `scripts/run-backtest.test.ts` had hardcoded expectations tied to
+#191's shipped numbers on shared worked windows (`[90,90,90,10,10]`, `[90,90,20,0,0]`) — these
+were updated to the reverted model's actual output as a direct, mechanical consequence of the
+revert, the same kind of fast-follow #191 itself needed for `expectedPoints.test.ts` when it
+shipped. No change to `scripts/run-backtest.ts` itself, `src/lib/projection/expectedPoints.ts`, or
+any other projection input.
+
+**#191 was not a bad idea, and its execution was measured properly the moment a working
+instrument existed.** Averaging `90, 90, 90, 90, 0` down to 72 expected minutes genuinely does
+understate a nailed starter who missed one match to rotation — that observation was real, and the
+underlying data behind it (77 players, 1,232 five-match windows, the "next match after a
+one-zero window looks almost identical to the next match after a clean window" finding) was real
+too. The idea was sound. It lost anyway, on a fair measurement, at every horizon and every
+position except goalkeeper and (at five gameweeks) forward, and it lost the season aggregate
+outright. That is pre-registration working exactly as intended: a clearly stated revert
+condition, honoured once the instrument to check it existed. **Do not re-propose the
+start/minutes-given-start split, or any other single-lowest-drop variant, without new evidence
+that addresses why it lost the honest backtest — restating the `90,90,90,90,0` motivating case
+again is not new evidence; it is the case that was already measured and lost.**
