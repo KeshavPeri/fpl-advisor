@@ -367,15 +367,35 @@ import {
   GOALS_CONCEDED_DIVISOR,
   GOALS_CONCEDED_POINTS_PER_UNIT,
   cleanSheetPoints,
+  expectedAppearancePoints,
   goalPoints,
   goalsConcededPointsApply,
   savePointsApply,
 } from '../src/lib/projection/pointValues.ts'
-import { positionPriorRates, type PlayerRateHistory, type PlayerRates, type RateHistoryMatch } from '../src/lib/projection/rates.ts'
-import { positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
+import { computePlayerRates, positionPriorRates, type PlayerRateHistory, type PlayerRates, type RateHistoryMatch } from '../src/lib/projection/rates.ts'
+import { estimateDefconHitRate, expectedDefensiveContributionPoints, positionPriorHitRate } from '../src/lib/projection/defconRate.ts'
 import type { DefensiveContributionMatch } from '../src/lib/projection/types.ts'
-import { HOME_ADVANTAGE_ELO, LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
 import {
+  HOME_ADVANTAGE_ELO,
+  LEAGUE_BASELINE_GOALS_PER_TEAM,
+  attackingMultiplier,
+  defensiveMultiplier,
+  expectedGoalsConceded,
+  expectedScore,
+  expectedScoreFromDifficulty,
+} from '../src/lib/projection/fixture.ts'
+import {
+  NO_HISTORY_BASELINE_MINUTES,
+  NO_HISTORY_BASELINE_SIXTY_PLUS_RATE,
+  availabilityFactor,
+  type MinutesEstimate,
+} from '../src/lib/projection/minutes.ts'
+import {
+  assistConversionFactor,
+  cleanSheetProbability,
+  expectedGoalsConcededPoints,
+  expectedSavePoints,
+  goalConversionFactor,
   projectPlayerGameweek,
   type FixtureContext,
   type FixtureProjectionComponents,
@@ -1471,6 +1491,153 @@ export function projectRow(
       : buildFixtureContextFromExpectedScore(expectedScoreValue, row.gameweek_id)
   })
   return projectPlayerGameweek(input, fixtures)
+}
+
+// ============================================================================
+// Ticket #201, Part 2 — the pre-#191 minutes construction, reconstructed for
+// REPORTED-ONLY comparison. `src/lib/projection/minutes.ts` is UNTOUCHED by
+// this ticket; nothing below is imported by, or wired into, the live
+// pipeline. This is a reconstruction of the OLD model, not a fork of the
+// live one — see ticket #201's own scope.
+//
+// THE OLD ARITHMETIC (verbatim from `git show e652df7 -- src/lib/projection/
+// minutes.ts`, the #191/#188 commit's own diff — the plain mean of the
+// recent-minutes window, no single-lowest drop, no start/minutes-given-start
+// split): `expectedMinutes = mean(recentMinutes) * pAppears`, `pSixtyPlus =
+// (count(m >= 60) / length) * pAppears`. `availabilityFactor` and both
+// NO_HISTORY_BASELINE_* constants are reused directly from minutes.ts,
+// unchanged by #191 (confirmed from that same diff) — reconstructing an
+// unchanged constant a second time here would be a second thing to get
+// wrong for no reason.
+// ============================================================================
+
+/** Mirrors minutes.ts's own private `clamp01` exactly — that helper is not exported, so this is the one unavoidable duplicate: two lines, unchanged since before #191, not a second thing to get wrong. */
+function preTicket191Clamp01(value: number): number {
+  if (value < 0) return 0
+  if (value > 1) return 1
+  return value
+}
+
+/**
+ * The pre-#191 `estimateMinutes` — reconstructed verbatim (see this
+ * section's own header). Returns minutes.ts's own exported `MinutesEstimate`
+ * shape so every downstream consumer (`projectPlayerFixturePreTicket191Minutes`
+ * below) is identical in shape to the shipped combiner, differing only in
+ * how the three fields are computed.
+ */
+export function estimateMinutesPreTicket191(recentMinutes: readonly number[], availability: number): MinutesEstimate {
+  const pAppears = preTicket191Clamp01(availability)
+
+  if (recentMinutes.length === 0) {
+    return {
+      expectedMinutes: NO_HISTORY_BASELINE_MINUTES * pAppears,
+      pAppears,
+      pSixtyPlus: NO_HISTORY_BASELINE_SIXTY_PLUS_RATE * pAppears,
+    }
+  }
+
+  const averageMinutes = recentMinutes.reduce((sum, m) => sum + m, 0) / recentMinutes.length
+  const sixtyPlusRate = recentMinutes.filter((m) => m >= 60).length / recentMinutes.length
+
+  return {
+    expectedMinutes: averageMinutes * pAppears,
+    pAppears,
+    pSixtyPlus: sixtyPlusRate * pAppears,
+  }
+}
+
+/**
+ * Mirrors `projectPlayerFixture` (src/lib/projection/expectedPoints.ts)
+ * function for function, substituting ONLY the minutes step:
+ * `estimateMinutesPreTicket191` in place of the shipped `estimateMinutes`.
+ * Every other input — rates, fixture multipliers, defcon, the goal/assist
+ * conversion factors, `totalMatchPoints` — is the SAME exported pure
+ * function the live pipeline uses, called here unmodified; nothing about
+ * them is reconstructed or approximated. Returns only the summed points
+ * (never the full FixtureProjection breakdown `projectPlayerFixture`
+ * returns) — this diagnostic never needs the per-component split.
+ */
+function projectPlayerFixturePreTicket191Minutes(player: PlayerProjectionInput, fixture: FixtureContext): number {
+  const availability = availabilityFactor(player.status, player.chanceOfPlayingNextRound)
+  const minutesEstimate = estimateMinutesPreTicket191(player.recentMinutes, availability)
+  const minutesFraction = minutesEstimate.expectedMinutes / 90
+
+  const playerRates = computePlayerRates(player.rateHistory, player.ratePositionPrior)
+  const defconHitRate = estimateDefconHitRate(player.position, player.defconMatches, player.defconPositionPrior)
+
+  const eloFallbackUsed = fixture.teamElo === null || fixture.opponentElo === null
+  const expectedScoreValue = eloFallbackUsed
+    ? expectedScoreFromDifficulty(fixture.fplDifficulty)
+    : expectedScore(fixture.teamElo as number, fixture.opponentElo as number, fixture.isHome)
+
+  const attackMultiplier = attackingMultiplier(expectedScoreValue)
+  const savesMultiplier = defensiveMultiplier(expectedScoreValue)
+  const teamLambdaConceded = expectedGoalsConceded(fixture.leagueBaselineGoals, expectedScoreValue)
+
+  const expectedGoals = playerRates.xgPer90 * minutesFraction * attackMultiplier * goalConversionFactor(player.position)
+  const expectedAssists = playerRates.xaPer90 * minutesFraction * attackMultiplier * assistConversionFactor(player.position)
+  const expectedSaves = playerRates.savesPer90 * minutesFraction * savesMultiplier
+
+  const pCleanSheet = cleanSheetProbability(teamLambdaConceded)
+  const playerLambdaConceded = teamLambdaConceded * minutesFraction
+
+  const fullComponents: MatchPointComponents = {
+    appearancePoints: expectedAppearancePoints(minutesEstimate.pAppears, minutesEstimate.pSixtyPlus),
+    goalPoints: expectedGoals * goalPoints(player.position),
+    assistPoints: expectedAssists * ASSIST_POINTS,
+    cleanSheetPoints: pCleanSheet * minutesEstimate.pSixtyPlus * cleanSheetPoints(player.position),
+    goalsConcededPoints: expectedGoalsConcededPoints(playerLambdaConceded, player.position),
+    savePoints: expectedSavePoints(expectedSaves, player.position),
+    defensiveContributionPoints: expectedDefensiveContributionPoints(defconHitRate) * minutesEstimate.pSixtyPlus,
+    bonusPoints: 0,
+    penaltySavePoints: 0,
+    penaltyMissPoints: 0,
+    yellowCardPoints: 0,
+    redCardPoints: 0,
+    ownGoalPoints: 0,
+  }
+
+  return totalMatchPoints(fullComponents)
+}
+
+/**
+ * Mirrors `projectRow` above exactly — the SAME `PlayerProjectionInput`
+ * construction (via `buildRecentMinutes`/`buildPlayerRateHistory`/
+ * `buildDefconMatches`, all unmodified) and the SAME fixture-context
+ * construction (`buildNeutralFixtureContext`/`buildFixtureContextFromExpectedScore`,
+ * also unmodified) — except it sums `projectPlayerFixturePreTicket191Minutes`
+ * per fixture instead of calling `projectPlayerGameweek`, which is wired to
+ * the SHIPPED `estimateMinutes` and cannot be parameterised to take a
+ * different minutes construction without editing expectedPoints.ts (out of
+ * this ticket's scope). Returns just the summed expected points — every
+ * caller below only ever needs the total, never the per-fixture breakdown
+ * `projectRow`'s `GameweekProjection` carries.
+ */
+export function projectRowPreTicket191Minutes(
+  row: FeatureHistoryRow,
+  position: Position,
+  prior: PositionPrior,
+  fixtureCount = 1,
+  fixtureExpectedScores: readonly number[] = [],
+): number {
+  const input: PlayerProjectionInput = {
+    position,
+    status: ASSUMED_AVAILABILITY_STATUS,
+    chanceOfPlayingNextRound: null,
+    recentMinutes: buildRecentMinutes(row),
+    rateHistory: buildPlayerRateHistory(row),
+    ratePositionPrior: prior.rate,
+    defconMatches: buildDefconMatches(row),
+    defconPositionPrior: prior.defconHitRate,
+  }
+  const count = Math.max(0, Math.trunc(fixtureCount))
+  const fixtures: FixtureContext[] = Array.from({ length: count }, (_, i) => {
+    const expectedScoreValue = fixtureExpectedScores[i]
+    return expectedScoreValue === undefined
+      ? buildNeutralFixtureContext(row.gameweek_id)
+      : buildFixtureContextFromExpectedScore(expectedScoreValue, row.gameweek_id)
+  })
+  return fixtures.reduce((sum, fixture) => sum + projectPlayerFixturePreTicket191Minutes(input, fixture), 0)
 }
 
 /** The 7 point components this job compares — bonus is deliberately absent (see file header); projectPlayerFixture's own bonusPoints is always exactly 0. */
@@ -2689,7 +2856,16 @@ export function isFiveGameweekWindowTruncated(startGameweekId: number, lastGamew
  * leg shares the same G row's team_code — see this function's own comment).
  */
 export type WindowGameweekOutcome =
-  | { status: 'ok'; position: Position; projectedPoints: number; actualPoints: number; fixtureCount: number; featured: boolean }
+  | {
+      status: 'ok'
+      position: Position
+      projectedPoints: number
+      actualPoints: number
+      fixtureCount: number
+      featured: boolean
+      /** Ticket #201, Part 2 — the SAME leg, projected a SECOND time through the pre-#191 minutes construction (reported only, never gates anything). See `projectRowPreTicket191Minutes`'s own comment. */
+      preTicket191MinutesProjectedPoints: number
+    }
   | { status: 'missingFeatureHistoryRow' }
   | { status: 'unresolvedPosition' }
   | { status: 'unresolvedTeamCode' }
@@ -2814,8 +2990,22 @@ export function projectAndReconstructWindowGameweek(
 
   const prior = positionPriors.get(positionPriorKey(featureGameweekId, position)) ?? fallbackPositionPrior(position)
   const projection = projectRow(row, position, prior, fixtureCount, fixtureExpectedScores)
+  // Ticket #201, Part 2 — REPORTED ONLY, never read by anything above (the
+  // shipped `projectedPoints` above is untouched). Same row/position/prior/
+  // fixtureCount/fixtureExpectedScores as the shipped projection immediately
+  // above; only the minutes construction differs. See
+  // `projectRowPreTicket191Minutes`'s own comment.
+  const preTicket191MinutesProjectedPoints = projectRowPreTicket191Minutes(row, position, prior, fixtureCount, fixtureExpectedScores)
 
-  return { status: 'ok', position, projectedPoints: projection.expectedPoints, actualPoints: outcome.totalPoints, fixtureCount, featured: outcome.featured }
+  return {
+    status: 'ok',
+    position,
+    projectedPoints: projection.expectedPoints,
+    actualPoints: outcome.totalPoints,
+    fixtureCount,
+    featured: outcome.featured,
+    preTicket191MinutesProjectedPoints,
+  }
 }
 
 /** One measured five-gameweek row — mirrors MeasuredRow's shape for the fields the ranking/baseline/report layer below needs, summed across the window rather than one gameweek. */
@@ -2843,6 +3033,8 @@ export interface FiveGameweekRow {
   legsBlankGameweek: number
   /** THE LEAK SIZE: of the legs with a scheduled fixture, how many the player did not feature in (0-4) — this is exactly what used to project a foreknown 0 before this ticket. */
   legsDidNotFeatureButClubHadFixture: number
+  /** Ticket #201, Part 2 — REPORTED ONLY. Sum of five per-gameweek projections built through the pre-#191 minutes construction instead of the shipped one, mirroring `projectedPoints` above exactly (same population, same fixtures, only the minutes step differs). Never read by anything that gates the job. */
+  preTicket191MinutesProjectedPoints: number
 }
 
 export type FiveGameweekExclusionReason = 'truncatedWindow' | 'missingFeatureHistoryRow' | 'unresolvedPosition' | 'unresolvedTeamCode' | 'actualDataIncomplete'
@@ -2878,6 +3070,15 @@ export type FiveGameweekClassification =
  * it had tallied for its earlier legs too, matching this function's existing
  * "a window is only as good as its worst-resolved leg" rule — never a
  * partial diagnostic for a window that isn't itself in the report.
+ *
+ * Ticket #201, Part 2 — `startRowPreTicket191MinutesProjectedPoints` is the
+ * G leg's OWN pre-#191 reconstruction (computed by the caller alongside the
+ * shipped one-gameweek projection, same as `startRow.projectedPoints`
+ * mirrors the shipped one). Defaults to 0 so every pre-#201 call site is an
+ * EXACT no-op for `projectedPoints`/`actualPoints`/every other field —
+ * matching `projectRow`'s own defaulted-trailing-parameter convention —
+ * only `row.preTicket191MinutesProjectedPoints` on the returned classification
+ * is affected by the default, and nothing pre-#201 reads that field.
  */
 export function classifyFiveGameweekRow(
   playerCode: number,
@@ -2890,6 +3091,7 @@ export function classifyFiveGameweekRow(
   teamMatchRecords: readonly TeamMatchRecord[],
   /** Ticket #193 — see `projectAndReconstructWindowGameweek`'s own parameter of the same name. */
   clubFixtureSchedule: ReadonlyMap<string, readonly (number | null)[]>,
+  startRowPreTicket191MinutesProjectedPoints = 0,
 ): FiveGameweekClassification {
   if (isFiveGameweekWindowTruncated(startRow.gameweekId, lastGameweekInData)) {
     return { kind: 'excluded', reason: 'truncatedWindow' }
@@ -2900,6 +3102,7 @@ export function classifyFiveGameweekRow(
   let legsWithScheduleFixture = 0
   let legsBlankGameweek = 0
   let legsDidNotFeatureButClubHadFixture = 0
+  let preTicket191MinutesProjectedPoints = startRowPreTicket191MinutesProjectedPoints
 
   const window = buildFiveGameweekWindow(startRow.gameweekId)
   for (let i = 1; i < window.length; i++) {
@@ -2919,6 +3122,7 @@ export function classifyFiveGameweekRow(
     if (outcome.status !== 'ok') return { kind: 'excluded', reason: outcome.status }
     projectedPoints += outcome.projectedPoints
     actualPoints += outcome.actualPoints
+    preTicket191MinutesProjectedPoints += outcome.preTicket191MinutesProjectedPoints
     if (outcome.fixtureCount > 0) {
       legsWithScheduleFixture++
       if (!outcome.featured) legsDidNotFeatureButClubHadFixture++
@@ -2940,6 +3144,7 @@ export function classifyFiveGameweekRow(
       legsWithScheduleFixture,
       legsBlankGameweek,
       legsDidNotFeatureButClubHadFixture,
+      preTicket191MinutesProjectedPoints,
     },
   }
 }
@@ -3341,36 +3546,59 @@ export interface OracleCeilingCheckResult {
 }
 
 /**
- * Ticket #187, DoD: "The oracle sits above the model at both horizons. If it
- * does not, STOP and report rather than shipping a ceiling the model
- * exceeds — that's a finding, not a pass." A hindsight ceiling the model
- * meets or beats means the CEILING is mis-specified, not that the model
- * found headroom that does not exist (ticket #183 said so explicitly, and
- * ticket #89/#187's own history — model 0.672 vs oracle 0.507 at five
- * gameweeks, pre-fix — is exactly the shape this check exists to catch
- * automatically rather than relying on a human reading the report). `>=`,
- * not `>` alone: a tie is not "the oracle sits above the model" either. Null
- * on either side of a comparison skips it (insufficient data to compare is
- * not the same failure as a ceiling the model exceeds).
+ * Ticket #201 retired the one-gameweek half of this check entirely — see
+ * docs/projection-model-backlog.md G14. A leave-target-out quality-only
+ * oracle was never entitled to bound a model that also has genuine,
+ * non-hindsight fixture knowledge (since ticket #175), and G14's own
+ * pre-registered prediction (forcing the model's fixtures neutral collapses
+ * its one-gameweek ranking skill toward the oracle's, goalkeeper hardest hit)
+ * was confirmed on a live run. The one-gameweek oracle and the #197
+ * fixture-forced-neutral diagnostic are still fully computed and reported
+ * elsewhere in this file — they are simply no longer compared against
+ * anything here.
+ *
+ * The five-gameweek half is UNTOUCHED in what it asserts (ticket #187, DoD:
+ * "The oracle sits above the model. If it does not, STOP and report rather
+ * than shipping a ceiling the model exceeds — that's a finding, not a
+ * pass."), and ticket #201 makes it STRICTER, never looser: it now checks
+ * every position, not only the season aggregate. A model can sit under its
+ * own ceiling at the aggregate while one position alone is already a breach
+ * — the exact shape `LEARNINGS-second-build-wave.md` §14 recorded: a bound
+ * checked only at the aggregate does not protect the breakdown. `>=`, not
+ * `>` alone: a tie is not "the oracle sits above the model" either. Null on
+ * either side of a comparison skips it (insufficient data to compare is not
+ * the same failure as a ceiling the model exceeds). Each per-position
+ * failure names the position, so a human reading the report (or the job's
+ * console output) does not have to re-derive which breakdown broke from the
+ * aggregate alone.
  */
 export function checkOracleCeiling(
-  oneGwModelSpearman: number | null,
-  oneGwOracleSpearman: number | null,
-  fiveGwModelSpearman: number | null,
-  fiveGwOracleSpearman: number | null,
+  fiveGwModelSeasonSpearman: number | null,
+  fiveGwOracleSeasonSpearman: number | null,
+  fiveGwModelByPosition: Record<Position, PositionRankingSummary>,
+  fiveGwOracleByPosition: Record<Position, PositionRankingSummary>,
 ): OracleCeilingCheckResult {
   const failures: string[] = []
-  if (oneGwModelSpearman !== null && oneGwOracleSpearman !== null && oneGwModelSpearman >= oneGwOracleSpearman) {
+  if (
+    fiveGwModelSeasonSpearman !== null &&
+    fiveGwOracleSeasonSpearman !== null &&
+    fiveGwModelSeasonSpearman >= fiveGwOracleSeasonSpearman
+  ) {
     failures.push(
-      `one-gameweek quality oracle (Spearman ${oneGwOracleSpearman.toFixed(3)}) does not sit above the model (${oneGwModelSpearman.toFixed(3)}) — ` +
-        'a hindsight ceiling the model meets or exceeds means the oracle is mis-specified, not that the model beat its own ceiling.',
+      `five-gameweek quality oracle (Spearman ${fiveGwOracleSeasonSpearman.toFixed(3)}) does not sit above the model (${fiveGwModelSeasonSpearman.toFixed(3)}) — ` +
+        'a hindsight ceiling the model meets or exceeds means the oracle is mis-specified, not that the model found real headroom.',
     )
   }
-  if (fiveGwModelSpearman !== null && fiveGwOracleSpearman !== null && fiveGwModelSpearman >= fiveGwOracleSpearman) {
-    failures.push(
-      `five-gameweek quality oracle (Spearman ${fiveGwOracleSpearman.toFixed(3)}) does not sit above the model (${fiveGwModelSpearman.toFixed(3)}) — ` +
-        'same reasoning as the one-gameweek check above.',
-    )
+  for (const position of POSITIONS) {
+    const modelSpearman = fiveGwModelByPosition[position].spearman
+    const oracleSpearman = fiveGwOracleByPosition[position].spearman
+    if (modelSpearman !== null && oracleSpearman !== null && modelSpearman >= oracleSpearman) {
+      failures.push(
+        `five-gameweek quality oracle for ${POSITION_NAMES[position]} (Spearman ${oracleSpearman.toFixed(3)}) does not sit above the model (${modelSpearman.toFixed(3)}) — ` +
+          'same reasoning as the season-aggregate check above, checked per position (ticket #201) because a bound ' +
+          'checked only at the aggregate does not protect the breakdown (LEARNINGS-second-build-wave.md §14).',
+      )
+    }
   }
   return { ok: failures.length === 0, failures }
 }
@@ -3469,6 +3697,33 @@ interface FiveGameweekReportData {
   }
   /** Ticket #187, DoD: "the oracle sits above the model at both horizons ... if it does not, STOP and report". */
   oracleCeiling: OracleCeilingCheckResult
+  /**
+   * Ticket #201, Part 2 — REPORTED ONLY, never a check, never gates the
+   * report, never compared against a threshold (same convention as
+   * `oneGwNeutralFixtureModel` above). Both the SAME one-gameweek `measured`
+   * population and the SAME `fiveGameweekMeasured` population, re-projected
+   * through a reconstruction of the PRE-#191 minutes model (plain mean of
+   * the recent-minutes window, no single-lowest drop, no
+   * start/minutes-given-start split — see `estimateMinutesPreTicket191`'s
+   * own comment) in place of the shipped one. Everything else — fixtures,
+   * rates, defcon, conversion factors — is identical to the shipped
+   * projection at both horizons; only the minutes step differs. Settles
+   * ticket #191's own deferred DoD ("if any position moves away from 1.00,
+   * revert rather than tune") against the honest backtest that ticket's
+   * deferral was waiting for — see docs/projection-model-backlog.md and this
+   * ticket's own decisions file for the reading, never drawn here.
+   * `src/lib/projection/minutes.ts` itself is untouched by this ticket.
+   */
+  preTicket191Minutes: {
+    oneGw: {
+      season: SeasonRankingSummary
+      byPosition: Record<Position, PositionRankingSummary>
+    }
+    fiveGw: {
+      season: SeasonRankingSummary
+      byPosition: Record<Position, PositionRankingSummary>
+    }
+  }
 }
 
 function buildPositionTable(byPosition: Record<Position, ErrorSummary>, cleanSheetRateByPosition: Partial<Record<Position, number | null>>): string {
@@ -3997,11 +4252,17 @@ function buildFiveGameweekSections(data: ReportData): string[] {
   sections.push(
     (fg.oracleCeiling.ok ? '### Oracle-ceiling check: PASSED\n\n' : '### Oracle-ceiling check: FAILED\n\n') +
       (fg.oracleCeiling.ok
-        ? 'The quality oracle sits above the model at both horizons, as a hindsight ceiling must — see ' +
-          '`checkOracleCeiling` in `scripts/run-backtest.ts`.'
+        ? 'The five-gameweek quality oracle sits above the model, as a hindsight ceiling must, at the season ' +
+          'aggregate and every position — see `checkOracleCeiling` in `scripts/run-backtest.ts`. **Ticket #201 ' +
+          'retired the one-gameweek half of this check** (docs/projection-model-backlog.md G14: a quality-only ' +
+          'hindsight oracle was never entitled to bound a model that also has genuine, non-hindsight fixture ' +
+          'knowledge) — the one-gameweek oracle above is still fully computed and reported, just no longer ' +
+          'compared against anything here.'
         : `**${fg.oracleCeiling.failures.length} check(s) failed — a model that meets or beats its own hindsight ` +
           'ceiling means the CEILING is mis-specified, not that the model found real headroom. This is a ' +
-          'finding to investigate, not a result to quote:**\n\n' +
+          'finding to investigate, not a result to quote. Ticket #201 retired the one-gameweek half of this ' +
+          'check (docs/projection-model-backlog.md G14) and extended the five-gameweek half to every position, ' +
+          'not only the season aggregate — every failure below is at the five-gameweek horizon:**\n\n' +
           fg.oracleCeiling.failures.map((f) => `- ${f}`).join('\n')),
   )
 
@@ -4020,6 +4281,42 @@ function buildFiveGameweekSections(data: ReportData): string[] {
       `— for comparison, the model as actually run above scores **${fmtSpearman(data.rankingSeason.spearman)}** and the ` +
       `one-gameweek oracle above scores **${fmtSpearman(fg.oracleOneGw.season.spearman)}**\n\n` +
       buildRankingPositionTable(fg.oneGwNeutralFixtureModel.byPosition),
+  )
+
+  // ==========================================================================
+  // Ticket #201, PART 2 — a separate section from Part 1 above (the
+  // oracle-ceiling check and the #197 diagnostic), by ticket design: two
+  // premises, two report sections, so a reader never credits one part's
+  // result to the other (ticket text, citing #89's own mistake of the same
+  // shape).
+  // ==========================================================================
+  sections.push(
+    '## Ticket #201, Part 2: the pre-#191 minutes model, reconstructed for comparison\n\n' +
+      'REPORTED ONLY — never a check, never gates this report, never asserted. Settles ticket #191\'s own ' +
+      'deferred DoD ("if any position moves away from 1.00, revert rather than tune") against the honest ' +
+      'backtest that deferral was waiting for — the reading is in this ticket\'s decisions file, never drawn ' +
+      'here. Every one-gameweek measured row and every five-gameweek measured window above is re-projected a ' +
+      'second time through a reconstruction of the PRE-#191 minutes model — the plain mean of the ' +
+      'recent-minutes window, no single-lowest drop, no start/minutes-given-start split (`git show e652df7 ' +
+      '-- src/lib/projection/minutes.ts` is the exact diff this reconstructs). `src/lib/projection/minutes.ts` ' +
+      'itself is untouched: this is a second, harness-only function (`estimateMinutesPreTicket191` in ' +
+      '`scripts/run-backtest.ts`), never a fork of the live model. Every other input — fixtures, rates, ' +
+      'defcon, the goal/assist conversion factors — is identical to the shipped projection at both horizons; ' +
+      'only the minutes step differs, so any ranking difference below is attributable to that step alone.\n\n' +
+      '### One-gameweek horizon\n\n' +
+      `- pre-#191 minutes model, season: Spearman **${fmtSpearman(fg.preTicket191Minutes.oneGw.season.spearman)}** ` +
+      `(n=${fg.preTicket191Minutes.oneGw.season.n}), top-10 overlap **${fmtTopN(fg.preTicket191Minutes.oneGw.season.top10)}**, ` +
+      `top-20 overlap **${fmtTopN(fg.preTicket191Minutes.oneGw.season.top20)}**\n` +
+      `- for comparison, the shipped model above scores **${fmtSpearman(data.rankingSeason.spearman)}**, and the naive ` +
+      `"prior minutes per match" baseline above scores **${fmtSpearman(data.baselines.find((b) => b.label === PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL)?.seasonSpearman ?? null)}**\n\n` +
+      buildRankingPositionTable(fg.preTicket191Minutes.oneGw.byPosition) +
+      '\n\n### Five-gameweek horizon\n\n' +
+      `- pre-#191 minutes model, season: Spearman **${fmtSpearman(fg.preTicket191Minutes.fiveGw.season.spearman)}** ` +
+      `(n=${fg.preTicket191Minutes.fiveGw.season.n}), top-10 overlap **${fmtTopN(fg.preTicket191Minutes.fiveGw.season.top10)}**, ` +
+      `top-20 overlap **${fmtTopN(fg.preTicket191Minutes.fiveGw.season.top20)}**\n` +
+      `- for comparison, the shipped model above scores **${fmtSpearman(fg.season.spearman)}**, and the naive ` +
+      `"prior minutes per match" baseline above scores **${fmtSpearman(fg.baselines.find((b) => b.label === PRIOR_MINUTES_PER_MATCH_BASELINE_LABEL)?.seasonSpearman ?? null)}**\n\n` +
+      buildRankingPositionTable(fg.preTicket191Minutes.fiveGw.byPosition),
   )
 
   return sections
@@ -4314,6 +4611,17 @@ async function main(): Promise<void> {
     // index population, never read by anything that isn't this diagnostic.
     // See FiveGameweekReportData.oneGwNeutralFixtureModel's own comment.
     const neutralFixtureOneGwRows: GenericRankingRow[] = []
+    // Ticket #201, Part 2 diagnostic — same pattern as neutralFixtureOneGwRows
+    // above: collected alongside `measured`, same index population, never
+    // read by anything that isn't this diagnostic. See
+    // FiveGameweekReportData.preTicket191Minutes's own comment.
+    const preTicket191MinutesOneGwRows: GenericRankingRow[] = []
+    // Ticket #201, Part 2 — the G leg's own pre-#191 projected points, same
+    // index correspondence as measuredPlayerCodes below (measured[i] pairs
+    // with preTicket191MinutesOneGwProjectedPoints[i]) — the five-gameweek
+    // section reuses this for the window's G leg, exactly as it reuses
+    // measured[i].projectedPoints for the shipped model.
+    const preTicket191MinutesOneGwProjectedPoints: number[] = []
     // Ticket #183 — the player_code for each `measured` row, same index
     // correspondence (measuredPlayerCodes[i] is measured[i]'s player) —
     // MeasuredRow itself carries no player identity, and the five-gameweek
@@ -4405,6 +4713,22 @@ async function main(): Promise<void> {
         actual: classification.outcome.totalPoints,
       })
 
+      // Ticket #201, Part 2 diagnostic — the SAME row/position/prior/
+      // fixtureCount/fixtureExpectedScores as `projection` above (the real
+      // fixtures, unlike the #197 diagnostic above, since this diagnostic is
+      // about the MINUTES model, not fixtures), projected a SECOND time
+      // through the pre-#191 minutes construction. REPORTED only — never
+      // touches `projection`/`measured` above, never gates pass/fail. See
+      // FiveGameweekReportData.preTicket191Minutes's own comment.
+      const preTicket191MinutesProjectedPoints = projectRowPreTicket191Minutes(row, classification.position, prior, classification.outcome.matchesFound, fixtureExpectedScores)
+      preTicket191MinutesOneGwRows.push({
+        position: classification.position,
+        groupId: row.gameweek_id,
+        projected: preTicket191MinutesProjectedPoints,
+        actual: classification.outcome.totalPoints,
+      })
+      preTicket191MinutesOneGwProjectedPoints.push(preTicket191MinutesProjectedPoints)
+
       // Ticket #159, Defect 1 — naive baselines, computed from this SAME row
       // (row.prior_matches > 0 is guaranteed here: classifyRow already
       // excluded anything else as `noPriorMatches` above).
@@ -4481,6 +4805,8 @@ async function main(): Promise<void> {
         actualByPlayerGameweek,
         teamMatchRecords,
         clubFixtureSchedule,
+        // Ticket #201, Part 2 — this window's G leg, same index correspondence as measured[i].
+        preTicket191MinutesOneGwProjectedPoints[i],
       )
       if (classification.kind === 'excluded') {
         incrementFiveGameweekExclusion(fiveGameweekExclusions, classification.reason)
@@ -4502,6 +4828,20 @@ async function main(): Promise<void> {
 
     const fiveGwBaselines = summarizeFiveGameweekBaselines(fiveGameweekMeasured)
     const fiveGwBaselineVerdicts = buildBaselineVerdicts(fiveGwSeason.spearman, fiveGwBaselines)
+
+    // Ticket #201, Part 2 diagnostic — the SAME fiveGameweekMeasured population,
+    // ranked on `preTicket191MinutesProjectedPoints` instead of the shipped
+    // `projectedPoints`. REPORTED ONLY, alongside the one-gameweek diagnostic
+    // above — never asserted, never gates the job.
+    const preTicket191MinutesFiveGwRankingRows: GenericRankingRow[] = fiveGameweekMeasured.map((r) => ({
+      position: r.position,
+      groupId: r.startGameweekId,
+      projected: r.preTicket191MinutesProjectedPoints,
+      actual: r.actualPoints,
+    }))
+    const preTicket191MinutesFiveGwByStartGameweek = summarizeGenericRankingByGroup(preTicket191MinutesFiveGwRankingRows)
+    const preTicket191MinutesFiveGwSeason = summarizeGenericSeasonRanking(preTicket191MinutesFiveGwRankingRows, preTicket191MinutesFiveGwByStartGameweek)
+    const preTicket191MinutesFiveGwByPosition = summarizeGenericRankingByPosition(preTicket191MinutesFiveGwRankingRows)
 
     // The quality oracle — a player's whole-season actual record, built once
     // from the SAME `actualByPlayerGameweek` map (no new Supabase read).
@@ -4554,15 +4894,22 @@ async function main(): Promise<void> {
     const oracleFiveGwSeason = summarizeGenericSeasonRanking(oracleFiveGwRows, oracleFiveGwByGroup)
     const oracleFiveGwByPosition = summarizeGenericRankingByPosition(oracleFiveGwRows)
 
-    // Ticket #187, DoD: "the oracle sits above the model at both horizons ...
-    // if it does not, STOP and report". Folded into the existing sanity-bound
-    // failure gate below, not a silent report-only observation.
-    const oracleCeiling = checkOracleCeiling(rankingSeason.spearman, oracleOneGwSeason.spearman, fiveGwSeason.spearman, oracleFiveGwSeason.spearman)
+    // Ticket #187, DoD: "the oracle sits above the model ... if it does not,
+    // STOP and report". Folded into the existing sanity-bound failure gate
+    // below, not a silent report-only observation. Ticket #201: the
+    // one-gameweek horizon no longer feeds this check at all (G14) — only
+    // the five-gameweek season aggregate and, new in #201, every position.
+    const oracleCeiling = checkOracleCeiling(fiveGwSeason.spearman, oracleFiveGwSeason.spearman, fiveGwByPosition, oracleFiveGwByPosition)
 
     // Ticket #197 diagnostic — see FiveGameweekReportData.oneGwNeutralFixtureModel's own comment.
     const oneGwNeutralFixtureByGroup = summarizeGenericRankingByGroup(neutralFixtureOneGwRows)
     const oneGwNeutralFixtureSeason = summarizeGenericSeasonRanking(neutralFixtureOneGwRows, oneGwNeutralFixtureByGroup)
     const oneGwNeutralFixtureByPosition = summarizeGenericRankingByPosition(neutralFixtureOneGwRows)
+
+    // Ticket #201, Part 2 diagnostic — see FiveGameweekReportData.preTicket191Minutes's own comment.
+    const preTicket191MinutesOneGwByGroup = summarizeGenericRankingByGroup(preTicket191MinutesOneGwRows)
+    const preTicket191MinutesOneGwSeason = summarizeGenericSeasonRanking(preTicket191MinutesOneGwRows, preTicket191MinutesOneGwByGroup)
+    const preTicket191MinutesOneGwByPosition = summarizeGenericRankingByPosition(preTicket191MinutesOneGwRows)
 
     // Ticket #193 — the three club-schedule fixture counters, summed across
     // every five-gameweek MEASURED row's own per-window leg tallies.
@@ -4583,6 +4930,10 @@ async function main(): Promise<void> {
       oracleFiveGw: { season: oracleFiveGwSeason, byPosition: oracleFiveGwByPosition, insufficientData: oracleFiveGwInsufficientData },
       oracleCeiling,
       oneGwNeutralFixtureModel: { season: oneGwNeutralFixtureSeason, byPosition: oneGwNeutralFixtureByPosition },
+      preTicket191Minutes: {
+        oneGw: { season: preTicket191MinutesOneGwSeason, byPosition: preTicket191MinutesOneGwByPosition },
+        fiveGw: { season: preTicket191MinutesFiveGwSeason, byPosition: preTicket191MinutesFiveGwByPosition },
+      },
     }
 
     const reportData: ReportData = {

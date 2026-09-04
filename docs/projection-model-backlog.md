@@ -1008,3 +1008,52 @@ isn't, structurally, not by bad luck on one report.
 That half is untouched, correct, and stays exactly as it is — this entry's proposal is scoped to the
 one-gameweek assertion only, and only option 1 above should be attempted without also re-deriving
 this diagnosis on a fresh live run first.
+
+---
+
+## G15 — Ticket #201, 4 Sep 2026: G14's follow-up landed (option 1) — the one-gameweek ceiling is
+## retired, and the five-gameweek ceiling is now checked per position, which immediately found a
+## real breach the aggregate-only check was blind to
+
+**G14's pre-registered prediction was confirmed on a live run (report 10):** forcing every one-gameweek
+fixture to neutral drops goalkeeper Spearman to **−0.021**, against the one-gameweek quality oracle's
+**0.035** and the model-as-run's **0.157** — both now fixture-blind rankers landing close together, well
+below the model's real, fixture-aware figure, exactly as G14's mechanism predicted. Defender moved by a
+visibly smaller amount (0.034); midfielder and forward barely moved. All four positions moved in the
+direction G14's account requires. The diagnosis in G14 stands confirmed, not merely argued.
+
+**Part 1 of this ticket applied G14's recommended option 1, verbatim.** `checkOracleCeiling` no longer
+takes or asserts anything about the one-gameweek horizon — its signature dropped from four numbers
+(one-gameweek model/oracle, five-gameweek model/oracle) to `(fiveGwModelSeasonSpearman,
+fiveGwOracleSeasonSpearman, fiveGwModelByPosition, fiveGwOracleByPosition)`. The one-gameweek oracle and
+the #197 fixture-forced-neutral diagnostic are still fully computed and printed in the report, completely
+unchanged — they simply no longer feed a pass/fail assertion. **Neither oracle construction changed. The
+five-gameweek half's own assertion logic (season aggregate, `>=` not `>`, null-skips) is untouched.**
+
+**Part 1 also extended the five-gameweek half to every position, per this ticket's own scope (not part of
+G14's proposal, which only asked for the one-gameweek removal) — and this is not a hypothetical
+tightening.** On report 10's own figures the five-gameweek season aggregate check PASSES (model 0.397
+below oracle 0.506), but the goalkeeper breakdown alone is already a breach: **model 0.240 against oracle
+0.201 — the model sitting ABOVE its own hindsight ceiling.** The old aggregate-only check could not see
+this; a per-position check catches it immediately, on the very first report it ran against. This is the
+exact shape `LEARNINGS-second-build-wave.md` §14 already described for the ranking-sanity bounds (a bound
+checked only at the aggregate does not protect the breakdown) — the oracle-ceiling check had the identical
+gap, now closed the same way.
+
+**This newly-exposed goalkeeper five-gameweek breach is NOT diagnosed or fixed here — ticket #201's own
+scope forbids it ("do not fix the goalkeeper five-gameweek breach in this ticket... it needs its own
+entry, not a patch made in passing").** The likely mechanism is the same fixture-knowledge asymmetry G14
+already describes for the one-gameweek horizon — goalkeeper scoring is dominated by a near-binary,
+fixture-driven clean-sheet outcome, and the model's real fixture knowledge may be compounding across the
+five legs in a way the oracle's out-of-window quality rate cannot match — but G14's own falsification
+account for why the *five*-gameweek horizon should sit the other way round (quality's contribution scales
+linearly with the horizon at season precision; fixture noise only partially cancels across five
+independent legs) is exactly what predicts the oracle should stay ahead at five gameweeks. That it does
+not, for goalkeepers specifically, is a genuine finding needing its own diagnosis ticket — restating G14's
+mechanism without re-deriving it for this specific case would be exactly the kind of asserted-not-derived
+explanation `docs/model-review-2026-09-02.md`'s own falsification check exists to catch. **The Backtest job
+will still exit 1 after this ticket merges — on this new per-position finding, not on the retired
+one-gameweek assertion. That exit is the check working, not a regression.**
+
+**What follow-up work should NOT do:** relax, widen, or remove the five-gameweek check (per position or
+aggregate) to make the job pass again. The check is correct; the model is what needs investigating.

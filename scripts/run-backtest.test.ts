@@ -257,6 +257,9 @@ function fiveGwRow(
     legsWithScheduleFixture: 0,
     legsBlankGameweek: 0,
     legsDidNotFeatureButClubHadFixture: 0,
+    // Ticket #201, Part 2 — the pre-#191 minutes reconstruction's own sum; 0
+    // by default, same convention as every other field above.
+    preTicket191MinutesProjectedPoints: 0,
     ...overrides,
   }
 }
@@ -914,15 +917,19 @@ describe('buildRecentMinutes — reads the #185 stored window (ticket #187)', ()
 
   it(
     'THE NAMED TEST: a five-entry stored window reaches estimateMinutes() intact, most-recent-first, unmodified — ' +
-      'never collapsed into one averaged match. This is the pSixtyPlus distinction the ticket exists to restore: a ' +
-      'player who just lost his starting place (his two MOST RECENT matches are 0 minutes) looks IDENTICAL to a ' +
-      'nailed starter under the old single-averaged-match construction (both average to the same 40 minutes, and a ' +
-      'single synthetic match is either wholly 60+ or wholly not — binary), but is CORRECTLY distinguished once the ' +
-      'true five-match window reaches estimateMinutes() directly.',
+      'never collapsed into one averaged match. Pre-existing test updated by ticket #201 (Part 2 is directly about ' +
+      'this exact window — see docs/projection-model-backlog.md and decisions/ticket-201.md): #191 shipped the v2 ' +
+      'minutes model AFTER this test was written for #187, and #191 changes expectedMinutes for this window too, ' +
+      'not only pSixtyPlus — the two are no longer "the same average either way", so that premise (and the figures ' +
+      'below) needed updating to the shipped model\'s actual output. A player who just lost his starting place (his ' +
+      'two MOST RECENT matches are 0 minutes) looks IDENTICAL to a nailed starter under the old single-averaged-match ' +
+      'construction (40 minutes, pSixtyPlus exactly 0 — a single synthetic match is binary), but is CORRECTLY ' +
+      'distinguished once the true five-match window reaches the shipped v2 estimateMinutes() directly (50 minutes, ' +
+      'pSixtyPlus 0.5 — hand-computed below, and pinned again on the pre-#191 reconstruction in the "Ticket #201, ' +
+      'Part 2" section further down this file).',
     () => {
       // prior_matches = 5 (exactly RECENT_MATCH_COUNT), so prior_minutes/prior_matches
-      // and the stored window's own average necessarily coincide — isolating
-      // pSixtyPlus as the one figure the fix actually changes.
+      // and the stored window's own average necessarily coincide.
       const row = featureRow({
         gameweek_id: 9,
         player_code: 7,
@@ -937,16 +944,21 @@ describe('buildRecentMinutes — reads the #185 stored window (ticket #187)', ()
       const fixedEstimate = estimateMinutes(recentMinutes, 1)
       const oldFallbackEstimate = estimateMinutes([averageMinutesPerMatch(row)], 1) // what pre-#187 buildRecentMinutes would have fed it
 
-      // Same average either way (both average to 40) — proves this test isn't
-      // accidentally exercising a different code path for the two constructions.
-      expect(fixedEstimate.expectedMinutes).toBeCloseTo(40, 10)
+      // Pre-#187 single-averaged-match construction: exactly 40 minutes,
+      // binary pSixtyPlus (40 < 60, so exactly 0) — untouched by #191, since
+      // a one-element sample never hits the full-window drop/split branch.
       expect(oldFallbackEstimate.expectedMinutes).toBeCloseTo(40, 10)
-
-      // pSixtyPlus is where the fix actually shows up: the old single-averaged
-      // match is binary (40 < 60, so exactly 0); the true window correctly
-      // reports 2 of 5 real matches at 60+ minutes.
       expect(oldFallbackEstimate.pSixtyPlus).toBe(0)
-      expect(fixedEstimate.pSixtyPlus).toBeCloseTo(0.4, 10)
+
+      // Shipped v2 (ticket #191): sorted ascending [0,0,20,90,90], the single
+      // lowest value dropped -> [0,20,90,90]; featured (>0) = [20,90,90],
+      // pFeature = 3/4 = 0.75, minutesGivenFeature = (20+90+90)/3 = 66.667,
+      // expectedMinutes = 0.75 x 66.667 = 50; pSixtyGivenFeature = 2/3 (20
+      // doesn't reach 60, both 90s do), pSixtyPlus = 0.75 x 2/3 = 0.5. BOTH
+      // figures now differ from the pre-#187 construction, not only pSixtyPlus.
+      expect(fixedEstimate.expectedMinutes).toBeCloseTo(50, 10)
+      expect(fixedEstimate.pSixtyPlus).toBeCloseTo(0.5, 10)
+      expect(fixedEstimate.expectedMinutes).not.toBeCloseTo(oldFallbackEstimate.expectedMinutes, 2)
       expect(fixedEstimate.pSixtyPlus).not.toBe(oldFallbackEstimate.pSixtyPlus)
     },
   )
@@ -966,11 +978,11 @@ describe('buildRecentMinutes — reads the #185 stored window (ticket #187)', ()
     const fixedProjection = projectRow(rowFixed, FORWARD, prior)
     const fallbackProjection = projectRow(rowFallback, FORWARD, prior)
 
-    // Same expectedMinutes (proven above), but pSixtyPlus differs, and
-    // pSixtyPlus feeds the appearance-points/clean-sheet/defcon terms — the
-    // two full projections must therefore differ measurably, not just at
-    // the minutes-estimate layer.
-    expect(fixedProjection.expectedMinutes).toBeCloseTo(fallbackProjection.expectedMinutes, 10)
+    // Ticket #201 update: under the shipped v2 minutes model (#191) BOTH
+    // expectedMinutes (50 vs 40) AND pSixtyPlus (0.5 vs 0) differ for this
+    // window — see the named test above for the hand-computed figures — so
+    // the full projection differs on both fronts, not only via pSixtyPlus.
+    expect(fixedProjection.expectedMinutes).not.toBeCloseTo(fallbackProjection.expectedMinutes, 2)
     expect(fixedProjection.expectedPoints).not.toBeCloseTo(fallbackProjection.expectedPoints, 10)
   })
 })
@@ -2610,24 +2622,28 @@ describe('computeOracleFiveGameweekEstimate — the fix itself: a TOTAL, not a r
   )
 })
 
-describe('checkOracleCeiling (ticket #187)', () => {
-  it('ok when the oracle sits strictly above the model at both horizons', () => {
-    const result = checkOracleCeiling(0.3, 0.35, 0.4, 0.48)
+describe('checkOracleCeiling (ticket #187; ticket #201 retired the one-gameweek half — G14 — and extended the five-gameweek half to every position, not only the season aggregate)', () => {
+  const emptyByPosition = (): Record<string, PositionRankingSummary> =>
+    Object.fromEntries(
+      [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [
+        p,
+        { position: p, n: 0, spearman: null, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false },
+      ]),
+    )
+
+  const withPosition = (position: number, spearman: number, n = 100): Record<string, PositionRankingSummary> => {
+    const byPosition = emptyByPosition()
+    byPosition[position] = { position: position as never, n, spearman, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    return byPosition
+  }
+
+  it('ok when the oracle sits strictly above the model at the season aggregate and no position breaches', () => {
+    const result = checkOracleCeiling(0.4, 0.48, emptyByPosition() as never, emptyByPosition() as never)
     expect(result).toEqual({ ok: true, failures: [] })
   })
 
-  it('fails when the model meets or beats the one-gameweek oracle', () => {
-    const tied = checkOracleCeiling(0.35, 0.35, 0.4, 0.48)
-    expect(tied.ok).toBe(false)
-    expect(tied.failures).toHaveLength(1)
-    expect(tied.failures[0]).toMatch(/one-gameweek/)
-
-    const beats = checkOracleCeiling(0.4, 0.35, 0.4, 0.48)
-    expect(beats.ok).toBe(false)
-  })
-
-  it('fails when the model meets or beats the five-gameweek oracle — the exact shape ticket #89/#187 was written to catch (model 0.672 vs oracle 0.507)', () => {
-    const result = checkOracleCeiling(0.325, 0.336, 0.672, 0.507)
+  it('fails when the model meets or beats the five-gameweek SEASON-AGGREGATE oracle — the exact shape ticket #89/#187 was written to catch (model 0.672 vs oracle 0.507)', () => {
+    const result = checkOracleCeiling(0.672, 0.507, emptyByPosition() as never, emptyByPosition() as never)
     expect(result.ok).toBe(false)
     expect(result.failures).toHaveLength(1)
     expect(result.failures[0]).toMatch(/five-gameweek/)
@@ -2635,15 +2651,55 @@ describe('checkOracleCeiling (ticket #187)', () => {
     expect(result.failures[0]).toContain('0.507')
   })
 
-  it('reports both horizons independently when both fail', () => {
-    const result = checkOracleCeiling(0.4, 0.3, 0.5, 0.4)
-    expect(result.ok).toBe(false)
-    expect(result.failures).toHaveLength(2)
+  it('null season Spearman on either side skips the aggregate check — insufficient data is not the same failure as a ceiling the model exceeds', () => {
+    expect(checkOracleCeiling(null, null, emptyByPosition() as never, emptyByPosition() as never)).toEqual({ ok: true, failures: [] })
+    expect(checkOracleCeiling(0.9, null, emptyByPosition() as never, emptyByPosition() as never)).toEqual({ ok: true, failures: [] })
   })
 
-  it('null on either side of a comparison skips it — insufficient data is not the same failure as a ceiling the model exceeds', () => {
-    expect(checkOracleCeiling(null, null, null, null)).toEqual({ ok: true, failures: [] })
-    expect(checkOracleCeiling(0.9, null, 0.9, null)).toEqual({ ok: true, failures: [] })
+  it('a per-position breach fails while the season aggregate PASSES — the exact defect LEARNINGS-second-build-wave.md §14 recorded: a bound checked only at the aggregate does not protect the breakdown', () => {
+    const modelByPosition = withPosition(GOALKEEPER, 0.3)
+    const oracleByPosition = withPosition(GOALKEEPER, 0.2)
+    // Season aggregate: model 0.35 < oracle 0.5 — passes on its own.
+    const result = checkOracleCeiling(0.35, 0.5, modelByPosition as never, oracleByPosition as never)
+    // Goalkeeper breakdown alone: model 0.3 >= oracle 0.2 — a breach the aggregate-only check would have missed entirely.
+    expect(result.ok).toBe(false)
+    expect(result.failures).toHaveLength(1)
+    expect(result.failures[0]).toMatch(/Goalkeeper/)
+    expect(result.failures[0]).toContain('0.300')
+    expect(result.failures[0]).toContain('0.200')
+  })
+
+  it('pins report 10\'s own goalkeeper figures — the new per-position check FAILS on model 0.240 vs oracle 0.201, naming Goalkeeper', () => {
+    const modelByPosition = withPosition(GOALKEEPER, 0.24, 520)
+    const oracleByPosition = withPosition(GOALKEEPER, 0.201, 512)
+    // The season aggregate itself passes on report 10 (model 0.397 < oracle 0.506) — only the breakdown catches this.
+    const result = checkOracleCeiling(0.397, 0.506, modelByPosition as never, oracleByPosition as never)
+    expect(result.ok).toBe(false)
+    expect(result.failures).toHaveLength(1)
+    expect(result.failures[0]).toMatch(/Goalkeeper/)
+    expect(result.failures[0]).toContain('0.240')
+    expect(result.failures[0]).toContain('0.201')
+  })
+
+  it('reports every breaching position independently, naming each, alongside a season-aggregate failure', () => {
+    const modelByPosition = emptyByPosition()
+    const oracleByPosition = emptyByPosition()
+    modelByPosition[GOALKEEPER] = { position: GOALKEEPER, n: 100, spearman: 0.3, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    oracleByPosition[GOALKEEPER] = { position: GOALKEEPER, n: 100, spearman: 0.2, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    modelByPosition[DEFENDER] = { position: DEFENDER, n: 100, spearman: 0.5, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    oracleByPosition[DEFENDER] = { position: DEFENDER, n: 100, spearman: 0.4, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    const result = checkOracleCeiling(0.6, 0.3, modelByPosition as never, oracleByPosition as never)
+    expect(result.ok).toBe(false)
+    // Season aggregate (model 0.6 >= oracle 0.3) + Goalkeeper (0.3 >= 0.2) + Defender (0.5 >= 0.4) = 3.
+    expect(result.failures).toHaveLength(3)
+    expect(result.failures.some((f) => /Goalkeeper/.test(f))).toBe(true)
+    expect(result.failures.some((f) => /Defender/.test(f))).toBe(true)
+  })
+
+  it('no longer accepts or asserts anything about the one-gameweek horizon — the one-gameweek oracle and #197\'s neutral-fixture diagnostic stay fully computed and printed elsewhere in the report, but nothing here reads them', () => {
+    // The signature is exactly (fiveGwModelSeason, fiveGwOracleSeason, fiveGwModelByPosition, fiveGwOracleByPosition) —
+    // four parameters, none of which is a one-gameweek figure any more.
+    expect(checkOracleCeiling.length).toBe(4)
   })
 })
 
@@ -3451,6 +3507,10 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
       oracleFiveGw: { season: fgSeason, byPosition: fgByPosition, insufficientData: 0 },
       oracleCeiling: { ok: true, failures: [] },
       oneGwNeutralFixtureModel: { season: fgSeason, byPosition: fgByPosition },
+      preTicket191Minutes: {
+        oneGw: { season: fgSeason, byPosition: fgByPosition },
+        fiveGw: { season: fgSeason, byPosition: fgByPosition },
+      },
     },
   }
 
