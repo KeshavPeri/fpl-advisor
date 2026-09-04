@@ -3445,6 +3445,22 @@ interface FiveGameweekReportData {
     /** measured rows skipped because the player had no season match outside the excluded gameweek — no evidence to rank on. */
     insufficientData: number
   }
+  /**
+   * Ticket #197 diagnostic — REPORTED ONLY, never a check, never gates the
+   * report, never compared against a threshold. The SAME one-gameweek
+   * `measured` population, re-projected via the SAME `projectRow` combiner
+   * with every fixture forced neutral (no `fixtureExpectedScores` argument
+   * at all — `projectRow`'s own documented default, bit-for-bit the same
+   * neutral construction ticket #175's coverage gate already falls back to
+   * for thin-history clubs). Tests directly, on this run's own population,
+   * whether the model's one-gameweek edge over the quality oracle above is
+   * fixture information specifically — see docs/projection-model-backlog.md
+   * G14.
+   */
+  oneGwNeutralFixtureModel: {
+    season: SeasonRankingSummary
+    byPosition: Record<Position, PositionRankingSummary>
+  }
   /** Five-gameweek quality oracle — leaves out the WHOLE target window. */
   oracleFiveGw: {
     season: SeasonRankingSummary
@@ -3989,6 +4005,23 @@ function buildFiveGameweekSections(data: ReportData): string[] {
           fg.oracleCeiling.failures.map((f) => `- ${f}`).join('\n')),
   )
 
+  sections.push(
+    '### Diagnostic (ticket #197): one-gameweek model with every fixture forced neutral\n\n' +
+      'REPORTED ONLY — never a check, never gates this report, never asserted (see ' +
+      '`docs/projection-model-backlog.md` G14). Same one-gameweek measured population and the SAME `projectRow` ' +
+      'combiner as the "Ranking skill" section above, called a second time per row with no ' +
+      '`fixtureExpectedScores` argument at all — `projectRow`\'s own documented default, bit-for-bit the same ' +
+      'neutral construction ticket #175\'s own coverage gate already falls back to for thin-history clubs (every ' +
+      'multiplier exactly 1.0). Tests directly, on this run\'s own population, whether the model\'s one-gameweek ' +
+      'edge over the quality oracle above is fixture information specifically — compare the by-position table ' +
+      'below against "Ranking skill" → "By position" above (the model as actually run) and the one-gameweek ' +
+      'oracle by-position table above (which sees no fixture information at all, by construction).\n\n' +
+      `- season: Spearman **${fmtSpearman(fg.oneGwNeutralFixtureModel.season.spearman)}** (n=${fg.oneGwNeutralFixtureModel.season.n}) ` +
+      `— for comparison, the model as actually run above scores **${fmtSpearman(data.rankingSeason.spearman)}** and the ` +
+      `one-gameweek oracle above scores **${fmtSpearman(fg.oracleOneGw.season.spearman)}**\n\n` +
+      buildRankingPositionTable(fg.oneGwNeutralFixtureModel.byPosition),
+  )
+
   return sections
 }
 
@@ -4277,6 +4310,10 @@ async function main(): Promise<void> {
     // --------------------------------------------------------------------
     const exclusions = emptyExclusionCounts()
     const measured: MeasuredRow[] = []
+    // Ticket #197 diagnostic — collected alongside `measured` below, same
+    // index population, never read by anything that isn't this diagnostic.
+    // See FiveGameweekReportData.oneGwNeutralFixtureModel's own comment.
+    const neutralFixtureOneGwRows: GenericRankingRow[] = []
     // Ticket #183 — the player_code for each `measured` row, same index
     // correspondence (measuredPlayerCodes[i] is measured[i]'s player) —
     // MeasuredRow itself carries no player identity, and the five-gameweek
@@ -4353,6 +4390,20 @@ async function main(): Promise<void> {
       const prior = positionPriors.get(positionPriorKey(row.gameweek_id, classification.position)) ?? fallbackPositionPrior(classification.position)
       const projection = projectRow(row, classification.position, prior, classification.outcome.matchesFound, fixtureExpectedScores)
       const projectedComponents = sumComponentTotals(projection.fixtures.map((f) => pickProjectedComponents(f.components)))
+
+      // Ticket #197 diagnostic — the SAME row/position/prior/fixtureCount,
+      // projected a SECOND time with no `fixtureExpectedScores` argument at
+      // all, so `projectRow` falls back to buildNeutralFixtureContext for
+      // every fixture (every multiplier exactly 1.0). REPORTED only — never
+      // touches `projection`/`measured` above, never gates pass/fail. See
+      // FiveGameweekReportData.oneGwNeutralFixtureModel's own comment.
+      const neutralFixtureProjection = projectRow(row, classification.position, prior, classification.outcome.matchesFound)
+      neutralFixtureOneGwRows.push({
+        position: classification.position,
+        groupId: row.gameweek_id,
+        projected: neutralFixtureProjection.expectedPoints,
+        actual: classification.outcome.totalPoints,
+      })
 
       // Ticket #159, Defect 1 — naive baselines, computed from this SAME row
       // (row.prior_matches > 0 is guaranteed here: classifyRow already
@@ -4508,6 +4559,11 @@ async function main(): Promise<void> {
     // failure gate below, not a silent report-only observation.
     const oracleCeiling = checkOracleCeiling(rankingSeason.spearman, oracleOneGwSeason.spearman, fiveGwSeason.spearman, oracleFiveGwSeason.spearman)
 
+    // Ticket #197 diagnostic — see FiveGameweekReportData.oneGwNeutralFixtureModel's own comment.
+    const oneGwNeutralFixtureByGroup = summarizeGenericRankingByGroup(neutralFixtureOneGwRows)
+    const oneGwNeutralFixtureSeason = summarizeGenericSeasonRanking(neutralFixtureOneGwRows, oneGwNeutralFixtureByGroup)
+    const oneGwNeutralFixtureByPosition = summarizeGenericRankingByPosition(neutralFixtureOneGwRows)
+
     // Ticket #193 — the three club-schedule fixture counters, summed across
     // every five-gameweek MEASURED row's own per-window leg tallies.
     const clubScheduleLegCounts = sumClubScheduleLegCounts(fiveGameweekMeasured)
@@ -4526,6 +4582,7 @@ async function main(): Promise<void> {
       oracleOneGw: { season: oracleOneGwSeason, byPosition: oracleOneGwByPosition, insufficientData: oracleOneGwInsufficientData },
       oracleFiveGw: { season: oracleFiveGwSeason, byPosition: oracleFiveGwByPosition, insufficientData: oracleFiveGwInsufficientData },
       oracleCeiling,
+      oneGwNeutralFixtureModel: { season: oneGwNeutralFixtureSeason, byPosition: oneGwNeutralFixtureByPosition },
     }
 
     const reportData: ReportData = {
