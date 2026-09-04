@@ -200,10 +200,10 @@ export const GATE_FORWARD_NAIVE_BASELINE_SPEARMAN = 0.476
 
 const POSITIONS: readonly Position[] = [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD]
 const POSITION_NAMES: Readonly<Record<Position, string>> = {
-  [GOALKEEPER]: 'Goalkeeper',
-  [DEFENDER]: 'Defender',
-  [MIDFIELDER]: 'Midfielder',
-  [FORWARD]: 'Forward',
+  1: 'Goalkeeper',
+  2: 'Defender',
+  3: 'Midfielder',
+  4: 'Forward',
 }
 
 /**

@@ -1146,3 +1146,81 @@ one-gameweek assertion. That exit is the check working, not a regression.**
 
 **What follow-up work should NOT do:** relax, widen, or remove the five-gameweek check (per position or
 aggregate) to make the job pass again. The check is correct; the model is what needs investigating.
+
+---
+
+## G16 — Ticket #208, 4 Sep 2026: learned model, second slice — trained and harnessed, GATE NOT YET
+## READ (no live Supabase project in this Builder session, same limitation as G9/G11/G13's first readings)
+
+**What this ticket built.** `scripts/train-and-evaluate-learned-model.ts` reads ticket #203's
+`training_features` (18,023 rows) and `public.player_match_stats`/`public.feature_history`, fits a
+small model, and evaluates it against exactly the gate table G15 recorded — reusing
+`scripts/run-backtest.ts`'s own `classifyRow`/`classifyFiveGameweekRow`/
+`summarizeGenericBaselineSpearman`/`summarizeBaselines`/`summarizeFiveGameweekBaselines`
+unmodified, never a second implementation of any ranking metric (grep-checkable: the new file
+defines no Spearman correlation, no rank function, and no five-gameweek window classifier of its
+own). `run-backtest.ts` itself is untouched — ticket #209 edits that same file concurrently in this
+batch, on a different branch.
+
+**The model.** A hand-written gradient-boosted regression-tree ensemble (`buildRegressionTree` /
+`fitGradientBoostingModel`, greedy CART on squared-error loss, deterministic — no random row/feature
+subsampling), not an npm ML dependency: the ticket's own scope constraint forbids a `package.json`
+edit ("one new script ... under scripts/. Nothing else"), and the review's own recommendation reads
+"gradient boosting on ~15 columns, not a neural network" — small enough to write and read by eye.
+Hyperparameters, fixed before any real data is read (no tuning against the gate): 60 trees, max depth
+3, learning rate 0.08, min 40 samples per leaf.
+
+**The 15 columns**, in the fixed order `FEATURE_NAMES` documents: FPL position code; prior-matches
+evidence volume; unshrunk xG/xA per 90 (`training_features.xg_rate_per90`/`xa_rate_per90`, the
+deliberately non-baseline-v1-shrunk rate that table stores); the last-five-match minutes average
+(falling back to the season average when the window is empty); the season-long minutes average
+itself (`docs/model-review-2026-09-02.md` 1f: this alone beats the 5-match window for midfielders at
+five gameweeks — the model sees both and finds its own blend); shots-on-target per match; the
+defensive-contribution hit rate and its own evidence volume; the player's own club's point-in-time
+goals-scored/goals-conceded-per-match and evidence volume; the scheduled opponent(s)' point-in-time
+goals-scored/goals-conceded-per-match, POOLED across a double gameweek, computed live via
+`computeTeamStrengthAsOf` (never stored on `training_features` — that table's own migration header
+leaves this to whichever ticket trains a model); and the fixture count itself (0/1/2). No column
+named in the ticket turned out to be un-ingestable beyond the four G15 already recorded as dropped
+(total shots, chances created, big chances missed, touches in the opposition box) — this ticket
+introduced no new drop.
+
+**The five-gameweek total mirrors G13's own discipline, reapplied to a second model.**
+`predictLearnedFiveGameweekTotal` reads every FORM input (xG/xA rates, minutes structure, defcon,
+the player's own team strength) exactly once, from the window's START gameweek G — never a leg's own
+later gameweek — and only the fixture identity (opponent codes, via the published schedule) and
+opponent STRENGTH-as-of-G vary leg by leg. Three of this ticket's own tests exist specifically to
+prove this: that mutating a form feature never changes a leg's prediction leg-to-leg, that a leg's
+opponent identity comes from the schedule and never from the window-start row's own stored
+`opponent_team_codes`, and that opponent strength is evaluated strictly before G for every leg,
+never before the leg's own (later) gameweek.
+
+**The split — the thing this ticket's DoD is most exacting about.** `splitByGameweekCutoff`
+partitions every row by its OWN `gameweekId` against a fixed cutoff (gameweek 28 of 38, ~74%
+training) — never a random row-level split, because a five-gameweek window's legs would then span
+both folds unpredictably. The model is fit ONLY on the training fold; the held-out fold (gameweeks
+29-38) is scored once. The named test the ticket's DoD asks for ("no gameweek in the evaluation set
+contributed to fitting") constructs a season where the held-out gameweeks carry an unmistakable
+outlier target (999) absent from every training-fold row, fits on the training fold alone, and
+proves the fitted model's own starting point — and therefore every downstream residual — reads as
+the training-fold mean, nowhere near 999. A second test confirms mutating the eval fold's own data
+AFTER fitting cannot retroactively change an already-fitted model, since fitting was never handed a
+reference to it.
+
+**GATE NOT YET READ — stated plainly, not a near miss and not a pass.** Exactly the same limitation
+G9's and G11's first readings recorded: this Builder session has no live Supabase project and no
+`SUPABASE_URL`/`SUPABASE_SECRET_KEY` in its environment, so `scripts/train-and-evaluate-learned-model.ts`
+has been proven correct on constructed rows (40 tests, all passing, no live database) but has never
+executed against the real 18,023 `training_features` rows. **No number in this entry is a measured
+gate result — there isn't one yet.** The confirming step: run
+`SUPABASE_URL=... SUPABASE_SECRET_KEY=... npx tsx scripts/train-and-evaluate-learned-model.ts` (reads
+`training_features`, `feature_history`, `player_match_stats`, `players`; writes
+`out/learned-model-report.md` and one `job_runs` row) and read the report's own Gate table — GK/DEF
+compared against the incumbent's own figure from THAT SAME run (never a quoted past number, since
+ticket #207 is reverting `src/lib/projection/minutes.ts` on its own branch in this same batch and the
+report records the exact git commit SHA it ran against precisely so a reader can tell which state of
+that file it reflects), MID/FWD compared against the FIXED report-10 naive-baseline figures (0.464 /
+0.476) this entry inherits from G15 without re-deriving them. **Do not tune `TRAIN_EVAL_GAMEWEEK_CUTOFF`,
+`DEFAULT_GBM_HYPERPARAMETERS`, or `FEATURE_NAMES` from a disappointing first reading** — the ticket's
+own instruction is fit once, evaluate once, report what comes out; a failed gate after that budgeted
+attempt is a real, useful result, not a defect to iterate away.
