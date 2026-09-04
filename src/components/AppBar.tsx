@@ -56,7 +56,16 @@ const DOME_ARC_PATH = `M ${DOME_RADIUS - DOME_TANGENT_HALF_WIDTH} ${NAV_BUMP_OVE
  * as a circle that bulges above the bar's own top edge rather than as a
  * third equal pill: "one continuous silhouette... Home at the centre as
  * a circle, with Chips and Record contouring outward from it to each end
- * of the bar." See AppBar.css for the shape mechanism.
+ * of the bar." Ticket #202, section C corrects HOW that silhouette is
+ * drawn — #194's Home circle was its own independently bordered,
+ * backdrop-filtered box, which merely overlapped the pill (two shapes,
+ * two borders, a doubled seam where they crossed: "a ring drawn on a
+ * bar"). `.app-bar` itself is now the single silhouette via a CSS mask
+ * union of the pill and a fixed-radius circle, with Home reduced to
+ * plain content (icon + label, no background of its own) positioned
+ * inside it, plus a small SVG arc tracing the one curve a native
+ * `border` cannot follow around a masked shape. See AppBar.css's own
+ * header comment for the full mechanism.
  *
  * ICONS — correction B to #166, which shipped this bar text-only. The
  * audit's reasoning for text alone (the app draws no icons, so inventing
@@ -64,17 +73,19 @@ const DOME_ARC_PATH = `M ${DOME_RADIUS - DOME_TANGENT_HALF_WIDTH} ${NAV_BUMP_OVE
  * and does not hold for a navigation bar: a bar of three text labels is
  * still the pile of text links P3 objected to, just pinned to the
  * bottom. NavIcons.tsx draws the three glyphs in this repo — no library,
- * no dependency, no emoji — on one grid at one stroke weight, in
- * currentColor. See that file's header for the full set of rules.
+ * no dependency, no emoji — on one grid at one stroke weight (raised
+ * again by #202, section C — see AppBar.css), in currentColor. See that
+ * file's header for the full set of rules.
  *
  * ACCESSIBLE NAME AND THE ACTIVE STATE. Each destination keeps its
  * visible text label, so its accessible name is unchanged from the
  * text-only bar and the icons are decorative (aria-hidden) additions
  * rather than the sole carrier of meaning. The current destination is
- * marked three ways, only one of which is colour: a heavier icon stroke
- * (--nav-stroke-active), a heavier label weight, and — the colour one —
- * --text-primary on a --accent-cyan-dim pill. Remove colour entirely and
- * the active item is still the one drawn in bolder line.
+ * marked four ways, only one of which is colour: a heavier icon stroke
+ * (--nav-stroke-active), a heavier label weight, a cyan fill, and —
+ * ticket #202, section C, "bring back the glow on Home" — an outer
+ * bloom (--nav-active-glow, index.css). Remove colour entirely and the
+ * active item is still the one drawn in bolder line.
  *
  * Rendered once in App.tsx, outside <Routes>, so it is a single
  * persistent DOM node across every navigation instead of remounting per
