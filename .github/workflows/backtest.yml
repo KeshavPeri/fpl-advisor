@@ -15,12 +15,27 @@ name: Backtest
 # scheduled-jobs.yml or calibration-report.yml, for the same reason
 # calibration-report.yml is its own file: other tickets in this batch own
 # other workflow files, and a separate file cannot collide with them.
+#
+# Ticket #198: the report above is written to disk and uploaded as a
+# workflow artifact only — and GitHub redirects an artifact download to
+# Azure blob storage, which no agent session's egress allowlist reaches
+# (see scripts/publish-backtest-summary.ts's own file header). The two
+# steps at the end of this job publish the report's headline figures and
+# named per-check verdicts to $GITHUB_STEP_SUMMARY (readable via
+# `api.github.com` with no download — a job's step summary becomes its
+# check-run `output.summary`) and, when this workflow runs on a pull
+# request, as a PR comment. Neither step changes what the job above
+# computes or its exit code: a failed bound still fails this job exactly as
+# before this ticket — see scripts/publish-backtest-summary.ts's own header
+# for why suppressing that would be the wrong fix for "a red run carries no
+# signal" (the summary now says WHICH named check failed instead).
 
 on:
   workflow_dispatch: {}
 
 env:
   BACKTEST_REPORT_PATH: out/backtest-report.md
+  BACKTEST_SUMMARY_PATH: out/backtest-summary.md
 
 jobs:
   backtest:
@@ -62,3 +77,39 @@ jobs:
           path: ${{ env.BACKTEST_REPORT_PATH }}
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Publish backtest summary
+        # if: always() (ticket #198 DoD) — the whole point is that a failed
+        # bound still publishes its numbers where an agent session can read
+        # them, exactly when the run is most likely to need explaining. This
+        # step's own exit code is untouched by anything above it (no
+        # continue-on-error anywhere in this file, per the ticket's explicit
+        # scope) — a report the parser cannot read is its own, separate,
+        # visible failure, not one silently folded into the backtest step's.
+        if: always()
+        run: |
+          mkdir -p "$(dirname "${{ env.BACKTEST_SUMMARY_PATH }}")"
+          npx tsx scripts/publish-backtest-summary.ts "${{ env.BACKTEST_REPORT_PATH }}" | tee "${{ env.BACKTEST_SUMMARY_PATH }}"
+          cat "${{ env.BACKTEST_SUMMARY_PATH }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post backtest summary as PR comment
+        # Only fires when this workflow is actually running against a pull
+        # request (github.event.pull_request is unset for a plain
+        # workflow_dispatch run — see this file's header). Dormant today
+        # (this workflow is workflow_dispatch-only by design, unchanged by
+        # this ticket), so that a future trigger change is the only thing
+        # that can turn this step on — this ticket does not itself make
+        # Backtest run on every PR. if: always() for the same reason as the
+        # step above: a failed bound is exactly when the comment matters.
+        if: always() && github.event.pull_request != null
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const body = fs.readFileSync(process.env.BACKTEST_SUMMARY_PATH, 'utf8')
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            })
