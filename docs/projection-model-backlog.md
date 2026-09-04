@@ -832,3 +832,179 @@ is the second, independent confirmation.
 **Still open after this ticket:** the ONE-gameweek oracle-ceiling failure (oracle 0.336 below model
 0.345). That is a separate problem with a separate cause and gets its own ticket — the Backtest job
 will still exit 1 after #193 merges, and that exit is not #193 failing.
+
+---
+
+## G14 — Ticket #197, 4 Sep 2026: the one-gameweek oracle-ceiling failure is not a defect in
+## either construction. The ASSERTION is wrong, not the oracle — a quality-only hindsight ranker
+## was never entitled to bound a model that also has genuine, non-hindsight fixture knowledge
+
+**Diagnosis-only ticket, per its own scope. Nothing below changed `checkOracleCeiling`,
+`computeOracleFeaturedRate`, `computeOracleAppearanceRate`, `computeOracleFiveGameweekEstimate`, or
+any model figure. The Backtest job still exits 1, and it should keep doing so until a follow-up
+ticket acts on the proposal at the bottom of this entry.**
+
+### The failure, restated
+
+`checkOracleCeiling` fails at the one-gameweek horizon: the leave-target-out quality oracle scores
+season Spearman **0.336**, the model it is meant to bound scores **0.345**, over the same
+10,460-row population. By position: Goalkeeper oracle **0.035** vs model **0.157**; Defender 0.265
+vs 0.286; Midfielder 0.402 vs 0.400; Forward 0.403 vs 0.428. The same construction, at five
+gameweeks, sits the other way round and comfortably so — oracle 0.506 vs model 0.397 (G13's
+addendum) — so whatever is wrong is specific to the one-gameweek horizon, not to "the oracle" as a
+general idea.
+
+### Ruled out first, by reading the code rather than reasoning about it
+
+**Tie handling is not the cause — it is byte-identical.** The one-gameweek oracle's ranking
+(`oracleOneGwSeason`) and the model's own ranking (`rankingSeason`) are both built by
+`summarizeGenericSeasonRanking`/`summarizeSeasonRanking`, and both call the exact same
+`spearmanCorrelation` → `rankDescending`, the standard average-rank tie correction. There is only
+one tie rule in this file and both sides of the comparison use it. Nothing to fix here.
+
+**Population identity is exact, confirmed from the construction, not merely read off the report.**
+The one-gameweek oracle loop iterates `measured[i]` — the identical `MeasuredRow[]` array the
+model's own ranking is built from — and only ever drops a row when `computeOracleRate` returns
+`null` (the player has literally no season match outside the one excluded gameweek). That drop
+count is `oracleOneGwInsufficientData`, printed in the report as "row(s) skipped"; the report reads
+0. So both sides rank the exact same 10,460 rows, and both read `actual` from the exact same
+`row.actualPoints` field — never independently recomputed. Population identity holds by
+construction, and the live run confirms the one place it could have silently diverged is empty.
+
+**The model already sees real, opponent-specific fixture data at one gameweek — this is the
+load-bearing fact.** Before ticket #175, every one-gameweek row was projected under a neutral
+fixture (`expectedScore` exactly 0.5). Ticket #175 changed that: `main()` now computes a
+point-in-time `expectedScore` per row from real team-strength history
+(`computeTeamStrengthAsOf`/`computeFixtureExpectedScore`) and only falls back to neutral when a
+club has too little prior history to trust. Report 7 measured this at 9,930 of 10,460 measured rows
+(95%) using a real, computed fixture. The one-gameweek oracle has never had access to any of this —
+`computeOracleRate` is a bare season points-per-match average, blind to who the player faces, in
+every report before and after #175.
+
+### The mechanism
+
+**A leave-target-out quality rate answers "how good is this player, generally". It cannot answer
+"what does he face this week" — and at one gameweek, for the positions whose scoring is dominated
+by a near-binary, opponent-driven outcome, the second question carries more of that week's variance
+than the first.** The model, since #175, answers both; the oracle, by design, only ever answers the
+first. `checkOracleCeiling`'s one-gameweek half implicitly assumes a quality-only ranker is an upper
+bound on any model scored against it. That assumption does not require a leak to be false — a model
+with strictly more legitimately-knowable information than the comparator can beat it fairly, and a
+"ceiling" that isn't actually a ceiling failing is not evidence of a defect in either side.
+
+**The goalkeeper figures are the sharpest confirmation, and the DoD requires addressing them
+explicitly — done here.** A goalkeeper's variable points are overwhelmingly appearance (near-fixed),
+clean sheet (worth 4, and `pCleanSheet = exp(-λ)` is driven almost entirely by the opponent's
+`expectedScore` this specific week — see `fixture.ts`), and saves (also fixture-scaled since ticket
+#109/G1). There is very little left over that is a *persistent, player-specific* skill difference
+between two similarly-tiered clubs' goalkeepers for a season-average rate to usefully rank on — most
+of what separates one week's goalkeeper score from another's is which opponent he faces that
+particular week, which the oracle cannot see by construction and the model can. This is not a new
+claim invented for this ticket: `docs/model-review-2026-09-02.md`'s own neutral-fixture ablation —
+independently built, validated against this harness within ~0.005–0.02 (G12) — found forcing every
+fixture to neutral collapses goalkeeper season Spearman from 0.168 to **−0.017**: below zero, i.e.
+worse than random. Remove fixture information from the model and its goalkeeper ranking skill is
+gone entirely. That is not a small contributor to the model's one-gameweek goalkeeper edge over the
+oracle — on the evidence available, it is essentially the whole of it.
+
+**Confirmed fresh, on this run's own population, not only on an older reconstruction — the new
+diagnostic this ticket adds (in scope: "a variant computed inside the harness and reported, never
+asserted").** `scripts/run-backtest.ts` now also re-projects every one-gameweek measured row through
+the SAME `projectRow` combiner a second time, with no `fixtureExpectedScores` argument at all — the
+function's own documented default, which forces every fixture to the same neutral construction the
+#175 coverage gate already falls back to for thin-history clubs. This is REPORTED ONLY, under a new
+"Diagnostic (ticket #197)" heading directly beneath the oracle-ceiling check, and asserts nothing —
+`checkOracleCeiling` reads none of it. **This session cannot dispatch a live Supabase run** (the
+same limitation G9/G11 recorded for their own first readings), so the live figures from this new
+section are not yet read; the next scheduled Backtest run will print them, and the prediction to
+check against is: goalkeeper Spearman for the neutral-fixture model variant should sit close to the
+one-gameweek oracle's own 0.035 (both are now quality-blind — well, fixture-blind — rankers over the
+same population) and well below the model-as-run's 0.157; defender should move by a smaller amount
+than goalkeeper (see below); midfielder and forward should barely move at all. **This prediction, not
+this entry, is what should be read against the report — if it is wrong, this diagnosis needs
+revisiting, and the discipline that opened this ticket (§18: suspect the instrument before the
+model) applies here too.**
+
+**Why the gap shrinks from goalkeeper to defender, and nearly vanishes at midfielder and forward —
+the same mechanism, read by position.** Defenders also earn the clean-sheet bonus, but unlike
+goalkeepers they have a second, genuinely persistent, largely fixture-independent skill dimension the
+season-rate oracle CAN see: defensive contribution (tackles/interceptions/clearances — a matter of
+role and profile more than opponent) and attacking returns for the forward-leaning defenders. That
+gives the oracle something real to rank defenders on that it structurally cannot offer goalkeepers,
+which is consistent with the measured gap being an order of magnitude smaller for defenders (0.021)
+than goalkeepers (0.122). Midfielders and forwards score overwhelmingly from goals, assists and
+bonus — components tied to a persistently good attacking player far more than to this week's specific
+opponent (the attacking fixture multiplier has always been the gentler of the two multipliers, and
+`docs/model-review-2026-09-02.md` §1b found it was, if anything, too steep before #184 damped it, not
+too narrow) — so a season-quality rate is close to measuring the same thing the model's attacking
+components measure, and the two rankers land close together (MID: oracle fractionally ahead, 0.402 vs
+0.400; FWD: model fractionally ahead, 0.428 vs 0.403, plausibly the residual fixture and bonus edge).
+**No part of this account is inconsistent with the by-position table; the size of every gap moves in
+the direction this mechanism predicts.**
+
+### The falsification check, addressed explicitly
+
+The ticket requires the explanation to account for both horizons in terms of the two constructions,
+not by assertion, or to say plainly that it cannot.
+
+**1. Why the one-gameweek oracle scores below the model.** Answered above: the model has real,
+non-hindsight, opponent-specific fixture information from ticket #175 onward, and the oracle's
+construction — a leave-target-out season rate — structurally cannot have any. For the positions
+whose weekly score is dominated by a near-binary fixture-driven event (clean sheets, most acutely for
+goalkeepers), that missing information costs the oracle more than its full-season quality-measurement
+precision buys back at a one-week horizon. This is not a leak: every input the model uses at one
+gameweek was genuinely knowable before that gameweek was played (team strength computed strictly
+before the row's own gameweek, per ticket #175's own lookahead guard) — it is real information the
+oracle's construction simply excludes by design.
+
+**2. Why the same construction bounds the model at five gameweeks.** This file's own "FIVE-GAMEWEEK
+RANKING TARGET" section header states the construction directly: "only the FIXTURE identity varies
+leg by leg" — each of the five legs G..G+4 uses a *different* opponent, drawn from the published
+schedule. A player's TRUE underlying quality is systematic and contributes to every leg alike, so its
+effect on a five-leg SUM scales with the horizon (5×); each leg's fixture-driven deviation is close to
+independent of the others (different opponent each week), so the fixture-noise component of the SUM
+grows only like the square root of the horizon (~√5×), the standard result for summing near-independent
+noise terms. The model's fixture-information edge is real in every individual leg, but it does not
+compound the way persistent quality does — while the oracle's evidence base for that quality (a whole
+season, ~30+ matches per player, versus the model's shrunk in-season rate) is far more precise, and
+that precision compounds with the horizon exactly as `docs/model-review-2026-09-02.md` already found
+("aggregation averages the week noise away and quality knowledge compounds"). At five gameweeks the
+signal-to-noise balance the check depends on has flipped, in terms of the construction, not by
+assertion: quality's contribution to the target scales linearly with the horizon and is measured with
+season-length precision; fixture-driven variance partially cancels across five independent legs. **Both
+conditions of the falsification check are satisfied by the same underlying fact — fixture identity is
+per-leg and independent, quality is per-player and persistent — read at two different window widths.**
+
+### Proposal — the ASSERTION is wrong, not either oracle construction
+
+**Neither oracle needs to change.** `computeOracleRate` (one-gameweek) and
+`computeOracleFeaturedRate`/`computeOracleAppearanceRate`/`computeOracleFiveGameweekEstimate`
+(five-gameweek) are both exactly what their own comments say they are — leak-free, out-of-window,
+quality-only estimators — and both are correctly built (confirmed above: same tie rule, same
+population, no leak). What is wrong is `checkOracleCeiling`'s one-gameweek half: it asserts that a
+quality-only hindsight ranker must sit above a model that also has real, non-hindsight fixture
+knowledge, and at one gameweek that assertion has no reason to be true and the evidence above says it
+isn't, structurally, not by bad luck on one report.
+
+**For the follow-up ticket to choose between, not decided here:**
+
+1. **Cheapest and recommended: stop treating the one-gameweek comparison as a pass/fail ceiling.**
+   Remove the one-gameweek branch of `checkOracleCeiling`'s assertion (the five-gameweek branch is
+   untouched — it is a genuine ceiling and must keep failing the job if a future model or a future
+   leak ever beats it). Keep the one-gameweek oracle fully computed and reported, exactly as today,
+   including the new fixture-forced-neutral diagnostic this ticket adds — it remains a useful reading
+   on how much of the model's one-gameweek skill is fixture-driven vs quality-driven, position by
+   position. It simply stops being something the job exits non-zero over.
+2. **More work, not recommended unless someone wants a true one-gameweek ceiling for its own sake:**
+   build a genuinely fair one-gameweek bound — a "quality + fixture" oracle that knows both a
+   player's true season quality AND this week's real opponent (the same team-strength data the model
+   already reads), so it is no longer missing information the model has. That would be a new,
+   different construction, not a rewrite of the existing one, and it would need its own leak-guard
+   tests exactly as rigorous as the ones `computeOracleRate` already has — real effort for a bound
+   this repo does not currently need, since the five-gameweek ceiling already does the job of
+   catching a lookahead leak (twice, per G13).
+
+**Do not read this as license to relax, widen, or remove `checkOracleCeiling`'s five-gameweek half.**
+That half is untouched, correct, and stays exactly as it is — this entry's proposal is scoped to the
+one-gameweek assertion only, and only option 1 above should be attempted without also re-deriving
+this diagnosis on a fresh live run first.
