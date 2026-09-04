@@ -87,6 +87,7 @@ import {
   emptyPositionResolutionCounts,
   emptyRecentMinutesSourceCounts,
   emptyRecentMinutesWindowLengthDistribution,
+  estimateMinutesPreTicket191,
   FIVE_GAMEWEEK_HORIZON,
   fallbackPositionPrior,
   fixtureHasSufficientHistory,
@@ -117,6 +118,7 @@ import {
   PRIOR_XG_XA_PER_MATCH_BASELINE_LABEL,
   projectAndReconstructWindowGameweek,
   projectRow,
+  projectRowPreTicket191Minutes,
   rankDescending,
   reconstructActualMatchPoints,
   resolveFixtureTeams,
@@ -2703,6 +2705,113 @@ describe('checkOracleCeiling (ticket #187; ticket #201 retired the one-gameweek 
   })
 })
 
+// ============================================================================
+// TICKET #201, PART 2 — the pre-#191 minutes construction, reconstructed for
+// REPORTED-ONLY comparison. `src/lib/projection/minutes.ts` is untouched by
+// this ticket; every test below exercises only harness-local code. See this
+// file's own comment above `estimateMinutesPreTicket191`/
+// `projectRowPreTicket191Minutes` (scripts/run-backtest.ts) for the full
+// "because", and `git show e652df7 -- src/lib/projection/minutes.ts` for the
+// exact diff being reconstructed.
+// ============================================================================
+
+describe('estimateMinutesPreTicket191 (ticket #201, Part 2)', () => {
+  it(
+    'THE NAMED TEST (ticket #201 DoD): reproduces the pre-#191 arithmetic on the worked window [90, 90, 20, 0, 0] — ' +
+      'expected minutes 40 and pSixtyPlus 0.4, against the shipped estimateMinutes()\'s 50 and 0.5 on the SAME window. ' +
+      'Hand-computed: mean(90,90,20,0,0) = 200/5 = 40; sixtyPlusRate = 2/5 = 0.4 (only the two 90s reach 60) — no ' +
+      'single-lowest drop, no start/minutes-given-start split, exactly `git show e652df7`\'s pre-image.',
+    () => {
+      const recentMinutes = [90, 90, 20, 0, 0]
+
+      const preTicket191 = estimateMinutesPreTicket191(recentMinutes, 1)
+      expect(preTicket191.expectedMinutes).toBeCloseTo(40, 10)
+      expect(preTicket191.pSixtyPlus).toBeCloseTo(0.4, 10)
+      expect(preTicket191.pAppears).toBe(1)
+
+      // Pinned against the SHIPPED model on the exact same window — the DoD's
+      // own comparator, not asserted elsewhere in this file for this window.
+      const shipped = estimateMinutes(recentMinutes, 1)
+      expect(shipped.expectedMinutes).toBeCloseTo(50, 10)
+      expect(shipped.pSixtyPlus).toBeCloseTo(0.5, 10)
+    },
+  )
+
+  it('scales both expectedMinutes and pSixtyPlus by availability, exactly like the shipped model', () => {
+    const full = estimateMinutesPreTicket191([90, 90, 20, 0, 0], 1)
+    const half = estimateMinutesPreTicket191([90, 90, 20, 0, 0], 0.5)
+    expect(half.expectedMinutes).toBeCloseTo(full.expectedMinutes / 2, 10)
+    expect(half.pSixtyPlus).toBeCloseTo(full.pSixtyPlus / 2, 10)
+    expect(half.pAppears).toBe(0.5)
+  })
+
+  it('an empty window returns the SAME no-history baseline the shipped model returns — #191 never touched this branch, so both constructions reuse the identical exported constants', () => {
+    const preTicket191 = estimateMinutesPreTicket191([], 1)
+    const shipped = estimateMinutes([], 1)
+    expect(preTicket191).toEqual(shipped)
+  })
+
+  it('a below-full window (fewer than 5 entries) is the plain mean over however many are given — no drop, matching the shipped model\'s own below-full-window behaviour (only a FULL window ever diverges)', () => {
+    const preTicket191 = estimateMinutesPreTicket191([90, 0], 1)
+    const shipped = estimateMinutes([90, 0], 1)
+    expect(preTicket191).toEqual(shipped)
+    expect(preTicket191.expectedMinutes).toBeCloseTo(45, 10)
+    expect(preTicket191.pSixtyPlus).toBeCloseTo(0.5, 10)
+  })
+})
+
+describe('projectRowPreTicket191Minutes (ticket #201, Part 2)', () => {
+  it(
+    'is IDENTICAL to the shipped projectRow when the recent-minutes window has no single-lowest-drop effect (a ' +
+      'clean, no-zero full window) — isolates that the reconstruction wires through rates/fixtures/defcon exactly ' +
+      'like the shipped combiner (every one of those is the SAME imported pure function on both sides), and only ' +
+      'the minutes step can ever differ',
+    () => {
+      const row = featureRow({
+        gameweek_id: 5,
+        player_code: 1,
+        element_type: FORWARD,
+        prior_matches: 5,
+        prior_minutes: 450,
+        prior_xg: 5,
+        prior_xa: 3,
+        prior_recent_minutes: [90, 90, 90, 90, 90],
+      })
+      const prior = zeroPrior(FORWARD)
+      const shipped = projectRow(row, FORWARD, prior, 1, [0.6])
+      const preTicket191 = projectRowPreTicket191Minutes(row, FORWARD, prior, 1, [0.6])
+      expect(preTicket191).toBeCloseTo(shipped.expectedPoints, 10)
+    },
+  )
+
+  it("diverges from the shipped projectRow on the DoD's own worked window ([90, 90, 20, 0, 0]) — the full combiner, not just the minutes estimate in isolation, is measurably sensitive", () => {
+    const row = featureRow({
+      gameweek_id: 6,
+      player_code: 2,
+      element_type: FORWARD,
+      prior_matches: 5,
+      prior_minutes: 200,
+      prior_xg: 4,
+      prior_xa: 2,
+      prior_recent_minutes: [90, 90, 20, 0, 0],
+    })
+    const prior = zeroPrior(FORWARD)
+    const shipped = projectRow(row, FORWARD, prior)
+    const preTicket191 = projectRowPreTicket191Minutes(row, FORWARD, prior)
+    // The pre-#191 reconstruction has both a lower expectedMinutes (40 vs 50)
+    // and a lower pSixtyPlus (0.4 vs 0.5) on this window — every
+    // minutes-scaled component is pulled down, never up.
+    expect(preTicket191).toBeLessThan(shipped.expectedPoints)
+    expect(preTicket191).not.toBeCloseTo(shipped.expectedPoints, 2)
+  })
+
+  it('a fixture count of 0 (no fixture that gameweek) projects 0 points on both constructions — mirrors projectRow\'s own no-fixture behaviour', () => {
+    const row = featureRow({ gameweek_id: 7, player_code: 3, element_type: FORWARD, prior_matches: 5, prior_recent_minutes: [90, 90, 90, 90, 90] })
+    const prior = zeroPrior(FORWARD)
+    expect(projectRowPreTicket191Minutes(row, FORWARD, prior, 0, [])).toBe(0)
+  })
+})
+
 describe('buildPlayerSeasonMatches / groupSeasonMatchesByPlayer', () => {
   it('reconstructs one points/matches pair per (player, gameweek) via the SAME aggregateActualForGameweek used everywhere else in this file', () => {
     const groups = [
@@ -3566,6 +3675,30 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     expect(output).toContain('season: Spearman **n/a**')
   })
 
+  it('prints the ticket #201, Part 2 pre-#191-minutes section as its OWN, visually separate section after the #197 diagnostic — never merged with Part 1\'s oracle-ceiling change', () => {
+    const output = generateReportMarkdown(data)
+    const diagnosticIndex = output.indexOf('### Diagnostic (ticket #197): one-gameweek model with every fixture forced neutral')
+    const part2Index = output.indexOf('## Ticket #201, Part 2: the pre-#191 minutes model, reconstructed for comparison')
+    expect(part2Index).toBeGreaterThan(diagnosticIndex)
+    expect(output).toContain('REPORTED ONLY — never a check, never gates this report, never asserted')
+    expect(output).toContain('src/lib/projection/minutes.ts` itself is untouched')
+    expect(output.indexOf('### One-gameweek horizon')).toBeGreaterThan(part2Index)
+    expect(output.indexOf('### Five-gameweek horizon')).toBeGreaterThan(output.indexOf('### One-gameweek horizon'))
+  })
+
+  it('the ticket #201, Part 2 section reads its figures from data.fiveGameweek.preTicket191Minutes, at both horizons, alongside the shipped model and the naive minutes baseline for comparison', () => {
+    const output = generateReportMarkdown(data)
+    // fgSeason (reused for every ranking summary in this fixture, per this
+    // describe block's own setup) is built from an empty rows array — n=0,
+    // spearman null — so every occurrence below reads 'n/a', proving the
+    // section reads the right field rather than always printing a fixed string.
+    const part2Index = output.indexOf('## Ticket #201, Part 2: the pre-#191 minutes model, reconstructed for comparison')
+    const part2Section = output.slice(part2Index)
+    expect(part2Section).toContain('pre-#191 minutes model, season: Spearman **n/a** (n=0)')
+    expect(part2Section).toContain('the shipped model above scores **n/a**')
+    expect(part2Section).toContain('"prior minutes per match" baseline above scores **n/a**')
+  })
+
   it('the oracle-ceiling check reports FAILED, with its failure text, when oracleCeiling.ok is false', () => {
     const failingData: ReportData = {
       ...data,
@@ -3787,6 +3920,18 @@ describe('run-backtest.ts — imports the rate and points modules, never reimple
     expect(source).toMatch(/from ['"]\.\.\/src\/lib\/projection\/fixture\.ts['"]/)
     expect(source).toMatch(/from ['"]\.\.\/src\/lib\/projection\/pointValues\.ts['"]/)
   })
+
+  it(
+    'imports minutes.ts (availabilityFactor, NO_HISTORY_BASELINE_*) rather than redeclaring them — ticket #201, ' +
+      "Part 2's pre-#191 reconstruction reuses the pieces #191 left unchanged, never re-derives them, and never " +
+      "forks src/lib/projection/minutes.ts itself",
+    () => {
+      expect(source).toMatch(/from ['"]\.\.\/src\/lib\/projection\/minutes\.ts['"]/)
+      expect(source).toMatch(/availabilityFactor/)
+      expect(source).toMatch(/NO_HISTORY_BASELINE_MINUTES/)
+      expect(source).toMatch(/NO_HISTORY_BASELINE_SIXTY_PLUS_RATE/)
+    },
+  )
 
   it('imports the scoring modules from src/lib/scoring/', () => {
     expect(source).toMatch(/from ['"]\.\.\/src\/lib\/scoring\/types\.ts['"]/)
