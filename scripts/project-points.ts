@@ -360,6 +360,29 @@ export function classifySeasonCoverage(hasCurrentSeasonRows: boolean, hasHistori
   return 'neither'
 }
 
+/**
+ * Ticket #213 — this player's CURRENT-SEASON minutes per match, the figure
+ * `PlayerProjectionInput.seasonMinutesPerMatch` carries into
+ * `estimateMinutes`'s shrinkage (src/lib/projection/minutes.ts's own
+ * header). Deliberately current-season only, not the two-stage
+ * current-shrunk-toward-historical cascade G6 uses for rates — that would be
+ * a second shrinkage stage this ticket's scope explicitly does not ask for,
+ * and it would stop this figure from matching what
+ * `scripts/run-backtest.ts`'s naive baseline measures (also current-season
+ * only, by construction of the single-season backtest harness — see that
+ * file's `computeBaselineMinutesPerMatch`), which is the exact number this
+ * ticket's falsification check compares the shrunk model against.
+ *
+ * `undefined` for a player with zero current-season matches — historicalOnly
+ * or neither coverage (ticket #113's classifySeasonCoverage) — rather than
+ * falling back to historical-season minutes, which would silently blend in
+ * a different quantity than the one being measured. Counted, never silent:
+ * see `playersMinutesSeasonFigureFallback` in job_runs.details, main() below.
+ */
+export function computeSeasonMinutesPerMatch(totalCurrentSeasonMinutes: number, currentSeasonMatchCount: number): number | undefined {
+  return currentSeasonMatchCount > 0 ? totalCurrentSeasonMinutes / currentSeasonMatchCount : undefined
+}
+
 // ============================================================================
 // Ticket #119 — price as a weak prior, pulled out the same way as the #113
 // helpers above: small, independently-testable pure functions rather than
@@ -910,6 +933,14 @@ async function main(): Promise<void> {
     let playersWithNeitherSeasonRows = 0
     const currentSeasonRowsRead = matchStatsRows.filter((row) => row.season === CURRENT_SEASON).length
 
+    // Ticket #213 — equals playersWithHistoricalOnlyRows + playersWithNeitherSeasonRows
+    // exactly, by construction of computeSeasonMinutesPerMatch (it only ever
+    // returns undefined for a player with zero current-season matches).
+    // Tracked as its own named counter anyway, per this ticket's own DoD
+    // ("counted and reported"), rather than asking a reader to derive it
+    // from the two ticket #113 counters above.
+    let playersMinutesSeasonFigureFallback = 0
+
     // Ticket #119 -- players receiving the price-adjusted prior always equals
     // playersWithNeitherSeasonRows exactly, by construction of
     // effectiveRatePositionPrior (it only ever fires on 'neither' coverage).
@@ -997,11 +1028,19 @@ async function main(): Promise<void> {
       const personalRatePrior = computePlayerRates(historicalRateHistory, effectivePrior)
       const personalDefconPrior = estimateDefconHitRate(position, historicalDefconMatches, defconPriorByPosition[position])
 
+      // Ticket #213 -- current-season minutes per match, the figure
+      // estimateMinutes shrinks recentMinutes toward. currentRateHistory.minutesPlayed
+      // is already the sum of currentMatches' minutes (aggregateRateHistory
+      // above), so this is a straight division, not a second reduce.
+      const seasonMinutesPerMatch = computeSeasonMinutesPerMatch(currentRateHistory.minutesPlayed, currentMatches.length)
+      if (seasonMinutesPerMatch === undefined) playersMinutesSeasonFigureFallback++
+
       const projectionInput: PlayerProjectionInput = {
         position,
         status: player.status,
         chanceOfPlayingNextRound: player.chance_of_playing_next_round,
         recentMinutes,
+        seasonMinutesPerMatch,
         rateHistory: currentRateHistory,
         ratePositionPrior: personalRatePrior,
         defconMatches: currentDefconMatches,
@@ -1012,7 +1051,7 @@ async function main(): Promise<void> {
       // once per player rather than read off an arbitrary fixture -- stays
       // meaningful even for a player with zero fixtures this gameweek.
       const availability = availabilityFactor(player.status, player.chance_of_playing_next_round)
-      const minutesEstimate = estimateMinutes(recentMinutes, availability)
+      const minutesEstimate = estimateMinutes(recentMinutes, availability, seasonMinutesPerMatch)
       const playerRates = computeTwoStagePlayerRates(currentRateHistory, historicalRateHistory, effectivePrior)
       const defconHitRate = estimateTwoStageDefconHitRate(
         position,
@@ -1236,6 +1275,11 @@ async function main(): Promise<void> {
       playersWithHistoricalOnlyRows,
       playersWithNeitherSeasonRows,
       currentSeasonRowsRead,
+      // Ticket #213 -- equals playersWithHistoricalOnlyRows + playersWithNeitherSeasonRows
+      // exactly, by construction of computeSeasonMinutesPerMatch. See that
+      // function's own doc for why this is current-season-only, not a
+      // silent blend with historical minutes.
+      playersMinutesSeasonFigureFallback,
       // Ticket #119 -- playersPriceAdjustedPrior equals playersWithNeitherSeasonRows
       // exactly, by construction of effectiveRatePositionPrior (it only ever
       // substitutes for 'neither' coverage). Of those, scaled-up + scaled-down
@@ -1293,7 +1337,9 @@ async function main(): Promise<void> {
       `read are current-season (${CURRENT_SEASON}). Coverage: ${playersWithCurrentSeasonRows} player(s) with ` +
       `current-season rows, ${playersWithHistoricalOnlyRows} historical-only, ${playersWithNeitherSeasonRows} with ` +
       `neither (${playersPriceAdjustedPrior} price-adjusted: ${playersPriceAdjustedScaledUp} scaled up, ` +
-      `${playersPriceAdjustedScaledDown} scaled down). Bonus: ${fixturesBonusAllocated} fixture(s) ` +
+      `${playersPriceAdjustedScaledDown} scaled down). Minutes shrinkage (ticket #213): ` +
+      `${playersMinutesSeasonFigureFallback} player(s) had no current-season season figure and fell back to the ` +
+      `pre-#213 plain-mean minutes estimate. Bonus: ${fixturesBonusAllocated} fixture(s) ` +
       `allocated, ${fixturesZeroExcess} zero-excess, ${playerFixturesBonusClamped} player-fixture(s) clamped, mean ` +
       `${meanProjectedBonusAmongLikelyStarters.toFixed(2)} among likely starters. Position priors: ` +
       `${priorRowsContributing} row(s) contributing (${priorRowsContributingNoRosterEntry} with no current-roster ` +

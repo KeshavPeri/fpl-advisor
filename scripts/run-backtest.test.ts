@@ -3707,10 +3707,10 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     expect(output).toContain('season: Spearman **n/a**')
   })
 
-  it('prints the ticket #201, Part 2 pre-#191-minutes section as its OWN, visually separate section after the #197 diagnostic — never merged with Part 1\'s oracle-ceiling change', () => {
+  it('prints the ticket #201/#213 unshrunk-minutes section as its OWN, visually separate section after the #197 diagnostic — never merged with Part 1\'s oracle-ceiling change', () => {
     const output = generateReportMarkdown(data)
     const diagnosticIndex = output.indexOf('### Diagnostic (ticket #197): one-gameweek model with every fixture forced neutral')
-    const part2Index = output.indexOf('## Ticket #201, Part 2: the pre-#191 minutes model, reconstructed for comparison')
+    const part2Index = output.indexOf('## Ticket #201/#213: the unshrunk (pre-#191) minutes model, reconstructed for comparison')
     expect(part2Index).toBeGreaterThan(diagnosticIndex)
     expect(output).toContain('REPORTED ONLY — never a check, never gates this report, never asserted')
     expect(output).toContain('src/lib/projection/minutes.ts` itself is untouched')
@@ -3718,13 +3718,13 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     expect(output.indexOf('### Five-gameweek horizon')).toBeGreaterThan(output.indexOf('### One-gameweek horizon'))
   })
 
-  it('the ticket #201, Part 2 section reads its figures from data.fiveGameweek.preTicket191Minutes, at both horizons, alongside the shipped model and the naive minutes baseline for comparison', () => {
+  it('the ticket #201/#213 section reads its figures from data.fiveGameweek.preTicket191Minutes, at both horizons, alongside the shipped model and the naive minutes baseline for comparison', () => {
     const output = generateReportMarkdown(data)
     // fgSeason (reused for every ranking summary in this fixture, per this
     // describe block's own setup) is built from an empty rows array — n=0,
     // spearman null — so every occurrence below reads 'n/a', proving the
     // section reads the right field rather than always printing a fixed string.
-    const part2Index = output.indexOf('## Ticket #201, Part 2: the pre-#191 minutes model, reconstructed for comparison')
+    const part2Index = output.indexOf('## Ticket #201/#213: the unshrunk (pre-#191) minutes model, reconstructed for comparison')
     const part2Section = output.slice(part2Index)
     expect(part2Section).toContain('pre-#191 minutes model, season: Spearman **n/a** (n=0)')
     expect(part2Section).toContain('the shipped model above scores **n/a**')

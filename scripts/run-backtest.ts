@@ -752,6 +752,29 @@ export function averageMinutesPerMatch(row: Pick<FeatureHistoryPriorFields, 'pri
 }
 
 /**
+ * Ticket #213 — `PlayerProjectionInput.seasonMinutesPerMatch` for `projectRow`
+ * below: the SAME quantity `computeBaselineMinutesPerMatch` computes for the
+ * naive-baseline comparison (prior minutes per prior match), but NON-THROWING
+ * — unlike that function, this one is called from `projectRow`, which (unlike
+ * the measured-population call sites below) is also exercised directly in
+ * this file's own tests on rows with `prior_matches <= 0` by design. Returns
+ * `undefined` for `prior_matches <= 0` rather than 0 — 0 would tell
+ * `estimateMinutes` to shrink toward a season figure of "plays zero minutes
+ * a match", which is not what "no season evidence" means; `undefined` is
+ * `PlayerProjectionInput.seasonMinutesPerMatch`'s own documented "producer
+ * cannot supply it" convention, so `estimateMinutes` falls back to its
+ * pre-#213 plain-mean behaviour instead. Within the real measured backtest
+ * population this never actually returns `undefined` in practice —
+ * `prior_matches > 0` is guaranteed there, same invariant
+ * `computeBaselineMinutesPerMatch`'s own throw enforces a few lines below —
+ * so the shrinkage fallback tally for this producer is 0 by construction,
+ * not by counting.
+ */
+export function buildSeasonMinutesPerMatch(row: Pick<FeatureHistoryPriorFields, 'prior_matches' | 'prior_minutes'>): number | undefined {
+  return row.prior_matches > 0 ? row.prior_minutes / row.prior_matches : undefined
+}
+
+/**
  * Ticket #159, naive baseline 1: prior minutes per prior match. Every row
  * that reaches the measured population already has prior_matches > 0 (rows
  * with prior_matches <= 0 are excluded as `noPriorMatches` before ever
@@ -1446,6 +1469,14 @@ export function incrementFixtureCoverage(counts: FixtureCoverageCounts, real: bo
  * approximations) and a position prior computed from the SAME gameweek's
  * data (computePositionPriors) — nothing here reads any later gameweek.
  *
+ * `seasonMinutesPerMatch` (ticket #213) is now threaded through via
+ * `buildSeasonMinutesPerMatch` — this is what makes the SHIPPED projection
+ * (this function) diverge from `projectRowPreTicket191Minutes` below, which
+ * deliberately keeps calling a frozen, pre-shrinkage reconstruction of
+ * `estimateMinutes`. That divergence is this ticket's own falsification
+ * check — see `FiveGameweekReportData.preTicket191Minutes`'s own comment.
+ *
+
  * `fixtureCount` (ticket #140) — how many fixtures the player's team held
  * this gameweek, defaulting to 1 so every existing call site (and every
  * pre-#140 test) is an EXACT no-op: one neutral fixture context, identical
@@ -1478,6 +1509,10 @@ export function projectRow(
     status: ASSUMED_AVAILABILITY_STATUS,
     chanceOfPlayingNextRound: null,
     recentMinutes: buildRecentMinutes(row),
+    // Ticket #213 — see buildSeasonMinutesPerMatch's own doc for why this is
+    // non-throwing (undefined, not 0, when prior_matches <= 0) unlike the
+    // naive-baseline computeBaselineMinutesPerMatch below.
+    seasonMinutesPerMatch: buildSeasonMinutesPerMatch(row),
     rateHistory: buildPlayerRateHistory(row),
     ratePositionPrior: prior.rate,
     defconMatches: buildDefconMatches(row),
@@ -1495,10 +1530,9 @@ export function projectRow(
 
 // ============================================================================
 // Ticket #201, Part 2 — the pre-#191 minutes construction, reconstructed for
-// REPORTED-ONLY comparison. `src/lib/projection/minutes.ts` is UNTOUCHED by
-// this ticket; nothing below is imported by, or wired into, the live
-// pipeline. This is a reconstruction of the OLD model, not a fork of the
-// live one — see ticket #201's own scope.
+// REPORTED-ONLY comparison. Nothing below is imported by, or wired into, the
+// live pipeline. This is a reconstruction of the OLD model, not a fork of
+// the live one — see ticket #201's own scope.
 //
 // THE OLD ARITHMETIC (verbatim from `git show e652df7 -- src/lib/projection/
 // minutes.ts`, the #191/#188 commit's own diff — the plain mean of the
@@ -1509,6 +1543,21 @@ export function projectRow(
 // unchanged by #191 (confirmed from that same diff) — reconstructing an
 // unchanged constant a second time here would be a second thing to get
 // wrong for no reason.
+//
+// TICKET #213 REPURPOSES THIS SECTION, DELIBERATELY UNCHANGED BELOW. Until
+// #213, `src/lib/projection/minutes.ts` was untouched since #207's revert,
+// so `estimateMinutesPreTicket191` below and the shipped `estimateMinutes`
+// computed IDENTICAL numbers — this section existed only to settle #191's
+// own deferred DoD (see below), a comparison against a hypothetical that had
+// already lost. #213 adds season-figure shrinkage to the SHIPPED
+// `estimateMinutes` (`projectRow` above) while this section's frozen
+// reconstruction stays exactly the old plain-mean arithmetic — so this exact
+// machinery, unmodified, now ALSO does double duty as #213's own
+// falsification check: "the shrunk model against the unshrunk one, per
+// position, at both horizons, in one run." No new comparison function was
+// needed; this one already computed precisely that gap once #213 wired
+// season figures into `projectRow`. See `FiveGameweekReportData.preTicket191Minutes`'s
+// own comment for where the report surfaces it.
 // ============================================================================
 
 /** Mirrors minutes.ts's own private `clamp01` exactly — that helper is not exported, so this is the one unavoidable duplicate: two lines, unchanged since before #191, not a second thing to get wrong. */
@@ -3729,12 +3778,20 @@ interface FiveGameweekReportData {
    * start/minutes-given-start split — see `estimateMinutesPreTicket191`'s
    * own comment) in place of the shipped one. Everything else — fixtures,
    * rates, defcon, conversion factors — is identical to the shipped
-   * projection at both horizons; only the minutes step differs. Settles
-   * ticket #191's own deferred DoD ("if any position moves away from 1.00,
-   * revert rather than tune") against the honest backtest that ticket's
-   * deferral was waiting for — see docs/projection-model-backlog.md and this
-   * ticket's own decisions file for the reading, never drawn here.
-   * `src/lib/projection/minutes.ts` itself is untouched by this ticket.
+   * projection at both horizons; only the minutes step differs. Originally
+   * settled ticket #191's own deferred DoD ("if any position moves away from
+   * 1.00, revert rather than tune") against the honest backtest that
+   * ticket's deferral was waiting for.
+   *
+   * TICKET #213: this field is now ALSO that ticket's own falsification
+   * check. `estimateMinutesPreTicket191` stays the frozen pre-shrinkage
+   * arithmetic while the shipped `projectRow` gains season-figure shrinkage
+   * (`src/lib/projection/minutes.ts`), so "pre-#191" and "unshrunk" are, as
+   * of #213, exactly the same population — the field name is kept rather
+   * than renamed (an internal type field, not a public API; renaming buys
+   * nothing and would cost every historical report comparison its diff).
+   * See docs/projection-model-backlog.md and this ticket's own decisions
+   * file for the reading, never drawn here.
    */
   preTicket191Minutes: {
     oneGw: {
@@ -4322,18 +4379,23 @@ function buildFiveGameweekSections(data: ReportData): string[] {
   // shape).
   // ==========================================================================
   sections.push(
-    '## Ticket #201, Part 2: the pre-#191 minutes model, reconstructed for comparison\n\n' +
-      'REPORTED ONLY — never a check, never gates this report, never asserted. Settles ticket #191\'s own ' +
-      'deferred DoD ("if any position moves away from 1.00, revert rather than tune") against the honest ' +
-      'backtest that deferral was waiting for — the reading is in this ticket\'s decisions file, never drawn ' +
-      'here. Every one-gameweek measured row and every five-gameweek measured window above is re-projected a ' +
-      'second time through a reconstruction of the PRE-#191 minutes model — the plain mean of the ' +
+    '## Ticket #201/#213: the unshrunk (pre-#191) minutes model, reconstructed for comparison\n\n' +
+      'REPORTED ONLY — never a check, never gates this report, never asserted. Originally built to settle ' +
+      'ticket #191\'s own deferred DoD ("if any position moves away from 1.00, revert rather than tune") ' +
+      'against the honest backtest that deferral was waiting for — that reading is in ticket #191\'s decisions ' +
+      'file, never drawn here. **As of ticket #213, this section is ALSO that ticket\'s own falsification ' +
+      'check.** #213 shrinks the shipped model\'s minutes estimate toward each player\'s season minutes per ' +
+      'match; this section\'s reconstruction is the frozen PRE-shrinkage arithmetic — the plain mean of the ' +
       'recent-minutes window, no single-lowest drop, no start/minutes-given-start split (`git show e652df7 ' +
-      '-- src/lib/projection/minutes.ts` is the exact diff this reconstructs). `src/lib/projection/minutes.ts` ' +
-      'itself is untouched: this is a second, harness-only function (`estimateMinutesPreTicket191` in ' +
-      '`scripts/run-backtest.ts`), never a fork of the live model. Every other input — fixtures, rates, ' +
+      '-- src/lib/projection/minutes.ts` is the exact diff this reconstructs) — so "pre-#191" and "unshrunk" ' +
+      'are now the same population, and the gap below IS the effect #213 measures. `src/lib/projection/minutes.ts` ' +
+      'itself is untouched BY THIS SECTION: this is a second, harness-only function (`estimateMinutesPreTicket191` ' +
+      'in `scripts/run-backtest.ts`), never a fork of the live model. Every other input — fixtures, rates, ' +
       'defcon, the goal/assist conversion factors — is identical to the shipped projection at both horizons; ' +
-      'only the minutes step differs, so any ranking difference below is attributable to that step alone.\n\n' +
+      'only the minutes step differs, so any ranking difference below is attributable to that step alone. ' +
+      'Ticket #213\'s own falsification check: at five gameweeks, midfield and forward Spearman should rise ' +
+      'from the unshrunk figures below toward the naive "prior minutes per match" baseline\'s figures reported ' +
+      'alongside them.\n\n' +
       '### One-gameweek horizon\n\n' +
       `- pre-#191 minutes model, season: Spearman **${fmtSpearman(fg.preTicket191Minutes.oneGw.season.spearman)}** ` +
       `(n=${fg.preTicket191Minutes.oneGw.season.n}), top-10 overlap **${fmtTopN(fg.preTicket191Minutes.oneGw.season.top10)}**, ` +
@@ -4762,7 +4824,13 @@ async function main(): Promise<void> {
 
       // Ticket #159, Defect 1 — naive baselines, computed from this SAME row
       // (row.prior_matches > 0 is guaranteed here: classifyRow already
-      // excluded anything else as `noPriorMatches` above).
+      // excluded anything else as `noPriorMatches` above). Ticket #213: the
+      // SAME guarantee is why `projection` above's own `seasonMinutesPerMatch`
+      // (via `buildSeasonMinutesPerMatch`) is never the `undefined` fallback
+      // case for this measured population — it only differs from
+      // `computeBaselineMinutesPerMatch` below in being non-throwing, for
+      // the OTHER call sites of `projectRow` (this file's own tests) that do
+      // exercise `prior_matches <= 0` rows.
       const baselineMinutes = computeBaselineMinutesPerMatch(row)
       const baselineXgXa = computeBaselineXgXaPerMatch(row)
 
