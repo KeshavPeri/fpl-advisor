@@ -1478,3 +1478,83 @@ condition, honoured once the instrument to check it existed. **Do not re-propose
 start/minutes-given-start split, or any other single-lowest-drop variant, without new evidence
 that addresses why it lost the honest backtest — restating the `90,90,90,90,0` motivating case
 again is not new evidence; it is the case that was already measured and lost.**
+
+---
+
+## G17 — Ticket #214, 5 Sep 2026: the learned-model gate was measuring a threshold seam, not a
+## finding — fixed to compare every position against the incumbent, live, across repeated splits.
+## GATE NOT YET READ (no live Supabase project in this Builder session, same limitation as
+## G9/G11/G16's first readings)
+
+**The defect, restated precisely.** Ticket #208's own gate table (as read on its first live run,
+report 12) mixed two kinds of threshold in one comparison: Goalkeeper and Defender were judged
+against the incumbent baseline-v1 model, computed live on the held-out fold (gameweeks 29-38).
+Midfielder and Forward were judged against `GATE_MIDFIELDER_NAIVE_BASELINE_SPEARMAN` (0.464) and
+`GATE_FORWARD_NAIVE_BASELINE_SPEARMAN` (0.476) — literal constants copied from report 10, a
+FULL-SEASON figure. The held-out fold scores every ranker higher than its full-season number
+(incumbent 0.503 on the fold vs 0.407 across the season; naive minutes baseline 0.479 vs 0.407) —
+a gap of roughly 0.05-0.07 of Spearman that has nothing to do with model quality and everything to
+do with which tenth of the season the fold happens to cover. The reported "2 of 4 lines passed"
+therefore split along that threshold seam, not along a real per-position finding. Read like-for-like
+instead (same fold, same population, every ranker): the learned model beats the incumbent in exactly
+one place, midfield, by 0.016 — a real result, but not evidence yet on a single arbitrary split.
+
+**What #214 changed — the evaluation only, per its own scope. No retraining.** Same model type
+(gradient-boosted regression trees), same `DEFAULT_GBM_HYPERPARAMETERS` (60 trees, depth 3,
+learning rate 0.08, 40 samples/leaf) and same `FEATURE_NAMES` (15 columns) as #208 — none of that
+changed. `scripts/train-and-evaluate-learned-model.ts`:
+
+1. **`TRAIN_EVAL_GAMEWEEK_CUTOFFS` replaces the single fixed `TRAIN_EVAL_GAMEWEEK_CUTOFF`** — four
+   independent train/eval splits (gameweek 22, 25, 28, 31), each with its own model fit on that
+   split's training fold alone and its own held-out evaluation. A one-split result can no longer
+   pass as a finding.
+2. **The gate compares EVERY position against the incumbent** — the naive-baseline gate for
+   Midfielder/Forward is gone entirely. No figure in the gate table is a literal constant carried
+   over from any report, for any position; the incumbent AND all three naive baselines are computed
+   fresh, on each split's own held-out fold, in the same run.
+3. **`buildGateResults` produces a three-way verdict per position** — `ship` (learned beats
+   incumbent on a majority of comparable splits), `do-not-ship` (incumbent wins a majority), or
+   `too-close-to-call` (an exact tie — with four splits, 2-2). A fourth state, `insufficient-data`,
+   covers a position with no comparable split at all. Nothing is ever guessed into `ship` or
+   `do-not-ship` when the evidence does not support it — this is a direct, structural answer to the
+   ticket's own worry that "a 0.016 midfield edge that halves under a second split is not evidence
+   of anything yet": a result that flips sign across splits now reads as `too-close-to-call` by
+   construction, not as a coin flip dressed up as a pass.
+4. **The report shows every ranker side by side, per split, per horizon** — learned, incumbent, and
+   all three naive baselines (minutes, xG+xA, constant) — plus a cross-split per-position summary
+   table of the learned-minus-incumbent margin at every cutoff, with min/max/spread columns, so the
+   "does the edge survive every split" question is a number in the report, not something a reader
+   has to reconstruct from four separate sections by eye.
+5. **The leakage test is now parameterized over every cutoff** in `TRAIN_EVAL_GAMEWEEK_CUTOFFS` —
+   the DoD's own sharpening from #208's single-cutoff proof ("a named test proving no gameweek in
+   the evaluation set contributed to fitting") to "at every cutoff", since a separate model is now
+   fit per split and the leak-guard needs to hold at each one independently.
+
+**Still reuses, never reimplements.** Every ranking figure is produced by
+`summarizeGenericBaselineSpearman`/`summarizeBaselines`/`summarizeFiveGameweekBaselines`, imported
+from `scripts/run-backtest.ts`, unedited by this ticket (grep-checkable: the file defines no
+Spearman correlation and no rank function of its own) — and `run-backtest.ts` itself was not
+touched, since #215 edits that file concurrently in this same batch on a separate branch.
+
+**GATE NOT YET READ — stated plainly, exactly the limitation G9/G11/G16 already recorded for their
+own first readings.** This Builder session has no live Supabase project and no
+`SUPABASE_URL`/`SUPABASE_SECRET_KEY` in its environment, so the rewritten harness has been proven
+correct on constructed rows (47 tests, all passing, no live database) but has never executed
+against the real `training_features`/`feature_history`/`player_match_stats` rows. **No per-position,
+per-split figure in this entry is a measured result — there isn't one yet.** The confirming step:
+run `SUPABASE_URL=... SUPABASE_SECRET_KEY=... npx tsx scripts/train-and-evaluate-learned-model.ts`
+and read the report's own per-split tables, cross-split summary, and Gate section. The report
+records the git commit SHA it ran at and a plain-language note on which minutes model that SHA
+reflects (this ticket's own commit, `30bfd1672ab916dbe5ebcc6723cb393186f5798d`, was written on a
+branch forked from `main` at `6bad91c...` — BEFORE ticket #213's concurrent widening of
+`PlayerProjectionInput`/`estimateMinutes` on its own branch in this same batch, so a run of this
+exact commit reflects today's `main` minutes model, not #213's). **Do not compare a live run's
+numbers against report 12's figures** — report 12 used a single arbitrary split; this harness uses
+repeated splits, a different methodology, not a like-for-like re-read of the same measurement.
+
+**No tuning against the gate, and no retraining — unchanged from #208's own discipline, restated
+for four splits instead of one.** The hyperparameters, the four cutoffs and the feature list are
+all fixed before this file's own `main()` ever reads a row of real data. If every position reads
+`do-not-ship` or `too-close-to-call` on the first live run, that is this ticket's own anticipated
+honest outcome (its own notes: "the honest outcome here may well be 'do not ship any of it'"), not
+a defect to iterate away.

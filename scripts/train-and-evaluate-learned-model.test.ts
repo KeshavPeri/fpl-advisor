@@ -1,19 +1,23 @@
-// Unit tests for scripts/train-and-evaluate-learned-model.ts — ticket #208.
+// Unit tests for scripts/train-and-evaluate-learned-model.ts — ticket #208,
+// re-evaluated by ticket #214 (fair-gate re-run).
 //
 // No live Supabase project: every DoD item provable without a database is
 // proven here on constructed rows — the gradient-boosting arithmetic, the
 // feature-vector construction (including the G13-style "pinned at the
 // window start" discipline for a five-gameweek leg), the gate comparison
-// logic, and — the single most important test in this file, per the
+// logic (now repeated-split, incumbent-only, three-way verdict — #214's own
+// change), and — the single most important test in this file, per the
 // ticket's own DoD wording — a named test proving no gameweek in the
-// evaluation set contributed to fitting.
+// evaluation set contributed to fitting, AT EVERY CUTOFF in
+// TRAIN_EVAL_GAMEWEEK_CUTOFFS (#214's own DoD: "at every cutoff").
 //
-// What this file cannot prove — that a real run against the live 18,023
+// What this file cannot prove — that a real run against the live
 // training_features rows produces a sane, non-overfit model and a
-// meaningful gate reading — is exactly the ticket's own "no live Supabase
-// project in this Builder session" limitation (see the Builder's final
-// report). Every test here exercises the harness on constructed data; none
-// of it is a substitute for that live run.
+// meaningful gate reading at each of the four splits — is exactly the same
+// "no live Supabase project in this Builder session" limitation #208's own
+// test file recorded (see the Builder's final report). Every test here
+// exercises the harness on constructed data; none of it is a substitute for
+// that live run.
 
 import { describe, expect, it } from 'vitest'
 import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
@@ -22,9 +26,7 @@ import type { TrainingFeatureRow } from './build-training-features.ts'
 import {
   DEFAULT_GBM_HYPERPARAMETERS,
   FEATURE_NAMES,
-  GATE_FORWARD_NAIVE_BASELINE_SPEARMAN,
-  GATE_MIDFIELDER_NAIVE_BASELINE_SPEARMAN,
-  TRAIN_EVAL_GAMEWEEK_CUTOFF,
+  TRAIN_EVAL_GAMEWEEK_CUTOFFS,
   buildGateResults,
   buildLearnedFeatureVector,
   buildReportMarkdown,
@@ -34,7 +36,9 @@ import {
   predictWithGbm,
   predictWithTree,
   splitByGameweekCutoff,
+  type FiveGwSplitGateInput,
   type GameweekKeyed,
+  type PositionGateResult,
   type TreeNode,
 } from './train-and-evaluate-learned-model.ts'
 
@@ -195,12 +199,14 @@ describe('splitByGameweekCutoff', () => {
     expect(evalRows.map((r) => r.id)).toEqual(['c', 'd'])
   })
 
-  it('the split is total and disjoint — every row lands on exactly one side', () => {
+  it('the split is total and disjoint — every row lands on exactly one side, at EVERY cutoff in TRAIN_EVAL_GAMEWEEK_CUTOFFS', () => {
     const rows = Array.from({ length: 38 }, (_, i) => row(`gw${i + 1}`, i + 1))
-    const { trainRows, evalRows } = splitByGameweekCutoff(rows, TRAIN_EVAL_GAMEWEEK_CUTOFF)
-    expect(trainRows.length + evalRows.length).toBe(rows.length)
-    expect(trainRows.every((r) => r.gameweekId <= TRAIN_EVAL_GAMEWEEK_CUTOFF)).toBe(true)
-    expect(evalRows.every((r) => r.gameweekId > TRAIN_EVAL_GAMEWEEK_CUTOFF)).toBe(true)
+    for (const cutoff of TRAIN_EVAL_GAMEWEEK_CUTOFFS) {
+      const { trainRows, evalRows } = splitByGameweekCutoff(rows, cutoff)
+      expect(trainRows.length + evalRows.length).toBe(rows.length)
+      expect(trainRows.every((r) => r.gameweekId <= cutoff)).toBe(true)
+      expect(evalRows.every((r) => r.gameweekId > cutoff)).toBe(true)
+    }
   })
 
   it('an empty input produces two empty folds, never throws', () => {
@@ -211,37 +217,45 @@ describe('splitByGameweekCutoff', () => {
 })
 
 // ============================================================================
-// THE MOST IMPORTANT TEST IN THIS FILE (ticket text: "a named test proving
-// no gameweek in the evaluation set contributed to fitting"). Constructs a
-// season where the eval-fold gameweeks carry a target value (999) that never
-// appears anywhere in the training fold, fits ONLY on the training fold
-// (built via splitByGameweekCutoff, the same function main() uses), and
-// proves the fitted model's initial prediction — and therefore every
-// downstream residual/leaf — could not have been influenced by that value.
+// THE MOST IMPORTANT TEST IN THIS FILE (ticket #208 text: "a named test
+// proving no gameweek in the evaluation set contributed to fitting"; ticket
+// #214's own DoD sharpens this to "at every cutoff" — TRAIN_EVAL_GAMEWEEK_CUTOFFS
+// now has four values, and main() fits a SEPARATE model per cutoff, so the
+// proof must hold at each one independently, not just at whichever cutoff
+// happened to be fixed before). Constructs a season where the eval-fold
+// gameweeks (everything after the cutoff under test) carry a target value
+// (999) that never appears anywhere in the training fold, fits ONLY on the
+// training fold (built via splitByGameweekCutoff, the same function main()
+// uses), and proves the fitted model's initial prediction — and therefore
+// every downstream residual/leaf — could not have been influenced by that
+// value.
 // ============================================================================
 
 describe('train/eval split — no lookahead into the evaluation set', () => {
-  it('fitting on the train fold alone never sees an eval-fold target, even when eval targets are extreme outliers', () => {
-    const CUTOFF = 5
-    const trainTargets = [1, 2, 3, 4, 1.5, 2.5, 3.5] // gameweeks 1-5 (some repeated gameweeks, different players)
-    const trainGameweeks = [1, 2, 3, 4, 5, 5, 4]
-    const evalTargets = [999, 999, 999] // gameweeks 6-8 — an extreme, unmistakable outlier value
-    const evalGameweeks = [6, 7, 8]
-
+  it.each(TRAIN_EVAL_GAMEWEEK_CUTOFFS)('fitting on the train fold alone never sees an eval-fold target, even when eval targets are extreme outliers (cutoff=%i)', (cutoff) => {
+    // One row per gameweek, 1..38 (spans every cutoff in TRAIN_EVAL_GAMEWEEK_CUTOFFS
+    // with a non-empty fold on both sides), so this single construction proves
+    // the claim at whichever cutoff the test is parameterized with.
     interface SyntheticRow extends GameweekKeyed {
       target: number
       feature: number
     }
-    const allRows: SyntheticRow[] = [
-      ...trainGameweeks.map((gw, i) => ({ gameweekId: gw, target: trainTargets[i], feature: i })),
-      ...evalGameweeks.map((gw, i) => ({ gameweekId: gw, target: evalTargets[i], feature: 100 + i })),
-    ]
+    const allRows: SyntheticRow[] = Array.from({ length: 38 }, (_, i) => {
+      const gameweekId = i + 1
+      // An extreme, unmistakable outlier value for every gameweek strictly
+      // after THIS test's cutoff — never present in the training fold for
+      // this cutoff, by construction.
+      const target = gameweekId > cutoff ? 999 : gameweekId
+      return { gameweekId, target, feature: i }
+    })
 
-    const { trainRows, evalRows } = splitByGameweekCutoff(allRows, CUTOFF)
+    const { trainRows, evalRows } = splitByGameweekCutoff(allRows, cutoff)
 
     // Sanity: the split actually separated the two populations as constructed.
     expect(trainRows.every((r) => r.target !== 999)).toBe(true)
     expect(evalRows.every((r) => r.target === 999)).toBe(true)
+    expect(trainRows.length).toBeGreaterThan(0)
+    expect(evalRows.length).toBeGreaterThan(0)
 
     // Fit using ONLY trainRows — the function signature accepts no other
     // data source, so this is the entire surface a leak could travel
@@ -255,7 +269,7 @@ describe('train/eval split — no lookahead into the evaluation set', () => {
     // eval fold's rows.
     const meanTrainTarget = targets.reduce((a, b) => a + b, 0) / targets.length
     expect(model.initialPrediction).toBeCloseTo(meanTrainTarget, 10)
-    expect(model.initialPrediction).toBeLessThan(10) // nowhere near the eval fold's 999
+    expect(model.initialPrediction).toBeLessThan(50) // nowhere near the eval fold's 999
 
     // Predicting on the eval fold's own feature values (which the model
     // never fit against) produces a number nowhere near 999 either — the
@@ -522,49 +536,104 @@ describe('predictLearnedFiveGameweekTotal', () => {
 })
 
 // ============================================================================
-// buildGateResults
+// buildGateResults — ticket #214's own replacement: every position compares
+// against the incumbent, across every split, reduced to a three-way verdict.
 // ============================================================================
 
 describe('buildGateResults', () => {
-  const learned = { 1: 0.3, 2: 0.4, 3: 0.5, 4: 0.5 }
-  const incumbent = { 1: 0.24, 2: 0.5, 3: 999, 4: 999 }
+  function splitInput(cutoff: number, learnedByPosition: Record<number, number | null>, incumbentByPosition: Record<number, number | null>): FiveGwSplitGateInput {
+    return { cutoff, learnedByPosition: learnedByPosition as Record<1 | 2 | 3 | 4, number | null>, incumbentByPosition: incumbentByPosition as Record<1 | 2 | 3 | 4, number | null> }
+  }
 
-  it('Midfielder/Forward compare against the FIXED thresholds, never against the incumbent', () => {
-    const results = buildGateResults(learned, incumbent)
+  it('every position — including Midfielder/Forward — compares against the incumbent, never a naive baseline', () => {
+    // Midfielder's learned figure (0.5) would clear the OLD fixed 0.464 bar,
+    // but the incumbent here is 0.9 — a much harder bar. If this function
+    // still special-cased Midfielder/Forward against a fixed threshold, this
+    // split would read as a win; against the incumbent it must read as a loss.
+    const results = buildGateResults([splitInput(28, { 1: 0.3, 2: 0.4, 3: 0.5, 4: 0.5 }, { 1: 0.24, 2: 0.3, 3: 0.9, 4: 0.9 })])
     const mid = results.find((r) => r.position === MIDFIELDER)!
     const fwd = results.find((r) => r.position === FORWARD)!
-    expect(mid.threshold).toBe(GATE_MIDFIELDER_NAIVE_BASELINE_SPEARMAN)
-    expect(fwd.threshold).toBe(GATE_FORWARD_NAIVE_BASELINE_SPEARMAN)
-    // Learned (0.5) beats the fixed 0.464/0.476 bars even though "incumbent" here is 999 —
-    // proving these two lines never read the incumbent record at all.
-    expect(mid.pass).toBe(true)
-    expect(fwd.pass).toBe(true)
+    expect(mid.splits[0].beat).toBe(false) // 0.5 is not > 0.9
+    expect(fwd.splits[0].beat).toBe(false)
+    expect(mid.verdict).toBe('do-not-ship')
+    expect(fwd.verdict).toBe('do-not-ship')
   })
 
-  it('Goalkeeper/Defender compare against the incumbent, computed fresh in this run', () => {
-    const results = buildGateResults(learned, incumbent)
+  it('a tie is not a win ("beat" means strictly greater than)', () => {
+    const results = buildGateResults([splitInput(28, { 1: 0.24, 2: null, 3: null, 4: null }, { 1: 0.24, 2: null, 3: null, 4: null })])
+    const gk = results.find((r) => r.position === GOALKEEPER)!
+    expect(gk.splits[0].beat).toBe(false)
+    expect(gk.wins).toBe(0)
+    expect(gk.losses).toBe(1)
+  })
+
+  it('null on either side yields beat: null, never a guessed true/false, and is excluded from wins/losses', () => {
+    const results = buildGateResults([splitInput(28, { 1: null, 2: 0.5, 3: null, 4: 0.5 }, { 1: 0.2, 2: null, 3: 999, 4: 999 })])
     const gk = results.find((r) => r.position === GOALKEEPER)!
     const def = results.find((r) => r.position === DEFENDER)!
-    expect(gk.threshold).toBe(0.24)
-    expect(gk.pass).toBe(true) // 0.3 > 0.24
-    expect(def.threshold).toBe(0.5)
-    expect(def.pass).toBe(false) // 0.4 is not > 0.5
+    expect(gk.splits[0].beat).toBeNull() // learned side null
+    expect(def.splits[0].beat).toBeNull() // incumbent side null
+    expect(gk.comparableSplits).toBe(0)
+    expect(gk.verdict).toBe('insufficient-data')
   })
 
-  it('a tie is not a pass ("beat" means strictly greater than)', () => {
-    const results = buildGateResults({ 1: 0.24, 2: null, 3: null, 4: null }, { 1: 0.24, 2: null, 3: null, 4: null })
+  it('a majority of wins across splits verdicts "ship"', () => {
+    const results = buildGateResults([
+      splitInput(22, { 1: 0.3 }, { 1: 0.2 }), // win
+      splitInput(25, { 1: 0.3 }, { 1: 0.2 }), // win
+      splitInput(28, { 1: 0.3 }, { 1: 0.4 }), // loss
+      splitInput(31, { 1: 0.3 }, { 1: 0.2 }), // win
+    ])
     const gk = results.find((r) => r.position === GOALKEEPER)!
-    expect(gk.pass).toBe(false)
+    expect(gk.wins).toBe(3)
+    expect(gk.losses).toBe(1)
+    expect(gk.verdict).toBe('ship')
   })
 
-  it('null on either side yields pass: null, never a guessed true/false', () => {
-    const results = buildGateResults({ 1: null, 2: 0.5, 3: null, 4: 0.5 }, { 1: 0.2, 2: null, 3: 999, 4: 999 })
+  it('a majority of losses across splits verdicts "do-not-ship"', () => {
+    const results = buildGateResults([
+      splitInput(22, { 1: 0.2 }, { 1: 0.3 }), // loss
+      splitInput(25, { 1: 0.2 }, { 1: 0.3 }), // loss
+      splitInput(28, { 1: 0.4 }, { 1: 0.3 }), // win
+      splitInput(31, { 1: 0.2 }, { 1: 0.3 }), // loss
+    ])
     const gk = results.find((r) => r.position === GOALKEEPER)!
-    const def = results.find((r) => r.position === DEFENDER)!
-    const mid = results.find((r) => r.position === MIDFIELDER)!
-    expect(gk.pass).toBeNull() // learned side null
-    expect(def.pass).toBeNull() // incumbent side null
-    expect(mid.pass).toBeNull() // learned side null, even though threshold is fixed
+    expect(gk.wins).toBe(1)
+    expect(gk.losses).toBe(3)
+    expect(gk.verdict).toBe('do-not-ship')
+  })
+
+  it('an exact 2-2 tie across splits verdicts "too-close-to-call", never a guessed ship/do-not-ship', () => {
+    const results = buildGateResults([
+      splitInput(22, { 1: 0.3 }, { 1: 0.2 }), // win
+      splitInput(25, { 1: 0.2 }, { 1: 0.3 }), // loss
+      splitInput(28, { 1: 0.3 }, { 1: 0.2 }), // win
+      splitInput(31, { 1: 0.2 }, { 1: 0.3 }), // loss
+    ])
+    const gk = results.find((r) => r.position === GOALKEEPER)!
+    expect(gk.wins).toBe(2)
+    expect(gk.losses).toBe(2)
+    expect(gk.verdict).toBe('too-close-to-call')
+  })
+
+  it('splits with insufficient data do not count toward the majority — a 2-1 majority among comparable splits still ships even with a 4th null split', () => {
+    const results = buildGateResults([
+      splitInput(22, { 1: 0.3 }, { 1: 0.2 }), // win
+      splitInput(25, { 1: 0.3 }, { 1: 0.2 }), // win
+      splitInput(28, { 1: 0.2 }, { 1: 0.3 }), // loss
+      splitInput(31, { 1: null }, { 1: 0.3 }), // insufficient data — excluded
+    ])
+    const gk = results.find((r) => r.position === GOALKEEPER)!
+    expect(gk.comparableSplits).toBe(3)
+    expect(gk.wins).toBe(2)
+    expect(gk.losses).toBe(1)
+    expect(gk.verdict).toBe('ship')
+  })
+
+  it('every split reports its own cutoff, learnedSpearman and incumbentSpearman verbatim', () => {
+    const results = buildGateResults([splitInput(22, { 1: 0.31 }, { 1: 0.29 })])
+    const gk = results.find((r) => r.position === GOALKEEPER)!
+    expect(gk.splits).toEqual([{ cutoff: 22, learnedSpearman: 0.31, incumbentSpearman: 0.29, beat: true }])
   })
 })
 
@@ -573,63 +642,79 @@ describe('buildGateResults', () => {
 // ============================================================================
 
 describe('buildReportMarkdown', () => {
-  const baseGates = [
-    { position: GOALKEEPER, positionName: 'Goalkeeper', learnedSpearman: 0.3, thresholdDescription: 'the incumbent', threshold: 0.24, pass: true },
-    { position: DEFENDER, positionName: 'Defender', learnedSpearman: 0.4, thresholdDescription: 'the incumbent', threshold: 0.5, pass: false },
-    { position: MIDFIELDER, positionName: 'Midfielder', learnedSpearman: 0.5, thresholdDescription: 'the naive baseline', threshold: 0.464, pass: true },
-    { position: FORWARD, positionName: 'Forward', learnedSpearman: 0.5, thresholdDescription: 'the naive baseline', threshold: 0.476, pass: true },
+  function gateResult(overrides: Partial<PositionGateResult> = {}): PositionGateResult {
+    return {
+      position: GOALKEEPER,
+      positionName: 'Goalkeeper',
+      splits: [
+        { cutoff: 22, learnedSpearman: 0.3, incumbentSpearman: 0.2, beat: true },
+        { cutoff: 25, learnedSpearman: 0.3, incumbentSpearman: 0.2, beat: true },
+        { cutoff: 28, learnedSpearman: 0.3, incumbentSpearman: 0.2, beat: true },
+        { cutoff: 31, learnedSpearman: 0.3, incumbentSpearman: 0.2, beat: true },
+      ],
+      wins: 4,
+      losses: 0,
+      comparableSplits: 4,
+      verdict: 'ship',
+      ...overrides,
+    }
+  }
+
+  const baseGates: PositionGateResult[] = [
+    gateResult({ position: GOALKEEPER, positionName: 'Goalkeeper', verdict: 'ship', wins: 4, losses: 0 }),
+    gateResult({ position: DEFENDER, positionName: 'Defender', verdict: 'do-not-ship', wins: 0, losses: 4 }),
+    gateResult({ position: MIDFIELDER, positionName: 'Midfielder', verdict: 'too-close-to-call', wins: 2, losses: 2 }),
+    gateResult({ position: FORWARD, positionName: 'Forward', verdict: 'ship', wins: 3, losses: 1 }),
   ]
 
   const horizonRow = { label: 'Learned model candidate', seasonSpearman: 0.4, byPosition: { 1: 0.3, 2: 0.4, 3: 0.5, 4: 0.5 } }
+  const baseSplit = { cutoff: 28, trainRowCount: 100, evalRowCount: 50, fiveGwEvalWindowCount: 10, oneGw: [horizonRow], fiveGw: [horizonRow] }
 
-  it('reports GATE FAILED when any line fails', () => {
+  it('reports each position\'s plain verdict (SHIP / DO NOT SHIP / TOO CLOSE TO CALL)', () => {
     const markdown = buildReportMarkdown({
       season: '2025-2026',
       gitCommitSha: 'abc123',
-      trainCutoffGameweek: 28,
-      trainRowCount: 100,
-      evalRowCount: 50,
-      fiveGwEvalWindowCount: 10,
-      oneGw: [horizonRow],
-      fiveGw: [horizonRow],
+      incumbentMinutesModelNote: 'Incumbent note.',
+      splits: [baseSplit],
       gates: baseGates,
     })
-    expect(markdown).toContain('GATE FAILED')
+    expect(markdown).toContain('SHIP')
+    expect(markdown).toContain('DO NOT SHIP')
+    expect(markdown).toContain('TOO CLOSE TO CALL')
     expect(markdown).toContain('abc123')
     expect(markdown).toContain('Defender')
+    expect(markdown).toContain('Incumbent note.')
   })
 
-  it('reports GATE PASSED when every line passes', () => {
-    const allPass = baseGates.map((g) => ({ ...g, pass: true }))
-    const markdown = buildReportMarkdown({
-      season: '2025-2026',
-      gitCommitSha: 'def456',
-      trainCutoffGameweek: 28,
-      trainRowCount: 100,
-      evalRowCount: 50,
-      fiveGwEvalWindowCount: 10,
-      oneGw: [horizonRow],
-      fiveGw: [horizonRow],
-      gates: allPass,
-    })
-    expect(markdown).toContain('GATE PASSED')
-    expect(markdown).not.toContain('GATE FAILED')
-  })
-
-  it('reports GATE INCONCLUSIVE when a line has insufficient data and none outright fails', () => {
-    const withNull = baseGates.map((g) => (g.position === DEFENDER ? { ...g, pass: null } : { ...g, pass: true }))
+  it('reports INSUFFICIENT DATA for a position with no comparable split, never guessed as ship or do-not-ship', () => {
+    const withInsufficient = baseGates.map((g) => (g.position === DEFENDER ? gateResult({ position: DEFENDER, positionName: 'Defender', verdict: 'insufficient-data', wins: 0, losses: 0, comparableSplits: 0 }) : g))
     const markdown = buildReportMarkdown({
       season: '2025-2026',
       gitCommitSha: 'ghi789',
-      trainCutoffGameweek: 28,
-      trainRowCount: 100,
-      evalRowCount: 50,
-      fiveGwEvalWindowCount: 10,
-      oneGw: [horizonRow],
-      fiveGw: [horizonRow],
-      gates: withNull,
+      incumbentMinutesModelNote: 'Incumbent note.',
+      splits: [baseSplit],
+      gates: withInsufficient,
     })
-    expect(markdown).toContain('GATE INCONCLUSIVE')
+    expect(markdown).toContain('INSUFFICIENT DATA')
+  })
+
+  it('includes every split section, labelled by its own cutoff', () => {
+    const markdown = buildReportMarkdown({
+      season: '2025-2026',
+      gitCommitSha: 'def456',
+      incumbentMinutesModelNote: 'Incumbent note.',
+      splits: [
+        { ...baseSplit, cutoff: 22 },
+        { ...baseSplit, cutoff: 25 },
+        { ...baseSplit, cutoff: 28 },
+        { ...baseSplit, cutoff: 31 },
+      ],
+      gates: baseGates,
+    })
+    expect(markdown).toContain('GW<=22')
+    expect(markdown).toContain('GW<=25')
+    expect(markdown).toContain('GW<=28')
+    expect(markdown).toContain('GW<=31')
   })
 })
 
