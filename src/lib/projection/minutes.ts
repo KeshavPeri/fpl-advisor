@@ -15,56 +15,27 @@
  * minutes do we expect this player to play". Every one of the last five
  * match rows counts here, cameos included.
  *
- * ── v2: start probability × minutes-given-start (ticket #188) ─────────────
+ * ── ticket #207: reverted to this, the pre-#191 form ───────────────────────
  *
- * v1 averaged all five rows into one number, so a single rested/subbed
- * match dragged a nailed starter's whole estimate down with it: a window of
- * `90, 90, 90, 90, 0` produced `expectedMinutes = 72.0` and `pSixtyPlus =
- * 0.8`, a ~20% discount on every attacking and defensive-contribution term
- * that multiplies by minutes, for a player who missed exactly one match in
- * five. v2 answers two separate questions from the window — does he feature
- * at all, and for how long when he does — and multiplies them back
- * together, matching how the DoD phrases it:
- * `pSixtyPlus = P(featured) × P(60+ | featured)`, and analogously
- * `expectedMinutes = P(featured) × E[minutes | featured]`.
- * "Featured" (any minutes > 0) stands in for "started" here — the source
- * publishes `start_min`/`finish_min`, but ingesting them is out of scope
- * for this ticket (no new stored data); minutes-based "featured" is the
- * available proxy.
+ * Ticket #191 briefly replaced the plain windowed mean below with a
+ * start-probability x minutes-given-start split that dropped the single
+ * lowest value from a full five-match window (see `git show e652df7` for
+ * that version). #191's own definition of done pre-registered its revert
+ * condition — "if any position moves away from 1.00 [on the appearance-ratio
+ * calibration check], revert rather than tune" — and three of four positions
+ * did, the day it shipped, and stayed that way five days later. Ticket #201
+ * then ran both models side by side in the honest backtest harness: the
+ * pre-#191 plain mean (this file) beat the shipped v2 model on the season
+ * aggregate and on midfield/defence at both the one- and five-gameweek
+ * horizons; v2 won only at goalkeeper (both horizons) and forward (five
+ * gameweeks only). Full figures: `docs/projection-model-backlog.md`.
  *
- * That split alone changes nothing numerically — `P(featured) ×
- * E[minutes|featured]` is arithmetically identical to the plain mean,
- * because a zero contributes zero to the sum either way. The robustness
- * comes from what feeds the split: on a FULL `RECENT_MATCH_COUNT`-row
- * window only, the single lowest raw value (zero, an early sub, a rested
- * cameo — whichever it is) is set aside before `P(featured)`,
- * `E[minutes|featured]` and `P(60+|featured)` are computed from what's
- * left. Below a full window (a player's first 1–4 matches) every row still
- * counts — there isn't enough data at that size to tell a genuine outlier
- * from real signal, and the ticket's own worked examples are all full
- * five-row windows.
- *
- * Justified from real data, not intuition: pulled every 2025-2026 Premier
- * League `playermatchstats.csv` row for gameweeks 1–20 from
- * FPL-Core-Insights (the source and method tickets #148/#162/#168 used) and
- * built true minutes sequences per player. Among players with a season
- * average ≥ 75 minutes/gameweek (77 players, 1,232 five-match sliding
- * windows), a window containing exactly one 0 (rest of the window ≥ 60) is
- * not rare — 7.6% of windows — and its plain mean (70.7) sits ~20% below
- * the mean of a "clean" all-≥60 window (88.8), reproducing the Haaland
- * shape almost exactly. But the *next* match after a one-zero window looks
- * almost identical to the next match after a clean window: mean 81.5 vs
- * 85.1 minutes, P(60+) 0.92 vs 0.94. A single missed match in this
- * population barely predicts a reduced role — it is usually rotation for a
- * cup tie or a game managed off a minor knock, not a form change — so an
- * estimator that lets one such match move the whole figure by a fifth is
- * measurably wrong, not just aesthetically crude. Dropping only the single
- * lowest value (not the median, not every zero) is the form that fits this
- * evidence: it recovers ~90 for the `90,90,90,90,0` case (matching the
- * "clean" population's ~89 average, not just asserting it), while still
- * requiring a SECOND low value to pull the figure down — verified against
- * the rotation-player case below — so it does not collapse into "every
- * missed match is noise."
+ * #191's reasoning was sound and its motivating data was real — averaging
+ * `90, 90, 90, 90, 0` down to 72 minutes genuinely does understate a nailed
+ * starter who missed one match to rotation. It was measured properly the
+ * moment a working backtest existed, and it lost. This file is the reverted,
+ * measured-worse idea; do not re-introduce the split without new evidence
+ * the backlog entry doesn't already cover.
  */
 
 /** How many of the player's most recent match rows feed the estimate. */
@@ -134,54 +105,23 @@ export const NO_HISTORY_BASELINE_MINUTES = 45
 export const NO_HISTORY_BASELINE_SIXTY_PLUS_RATE = 0.25
 
 /**
- * Drops the single lowest raw value from a full-length window before the
- * start/minutes-given-start split below — see the file header's "v2"
- * section for why exactly one, and why only at a full window. Ties for
- * lowest drop only one instance (sorts ascending, slices off index 0), so a
- * window with two zeros — a genuine rotation pattern, not one blip — still
- * carries a zero into the estimate.
- */
-function dropSingleLowest(values: readonly number[]): number[] {
-  return [...values].sort((a, b) => a - b).slice(1)
-}
-
-/**
- * Splits a match-minutes sample into the two questions v2 answers
- * separately: how often the player features at all (any minutes > 0 — the
- * available proxy for "starts", see file header), and, given that he does,
- * how long he typically lasts and how often that reaches 60+. `sample` is
- * assumed non-empty; the empty-window case is handled entirely above this
- * function by the named no-history baseline.
- */
-function splitFeaturedFromSample(sample: readonly number[]): {
-  pFeature: number
-  minutesGivenFeature: number
-  pSixtyGivenFeature: number
-} {
-  const featured = sample.filter((m) => m > 0)
-  const pFeature = featured.length / sample.length
-  const minutesGivenFeature = featured.length > 0 ? featured.reduce((s, m) => s + m, 0) / featured.length : 0
-  const pSixtyGivenFeature = featured.length > 0 ? featured.filter((m) => m >= 60).length / featured.length : 0
-  return { pFeature, minutesGivenFeature, pSixtyGivenFeature }
-}
-
-/**
  * Estimates expected minutes, appearance probability and 60+-minute
  * probability from a player's recent match-minutes history (up to the last
  * `RECENT_MATCH_COUNT` = 5 rows, every one of them — see file header) and an
  * availability factor from {@link availabilityFactor}.
  *
  * `recentMinutes` may hold fewer than 5 entries (a player early in their
- * first season) — every row is used directly, with no trimming (see file
- * header). An empty array is the stated no-history case and returns the
- * named fallback baseline above, scaled by availability, rather than
- * 0/NaN/error.
+ * first season) — the average is simply taken over however many are given.
+ * An empty array is the stated no-history case and returns the named
+ * fallback baseline above, scaled by availability, rather than 0/NaN/error.
  *
- * `expectedMinutes` and `pSixtyPlus` keep their v1 meanings and ranges
- * exactly (0–90 and 0–1 respectively, both scaled by availability) — only
- * how they're derived from `recentMinutes` changed. `pAppears` is untouched:
- * it equals availability, as it always has, since minutes history is not
- * evidence about current fitness/selection risk.
+ * Deliberately a plain mean over the whole window, with no outlier handling
+ * — see the file header's "ticket #207" section for why: a window of
+ * `90, 90, 90, 90, 0` gives `expectedMinutes = 72.0` and `pSixtyPlus = 0.8`,
+ * a real ~20% discount for a player who missed exactly one match in five.
+ * That was #191's motivating case for dropping the single lowest value
+ * instead; the measured backtest said the plain mean below still ranks
+ * players better overall, so the discount stays.
  */
 export function estimateMinutes(recentMinutes: readonly number[], availability: number): MinutesEstimate {
   const pAppears = clamp01(availability)
@@ -194,18 +134,13 @@ export function estimateMinutes(recentMinutes: readonly number[], availability: 
     }
   }
 
-  const sample = recentMinutes.length === RECENT_MATCH_COUNT ? dropSingleLowest(recentMinutes) : [...recentMinutes]
-  const { pFeature, minutesGivenFeature, pSixtyGivenFeature } = splitFeaturedFromSample(sample)
-
-  const expectedMinutesRaw = pFeature * minutesGivenFeature
-  const pSixtyPlusRaw = pFeature * pSixtyGivenFeature
+  const averageMinutes = recentMinutes.reduce((sum, m) => sum + m, 0) / recentMinutes.length
+  const sixtyPlusRate = recentMinutes.filter((m) => m >= 60).length / recentMinutes.length
 
   return {
-    // Defensively capped at 90: the source data measured for this ticket
-    // never exceeds 90, but the cap keeps the invariant true regardless.
-    expectedMinutes: Math.min(expectedMinutesRaw * pAppears, 90),
+    expectedMinutes: averageMinutes * pAppears,
     pAppears,
-    pSixtyPlus: clamp01(pSixtyPlusRaw * pAppears),
+    pSixtyPlus: sixtyPlusRate * pAppears,
   }
 }
 

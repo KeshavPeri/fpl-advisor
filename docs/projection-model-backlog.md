@@ -1224,3 +1224,257 @@ that file it reflects), MID/FWD compared against the FIXED report-10 naive-basel
 `DEFAULT_GBM_HYPERPARAMETERS`, or `FEATURE_NAMES` from a disappointing first reading** — the ticket's
 own instruction is fit once, evaluate once, report what comes out; a failed gate after that budgeted
 attempt is a real, useful result, not a defect to iterate away.
+## G16 — Ticket #209, 4 Sep 2026: the goalkeeper five-gameweek breach diagnosed — option 1, goalkeeper
+## exempted from the per-position check at five gameweeks, for the same structural reason G14 gave at one
+
+**The finding this ticket investigates, restated with its numbers.** The per-position five-gameweek
+oracle-ceiling check the second G15 entry above (ticket #201) added immediately found a breach the
+season aggregate could not see: at five gameweeks, goalkeeper model Spearman **0.240** sits above its
+own hindsight oracle's **0.201**. Defender, also clean-sheet-driven, sits comfortably the other way
+round: model **0.374** against oracle **0.479**. This entry extends G14 — it does not restate it — to
+explain why the same mechanism G14 diagnosed at one gameweek produces a genuine breach at five for
+goalkeepers only, and reaches this ticket's required decision.
+
+### Line of enquiry 1 — the same mechanism, measured by how much each horizon's variance the oracle explains
+
+G14 already established the mechanism at one gameweek: the model has real, non-hindsight fixture
+knowledge (ticket #175) the quality-only oracle structurally cannot have, and for goalkeepers almost
+none of the weekly score is persistent, fixture-independent skill — both scoring components (clean
+sheets, and saves since ticket #109/G1) are themselves fixture-scaled. G14 also predicted this would
+wash out over five gameweeks: a persistent-quality signal compounds roughly linearly with the horizon
+(measured with season-length precision), while independent per-leg fixture variance only partially
+cancels (√5-ish), so a real quality-only oracle should eventually out-run a fixture-only model. That
+prediction held for three of the four positions and did not for goalkeepers. Why, in terms of the two
+constructions, is answered by looking at how much each oracle's rank correlation actually grew.
+
+Squaring each reported Spearman figure as the standard proxy for "share of rank variance explained"
+(not a rigorous variance decomposition — a heuristic, same spirit as G8/G12's use of the same
+correlations) and comparing the oracle's own growth from one gameweek to five, using every figure
+already on record in this file (one-gameweek: G14; five-gameweek: G15/#201 for goalkeeper and
+defender, the #203 gate table's reference ceiling and this same batch's report-10 reading — "the model
+losing to a naive... baseline... at midfield (0.412 vs 0.464) and forward (0.452 vs 0.476)" — for
+midfielder and forward's own model figure):
+
+| Position | 1-GW oracle r² | 5-GW oracle r² | 1-GW model r² | 5-GW model r² | Oracle−model gap, 1-GW | Oracle−model gap, 5-GW | Change in gap |
+|---|---|---|---|---|---|---|---|
+| Goalkeeper | 0.0012 (0.035²) | 0.0404 (0.201²) | 0.0246 (0.157²) | 0.0576 (0.240²) | **−0.0234** | **−0.0172** | **+0.0062** |
+| Defender | 0.0702 (0.265²) | 0.2294 (0.479²) | 0.0818 (0.286²) | 0.1399 (0.374²) | −0.0116 | **+0.0895** | +0.1011 |
+| Midfielder | 0.1616 (0.402²) | 0.2714 (0.521²) | 0.1600 (0.400²) | 0.1697 (0.412²) | +0.0016 | **+0.1017** | +0.1001 |
+| Forward | 0.1624 (0.403²) | 0.3158 (0.562²) | 0.1832 (0.428²) | 0.2043 (0.452²) | −0.0208 | **+0.1115** | +0.1323 |
+
+Every position's oracle-minus-model gap moves in the direction G14's compounding argument predicts —
+the horizon genuinely helps the oracle everywhere, goalkeeper included (+0.0062 is a real, positive
+move, not zero). But for defender, midfielder and forward that move is **roughly +0.10 to +0.13 of r²**,
+comfortably flipping a small one-gameweek deficit (all four positions start with the model at or above
+the oracle at one gameweek — G14's own point) into a clear five-gameweek lead for the oracle. For
+goalkeeper the same mechanism moves the gap by **+0.0062 — about a sixteenth the size of the smallest
+of the other three moves.** The compounding argument is not failing for goalkeepers; it is operating on
+a starting quantity that is, by the oracle's own reading, close to zero: goalkeeper's one-gameweek
+oracle r² (0.0012) is roughly 55–135 times smaller than the other three positions', which is exactly
+what "goalkeepers have almost no independent, fixture-blind persistent-quality signal for a season
+rate to measure" (G14's own diagnosis) predicts a quality-only oracle should look like before any
+compounding happens at all. Five gameweeks of linear compounding applied to "almost nothing" is still a
+small absolute number (5-GW oracle r² of 0.0404 — the smallest of any position by a wide margin: roughly
+a sixth of defender's, a seventh of midfielder's and forward's) — smaller, in fact, than the
+model's own modest five-gameweek fixture-based r² for the same position (0.0576, itself the smallest
+model r² of the four positions). **Goalkeeper does not have an unusually powerful model; it has an
+unusually powerless oracle, for a reason the oracle's own numbers state directly at both horizons.**
+
+### Line of enquiry 2 — the population, addressed with a number
+
+Report 10's five-gameweek measured population is **616** goalkeeper rows against **4,276** midfielder
+rows (this ticket's own text; goalkeeper is, as expected, the smallest position by a wide margin — one
+starting XI slot against up to five for outfield positions). The standard-error heuristic for a Spearman
+correlation, SE(ρ) ≈ 1/√(n−1), gives:
+
+- Goalkeeper (n=616): SE ≈ 1/√615 ≈ **0.0403**.
+- Midfielder (n=4,276): SE ≈ 1/√4,275 ≈ **0.0153**.
+
+The goalkeeper breach itself — model 0.240 minus oracle 0.201 = **0.039** — is almost exactly **one
+SE** for a correlation measured on 616 rows: on its own, a gap that size is not distinguishable from
+sampling noise by any conventional significance bar (a two-sided 95% test would want roughly 1.96 SE),
+and this heuristic if anything understates the noise, since it treats the two correlations as
+independent draws when they are in fact two rankings scored against the identical actual outcomes on
+the identical rows — a proper paired test would not shrink that uncertainty. Contrast the midfielder
+margin the other way (oracle 0.521 minus model 0.412 = 0.109, roughly **7 SE** at n=4,276) or
+defender's 0.105 gap (also several SE at a population that report 10's one-gameweek section shows runs
+into the thousands) — those are not close calls.
+
+**This does not mean the finding is "just noise" and should be ignored — it means the opposite, once
+read together with enquiry 1.** The population size explains why *this run's specific number* (0.039)
+should not be treated as a precise, stable figure — a re-run could plausibly show it at anywhere from
+roughly 0 to 0.08, or even briefly negative, by chance alone. What enquiry 1 shows, independently of
+this run's sample noise, is *why* the true gap should sit near zero for goalkeepers regardless: the
+oracle has almost no independent signal to offer at this position at either horizon, confirmed by its
+own by-position pattern rather than by this one comparison alone. The small sample size is why the
+sign of the observed gap bounces around; the near-zero true quality signal is why it bounces around
+*zero* rather than settling clearly on either side, the way every other position's gap does.
+
+### Line of enquiry 3 — does the same shape appear for defenders? Yes, and it is why they diverge
+
+Defenders also earn the clean-sheet bonus (the same fixture-driven component goalkeepers have), so the
+same "compounding favours the oracle" argument should, on the clean-sheet component alone, apply
+equally weakly to them. It does not, because defenders have a **second** scoring dimension the
+quality-only oracle CAN measure and goalkeepers structurally cannot: defensive-contribution rate
+(tackling, clearing, intercepting — chiefly a matter of role and profile, largely independent of this
+week's specific opponent) plus attacking returns for advanced defenders. G14 already used exactly this
+distinction to explain the one-gameweek gradient from goalkeeper (0.122 gap) to defender (0.021 gap) to
+midfielder/forward (near zero). It is the same distinction, unchanged, that explains why defender's
+oracle has real quality to compound at five gameweeks (one-gameweek oracle r² of 0.070, already 57
+times goalkeeper's 0.0012) while goalkeeper's does not: a goalkeeper's *second* scoring component,
+saves, is **also** fixture-scaled (G1/ticket #109) — there is no defender-defcon equivalent for
+goalkeepers, no fixture-independent second dimension at all. This is not a new mechanism invented for
+five gameweeks; it is G14's own gradient, read at a different horizon, and it produces exactly the
+ordering observed: goalkeeper (breach), defender (comfortably bounded, smaller margin than
+midfielder/forward), midfielder and forward (comfortably bounded, largest margins) — a monotonic
+relationship with how much fixture-independent scoring each position actually has.
+
+### The falsification check, addressed explicitly
+
+1. **Why does the goalkeeper five-gameweek model sit above its oracle?** The model has real,
+   non-hindsight, per-leg fixture knowledge (published schedule + team strength as of the window's
+   start, ticket #175/#193, leak-guarded per G13) that legitimately predicts a meaningful share of a
+   near-binary, opponent-driven outcome (clean sheets) across all five legs. The oracle's season-quality
+   rate, by construction, cannot see any of that, and — confirmed independently by
+   `docs/model-review-2026-09-02.md`'s own neutral-fixture ablation collapsing goalkeeper ranking
+   *below zero* when fixture information is removed — there is almost no fixture-independent quality
+   left in goalkeeper scoring for a season rate to measure instead. A model with strictly more
+   legitimately-knowable information than its comparator can rank above it fairly; that is not evidence
+   the ceiling was leaked, it is evidence the ceiling was never a ceiling for this position.
+2. **Why does the defender five-gameweek model, also clean-sheet driven, sit comfortably below its
+   oracle?** Because defenders, unlike goalkeepers, have a second scoring dimension — defensive
+   contribution, plus attacking returns for advanced defenders — that is genuinely persistent and
+   largely fixture-independent, giving their season-quality rate real signal to compound over five legs
+   that goalkeepers structurally do not have (enquiry 3, extending G14's own one-gameweek gradient).
+3. **Why is the same goalkeeper gap larger at one gameweek (0.157 vs 0.035) than at five (0.240 vs
+   0.201)?** G14's compounding argument is real and does operate on goalkeepers — enquiry 1 measures a
+   genuine, positive move in the oracle's favour (+0.0062 of r²) at five gameweeks, in the same
+   direction as every other position. It is simply compounding a starting quantity that is, by the
+   oracle's own numbers, close to zero — 55 to 135 times smaller than the other three positions' — so
+   the horizon damps the raw Spearman gap (0.122 → 0.039) without having enough underlying signal to
+   flip it, while the other three positions' far larger starting quality signal flips comfortably.
+
+All three conditions are satisfied by one mechanism — the size of each position's fixture-independent,
+season-measurable quality signal, established in G14 for one gameweek and unchanged in kind at five,
+read now through the numbers that were not available at the time (this ticket does not need a new
+model construction or a new live run to make the case; every figure above is already recorded in this
+file or this ticket's own text).
+
+### The decision — option 1: exempt goalkeeper from the per-position check, at five gameweeks only
+
+**Recommendation: option 1** — the oracle is not a valid ceiling for goalkeepers at five gameweeks, for
+the same structural reason G14 gave at one gameweek, and the per-position half of `checkOracleCeiling`
+now skips goalkeeper by name (`scripts/run-backtest.ts`, both the function's own comment and the loop
+itself point back to this entry). The season-aggregate check and every other position's per-position
+check are untouched.
+
+**Why not option 2 (build a fixture-aware oracle).** It would be the more thorough fix — a quality *and*
+fixture oracle would be a genuinely fair bound at both horizons for every position — but it is real,
+separate work: a new construction, not a rewrite, needing its own leak-guard tests as rigorous as
+`computeOracleRate`'s own (a fixture-aware oracle that accidentally reads inside its target window would
+be a much larger, quieter leak than either one this file already records). This ticket's own scope
+forbids attempting it here, and enquiry 1 shows the goalkeeper-specific mechanism is already understood
+well enough to act on without it — building a bound this repo does not currently need, when the
+five-gameweek season-aggregate and three-position check already does the leak-catching work (twice, per
+G13), is not the most useful next ticket.
+
+**Why not option 3 (something else is wrong).** Every other candidate explanation was checked and ruled
+out or subsumed: tie handling and population identity were already confirmed byte-identical in G14's own
+diagnosis and are unchanged by this entry; the five-gameweek construction itself was independently fixed
+and confirmed correct by G13's addendum (the club-schedule fix) before this breach was ever visible; and
+the population-size concern (enquiry 2) explains why the *specific number* 0.039 is noisy, not why the
+*direction* the mechanism predicts is wrong — enquiry 1's r²-growth comparison holds regardless of which
+side of zero any single run's goalkeeper gap happens to land on.
+
+### A falsifiable prediction for the next live run
+
+If this diagnosis is right, the goalkeeper five-gameweek gap should keep hovering close to parity —
+sometimes the model narrowly ahead, sometimes the oracle narrowly ahead — as the season lengthens and
+both estimates' sample sizes grow, **never opening into a gap of the size defender, midfielder or
+forward show (roughly 0.09–0.13 of r², i.e. very roughly 0.10–0.15 of Spearman).** If a future report
+instead shows the goalkeeper oracle pulling decisively ahead of the model by a margin comparable to
+defender's or midfielder's, that would refute the "goalkeepers have almost no fixture-independent
+quality signal" account, and the exemption should be revisited rather than assumed permanent — this
+entry's own falsification check would then need re-doing, not waved past.
+
+### What this ticket did not do
+
+No oracle construction changed. No model figure moved — `src/lib/projection/` is untouched. No
+constant was tuned. The season-aggregate check and the defender/midfielder/forward per-position checks
+are exactly as strict as ticket #201 left them. The Backtest job's five-gameweek section will now pass
+on report 10's own goalkeeper figures (0.240/0.201) specifically because of this named exemption, not
+because the underlying numbers changed — the report states this explicitly, in the oracle-ceiling
+section itself, every time it runs, so a passing job is never silently read as "goalkeeper ranking beat
+its own ceiling and that's fine" when what actually happened is "goalkeeper is exempt, and here is why."
+## G16 — Ticket #207, 4 Sep 2026: the minutes model v2 (#191) is REVERTED — pre-registration worked
+## exactly as intended, and it said no
+
+**#191's own definition of done pre-registered its revert condition, and #207 acts on it.** #191
+(commit `e652df7`) replaced the plain windowed mean in `src/lib/projection/minutes.ts` with a
+start-probability x minutes-given-start split that dropped the single lowest value from a full
+five-match window, stating up front: "if any position moves away from 1.00 [on the
+appearance-ratio calibration check], revert rather than tune." Three of four positions did, the
+day it shipped. The revert was deferred at the time, openly, on the grounds that the backtest was
+the better instrument for the question and was broken. That instrument is now honest (ticket
+#201), and all three lines of evidence agree.
+
+**1. The pre-registered calibration criterion, failed and still failing.** Appearance ratios by
+position:
+
+| Report | GK | DEF | MID | FWD |
+|---|---|---|---|---|
+| 7 — before #191 | 1.06 | 1.00 | 0.96 | 0.92 |
+| 8 — after #191 | 1.05 | 0.98 | 0.93 | 0.89 |
+| 9 — after #191, five days on | 1.05 | 0.98 | 0.94 | 0.89 |
+
+Three positions moved away from 1.00 and stayed there. Two independent readings, same answer.
+
+**2. The honest backtest, both horizons.** Ticket #201 reconstructed the pre-#191 minutes model
+inside the harness and ran both side by side over the identical population, with every other
+input held constant (backtest report 11):
+
+| Ranking | Pre-#191 | Shipped (#191) |
+|---|---|---|
+| One gameweek, season | 0.354 | 0.345 |
+| Five gameweek, season | 0.407 | 0.397 |
+| One gameweek, midfield | 0.411 | 0.400 |
+| One gameweek, defence | 0.296 | 0.286 |
+| Five gameweek, midfield | 0.421 | 0.412 |
+| Five gameweek, defence | 0.385 | 0.374 |
+
+The shipped model wins only at goalkeeper on one gameweek (0.157 against 0.149) and at goalkeeper
+and forward on five (0.240/0.452 against 0.228/0.442). It loses the season aggregate at both
+horizons and loses midfield and defence at both.
+
+**3. The independent prediction.** `docs/model-review-2026-09-02.md` §3 predicted a correct
+live-window minutes model would score 0.354 at one gameweek, from a reconstruction built
+separately in Python with no lookahead. The pre-#191 construction scores exactly that. #191 moved
+the model away from the review's predicted state, not toward it.
+
+At five gameweeks the naive "prior minutes per match" baseline scores 0.407 and the shipped model
+scores 0.397 — the model currently loses to a one-line ranker. The pre-#191 model scores 0.407.
+Reverting closes that deficit entirely.
+
+**What #207 did.** `src/lib/projection/minutes.ts` restored to its exact pre-`e652df7` state — the
+plain mean of the recent-minutes window, no `dropSingleLowest`, no
+`splitFeaturedFromSample`/start-minutes-given-start. `estimateMinutes`'s exported signature and
+`MinutesEstimate` shape are unchanged, so no consumer needed editing. `src/lib/projection/
+expectedPoints.test.ts` and `scripts/run-backtest.test.ts` had hardcoded expectations tied to
+#191's shipped numbers on shared worked windows (`[90,90,90,10,10]`, `[90,90,20,0,0]`) — these
+were updated to the reverted model's actual output as a direct, mechanical consequence of the
+revert, the same kind of fast-follow #191 itself needed for `expectedPoints.test.ts` when it
+shipped. No change to `scripts/run-backtest.ts` itself, `src/lib/projection/expectedPoints.ts`, or
+any other projection input.
+
+**#191 was not a bad idea, and its execution was measured properly the moment a working
+instrument existed.** Averaging `90, 90, 90, 90, 0` down to 72 expected minutes genuinely does
+understate a nailed starter who missed one match to rotation — that observation was real, and the
+underlying data behind it (77 players, 1,232 five-match windows, the "next match after a
+one-zero window looks almost identical to the next match after a clean window" finding) was real
+too. The idea was sound. It lost anyway, on a fair measurement, at every horizon and every
+position except goalkeeper and (at five gameweeks) forward, and it lost the season aggregate
+outright. That is pre-registration working exactly as intended: a clearly stated revert
+condition, honoured once the instrument to check it existed. **Do not re-propose the
+start/minutes-given-start split, or any other single-lowest-drop variant, without new evidence
+that addresses why it lost the honest backtest — restating the `90,90,90,90,0` motivating case
+again is not new evidence; it is the case that was already measured and lost.**

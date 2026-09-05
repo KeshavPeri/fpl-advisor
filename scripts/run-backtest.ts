@@ -3571,6 +3571,22 @@ export interface OracleCeilingCheckResult {
  * failure names the position, so a human reading the report (or the job's
  * console output) does not have to re-derive which breakdown broke from the
  * aggregate alone.
+ *
+ * TICKET #209 — GOALKEEPER IS EXEMPT FROM THE PER-POSITION CHECK, AND ONLY
+ * FROM THE PER-POSITION CHECK, AT FIVE GAMEWEEKS. See
+ * docs/projection-model-backlog.md G16 for the full argument; summary: the
+ * quality oracle's own by-position figures show goalkeepers have almost no
+ * independent, fixture-blind persistent-quality signal to compound over a
+ * five-gameweek window (both of a goalkeeper's scoring components — clean
+ * sheets and, since ticket #109, saves — are themselves fixture-scaled,
+ * unlike a defender's defensive-contribution rate), while the model's real,
+ * non-hindsight fixture knowledge (ticket #175/#193) applies across all
+ * five legs. The two sit close enough to parity that which one reports
+ * higher on a single run is not a meaningful signal either way — the exact
+ * reasoning G14 already established for goalkeepers at one gameweek,
+ * extended here to five. The season-aggregate check and every OTHER
+ * position's per-position check are unaffected — this is a named,
+ * position-scoped exemption, not a relaxation of the check itself.
  */
 export function checkOracleCeiling(
   fiveGwModelSeasonSpearman: number | null,
@@ -3590,6 +3606,12 @@ export function checkOracleCeiling(
     )
   }
   for (const position of POSITIONS) {
+    // Ticket #209 — Goalkeeper is exempt from the PER-POSITION half of this
+    // check only (never from the season aggregate above, and never any
+    // other position). See docs/projection-model-backlog.md G16: the
+    // oracle is not a valid ceiling for goalkeepers at this horizon, for the
+    // same structural reason G14 already gave at one gameweek.
+    if (position === GOALKEEPER) continue
     const modelSpearman = fiveGwModelByPosition[position].spearman
     const oracleSpearman = fiveGwOracleByPosition[position].spearman
     if (modelSpearman !== null && oracleSpearman !== null && modelSpearman >= oracleSpearman) {
@@ -4253,17 +4275,26 @@ function buildFiveGameweekSections(data: ReportData): string[] {
     (fg.oracleCeiling.ok ? '### Oracle-ceiling check: PASSED\n\n' : '### Oracle-ceiling check: FAILED\n\n') +
       (fg.oracleCeiling.ok
         ? 'The five-gameweek quality oracle sits above the model, as a hindsight ceiling must, at the season ' +
-          'aggregate and every position — see `checkOracleCeiling` in `scripts/run-backtest.ts`. **Ticket #201 ' +
-          'retired the one-gameweek half of this check** (docs/projection-model-backlog.md G14: a quality-only ' +
-          'hindsight oracle was never entitled to bound a model that also has genuine, non-hindsight fixture ' +
-          'knowledge) — the one-gameweek oracle above is still fully computed and reported, just no longer ' +
-          'compared against anything here.'
+          'aggregate and every CHECKED position — see `checkOracleCeiling` in `scripts/run-backtest.ts`. **Ticket ' +
+          '#201 retired the one-gameweek half of this check** (docs/projection-model-backlog.md G14: a ' +
+          'quality-only hindsight oracle was never entitled to bound a model that also has genuine, ' +
+          'non-hindsight fixture knowledge) — the one-gameweek oracle above is still fully computed and ' +
+          'reported, just no longer compared against anything here.'
         : `**${fg.oracleCeiling.failures.length} check(s) failed — a model that meets or beats its own hindsight ` +
           'ceiling means the CEILING is mis-specified, not that the model found real headroom. This is a ' +
           'finding to investigate, not a result to quote. Ticket #201 retired the one-gameweek half of this ' +
-          'check (docs/projection-model-backlog.md G14) and extended the five-gameweek half to every position, ' +
-          'not only the season aggregate — every failure below is at the five-gameweek horizon:**\n\n' +
-          fg.oracleCeiling.failures.map((f) => `- ${f}`).join('\n')),
+          'check (docs/projection-model-backlog.md G14) and extended the five-gameweek half to every CHECKED ' +
+          'position, not only the season aggregate — every failure below is at the five-gameweek horizon:**\n\n' +
+          fg.oracleCeiling.failures.map((f) => `- ${f}`).join('\n')) +
+      '\n\n**Goalkeeper is exempt from the per-position half of this check, at five gameweeks only — ticket ' +
+      '#209, docs/projection-model-backlog.md G16.** The five-gameweek quality oracle is not a valid ceiling for ' +
+      'goalkeepers: both of a goalkeeper\'s scoring components (clean sheets, and saves since ticket #109) are ' +
+      'themselves fixture-driven, so the season-quality rate this oracle measures has almost no independent, ' +
+      'fixture-blind signal left to compound over a five-gameweek window — the same structural reason G14 gave ' +
+      'for exempting goalkeepers from the one-gameweek check entirely. The goalkeeper figures are still fully ' +
+      'computed and printed in the "By position" and "Five-gameweek oracle, by position" tables above; they are ' +
+      'simply not compared against each other here. The season aggregate and every other position remain ' +
+      'checked, unrelaxed.',
   )
 
   sections.push(
