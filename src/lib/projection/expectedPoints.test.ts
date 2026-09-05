@@ -162,16 +162,12 @@ describe('expectedSavePoints', () => {
 // ============================================================================
 
 describe('defensive-contribution points in the combiner, weighted by pSixtyPlus', () => {
-  it('hit rate 0.5, pSixtyPlus 0.75 -> 0.75 points, within 0.001', () => {
-    // recentMinutes = [90, 90, 90, 10, 10] is a full 5-row window, so
-    // ticket #188's estimator drops its single lowest raw value before
-    // deriving pSixtyPlus. By hand:
-    //   sorted:            [10, 10, 90, 90, 90]
-    //   drop lowest (10):  [10, 90, 90, 90]
-    //   featured (>0):     [10, 90, 90, 90]  (all four — 10 is still > 0)
-    //   pFeature        = 4/4 = 1.0
-    //   pSixtyGivenFeat = 3/4 = 0.75   (10 doesn't reach 60; the three 90s do)
-    //   pSixtyPlusRaw   = 1.0 * 0.75 = 0.75, availability 1 -> pSixtyPlus = 0.75
+  it('hit rate 0.5, pSixtyPlus 0.6 -> 0.6 points, within 0.001', () => {
+    // recentMinutes = [90, 90, 90, 10, 10] is the plain windowed mean
+    // (ticket #207 reverted #191's drop-single-lowest/start-split estimator
+    // — see docs/projection-model-backlog.md). By hand:
+    //   sixtyPlusRate = 3/5 = 0.6 (the three 90s reach 60; neither 10 does)
+    //   pSixtyPlus = 0.6, availability 1 -> pSixtyPlus = 0.6
     const p = player({
       position: DEFENDER,
       recentMinutes: [90, 90, 90, 10, 10],
@@ -179,9 +175,9 @@ describe('defensive-contribution points in the combiner, weighted by pSixtyPlus'
       defconPositionPrior: 0.5,
     })
     const projection = projectPlayerFixture(p, fixture())
-    expect(projection.modelInputs.pSixtyPlus).toBeCloseTo(0.75, 10)
+    expect(projection.modelInputs.pSixtyPlus).toBeCloseTo(0.6, 10)
     expect(projection.modelInputs.defconHitRate).toBe(0.5)
-    expect(projection.components.defensiveContributionPoints).toBeCloseTo(0.75, 3)
+    expect(projection.components.defensiveContributionPoints).toBeCloseTo(0.6, 3)
   })
 
   it('goalkeepers score 0 defensive-contribution points (enforced by defconRate.ts, #28)', () => {
