@@ -1481,6 +1481,136 @@ again is not new evidence; it is the case that was already measured and lost.**
 
 ---
 
+## Ticket #215, 5 Sep 2026: penalty-duty diagnostic — MEASURED, and the review's proposed method does not work. Recommendation: leave it alone
+
+`docs/model-review-2026-09-02.md` §1g named penalty duty the one excluded absence with
+"concentrated cost", proposed a method ("a persistent positive per-player goals-minus-xG
+residual identifies takers"), and asked for one diagnostic, not a build. `scripts/
+penalty-duty-diagnostic.ts` (hand-run, not wired into any workflow) is that diagnostic. This
+entry reports what running it found. **No model change. `src/lib/projection/` is untouched.**
+
+**How the numbers below were produced.** This Builder session has no live Supabase project —
+the same limitation G9/G11 record for the backtest and ranking-skill slices. Rather than ship
+untested guesses, the diagnostic's exact logic (`aggregateSeasonTotals` +
+`computeGoalsMinusXgResidualPerNinety` + the stated threshold) was reproduced directly against
+FPL-Core-Insights' public per-gameweek CSVs for the complete, already-ingested 2025-2026
+season — the identical source `scripts/ingest-core-insights.ts` reads. The reproduction's row
+counts match this codebase's own previously-documented figures for that table exactly (15,340
+total rows, 12,754 Premier-League rows after the competition filter — see G13's "15,340 of
+15,340" and the opponent-resolution figures elsewhere in this file), so these are a faithful
+run of the shipped script against 2025-2026, not a synthetic stand-in. The one figure this
+could not reproduce — cost figure 3, captaincy overlap, which needs the CURRENT season's live
+`player_projections` — is reported as not yet read, below, exactly as G9/G11 reported their own
+first live numbers as "not yet read" until a session with real Supabase credentials ran them.
+
+### Population and the separation rule
+
+339 of 565 players carried >= 900 minutes (`MIN_SEASON_MINUTES`) of 2025-2026 Premier-League
+football — the qualifying population the threshold was applied against. At
+`PENALTY_DUTY_RESIDUAL_THRESHOLD_PER_90 = 0.10`, **21 of 339 (6.2%) are flagged as candidates.**
+
+### Cost figure 1 — points-impact, at face value
+
+Summed at face value (residual x 5 x `goalPoints(position)`, the DoD's specified figure), the
+21 candidates' combined five-gameweek "impact" is real-sized — several points per candidate.
+**This figure is reported because the DoD asks for it, and it is exactly the number that
+figures 2 and 3 below show should not be trusted as evidence of an actual model gap.**
+
+### Cost figure 2 — cross-check against real penalty records: 76% false positives
+
+The ticket's specified cross-check (`players.penalties_missed`) is season-mismatched by
+construction — that column is always the *current* season's total (from live
+`bootstrap-static/`), while a season-long residual needs a *completed* season, and 2026-27 has
+only 2 finished gameweeks as of this ticket (1 player, Thiago, with any penalty miss on
+record). A materially stronger, matched-season check exists in the same source used for the
+residual itself: FPL-Core-Insights' per-gameweek CSV already carries `penalties_scored` and
+`penalties_missed` per match for 2025-2026 (see "A discovery" below — this repo just doesn't
+ingest them). Cross-checking the 21 flagged candidates against those same-season columns:
+
+**only 5 of 21 (24%) have any penalty attempt — scored or missed — on record for 2025-2026 at
+all.** 76% of what the residual method flags has no evidence of ever taking a penalty.
+
+### The method fails a direct correlation check, not just the cross-check
+
+Across all 339 qualifying players, the Pearson correlation between season residual and season
+penalty-attempt count is **r = 0.002** — no relationship. Worse, the players with the most real
+penalty involvement are not merely absent from the flagged list, they rank in the **bottom
+third** of the entire 339-player residual ranking: Palmer (5 scored) ranks 234th, Calvert-Lewin
+(4 scored) 274th, B. Fernandes (4 scored) 284th, Mateta (4 scored) 317th, Raúl (4 scored) 318th
+of 339. The two best-known 2025-26 penalty takers who DO score positively, Haaland (3 scored,
++0.037/90) and Gyökeres (3 scored, +0.067/90), rank 64th and 37th respectively — nowhere near
+the threshold, buried among finishers with zero penalty involvement.
+
+**Why: the model's own input already prices penalty duty in, to first order.**
+`src/lib/projection/rates.ts` projects goals from shrunk **xG** per 90, not shrunk actual
+goals — and FPL-Core-Insights' own xG model assigns a penalty kick real expected-goal value
+(0.79-0.90 in the specific penalty-attempt rows checked while building this ticket, both from
+the per-match CSV and cross-referenced against live `bootstrap-static`'s individual penalty
+entries). A designated taker's season `prior_xg` already carries that elevated value from every
+penalty he attempts, whether he scores it or not. Real Premier League penalty conversion sits
+close to that same 0.79-0.90 range, so **in expectation, taking penalties does not push actual
+goals persistently above what the model's own xG-based rate already assumes** — which is
+exactly why the residual doesn't correlate with penalty duty: there is very little systematic
+gap left for it to detect. What's left in the residual is ordinary shot-conversion variance —
+the same "small, noisy, near-unrankable" territory G4 already excluded cards, own goals and
+penalty misses from, for the same reason.
+
+**This does not mean penalty duty is worthless to a player's total, only that it isn't a hidden
+model error.** Ground truth, same season: of the 22 players with >= 2 penalty attempts,
+penalty goals account for **27% of their combined goal-scoring points on average** (range
+6%-60% per player, e.g. Palmer 50%, B. Fernandes 44%, Thiago 36%). That's a real, large,
+concentrated number — and it is already substantially reflected in those players' `prior_xg`,
+per the mechanism above, which is why it does not show up as a model gap in the residual.
+
+### Cost figure 3 — captaincy overlap: not yet read
+
+Requires the current season's live `player_projections`, which this Builder session cannot
+reach and which 2026-27 (2 finished gameweeks) does not yet have enough of regardless. The
+diagnostic implements and tests `computeTopProjectedPerGameweek` /
+`computeCaptaincyOverlap` fully; a future run with real credentials against a season with >= 5
+gameweeks of stored projections will read it. Given the mechanism finding above — the players a
+captaincy call turns on (Haaland, Watkins, etc.) show unremarkable residuals — a large effect
+here would be surprising, not expected.
+
+### penalties_order — CONFIRMED PRESENT
+
+Checked directly against a live `bootstrap-static/` fetch while building this ticket, 5 Sep
+2026: **yes, `penalties_order` is present** on every element, non-null for 64 of 652 players —
+an explicit 1-4 priority ranking per club, naming takers directly rather than inferring them.
+
+### A discovery this ticket did not expect, and does not act on
+
+FPL-Core-Insights' per-gameweek `playermatchstats.csv` — the exact file
+`scripts/ingest-core-insights.ts` already fetches for every other `player_match_stats` column —
+**also publishes `penalties_scored` and `penalties_missed` per match, populated with real
+values** (verified directly: 3 nonzero `penalties_scored` rows in the 2025-2026 GW1 file alone).
+`ingest-core-insights.ts`'s row mapping simply never selects those two columns. This is a
+cheaper, more direct, same-season ground truth than `penalties_order` — it needs no new
+external source, only two more field mappings on an ingest job already running, versus a new
+bootstrap-static read. **Recorded for completeness, not actioned:** ticket scope forbids any
+ingest or migration change here, and per the recommendation below, the projection-accuracy
+question this ticket was asked to answer does not call for either source to be ingested.
+
+### Recommendation: leave it alone
+
+1. **The review's proposed method (goals-minus-xG residual) does not work and should not be
+   built on.** r = 0.002 against real penalty attempts; known heavy takers rank in the bottom
+   third of the very ranking meant to surface them; 76% of what it flags has no penalty record
+   at all.
+2. **The underlying worry — captaincy-relevant players carrying unpriced penalty inflation —
+   is not supported by the mechanism.** The model's xG-based rate already substantially prices
+   in penalty duty, because the source's own xG model values a penalty kick near its real
+   conversion rate. There is little bias left for a correction to remove.
+3. **Do not chase this via `penalties_order` or the newly-found `penalties_scored`/
+   `penalties_missed` CSV columns for projection-accuracy purposes.** Both are real, both are
+   cheap, and neither is needed here — the mechanism argument in point 2 already answers the
+   question those sources would be ingested to answer. (Either might earn its own ticket for a
+   different reason — e.g. an informational "penalty taker" badge in the UI — but that is a
+   product decision this diagnostic was not asked to make and does not argue for.)
+4. **Close this line of the review.** Penalty duty joins cards, own goals and penalty misses
+   (G4) in the "stays out" bucket — not because it's untested, now, but because it was tested
+   and the concentrated cost the review worried about did not materialize. If this is ever
+   reopened, start from the mechanism argument above, not from re-proposing the residual.
 ## G17 — Ticket #214, 5 Sep 2026: the learned-model gate was measuring a threshold seam, not a
 ## finding — fixed to compare every position against the incumbent, live, across repeated splits.
 ## GATE NOT YET READ (no live Supabase project in this Builder session, same limitation as
