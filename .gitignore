@@ -24,3 +24,11 @@ dist-ssr
 
 # Claude Code worktree isolation scaffolding (not repo content)
 .claude/worktrees/
+
+# Local credentials for hand-run scripts (SUPABASE_URL / SUPABASE_SECRET_KEY).
+# Never committed. Read with `npx tsx --env-file=.env scripts/<job>.ts`.
+.env
+.env.*
+
+# Local output from hand-run scripts (learned-model report, etc.)
+out/
