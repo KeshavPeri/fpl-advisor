@@ -74,6 +74,13 @@
  * scale is closer to reality than the flat prior it replaces (see
  * docs/projection-model-backlog.md G2).
  *
+ * MINUTES SHRINKAGE (ticket #213). `shrunkRate` below is exported so
+ * `src/lib/projection/minutes.ts` can shrink a player's recent-minutes
+ * window toward his season minutes-per-match with the exact same formula
+ * and the exact same `SHRINKAGE_K` — no second shrinkage convention, no new
+ * fitted parameter. See minutes.ts's own header for the full "because"; this
+ * file's math is otherwise completely untouched by that ticket.
+ *
  * TICKET #168, 31 Aug 2026 — investigated, no change here. `positionPriorRates`
  * itself was directly measured (against fresh FPL-Core-Insights data, both
  * ingested seasons) as reasonably calibrated for forwards' xG and xA alike —
@@ -116,8 +123,20 @@ export interface PlayerRateHistory {
   totalRecoveries: number
 }
 
-function shrunkRate(total: number, ninetiesPlayed: number, prior: number): number {
-  return (total + SHRINKAGE_K * prior) / (ninetiesPlayed + SHRINKAGE_K)
+/**
+ * Exported (ticket #213) so `minutes.ts` can reuse the SAME formula and the
+ * SAME `SHRINKAGE_K` for its own shrinkage of the recent-minutes window
+ * toward a player's season minutes-per-match — see that file's own header
+ * for the "because". `observedCount` is deliberately not named
+ * `ninetiesPlayed` any more: for the rates this file computes it IS a count
+ * of nineties (`minutesPlayed / 90`), but minutes.ts's own use of this same
+ * formula counts recent-window MATCHES instead (each one contributes one
+ * unit of observed evidence, regardless of how many minutes that match was)
+ * — the formula itself doesn't care what unit `total`/`observedCount` are
+ * in, only that they're consistent with each other and with `prior`.
+ */
+export function shrunkRate(total: number, observedCount: number, prior: number): number {
+  return (total + SHRINKAGE_K * prior) / (observedCount + SHRINKAGE_K)
 }
 
 /**

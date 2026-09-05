@@ -126,4 +126,95 @@ describe('every returned value is finite', () => {
     expect(Number.isFinite(estimate.pAppears)).toBe(true)
     expect(Number.isFinite(estimate.pSixtyPlus)).toBe(true)
   })
+
+  it.each([
+    [[], 1.0, 60],
+    [[0, 0, 0, 0, 0], 1.0, 45],
+    [[90, 90, 90, 90, 90], 0.5, 90],
+  ] as const)('recentMinutes=%j availability=%j seasonMinutesPerMatch=%j', (recentMinutes, availability, seasonMinutesPerMatch) => {
+    const estimate = estimateMinutes(recentMinutes, availability, seasonMinutesPerMatch)
+    expect(Number.isFinite(estimate.expectedMinutes)).toBe(true)
+    expect(Number.isFinite(estimate.pAppears)).toBe(true)
+    expect(Number.isFinite(estimate.pSixtyPlus)).toBe(true)
+  })
+})
+
+describe('ticket #213 — shrinking the recent window toward the season figure', () => {
+  describe('the two collapse ends the DoD names', () => {
+    it(
+      'collapses to today\'s (pre-#213) behaviour when no season figure is supplied at all — a producer that ' +
+        'cannot supply one (see PlayerProjectionInput\'s own comment) must reproduce the exact pre-#213 number, ' +
+        'not a silently different one',
+      () => {
+        const withoutShrinkage = estimateMinutes([90, 90, 90, 90, 0], 1.0)
+        const withUndefinedSeasonFigure = estimateMinutes([90, 90, 90, 90, 0], 1.0, undefined)
+        expect(withUndefinedSeasonFigure.expectedMinutes).toBeCloseTo(withoutShrinkage.expectedMinutes, 10)
+        expect(withUndefinedSeasonFigure.expectedMinutes).toBeCloseTo(72, 10)
+      },
+    )
+
+    it(
+      'collapses to today\'s behaviour when a full window\'s season figure equals the window\'s own mean — "no ' +
+        'season history beyond it": nothing for shrinkage to pull the window away from',
+      () => {
+        const recentMinutes = [90, 90, 90, 90, 0]
+        const windowMean = 72 // (90+90+90+90+0)/5
+        const estimate = estimateMinutes(recentMinutes, 1.0, windowMean)
+        expect(estimate.expectedMinutes).toBeCloseTo(72, 10)
+      },
+    )
+
+    it('collapses to exactly the season figure when the window is empty', () => {
+      const estimate = estimateMinutes([], 1.0, 63)
+      expect(estimate.expectedMinutes).toBeCloseTo(63, 10)
+    })
+
+    it('the empty-window collapse to the season figure is still scaled by availability', () => {
+      const estimate = estimateMinutes([], 0.5, 63)
+      expect(estimate.expectedMinutes).toBeCloseTo(63 * 0.5, 10)
+    })
+  })
+
+  describe('the two named concrete cases', () => {
+    it(
+      'a nailed starter with one recent rested match (90,90,90,90,0) moves LESS toward the discount than he does ' +
+        'today: a season figure of 84 (mostly starts, this is his one rest all season) shrinks the raw 72 back up ' +
+        'to 76.5, a smaller discount than the unshrunk 72',
+      () => {
+        const recentMinutes = [90, 90, 90, 90, 0]
+        const unshrunk = estimateMinutes(recentMinutes, 1.0)
+        const shrunk = estimateMinutes(recentMinutes, 1.0, 84)
+        expect(unshrunk.expectedMinutes).toBeCloseTo(72, 10)
+        // shrunkRate(360, 5, 84) = (360 + 3*84) / (5+3) = 612/8 = 76.5
+        expect(shrunk.expectedMinutes).toBeCloseTo(76.5, 10)
+        expect(shrunk.expectedMinutes).toBeGreaterThan(unshrunk.expectedMinutes)
+      },
+    )
+
+    it(
+      'a genuinely fading player (0,0,10,20,30 — losing his place) STILL moves well below his season figure: ' +
+        'shrinkage narrows the gap, it does not erase the fade',
+      () => {
+        const recentMinutes = [0, 0, 10, 20, 30]
+        const seasonMinutesPerMatch = 70 // was a regular starter for most of the season before the fade
+        const unshrunk = estimateMinutes(recentMinutes, 1.0)
+        const shrunk = estimateMinutes(recentMinutes, 1.0, seasonMinutesPerMatch)
+        expect(unshrunk.expectedMinutes).toBeCloseTo(12, 10) // (0+0+10+20+30)/5
+        // shrunkRate(60, 5, 70) = (60 + 3*70) / (5+3) = 270/8 = 33.75
+        expect(shrunk.expectedMinutes).toBeCloseTo(33.75, 10)
+        // Moved up from the raw window mean (shrinkage pulls toward the season figure)...
+        expect(shrunk.expectedMinutes).toBeGreaterThan(unshrunk.expectedMinutes)
+        // ...but still well short of the season figure — the fade is real evidence, not noise shrinkage erases.
+        expect(shrunk.expectedMinutes).toBeLessThan(seasonMinutesPerMatch - 30)
+      },
+    )
+  })
+
+  it('pSixtyPlus is completely unaffected by seasonMinutesPerMatch — ticket #213 touches only the mean', () => {
+    const recentMinutes = [90, 90, 90, 90, 0]
+    const withoutShrinkage = estimateMinutes(recentMinutes, 1.0)
+    const withShrinkage = estimateMinutes(recentMinutes, 1.0, 84)
+    expect(withShrinkage.pSixtyPlus).toBeCloseTo(withoutShrinkage.pSixtyPlus, 10)
+    expect(withShrinkage.pAppears).toBeCloseTo(withoutShrinkage.pAppears, 10)
+  })
 })
