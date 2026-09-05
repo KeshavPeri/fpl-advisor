@@ -1688,3 +1688,222 @@ all fixed before this file's own `main()` ever reads a row of real data. If ever
 `do-not-ship` or `too-close-to-call` on the first live run, that is this ticket's own anticipated
 honest outcome (its own notes: "the honest outcome here may well be 'do not ship any of it'"), not
 a defect to iterate away.
+
+---
+
+## Ticket #220, 5 Sep 2026: closing out the model programme — three threads recorded together,
+## because they are the same finding read three times: this model is at its ceiling, an
+## experiment answered its question inside budget, and a correctly-specified gate did not stop
+## a merge it should have stopped
+
+This entry is bookkeeping, not measurement. **No model code changed here — everything under
+`src/lib/projection/` is exactly as #216/#217/#218 left it.** Written on branch
+`claude/ticket-220-close-out-model-programme`, at commit `06d0d92` (forked from `main` at
+`cff8fd3`). Ticket #219, in the same batch, is concurrently editing `src/lib/projection/rates.ts`
+on its own unmerged branch — nothing below was recomputed against that branch, and nothing below
+should be read as reflecting whatever #219 lands. The three figures this entry carries forward
+(the #217 falsification result, the #216 four-split margin table, and the baseline-v1 five-
+gameweek headline) are #216's/#217's own already-measured results, not something re-derived here
+— this session has no live Supabase project, the same limitation G9/G11/G15/G16/G17 above all
+record for their own first readings, so nothing quantitative in this entry claiming to be a fresh
+measurement is one; where a number could not be recomputed live it is named as inherited, not
+reproduced.
+
+### Thread 1 — the #217 shrinkage: measured to be immaterial, and its own falsification gate did
+### not stop the merge
+
+**The gate, stated in #217's own ticket text.** "At five gameweeks, midfield must rise from 0.421
+toward 0.464 and forward from 0.442 toward 0.476. If neither moves materially, stop, do not
+merge." 0.464 and 0.476 are G15's own naive-minutes-baseline gate figures (above) — the thing
+#217's shrinkage was built to close some of the gap toward.
+
+**What the backtest actually measured — backtest report 13, read after #217 had already merged.**
+Midfield **0.426** (against a target of 0.464 — a move of **+0.005** against a needed **+0.043**),
+forward **0.446** (against a target of 0.476 — a move of **+0.004** against a needed **+0.034**).
+Neither move is material by any reasonable reading of #217's own pre-registered bar. **The gate's
+own condition was met, and the ticket merged anyway.** Both facts are recorded here because the
+ticket asked for both, not because this entry is assigning blame. The mechanical reason THIS could
+happen — not just that it did — sits in `.github/workflows/backtest.yml`'s own header: the Backtest
+job is "workflow_dispatch only, deliberately no schedule ... run by hand, on demand." Producing the
+number the gate needed requires a human to manually trigger that workflow and read its report; no
+step in this pipeline computes it automatically, and nothing ties that manual step to the PR review
+or merge decision. #217's own Builder session pre-registered the gate correctly from
+`docs/model-review-2026-09-02.md`'s existing figures (the ones it could see without dispatching
+anything), but could not itself produce the post-change number the gate needed to be checked against
+— the same "no live Supabase project in this Builder session" limitation this file's own G9/G11/
+G16/G17 entries record for their first readings. See the drafted learnings-entry text at the bottom
+of this section for the fuller process reading, which belongs in `app-factory`'s own learnings
+file, not here.
+
+**Why it moved so little — the hypothesis this ticket was asked to test first: the window and
+season means are usually already close.** Ticket #220 adds a diagnostic to
+`scripts/run-backtest.ts` (`computeWindowSeasonMinutesGap` /
+`bucketWindowSeasonMinutesGap` / `summarizeWindowSeasonMinutesGap`) that reports, over the exact
+same single-gameweek measured population every other diagnostic in that file uses, the
+distribution of `|recent-minutes window mean − season minutes-per-match mean|` — the precise
+quantity #217's shrinkage formula pulls one value toward the other by. Bucketed `<5 / 5–10 / 10–20
+/ 20–40 / 40+` minutes, with the same `MIN_BUCKET_SAMPLE_SIZE` (50) "too small to read" rule every
+other bucketed diagnostic in that file already uses. **This diagnostic's live figures are NOT YET
+READ — this Builder session has no live Supabase project, the same limitation every earlier
+first-reading entry in this file records.** The confirming step is the next scheduled Backtest
+run; read the new "Window vs season minutes" section it prints, immediately after the
+ticket-#187 minutes-evidence section.
+
+**A second, complementary mechanism — derivable from the formula itself, without live data, and
+worth reading alongside whatever the distribution above eventually shows.** `estimateMinutes`'s
+shrinkage weight on the season figure is `SHRINKAGE_K / (windowLength + SHRINKAGE_K)` — with
+`SHRINKAGE_K = 3` (`src/lib/projection/rates.ts`) and a full five-match window
+(`RECENT_MATCH_COUNT = 5`, `src/lib/projection/minutes.ts`), that weight is `3 / (5 + 3) =
+0.375`. **Even for a player whose window and season means genuinely differ, the shipped model can
+only close 37.5% of that gap for a nailed starter with a full window** — the naive "prior minutes
+per match" baseline, by contrast, is the season mean outright: 100% of the gap, by construction.
+Players with shorter windows (early in the season, or returning from injury) get pulled harder —
+weight `3/4 = 0.75` at window length 1 — but the measured population this backtest scores is
+weighted toward established players with fuller windows, exactly the population where the cap
+bites hardest. This is a real, code-derivable property of the fixed formula #217's own scope
+required reusing unmodified (no new fitted parameter), not a criticism of the choice to reuse it.
+
+**Left as an open question — deliberately, per this ticket's own instruction not to invent an
+answer.** Two candidate explanations for the tiny observed move now exist — (a) most players'
+window and season means are already close (the distribution this ticket's diagnostic will read),
+and (b) even a real gap is only ever partially closed by the fixed `SHRINKAGE_K = 3` weight — and
+this entry cannot yet say how much each contributes, or whether either fully accounts for the
+remaining gap to the naive baseline's 0.464/0.476. **Do not tune `SHRINKAGE_K`, `RECENT_MATCH_COUNT`,
+or any constant in `minutes.ts`/`rates.ts` from this entry** — that is exactly the kind of
+reach-for-a-constant move G10's own precedent (§ "do NOT tune `k`... from this evidence") warns
+against, and neither candidate explanation has been measured yet. The next scheduled Backtest run's
+new diagnostic section is the next real evidence; read it, and (a) if most gaps are small, (a)
+is confirmed as the dominant story; if gaps are typically large but the move is still small, (b) is
+implicated instead, and a future ticket would need to weigh whether the fixed shrink weight itself
+should be revisited — a Tier 2 modelling decision this bookkeeping ticket does not make.
+
+### Thread 2 — learned-v1: measured and parked, not failed
+
+Ticket #216's fair-gate re-run — every threshold computed live on each split's own held-out fold,
+across four independent train/eval cutoffs (gameweek 22/25/28/31), never a baseline lifted from a
+different report (the mixed-threshold defect ticket #214 fixed, per that ticket's own G17 entry
+above; #216 is the first live run against that fixed harness). The full four-split result, carried
+forward verbatim:
+
+| Position | Splits won vs incumbent | Verdict | Margins |
+|---|---|---|---|
+| Goalkeeper | 0 of 4 | do-not-ship | losing by up to 0.193 |
+| Defender | 2 of 4 | too-close-to-call | not separately itemised in this ticket's source text |
+| Midfielder | 4 of 4 | **ship** (arithmetically) | +0.001, +0.005, +0.005, +0.024 |
+| Forward | 0 of 4 | do-not-ship | not separately itemised in this ticket's source text |
+
+**Midfielder's own mean edge: (0.001 + 0.005 + 0.005 + 0.024) / 4 ≈ 0.009** — matching the ~0.009
+this ticket's own text states. Against #216's own stated instrument resolution of roughly ±0.01
+(this entry does not re-derive that figure — #216's own report is the source, not this file's own
+season-scale `SE(ρ) ≈ 1/√(n−1)` heuristic from G16's enquiry 2, which is not directly comparable at
+a single split's smaller fold size), a 0.009 mean edge is **inside the noise floor of the
+instrument used to measure it.** Three of the four individual splits (+0.001, +0.005, +0.005) are
+smaller than that resolution on their own; only one split (+0.024) would clear it in isolation, and
+a single split out of four is exactly the "not evidence of anything yet" case #214's own gate
+redesign was built to stop a false read on.
+
+**The verdict table's own "ship" label for midfielder is arithmetically correct and substantively
+too small to act on — both statements are true at once, and this entry states both rather than
+picking one.** `buildGateResults`'s majority-of-splits rule (G17, ticket #214) counted the wins
+correctly: 4 of 4 splits favoured the learned model, so "ship" is the right output of that
+function, given its own stated rule. It is a different question whether a mean edge of ~0.009,
+against a resolution of ~0.01, is a result to act on — and it is not.
+
+**This is "measured and parked", not "failed".** `product-brief.md` §6c's own governing property
+of the projection seam is that a model can be replaced without touching the solver, the app, the
+data layer or the notifications — which is exactly what makes an experiment like `learned-v1`
+cheap to run and cheap to set down again. The experiment asked a well-posed question (does a
+small gradient-boosted model, given `training_features`' 15 columns, out-rank the incumbent on a
+fair, repeated-split gate) and answered it inside its own budget: no, not by a margin this
+instrument can distinguish from noise, at any position. That is the seam working as intended, not
+a wasted ticket. **`learned-v1` is parked, not deleted** — `scripts/train-and-evaluate-learned-
+model.ts` and `public.training_features` (G15/G16) stay in the repo as a substrate a future
+attempt could restart from (a different feature set, a different model family, more seasons of
+data) without repeating #203's/#208's own groundwork. Nothing here recommends restarting it
+without new evidence that the edge would clear the instrument's own resolution.
+
+### Thread 3 — baseline-v1: at its ceiling
+
+At the five-gameweek horizon, on the same honest backtest instrument this file already treats as
+the trustworthy reading (G13's addendum, G17): the shipped model scores **0.409**, the naive
+"prior minutes per match" ranker scores **0.407**, and the leave-target-out hindsight ceiling sits
+at **0.506**. The model and the simplest possible baseline are, at this horizon, within noise of
+each other. **Every remaining constant the 2 September model review tested was worth ≤0.01** of
+Spearman at this horizon — this ticket's own framing, not re-derived here — and the two most
+recent, most directly measured confirmations of that ceiling sit in this same file: #217's minutes
+shrinkage (Thread 1 above, +0.005/+0.004) and #216's learned-model gate (Thread 2 above, a mean
+midfield edge of ~0.009, the only position that came close to clearing anything). Both are
+comfortably inside the same "≤0.01" band.
+
+**The standing rule, from this point forward: no further constant already measured against these
+metrics is to be re-tuned against them.** `SHRINKAGE_K`, `RECENT_MATCH_COUNT`, the attacking
+fixture multiplier's offset (#184), and the learned-model hyperparameters/feature list
+(#208/#214/#216) have each now been measured, directly or by a documented proxy, as worth `≤0.01`
+of Spearman at this horizon — at or below what this file's own instrument (a Spearman correlation
+on a population in the low thousands, per position) can distinguish from sampling noise.
+Continuing to re-tune any of THESE SPECIFIC constants against these same season-level Spearman/MAE
+figures is asking the same instrument to answer a question it has already answered for them. **This
+freeze does not extend to work this file has explicitly left open** — most notably G12's
+defensive-multiplier measurement, which this file already states must not be touched "without its
+own separate measurement and ticket" (its own words, unchanged by this entry) precisely because it
+has NOT yet been measured the way the constants above have. `docs/model-review-2026-09-02.md`'s
+other remaining open items (a genuinely fixture-aware oracle per G14's option 2, more seasons of
+`training_features` for a future learned-model attempt) are likewise untouched by this freeze —
+they are different levers, not smaller turns of the ones already exhausted here. A future ticket
+proposing to re-tune one of the already-measured constants against the season Spearman or MAE
+figures should point to *new* evidence — a different population, a different horizon, a different
+instrument — not another pass over the same backtest with the same constants.
+
+### Drafted learnings-entry text — for `app-factory/LEARNINGS-second-build-wave.md`, pasted by hand
+
+This repo cannot write to `app-factory`. The text below is drafted in full for the orchestrator to
+carry into that file's own numbered-finding style; it is not written anywhere in this repo other
+than here and in this ticket's own PR body/report.
+
+> **Finding: a correctly-specified falsification gate did not stop a merge it required to stop —
+> the second time this shape of gap has appeared.**
+>
+> Ticket #217 (fpl-advisor) pre-registered its own revert condition before shipping: "at five
+> gameweeks, midfield must rise from 0.421 toward 0.464 and forward from 0.442 toward 0.476. If
+> neither moves materially, stop, do not merge." Backtest report 13 — read only after #217 had
+> already merged — measured midfield at 0.426 (a move of +0.005 against a required +0.043) and
+> forward at 0.446 (+0.004 against a required +0.034). Neither move is material by the gate's own
+> stated bar. The ticket merged anyway.
+>
+> The threshold was not vague, was not missed for lack of a check, and the check was not run
+> against the wrong data — it simply could not run before the merge decision was made, and nothing
+> in the pipeline required it to. The Backtest job that alone can compute this figure
+> (`.github/workflows/backtest.yml`) is `workflow_dispatch`-only, by explicit design ("a
+> measurement job, not a scheduled one ... run by hand, on demand") — no Builder session, and no
+> automated step in this pipeline, can trigger it or read its report. The Builder session that
+> shipped #217 could see the model review's EXISTING figures (the ones the gate's own threshold
+> values were drawn from) but had no way to produce the post-change number the gate needed to be
+> checked against before proposing the diff as done — the same "no live Supabase project in this
+> Builder session" limitation this repo's own `docs/projection-model-backlog.md` records, by name,
+> for nearly every ticket that has touched the projection model this build wave. A ticket can
+> pre-register a falsification gate in its own prose with complete honesty and still have no way to
+> enforce it, because the one instrument that can evaluate it is human-triggered and asynchronous to
+> the PR review and merge process. Nothing here failed to follow the process; the process itself has
+> no step that connects "the gate exists" to "the gate is checked before merge."
+>
+> This is a process finding, not a blame note — the check itself was correctly designed and
+> correctly specified; nothing downstream of it was positioned to act on its result before the
+> point of no return. **This is the second time this has happened — a similar §17 finding in this
+> same file was the first.** This entry does not restate that earlier finding's own content
+> (fpl-advisor's own working copy of this file has no access to re-read it) — it is named here only
+> so the two are counted together, as the ticket that requested this entry asked. Two occurrences of
+> "a check existed, fired, and its result did not stop the thing it was meant to stop" is a pattern,
+> not a coincidence, and in this case the pattern has an identifiable cause: a check whose only
+> instrument is a human-triggered, on-demand GitHub Action has no way to run before a merge decision
+> unless a human is deliberately made to run it first.
+>
+> **A concrete fix, for a future revision of this pipeline to weigh, not adopted here:** a ticket
+> that states a numeric falsification gate against a report only a manual workflow dispatch can
+> produce should not be eligible to leave `status:for-review` for a merge until that report has
+> actually been read against the gate — either by requiring the draft PR to carry an explicit
+> "gate: UNCONFIRMED, needs a live Backtest read" note that a human must clear before merging, or by
+> giving the orchestrator (which already holds the GitHub tools this pipeline trusts) a way to
+> dispatch that one workflow and block the ticket on its result, the same way a Tier 1 stop already
+> blocks a ticket rather than the run. Either way, the fix is a process step, not a sharper-worded
+> instruction to the Builder — the Builder in this instance could not have done anything differently
+> with the tools it had.
