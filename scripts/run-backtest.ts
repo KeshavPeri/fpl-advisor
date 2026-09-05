@@ -517,6 +517,20 @@ export const PRIOR_MATCHES_BUCKETS: readonly { label: string; min: number; max: 
 ]
 
 /**
+ * Ticket #220. Buckets for |window mean − season mean| minutes (see
+ * {@link computeWindowSeasonMinutesGap}) — half-open ranges (`gap >= min &&
+ * gap < max`), unlike PRIOR_MATCHES_BUCKETS' integer ranges, since this
+ * quantity is continuous and every gap must land in exactly one bucket.
+ */
+export const WINDOW_SEASON_MINUTES_GAP_BUCKETS: readonly { label: string; min: number; max: number }[] = [
+  { label: '<5', min: 0, max: 5 },
+  { label: '5–10', min: 5, max: 10 },
+  { label: '10–20', min: 10, max: 20 },
+  { label: '20–40', min: 20, max: 40 },
+  { label: '40+', min: 40, max: Infinity },
+]
+
+/**
  * The multi-fixture-headline sanity threshold from the ticket text
  * verbatim: "if excluding [multi-fixture player-gameweeks] moves the season
  * headline by more than 0.05, say so prominently." Applied to mean absolute
@@ -2257,6 +2271,73 @@ export function defconSignedError(row: MeasuredRow): number {
   return row.projectedComponents.defensiveContributionPoints - row.actualComponents.defensiveContributionPoints
 }
 
+/**
+ * Ticket #220. |window mean − season mean| for one measured row's minutes —
+ * the exact gap ticket #217's shrinkage formula
+ * (`shrunkRate(sum(recentMinutes), recentMinutes.length, seasonMinutesPerMatch)`,
+ * `src/lib/projection/minutes.ts`) pulls the window mean toward its season
+ * prior by. Diagnostic only — tests this file's own stated hypothesis
+ * (docs/projection-model-backlog.md) for why #217 barely moved the
+ * five-gameweek ranking figures: for most players the two means are already
+ * close, so shrinking one toward the other changes little. An empty window
+ * returns exactly 0, matching `shrunkRate`'s own algebra (an empty window
+ * collapses to precisely the season figure, see minutes.ts's header) —
+ * never a NaN or a division by zero.
+ */
+export function computeWindowSeasonMinutesGap(recentMinutes: readonly number[], seasonMinutesPerMatch: number): number {
+  if (recentMinutes.length === 0) return 0
+  const windowMean = recentMinutes.reduce((sum, m) => sum + m, 0) / recentMinutes.length
+  return Math.abs(windowMean - seasonMinutesPerMatch)
+}
+
+export interface WindowSeasonMinutesGapBucket {
+  label: string
+  n: number
+  /** Fraction of the total population this bucket holds. Null when tooSmallToRead — same "too small to read" rule MIN_BUCKET_SAMPLE_SIZE's other uses apply to a mean, applied here to a population share instead. */
+  shareOfPopulation: number | null
+  tooSmallToRead: boolean
+}
+
+/** Buckets a set of |window mean − season mean| gaps into WINDOW_SEASON_MINUTES_GAP_BUCKETS. */
+export function bucketWindowSeasonMinutesGap(gaps: readonly number[]): WindowSeasonMinutesGapBucket[] {
+  const total = gaps.length
+  return WINDOW_SEASON_MINUTES_GAP_BUCKETS.map(({ label, min, max }) => {
+    const n = gaps.filter((g) => g >= min && g < max).length
+    const tooSmallToRead = n < MIN_BUCKET_SAMPLE_SIZE
+    const shareOfPopulation = tooSmallToRead || total === 0 ? null : n / total
+    return { label, n, shareOfPopulation, tooSmallToRead }
+  })
+}
+
+function medianOf(values: readonly number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+}
+
+export interface WindowSeasonMinutesGapSummary {
+  n: number
+  meanGap: number | null
+  medianGap: number | null
+  buckets: WindowSeasonMinutesGapBucket[]
+}
+
+/**
+ * Ticket #220. The full window-vs-season-mean diagnostic over the measured
+ * population: sample size, central tendency, and the bucketed histogram.
+ * REPORTED ONLY — never a check, never gates this report, never asserted,
+ * same convention as every other diagnostic in this section.
+ */
+export function summarizeWindowSeasonMinutesGap(gaps: readonly number[]): WindowSeasonMinutesGapSummary {
+  return {
+    n: gaps.length,
+    meanGap: gaps.length === 0 ? null : gaps.reduce((sum, g) => sum + g, 0) / gaps.length,
+    medianGap: medianOf(gaps),
+    buckets: bucketWindowSeasonMinutesGap(gaps),
+  }
+}
+
 export interface MultiFixtureDiagnostic {
   /** Player-gameweeks with fixtureCount > 1 — the population the diagnostic isolates. */
   multiFixtureCount: number
@@ -3721,6 +3802,8 @@ export interface ReportData {
   fixtureCoverage: FixtureCoverageCounts
   /** Ticket #183 — the five-gameweek ranking target. See this file's "FIVE-GAMEWEEK RANKING TARGET" section. */
   fiveGameweek: FiveGameweekReportData
+  /** Ticket #220 — see {@link summarizeWindowSeasonMinutesGap}'s own comment. */
+  windowSeasonMinutesGap: WindowSeasonMinutesGapSummary
 }
 
 /** Ticket #183. Everything the five-gameweek section's report block needs, computed entirely in main() from data the section above already fetched — no new Supabase read. */
@@ -4157,6 +4240,11 @@ export function generateReportMarkdown(data: ReportData): string {
   // the same ReportData).
   sections.push(buildRecentMinutesEvidenceSection(data))
 
+  // Ticket #220 — appended strictly AFTER the minutes-evidence section
+  // above; nothing above this line is touched, matching every prior
+  // ticket's own "appended, never inserted" convention for this function.
+  sections.push(buildWindowSeasonMinutesGapSection(data))
+
   return sections.join('\n\n') + '\n'
 }
 
@@ -4198,6 +4286,47 @@ function buildRecentMinutesEvidenceSection(data: ReportData): string {
     'figure in every section above move once this fix lands — each measured row now receives a different ' +
     'projection than any previous run. This is that fix working, not a regression; reports before and after ' +
     'ticket #187 are not comparable to each other.'
+  )
+}
+
+function buildWindowSeasonMinutesGapTable(buckets: readonly WindowSeasonMinutesGapBucket[]): string {
+  const header = '| Absolute gap (window mean vs season mean, minutes) | n | Share of measured population |\n|---|---|---|'
+  const rows = buckets.map(
+    (b) => `| ${b.label} | ${b.n} | ${b.tooSmallToRead || b.shareOfPopulation === null ? 'too small to read' : `${(b.shareOfPopulation * 100).toFixed(1)}%`} |`,
+  )
+  return [header, ...rows].join('\n')
+}
+
+/**
+ * Ticket #220. Tests this file's own stated hypothesis for why ticket
+ * #217's minutes shrinkage moved the five-gameweek midfield/forward ranking
+ * figures so little (0.421 -> 0.426, 0.442 -> 0.446, against naive-baseline
+ * targets of 0.464/0.476 — docs/projection-model-backlog.md): for most
+ * players the recent-minutes window mean and the season minutes-per-match
+ * mean are already close, so shrinking one toward the other via
+ * SHRINKAGE_K changes little regardless of that constant's value.
+ * REPORTED ONLY — never a check, never gates this report, never asserted.
+ * Same single-gameweek measured population as every diagnostic above
+ * (data.measured's own row count) — every gap is computed from that row's
+ * OWN buildRecentMinutes(row) window and computeBaselineMinutesPerMatch(row)
+ * season figure, the identical two inputs #217's own
+ * buildSeasonMinutesPerMatch-fed shrinkage reads for that row's live
+ * projection.
+ */
+function buildWindowSeasonMinutesGapSection(data: ReportData): string {
+  const g = data.windowSeasonMinutesGap
+  return (
+    "## Window vs season minutes: how much does #217's shrinkage have to move? (ticket #220)\n\n" +
+    'REPORTED ONLY — never a check, never gates this report, never asserted. ' +
+    "`docs/projection-model-backlog.md` records this ticket's own reading of the figures below; " +
+    'this section only computes them, over the exact measured population above.\n\n' +
+    `- measured rows: **${g.n}**\n` +
+    `- mean |window mean − season mean|: **${fmt(g.meanGap, 1)} minutes**\n` +
+    `- median |window mean − season mean|: **${fmt(g.medianGap, 1)} minutes**\n\n` +
+    buildWindowSeasonMinutesGapTable(g.buckets) +
+    '\n\n' +
+    `A bucket under ${MIN_BUCKET_SAMPLE_SIZE} rows is reported "too small to read" rather than a figure ` +
+    'nobody checked — the same rule every other bucketed diagnostic in this report uses.'
   )
 }
 
@@ -4722,6 +4851,11 @@ async function main(): Promise<void> {
     // Pushed alongside `measured.push` below; nothing about that push itself
     // is touched.
     const measuredPlayerCodes: number[] = []
+    // Ticket #220 diagnostic — |window mean − season mean| minutes, one
+    // entry per measured row, same index population as `measured` (pushed
+    // alongside `measured.push` below). See computeWindowSeasonMinutesGap's
+    // own comment.
+    const windowSeasonMinutesGaps: number[] = []
     let actualRowsMatched = 0
     // Ticket #154 — population-health counters, over every feature_history
     // row read (not only the measured population): see the two interfaces'
@@ -4833,6 +4967,12 @@ async function main(): Promise<void> {
       // exercise `prior_matches <= 0` rows.
       const baselineMinutes = computeBaselineMinutesPerMatch(row)
       const baselineXgXa = computeBaselineXgXaPerMatch(row)
+
+      // Ticket #220 diagnostic — the SAME two inputs #217's own shrinkage
+      // reads for this row's live minutes projection above (the window
+      // `projection` was built from, and `baselineMinutes` just computed):
+      // see computeWindowSeasonMinutesGap's own comment.
+      windowSeasonMinutesGaps.push(computeWindowSeasonMinutesGap(buildRecentMinutes(row), baselineMinutes))
 
       measured.push(
         buildMeasuredRow(
@@ -5066,6 +5206,7 @@ async function main(): Promise<void> {
       rankingByGameweekAndPosition,
       fixtureCoverage,
       fiveGameweek: fiveGameweekReportData,
+      windowSeasonMinutesGap: summarizeWindowSeasonMinutesGap(windowSeasonMinutesGaps),
     }
     const reportMarkdown = generateReportMarkdown(reportData)
     await mkdir(dirname(reportPath), { recursive: true })
@@ -5112,6 +5253,9 @@ async function main(): Promise<void> {
       fiveGameweekRankingSeason: fiveGameweekReportData.season,
       fiveGameweekOracleSeason: fiveGameweekReportData.oracleFiveGw.season,
       oracleCeiling: fiveGameweekReportData.oracleCeiling,
+      // Ticket #220 — informational, exactly like the oracle's own figures
+      // noted above: no sanity bound is derived from it.
+      windowSeasonMinutesGap: reportData.windowSeasonMinutesGap,
       reportPath,
     }
 

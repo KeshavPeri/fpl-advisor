@@ -39,6 +39,7 @@ import {
   averageMinutesPerMatch,
   buildBaselineVerdicts,
   bucketByPriorMatches,
+  bucketWindowSeasonMinutesGap,
   buildClubFixtureSchedule,
   buildDefconMatches,
   buildDefconMatchesFromCounts,
@@ -72,6 +73,7 @@ import {
   computeOracleRate,
   computePositionPriors,
   computeTeamStrengthAsOf,
+  computeWindowSeasonMinutesGap,
   CONSTANT_BASELINE_LABEL,
   CONSTANT_BASELINE_VALUE,
   countMultiFixtureRowsByGameweek,
@@ -141,6 +143,7 @@ import {
   summarizeRankingByGameweekAndPosition,
   summarizeRankingByPosition,
   summarizeSeasonRanking,
+  summarizeWindowSeasonMinutesGap,
   sumClubScheduleLegCounts,
   teamStrengthRate,
   toActualMatchStatsInput,
@@ -166,6 +169,7 @@ import {
   type ReportData,
   type TeamMatchRecord,
   type TeamStrengthRecord,
+  WINDOW_SEASON_MINUTES_GAP_BUCKETS,
 } from './run-backtest.ts'
 
 const zeroPrior = (position = FORWARD): PositionPrior => ({
@@ -1643,6 +1647,82 @@ describe('bucketByPriorMatches', () => {
     const bucket20plus = buckets.find((b) => b.label === '20+')!
     expect(bucket20plus.tooSmallToRead).toBe(false)
     expect(bucket20plus.meanSignedError).toBeCloseTo(4, 10)
+  })
+})
+
+// ============================================================================
+// computeWindowSeasonMinutesGap / bucketWindowSeasonMinutesGap /
+// summarizeWindowSeasonMinutesGap — ticket #220.
+// ============================================================================
+
+describe('computeWindowSeasonMinutesGap', () => {
+  it('is the absolute difference between the window mean and the season figure', () => {
+    // window mean = (90+90+90+90+0)/5 = 72; season figure supplied as 60 -> |72-60| = 12
+    expect(computeWindowSeasonMinutesGap([90, 90, 90, 90, 0], 60)).toBeCloseTo(12, 10)
+  })
+
+  it('is exactly 0 when the window mean equals the season figure', () => {
+    expect(computeWindowSeasonMinutesGap([80, 80, 80], 80)).toBe(0)
+  })
+
+  it('is exactly 0 for an empty window, matching shrunkRate\'s own collapse-to-the-prior algebra — never a NaN', () => {
+    expect(computeWindowSeasonMinutesGap([], 45)).toBe(0)
+  })
+
+  it('works on a single-match window (the pre-#187 averaged-fallback shape)', () => {
+    expect(computeWindowSeasonMinutesGap([90], 70)).toBeCloseTo(20, 10)
+  })
+})
+
+describe('bucketWindowSeasonMinutesGap', () => {
+  it('partitions gaps into the <5 / 5–10 / 10–20 / 20–40 / 40+ buckets by label, half-open on the lower bound', () => {
+    // One gap in each bucket, right at its lower boundary, padded past MIN_BUCKET_SAMPLE_SIZE.
+    const oneEach = [0, 5, 10, 20, 40]
+    const padded = oneEach.flatMap((gap) => Array.from({ length: MIN_BUCKET_SAMPLE_SIZE }, () => gap))
+    const buckets = bucketWindowSeasonMinutesGap(padded)
+    expect(buckets.map((b) => b.label)).toEqual(WINDOW_SEASON_MINUTES_GAP_BUCKETS.map((b) => b.label))
+    expect(buckets.map((b) => b.n)).toEqual([MIN_BUCKET_SAMPLE_SIZE, MIN_BUCKET_SAMPLE_SIZE, MIN_BUCKET_SAMPLE_SIZE, MIN_BUCKET_SAMPLE_SIZE, MIN_BUCKET_SAMPLE_SIZE])
+    for (const b of buckets) {
+      expect(b.tooSmallToRead).toBe(false)
+      expect(b.shareOfPopulation).toBeCloseTo(1 / 5, 10)
+    }
+  })
+
+  it('labels a bucket "too small to read" (null share) below MIN_BUCKET_SAMPLE_SIZE, same rule bucketByPriorMatches uses', () => {
+    const gaps = Array.from({ length: MIN_BUCKET_SAMPLE_SIZE - 1 }, () => 1) // lands in "<5"
+    const buckets = bucketWindowSeasonMinutesGap(gaps)
+    const under5 = buckets.find((b) => b.label === '<5')!
+    expect(under5.n).toBe(MIN_BUCKET_SAMPLE_SIZE - 1)
+    expect(under5.tooSmallToRead).toBe(true)
+    expect(under5.shareOfPopulation).toBeNull()
+  })
+
+  it('every gap lands in exactly one bucket (n across buckets sums to the input length)', () => {
+    const gaps = [0, 1, 4.9, 5, 9.9, 10, 19.9, 20, 39.9, 40, 90]
+    const buckets = bucketWindowSeasonMinutesGap(gaps)
+    expect(buckets.reduce((sum, b) => sum + b.n, 0)).toBe(gaps.length)
+  })
+})
+
+describe('summarizeWindowSeasonMinutesGap', () => {
+  it('reports n, mean and median alongside the bucketed histogram', () => {
+    const summary = summarizeWindowSeasonMinutesGap([2, 4, 6])
+    expect(summary.n).toBe(3)
+    expect(summary.meanGap).toBeCloseTo(4, 10)
+    expect(summary.medianGap).toBe(4)
+    expect(summary.buckets.length).toBe(WINDOW_SEASON_MINUTES_GAP_BUCKETS.length)
+  })
+
+  it('reports null mean/median (never NaN) for an empty population', () => {
+    const summary = summarizeWindowSeasonMinutesGap([])
+    expect(summary.n).toBe(0)
+    expect(summary.meanGap).toBeNull()
+    expect(summary.medianGap).toBeNull()
+  })
+
+  it('takes the average of the two middle values for an even-sized population', () => {
+    const summary = summarizeWindowSeasonMinutesGap([1, 2, 3, 10])
+    expect(summary.medianGap).toBeCloseTo(2.5, 10)
   })
 })
 
@@ -3653,6 +3733,7 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
         fiveGw: { season: fgSeason, byPosition: fgByPosition },
       },
     },
+    windowSeasonMinutesGap: summarizeWindowSeasonMinutesGap([]),
   }
 
   it('starts with the exact pre-#183 report content, then continues with the new Five-gameweek section', () => {
@@ -3743,6 +3824,29 @@ describe('generateReportMarkdown — the existing (pre-#183) report is byte-iden
     expect(output).toContain('### Oracle-ceiling check: FAILED')
     expect(output).toContain('0.672')
     expect(output).toContain('0.507')
+  })
+
+  // Ticket #220 — appended strictly after the minutes-evidence section
+  // (see generateReportMarkdown's own final push); everything through the
+  // end of that section stays byte-identical, proven above.
+  it('appends the window-vs-season-minutes-gap section after the minutes-evidence section (ticket #220)', () => {
+    const withGap: ReportData = { ...data, windowSeasonMinutesGap: summarizeWindowSeasonMinutesGap([1, 6, 12, 25, 45]) }
+    const output = generateReportMarkdown(withGap)
+    const minutesIndex = output.indexOf('## Minutes evidence (ticket #187)')
+    const gapIndex = output.indexOf("## Window vs season minutes: how much does #217's shrinkage have to move? (ticket #220)")
+    expect(minutesIndex).toBeGreaterThan(-1)
+    expect(gapIndex).toBeGreaterThan(minutesIndex)
+    expect(output).toContain('REPORTED ONLY — never a check, never gates this report, never asserted')
+    expect(output).toContain('measured rows: **5**')
+    expect(output).toContain('too small to read') // every bucket here is well under MIN_BUCKET_SAMPLE_SIZE
+  })
+
+  it('the window-vs-season-minutes-gap section reads its figures from data.windowSeasonMinutesGap, not a fixed string', () => {
+    const withGap: ReportData = { ...data, windowSeasonMinutesGap: summarizeWindowSeasonMinutesGap([]) }
+    const output = generateReportMarkdown(withGap)
+    expect(output).toContain('measured rows: **0**')
+    expect(output).toContain('mean |window mean − season mean|: **n/a minutes**')
+    expect(output).toContain('median |window mean − season mean|: **n/a minutes**')
   })
 })
 
