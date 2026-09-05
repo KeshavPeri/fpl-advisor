@@ -26,6 +26,9 @@ import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.js'
 // check (see project-points.ts's own footer comment) so this import alone
 // never triggers a real run.
 import { CURRENT_SEASON, classifySeasonCoverage, sortRecentFirst, splitBySeason } from './project-points.ts'
+// Ticket #213: same reasoning -- computeSeasonMinutesPerMatch is a plain pure
+// function (no Supabase call of its own), imported and exercised directly.
+import { computeSeasonMinutesPerMatch } from './project-points.ts'
 // Ticket #119: same reasoning -- effectiveRatePositionPrior and
 // medianNowCostByPosition are plain pure functions, imported and exercised
 // directly.
@@ -217,6 +220,17 @@ describe('splitBySeason — ticket #113', () => {
   })
 })
 
+describe('computeSeasonMinutesPerMatch — ticket #213', () => {
+  it('a player with current-season matches: total minutes / match count', () => {
+    expect(computeSeasonMinutesPerMatch(360, 5)).toBeCloseTo(72, 10)
+    expect(computeSeasonMinutesPerMatch(90, 1)).toBeCloseTo(90, 10)
+  })
+
+  it('zero current-season matches -> undefined, never 0 or NaN (the fallback case, counted by main() as playersMinutesSeasonFigureFallback)', () => {
+    expect(computeSeasonMinutesPerMatch(0, 0)).toBeUndefined()
+  })
+})
+
 describe('classifySeasonCoverage — ticket #113 job_runs.details counters', () => {
   it('current-season rows present -> "current", regardless of historical coverage', () => {
     expect(classifySeasonCoverage(true, true)).toBe('current')
@@ -284,6 +298,11 @@ describe('project-points.ts — season-split source invariants (ticket #113)', (
   it('imports the two-stage estimators from src/lib/projection rather than re-deriving a blend inline', () => {
     expect(source).toMatch(/computeTwoStagePlayerRates/)
     expect(source).toMatch(/estimateTwoStageDefconHitRate/)
+  })
+
+  it('reports the ticket #213 minutes-shrinkage fallback as its own named job_runs.details field, never silently', () => {
+    expect(source).toMatch(/playersMinutesSeasonFigureFallback/)
+    expect(source).toMatch(/seasonMinutesPerMatch/)
   })
 
   it('the sort placing current-season matches first lives in this file, not in minutes.ts', () => {

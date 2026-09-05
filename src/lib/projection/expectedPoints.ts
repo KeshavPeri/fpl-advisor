@@ -440,6 +440,17 @@ export interface PlayerProjectionInput {
   chanceOfPlayingNextRound: number | null
   /** Last five match rows' minutes played, all of them, most-recent-first or any order — see minutes.ts. Empty array is the stated no-history case. */
   recentMinutes: readonly number[]
+  /**
+   * Ticket #213, optional. This player's season minutes per match — the
+   * figure `estimateMinutes` shrinks `recentMinutes`' mean toward (see that
+   * file's own header for the formula and the "because"). `undefined` when
+   * the producer cannot supply one (e.g. a player with zero current-season
+   * matches) — `estimateMinutes` then falls back to its pre-#213 plain-mean
+   * behaviour, exactly, rather than guessing. Every producer of this type
+   * either supplies a real value or is counted in its own reported fallback
+   * tally — see scripts/project-points.ts and scripts/run-backtest.ts.
+   */
+  seasonMinutesPerMatch?: number
   /** Aggregated totals across the player's own full available match history. */
   rateHistory: PlayerRateHistory
   /** This player's position prior, from `positionPriorRates` over that position's league-wide match history. */
@@ -536,7 +547,7 @@ export interface FixtureProjection {
  */
 export function projectPlayerFixture(player: PlayerProjectionInput, fixture: FixtureContext): FixtureProjection {
   const availability = availabilityFactor(player.status, player.chanceOfPlayingNextRound)
-  const minutesEstimate = estimateMinutes(player.recentMinutes, availability)
+  const minutesEstimate = estimateMinutes(player.recentMinutes, availability, player.seasonMinutesPerMatch)
   // Fraction of a full 90 minutes this player is expected to be exposed to
   // this fixture's attacking/defensive events. Reuses expectedMinutes
   // (already scaled by availability and recent involvement) rather than
