@@ -29,6 +29,15 @@
 // arrays, and fixtures/ must be a non-empty JSON array. An unexpected shape
 // throws before the first upsert call, so a bad response never overwrites
 // good data with partial or empty rows — no data beats wrong data.
+//
+// PENALTIES_ORDER (ticket #219). mapPlayers now also reads bootstrap-static's
+// own `penalties_order` field (1 = first-choice taker, 2 = second, ... null
+// for no recorded role) straight through onto players.penalties_order — see
+// supabase/migrations/20260905090000_players_penalties_order.sql for the
+// column and docs/projection-model-backlog.md's ticket #219 entry for why
+// this is an ingest-only change: a projection-model treatment built on top
+// of this field was measured and did not clear its falsification bar, so
+// nothing in src/lib/projection/ reads this column.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
@@ -288,7 +297,12 @@ function mapGameweeks(events: JsonRecord[]): JsonRecord[] {
   }))
 }
 
-function mapPlayers(elements: JsonRecord[]): JsonRecord[] {
+// Exported (ticket #219) so the null/1/2/3 mapping and the non-null counter
+// below can be unit-tested directly on constructed bootstrap-static-shaped
+// rows, without a live Supabase project or a real API fetch — same
+// technique scripts/ingest-core-insights.ts already uses for its own pure
+// row-mapping functions.
+export function mapPlayers(elements: JsonRecord[]): JsonRecord[] {
   return elements.map((p) => ({
     id: num(p, 'id'),
     code: num(p, 'code'),
@@ -314,6 +328,14 @@ function mapPlayers(elements: JsonRecord[]): JsonRecord[] {
     own_goals: num(p, 'own_goals') ?? 0,
     penalties_saved: num(p, 'penalties_saved') ?? 0,
     penalties_missed: num(p, 'penalties_missed') ?? 0,
+    // Ticket #219 — FPL's own published penalty-taking priority (1 = first
+    // choice, 2 = second, ...). Nullable, no default (see the migration's
+    // own header) — the large majority of players genuinely have no
+    // penalty-taking role, and null must stay null, never coerced to 0 the
+    // way the counting stats above are. No range check: the source has been
+    // observed to publish values above 3 (see the migration header), so
+    // this is read verbatim, whatever the API sends.
+    penalties_order: num(p, 'penalties_order'),
     yellow_cards: num(p, 'yellow_cards') ?? 0,
     red_cards: num(p, 'red_cards') ?? 0,
     saves: num(p, 'saves') ?? 0,
@@ -329,6 +351,17 @@ function mapPlayers(elements: JsonRecord[]): JsonRecord[] {
     expected_goal_involvements: num(p, 'expected_goal_involvements') ?? 0,
     expected_goals_conceded: num(p, 'expected_goals_conceded') ?? 0,
   }))
+}
+
+/**
+ * Ticket #219 — how many players in this mapped batch carry a non-null
+ * `penalties_order`. Pulled out as its own pure, exported function so
+ * job_runs.details' new counter is provable on constructed rows, the same
+ * technique this file's other tests would use if it had any before this
+ * ticket — see ingest-fpl.test.ts.
+ */
+export function countPlayersWithPenaltiesOrder(playerRows: readonly JsonRecord[]): number {
+  return playerRows.filter((row) => row.penalties_order !== null && row.penalties_order !== undefined).length
 }
 
 function mapFixtures(fixtures: JsonRecord[]): JsonRecord[] {
@@ -421,6 +454,11 @@ async function main(): Promise<void> {
     const gameweekRows = mapGameweeks(bootstrapData.events)
     const playerRows = mapPlayers(bootstrapData.elements)
     const fixtureRows = mapFixtures(fixturesData)
+    // Ticket #219 — reported in job_runs.details below, not used to filter
+    // or validate anything: a batch with zero penalty-priority players is
+    // unusual but not an error (see the migration's own "large majority
+    // never take a penalty" note).
+    const playersWithPenaltiesOrder = countPlayersWithPenaltiesOrder(playerRows)
 
     // Order matters for foreign keys: teams and gameweeks have none,
     // players references teams, fixtures references both teams and
@@ -440,13 +478,16 @@ async function main(): Promise<void> {
     for (const table of TABLES) {
       console.log(`ingest-fpl: ${table}: ${counts[table]} rows`)
     }
+    console.log(`ingest-fpl: players with a non-null penalties_order: ${playersWithPenaltiesOrder}`)
 
     const finishedAt = new Date()
     const { error: jobRunError } = await supabase.from('job_runs').insert({
       job_name: JOB_NAME,
       status: 'success',
       message: 'ingest-fpl: bootstrap-static/ and fixtures/ ingested',
-      details: counts,
+      // Ticket #219 — playersWithPenaltiesOrder alongside the pre-existing
+      // per-table row counts, not replacing them.
+      details: { ...counts, playersWithPenaltiesOrder },
       started_at: startedAt.toISOString(),
       finished_at: finishedAt.toISOString(),
     })
@@ -500,8 +541,19 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err)
-  console.error(`ingest-fpl: unexpected top-level failure: ${message}`)
-  process.exit(1)
-})
+// Guarded (ticket #219, matching every other scripts/*.ts job — e.g.
+// scripts/ingest-core-insights.ts, scripts/project-points.ts,
+// scripts/sync-squad.ts): this file now exports mapPlayers and
+// countPlayersWithPenaltiesOrder so they are unit-testable without a live
+// Supabase project or a real API fetch (ingest-fpl.test.ts). Importing the
+// module for that must not trigger a real run — before this ticket it did,
+// since this was the one job in scripts/ with no isMainModule guard,
+// because it had no test file to import it until now.
+const isMainModule = process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`
+if (isMainModule) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`ingest-fpl: unexpected top-level failure: ${message}`)
+    process.exit(1)
+  })
+}
