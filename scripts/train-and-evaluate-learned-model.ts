@@ -1,8 +1,18 @@
-// Learned model, second slice — ticket #208 (R6, feature-list items 30/31
-// reshaped). Trains a small model on ticket #203's `training_features`
-// substrate (18,023 rows for 2025-2026) and reads it against the
-// pre-registered gate from docs/model-review-2026-09-02.md's question 4 and
-// docs/projection-model-backlog.md's G15 entry.
+// Learned model, THIRD slice — ticket #214 (fair-gate re-run). Ticket #208's
+// first live run (report 12) mixed two kinds of threshold in one gate table:
+// Goalkeeper/Defender were judged against the incumbent computed live, on
+// the held-out fold; Midfielder/Forward were judged against 0.464/0.476 —
+// literal constants lifted from report 10, a FULL-SEASON report, and the
+// held-out fold (gameweeks 29-38) scores every ranker roughly 0.05 higher
+// than its full-season figure. The pass/fail split (2 of 4) fell straight
+// along that seam, not along a real finding. This ticket does not retrain
+// anything — same model type, same hyperparameters, same feature list as
+// #208 (see DEFAULT_GBM_HYPERPARAMETERS/FEATURE_NAMES, both untouched). It
+// replaces the EVALUATION only: every threshold is now computed live, on the
+// SAME fold as the model it judges, and the whole thing is repeated across
+// four independent train/eval cutoffs so a one-split fluke cannot pass as a
+// finding. See docs/projection-model-backlog.md's G16 entries for #208/#207/
+// #209's own history, and this ticket's own new entry for what changed here.
 //
 // ============================================================================
 // SHIPS NOTHING USER-VISIBLE.
@@ -10,41 +20,44 @@
 // No projection is written, no player_projections row gains a new
 // model_version, no CSV changes, no recommendation moves. This is a
 // measurement job — it reads training_features and player_match_stats,
-// fits a model, evaluates it, and reports a table plus a pass/fail verdict.
-// Its only Supabase write is one job_runs row.
+// fits one model per split, evaluates each, and reports a table plus a
+// plain per-position verdict. Its only Supabase write is one job_runs row.
 //
 // ============================================================================
-// THE GATE — pre-registered, restated here so a reader never has to
-// cross-reference docs/projection-model-backlog.md's G15 entry to know why
-// these four numbers.
+// THE GATE — restated here so a reader never has to cross-reference
+// docs/projection-model-backlog.md to know the rule.
 // ============================================================================
-// Measured on the five-gameweek ranking target, over the same measured
-// population and exclusions scripts/run-backtest.ts already uses, per
-// position:
-//   Midfielder | must beat 0.464 — the naive "prior minutes per match" baseline (report 10, FIXED, never recomputed from this run)
-//   Forward    | must beat 0.476 — same baseline, FIXED
-//   Goalkeeper | must beat the INCUMBENT's own figure, computed fresh in this same run
-//   Defender   | must beat the INCUMBENT's own figure, computed fresh in this same run
-// The MID/FWD gate is the naive baseline, not the hand-built baseline-v1
-// model, because report 10 already showed the naive baseline beating
-// baseline-v1 at those two positions — that gate would pass a model with no
-// real skill. GK/DEF use the incumbent because report 10 showed baseline-v1
-// beating the naive baseline there; a learned model has to clear the bar
-// that already exists, not a weaker one.
+// For every position, at the five-gameweek horizon: the learned model must
+// beat the INCUMBENT's own figure — never a naive baseline, never a number
+// quoted from any report — on the MAJORITY of TRAIN_EVAL_GAMEWEEK_CUTOFFS'
+// splits. Beating a naive baseline is not sufficient: the incumbent already
+// beats every naive baseline at every position except midfield and forward
+// (docs/projection-model-backlog.md G15), so a naive-baseline gate would pass
+// a model that is a genuine downgrade at goalkeeper/defender. See
+// buildGateResults for the exact win/loss/verdict arithmetic, and its own
+// comment for the "because" behind the three-way verdict (ship / do not ship
+// / too close to call) rather than a bare pass/fail.
 //
 // ============================================================================
-// THE INCUMBENT IS COMPUTED LIVE, NEVER QUOTED FROM A PAST REPORT.
+// THE INCUMBENT IS COMPUTED LIVE, NEVER QUOTED FROM A PAST REPORT — AT EVERY
+// SPLIT.
 // ============================================================================
-// A sibling ticket (#207) reverts src/lib/projection/minutes.ts on its own
-// branch in this same batch — that changes every incumbent number once
-// merged. This job never assumes a merge order: it imports
-// src/lib/projection/ dynamically (via scripts/run-backtest.ts's own
-// projectRow) and computes the incumbent's baseline-v1 figures fresh, every
-// run, from whatever those modules contain on the branch/commit actually
-// checked out. The report and job_runs details both record the checked-out
-// git commit SHA (see `readGitCommitSha` below) precisely so a reader can
-// tell, after the fact, whether a given run's incumbent numbers reflect
-// #207's revert or not — never guessed, always checkable.
+// A sibling ticket (#213) widens PlayerProjectionInput and changes what
+// estimateMinutes returns, on its own branch in this same batch — that
+// changes every incumbent number once merged, and this job never assumes a
+// merge order. It imports src/lib/projection/ dynamically (via
+// scripts/run-backtest.ts's own projectRow) and computes the incumbent's
+// baseline-v1 figures fresh, every split, from whatever those modules
+// contain on the branch/commit actually checked out. The report and
+// job_runs details both record the checked-out git commit SHA (see
+// `readGitCommitSha` below) and a plain-language note on which minutes model
+// that SHA reflects, precisely so a reader can tell, after the fact, whether
+// a given run's incumbent numbers predate #213's change — never guessed,
+// always checkable. The naive baselines are ALSO computed live, per split,
+// on that split's own held-out fold — never a number carried over from
+// report 10 or any other report. This is the whole defect #214 fixes: no
+// figure in the gate table is a literal constant carried over from a report,
+// for any position.
 //
 // ============================================================================
 // REUSE, NEVER REIMPLEMENT (this ticket's own DoD, grep-checkable).
@@ -52,51 +65,53 @@
 // This file defines NO Spearman correlation, NO rank function, and NO
 // five-gameweek window classifier of its own. Every ranking figure below is
 // produced by summarizeGenericBaselineSpearman / summarizeBaselines /
-// summarizeFiveGameweekBaselines / computeGenericConstantBaselineSpearman,
-// all imported from scripts/run-backtest.ts, never edited by this ticket.
-// The five-gameweek population is built by literally calling that file's own
+// summarizeFiveGameweekBaselines, all imported from scripts/run-backtest.ts,
+// never edited by this ticket (out of scope, and #215 edits that file
+// concurrently in this same batch on a separate branch). The five-gameweek
+// population is built by literally calling that file's own
 // classifyFiveGameweekRow for every candidate window — this job supplies a
 // SECOND model's predictions (the learned model's) for the exact same
 // windows that function already proved are safe to measure; it does not
 // re-derive which windows those are.
 //
 // ============================================================================
-// THE MODEL — small, inspectable, no new dependency.
+// THE MODEL — unchanged from #208. Small, inspectable, no new dependency.
 // ============================================================================
 // Gradient-boosted regression trees over FEATURE_NAMES (15 columns), hand
 // written below (buildRegressionTree / fitGradientBoostingModel) rather than
-// pulled from an ML package: this ticket's own scope constraint is "one new
-// script ... under scripts/. Nothing else" (no package.json edit), and the
-// ticket text itself asks for "gradient boosting on ~15 columns, not a
-// neural network" — small enough that a from-scratch implementation is both
-// safer (no new npm dependency, no Tier 2 "framework choice" to justify) and
-// more inspectable than importing one. See DEFAULT_GBM_HYPERPARAMETERS for
-// the exact numbers and the "because" for each.
+// pulled from an ML package. Hyperparameters, fixed before any real data is
+// read (no tuning against the gate, and #214's own scope forbids retraining
+// to chase it): 60 trees, max depth 3, learning rate 0.08, min 40 samples
+// per leaf. NONE of this changed for #214 — only the evaluation did.
 //
 // ============================================================================
-// THE SPLIT — gameweek-block, not row-random, and it is the thing under
-// test.
+// THE SPLIT — gameweek-block, not row-random, REPEATED across four cutoffs.
 // ============================================================================
-// TRAIN_EVAL_GAMEWEEK_CUTOFF partitions every row by its OWN gameweek_id: a
-// row belongs to the training fold iff gameweekId <= cutoff. This is a
-// temporal split, not a random one, because the DoD requires proving no
-// gameweek the model is SCORED on ever contributed to FITTING it — a random
-// row-level split could not make that claim, since a five-gameweek window's
-// legs would then span both folds unpredictably. See splitByGameweekCutoff's
-// own tests, and the "no lookahead into the evaluation set" describe block
-// in this file's test file — the single most important test this ticket
-// adds.
+// TRAIN_EVAL_GAMEWEEK_CUTOFFS partitions every row by its OWN gameweek_id,
+// once per cutoff in the array: a row belongs to that split's training fold
+// iff gameweekId <= cutoff. This is a temporal split, not a random one,
+// because the DoD requires proving no gameweek the model is SCORED on ever
+// contributed to FITTING it, at EVERY cutoff — a random row-level split
+// could not make that claim, since a five-gameweek window's legs would then
+// span both folds unpredictably. A separate model is fit for each cutoff
+// (fitting is cheap — a few thousand rows, 60 shallow trees — and reusing
+// one model across cutoffs would defeat the point of testing whether an edge
+// survives a different amount of training data too). See
+// splitByGameweekCutoff's own tests, and the "no lookahead into the
+// evaluation set" describe block in this file's test file, now parameterized
+// over every cutoff in TRAIN_EVAL_GAMEWEEK_CUTOFFS — the single most
+// important test this ticket touches.
 //
 // ============================================================================
-// NO TUNING AGAINST THE GATE.
+// NO TUNING AGAINST THE GATE, AND NO RETRAINING (#214's own scope line).
 // ============================================================================
-// The hyperparameters, the split cutoff and the feature list are all fixed
+// The hyperparameters, the split cutoffs and the feature list are all fixed
 // BEFORE this file's own main() ever reads a row of real data — they are
 // module-level constants, not env-configurable, so there is no dial to turn
-// after seeing a disappointing number. Fit once on the training fold,
-// evaluate once on the held-out fold, report whatever comes out. If the gate
+// after seeing a disappointing number. Fit once per cutoff, evaluate once
+// per cutoff, report whatever comes out for all four. If a position's gate
 // fails, this job says so plainly (see buildReportMarkdown's gate section)
-// and does not retry with different numbers.
+// and does not retry with different numbers or a different model.
 //
 // ============================================================================
 // Wiring.
@@ -157,7 +172,6 @@ import {
   incrementFiveGameweekExclusion,
   assertFiveGameweekReconciles,
   summarizeGenericBaselineSpearman,
-  computeGenericConstantBaselineSpearman,
   summarizeBaselines,
   summarizeFiveGameweekBaselines,
 } from './run-backtest.ts'
@@ -173,30 +187,20 @@ export const DEFAULT_SEASON = '2025-2026'
 const DEFAULT_REPORT_PATH = './out/learned-model-report.md'
 
 /**
- * The train/eval split — a GAMEWEEK cutoff, not a row-random split (see file
- * header, "THE SPLIT"). A row with gameweekId <= this value is training
- * data; every other row is held out. 28 of the season's 38 gameweeks
- * (~74%) for training, leaving gameweeks 29-38 (10 gameweeks) for
- * evaluation — enough single-gameweek eval rows to comfortably clear
- * MIN_BUCKET_SAMPLE_SIZE (50) per position, and enough five-gameweek window
- * starts (29..34, since a window starting later than 34 would reach past
- * gameweek 38) to read a five-gameweek figure at all. Fixed before this file
- * ever reads a row of real data — see file header, "NO TUNING AGAINST THE
- * GATE".
+ * The train/eval splits — REPEATED, per ticket #214's own scope ("evaluate
+ * across several train/eval cutoffs — gameweek 22, 25, 28 and 31"). Each
+ * cutoff is a GAMEWEEK boundary, not a row-random split (see file header,
+ * "THE SPLIT"): a row with gameweekId <= the cutoff is that split's training
+ * data, every other row is held out FOR THAT SPLIT. 22/25/28/31 of the
+ * season's 38 gameweeks leave held-out folds of 16/13/10/7 gameweeks
+ * respectively — every one comfortably clears MIN_BUCKET_SAMPLE_SIZE (50)
+ * per position at the one-gameweek horizon, and every one leaves at least
+ * one five-gameweek window start (cutoff 31's eval fold is gameweeks 32-38,
+ * giving window starts 32/33/34). Fixed before this file ever reads a row of
+ * real data — see file header, "NO TUNING AGAINST THE GATE" — and never
+ * env-configurable, for the same reason.
  */
-export const TRAIN_EVAL_GAMEWEEK_CUTOFF = 28
-
-/**
- * The two FIXED gate thresholds (docs/projection-model-backlog.md G15,
- * docs/model-review-2026-09-02.md question 4) — report 10's own naive
- * "prior minutes per match" baseline at the five-gameweek horizon, full
- * season. These do NOT get recomputed from this run's own (necessarily
- * smaller, held-out-only) population — the ticket's gate table states them
- * as fixed numbers to beat, not "beat whatever this run's naive baseline
- * happens to read on a 10-gameweek slice". See buildGateResults.
- */
-export const GATE_MIDFIELDER_NAIVE_BASELINE_SPEARMAN = 0.464
-export const GATE_FORWARD_NAIVE_BASELINE_SPEARMAN = 0.476
+export const TRAIN_EVAL_GAMEWEEK_CUTOFFS: readonly number[] = [22, 25, 28, 31]
 
 const POSITIONS: readonly Position[] = [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD]
 const POSITION_NAMES: Readonly<Record<Position, string>> = {
@@ -717,54 +721,99 @@ export function predictLearnedFiveGameweekTotal(
 
 // ============================================================================
 // Pure computation — the gate. Boolean comparisons of ALREADY-COMPUTED
-// Spearman figures, never a correlation/rank computation of its own.
+// Spearman figures, never a correlation/rank computation of its own. This is
+// the section ticket #214 replaces almost entirely: one split's worth of
+// pass/fail booleans becomes a per-position record across every split in
+// TRAIN_EVAL_GAMEWEEK_CUTOFFS, reduced to a plain verdict.
 // ============================================================================
 
-export interface GateLineResult {
+/** One position's result at ONE split — the atom every gate figure is built from. */
+export interface SplitGateLine {
+  cutoff: number
+  learnedSpearman: number | null
+  incumbentSpearman: number | null
+  /**
+   * Whether the learned model beat the incumbent AT THIS SPLIT — "beat"
+   * means strictly greater than, matching scripts/run-backtest.ts's own
+   * checkOracleCeiling `>=`-fails convention (a tie is not a win). Null when
+   * either side lacks enough data to compare — never guessed as a win or a
+   * loss, and never counted toward wins/losses below.
+   */
+  beat: boolean | null
+}
+
+export type PositionVerdict = 'ship' | 'do-not-ship' | 'too-close-to-call' | 'insufficient-data'
+
+export interface PositionGateResult {
   position: Position
   positionName: string
-  learnedSpearman: number | null
-  thresholdDescription: string
-  threshold: number | null
-  /** null means insufficient data to compare (either side null) — never guessed as pass or fail. */
-  pass: boolean | null
+  splits: readonly SplitGateLine[]
+  wins: number
+  losses: number
+  /** Splits where both sides had enough data to compare — wins + losses. */
+  comparableSplits: number
+  /**
+   * The ticket's own three-way verdict, read off the win/loss count across
+   * TRAIN_EVAL_GAMEWEEK_CUTOFFS' splits (see this function's own comment for
+   * the "because"). 'insufficient-data' is a fourth, honest state this
+   * ticket's own instruction not to guess requires — never folded into
+   * 'do-not-ship'.
+   */
+  verdict: PositionVerdict
 }
 
 /**
- * Builds the four gate lines (file header, "THE GATE"). Midfielder/Forward
- * compare against the FIXED report-10 naive-baseline figures
- * (GATE_MIDFIELDER_NAIVE_BASELINE_SPEARMAN/GATE_FORWARD_NAIVE_BASELINE_SPEARMAN);
- * Goalkeeper/Defender compare against `incumbentFiveGwByPosition`, computed
- * fresh in THIS run (file header, "THE INCUMBENT IS COMPUTED LIVE"). "Beat"
- * means strictly greater than — a tie is not a pass, matching
- * scripts/run-backtest.ts's own checkOracleCeiling `>=`-fails convention.
+ * One split's per-position five-gameweek figures — learned AND incumbent,
+ * both computed fresh on that split's own held-out fold (file header, "THE
+ * INCUMBENT IS COMPUTED LIVE ... AT EVERY SPLIT"). What main() feeds
+ * buildGateResults, one entry per cutoff in TRAIN_EVAL_GAMEWEEK_CUTOFFS.
  */
-export function buildGateResults(
-  learnedFiveGwByPosition: Record<Position, number | null>,
-  incumbentFiveGwByPosition: Record<Position, number | null>,
-): GateLineResult[] {
+export interface FiveGwSplitGateInput {
+  cutoff: number
+  learnedByPosition: Record<Position, number | null>
+  incumbentByPosition: Record<Position, number | null>
+}
+
+/**
+ * Builds one PositionGateResult per position (file header, "THE GATE"):
+ * for EVERY position — never just goalkeeper/defender, never a naive
+ * baseline for any position — the learned model is compared against the
+ * INCUMBENT, on the five-gameweek target, split by split.
+ *
+ * The verdict, and why it is three-way rather than a bare pass/fail:
+ *  - `ship` — the learned model beat the incumbent on a genuine MAJORITY of
+ *    the comparable splits (wins > losses). This is the ticket's own gate
+ *    restated ("on the majority of splits"), read as a recommendation to
+ *    ship rather than a bare boolean.
+ *  - `do-not-ship` — the incumbent won a majority (losses > wins). Shipping
+ *    something that loses on most splits is not an upgrade (ticket text).
+ *  - `too-close-to-call` — an exact tie (wins === losses > 0), which with
+ *    four splits means 2-2: the model and the incumbent split the verdict
+ *    down the middle. The ticket's own notes are explicit that "a 0.016
+ *    midfield edge that halves under a second split is not evidence of
+ *    anything yet" — a result that flips depending on which half of the
+ *    splits you look at is exactly that shape, and calling it a plain win
+ *    or a plain loss would overstate the evidence either way.
+ *  - `insufficient-data` — no split had enough data on both sides to
+ *    compare at all. Never guessed as any of the above.
+ */
+export function buildGateResults(splits: readonly FiveGwSplitGateInput[]): PositionGateResult[] {
   return POSITIONS.map((position) => {
-    const learnedSpearman = learnedFiveGwByPosition[position]
-    if (position === MIDFIELDER || position === FORWARD) {
-      const threshold = position === MIDFIELDER ? GATE_MIDFIELDER_NAIVE_BASELINE_SPEARMAN : GATE_FORWARD_NAIVE_BASELINE_SPEARMAN
-      return {
-        position,
-        positionName: POSITION_NAMES[position],
-        learnedSpearman,
-        thresholdDescription: 'the naive "prior minutes per match" baseline (report 10, fixed)',
-        threshold,
-        pass: learnedSpearman === null ? null : learnedSpearman > threshold,
-      }
-    }
-    const threshold = incumbentFiveGwByPosition[position]
-    return {
-      position,
-      positionName: POSITION_NAMES[position],
-      learnedSpearman,
-      thresholdDescription: 'the incumbent baseline-v1 model, computed fresh in this same run',
-      threshold,
-      pass: learnedSpearman === null || threshold === null ? null : learnedSpearman > threshold,
-    }
+    const splitLines: SplitGateLine[] = splits.map((s) => {
+      const learnedSpearman = s.learnedByPosition[position]
+      const incumbentSpearman = s.incumbentByPosition[position]
+      const beat = learnedSpearman === null || incumbentSpearman === null ? null : learnedSpearman > incumbentSpearman
+      return { cutoff: s.cutoff, learnedSpearman, incumbentSpearman, beat }
+    })
+    const wins = splitLines.filter((l) => l.beat === true).length
+    const losses = splitLines.filter((l) => l.beat === false).length
+    const comparableSplits = wins + losses
+    let verdict: PositionVerdict
+    if (comparableSplits === 0) verdict = 'insufficient-data'
+    else if (wins > losses) verdict = 'ship'
+    else if (losses > wins) verdict = 'do-not-ship'
+    else verdict = 'too-close-to-call'
+    return { position, positionName: POSITION_NAMES[position], splits: splitLines, wins, losses, comparableSplits, verdict }
   })
 }
 
@@ -778,20 +827,33 @@ export interface HorizonResultRow {
   byPosition: Record<Position, number | null>
 }
 
-export interface LearnedModelReportInput {
-  season: string
-  gitCommitSha: string
-  trainCutoffGameweek: number
+/** One split's full result — population, and both horizons' ranker tables (learned, incumbent, all three naive baselines — file header, "side by side ... over identical populations"). */
+export interface SplitResult {
+  cutoff: number
   trainRowCount: number
   evalRowCount: number
   fiveGwEvalWindowCount: number
-  oneGw: HorizonResultRow[]
-  fiveGw: HorizonResultRow[]
-  gates: readonly GateLineResult[]
+  oneGw: readonly HorizonResultRow[]
+  fiveGw: readonly HorizonResultRow[]
+}
+
+export interface LearnedModelReportInput {
+  season: string
+  gitCommitSha: string
+  /** Plain-language statement of which minutes model the incumbent figures reflect — DoD: "states which minutes model the incumbent figures reflect." Never asserts a specific merge state this job cannot observe; states what IS checkable (the SHA) and what is NOT yet reflected (ticket #213's concurrent change). */
+  incumbentMinutesModelNote: string
+  splits: readonly SplitResult[]
+  gates: readonly PositionGateResult[]
 }
 
 function fmtSpearman(value: number | null): string {
   return value === null ? 'n/a' : value.toFixed(3)
+}
+
+function fmtSigned(value: number | null): string {
+  if (value === null) return 'n/a'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${value.toFixed(3)}`
 }
 
 function buildResultTable(rows: readonly HorizonResultRow[]): string {
@@ -801,45 +863,105 @@ function buildResultTable(rows: readonly HorizonResultRow[]): string {
   return [header, divider, ...lines].join('\n')
 }
 
-function buildGateTable(gates: readonly GateLineResult[]): string {
-  const header = `| Position | Learned model | Must beat | Threshold | Verdict |`
+function buildSplitSection(split: SplitResult): string {
+  return [
+    `### Split: train on gameweek <= ${split.cutoff}, evaluate on gameweek > ${split.cutoff}`,
+    ``,
+    `Training rows: ${split.trainRowCount}. Held-out rows: ${split.evalRowCount} single-gameweek, ${split.fiveGwEvalWindowCount} five-gameweek window(s). A separate model is fit for this split alone (file header, "THE SPLIT — ... REPEATED across four cutoffs") — the model never saw an eval-fold row's target during fitting; see splitByGameweekCutoff's own tests and this file's leakage test, now run at every cutoff in TRAIN_EVAL_GAMEWEEK_CUTOFFS.`,
+    ``,
+    `**One-gameweek horizon (this split's held-out fold only):**`,
+    ``,
+    buildResultTable(split.oneGw),
+    ``,
+    `**Five-gameweek horizon (this split's held-out fold only) — the gate's own horizon:**`,
+    ``,
+    buildResultTable(split.fiveGw),
+  ].join('\n')
+}
+
+/**
+ * Per-position summary across every split, at the five-gameweek horizon —
+ * DoD: "the spread across splits shown". Margin = learned − incumbent; a
+ * positive margin is a split the learned model won. Min/max/range make the
+ * spread itself a number in the table, not something a reader has to
+ * eyeball from four separate split sections.
+ */
+function buildCrossSplitSummaryTable(gates: readonly PositionGateResult[]): string {
+  const header = `| Position | ${gates[0]?.splits.map((s) => `GW<=${s.cutoff} margin`).join(' | ') ?? ''} | Min | Max | Spread | Wins | Losses | Verdict |`
+  const divider = `|---|${gates[0]?.splits.map(() => '---').join('|') ?? ''}|---|---|---|---|---|---|`
+  const lines = gates.map((g) => {
+    const margins = g.splits.map((s) => (s.learnedSpearman === null || s.incumbentSpearman === null ? null : s.learnedSpearman - s.incumbentSpearman))
+    const comparableMargins = margins.filter((m): m is number => m !== null)
+    const min = comparableMargins.length > 0 ? Math.min(...comparableMargins) : null
+    const max = comparableMargins.length > 0 ? Math.max(...comparableMargins) : null
+    const spread = min !== null && max !== null ? max - min : null
+    return `| ${g.positionName} | ${margins.map(fmtSigned).join(' | ')} | ${fmtSigned(min)} | ${fmtSigned(max)} | ${fmtSpearman(spread)} | ${g.wins} | ${g.losses} | ${fmtVerdict(g.verdict)} |`
+  })
+  return [header, divider, ...lines].join('\n')
+}
+
+function fmtVerdict(verdict: PositionVerdict): string {
+  switch (verdict) {
+    case 'ship':
+      return 'SHIP'
+    case 'do-not-ship':
+      return 'DO NOT SHIP'
+    case 'too-close-to-call':
+      return 'TOO CLOSE TO CALL'
+    case 'insufficient-data':
+      return 'INSUFFICIENT DATA'
+  }
+}
+
+function buildGateTable(gates: readonly PositionGateResult[]): string {
+  const header = `| Position | Wins | Losses | Comparable splits | Verdict |`
   const divider = `|---|---|---|---|---|`
-  const lines = gates.map(
-    (g) =>
-      `| ${g.positionName} | ${fmtSpearman(g.learnedSpearman)} | ${g.thresholdDescription} | ${fmtSpearman(g.threshold)} | ${g.pass === null ? 'n/a (insufficient data)' : g.pass ? 'PASS' : 'FAIL'} |`,
-  )
+  const lines = gates.map((g) => `| ${g.positionName} | ${g.wins} | ${g.losses} | ${g.comparableSplits} | ${fmtVerdict(g.verdict)} |`)
   return [header, divider, ...lines].join('\n')
 }
 
 export function buildReportMarkdown(input: LearnedModelReportInput): string {
-  const overallPass = input.gates.every((g) => g.pass === true)
-  const anyFail = input.gates.some((g) => g.pass === false)
-  const verdictLine = anyFail
-    ? "**GATE FAILED.** At least one position did not beat its threshold — see the table below. Per ticket #208's own instruction, this is reported plainly and no tuning follows."
-    : overallPass
-      ? '**GATE PASSED** on every position with enough data to compare.'
-      : '**GATE INCONCLUSIVE** — at least one position had insufficient data to compare (see "n/a" above); no position outright failed.'
+  const verdictLines = input.gates.map((g) => {
+    switch (g.verdict) {
+      case 'ship':
+        return `- **${g.positionName}: SHIP.** The learned model beat the incumbent on ${g.wins} of ${g.comparableSplits} comparable split(s) — a majority.`
+      case 'do-not-ship':
+        return `- **${g.positionName}: DO NOT SHIP.** The incumbent beat the learned model on ${g.losses} of ${g.comparableSplits} comparable split(s) — shipping this would be a downgrade.`
+      case 'too-close-to-call':
+        return `- **${g.positionName}: TOO CLOSE TO CALL.** ${g.wins} win(s) and ${g.losses} loss(es) out of ${g.comparableSplits} comparable split(s) — an edge that flips depending which splits you look at is not yet evidence of anything.`
+      case 'insufficient-data':
+        return `- **${g.positionName}: INSUFFICIENT DATA.** No split had enough data on both sides to compare.`
+    }
+  })
 
   return [
-    `# Learned model (learned-v1 candidate) — ticket #208`,
+    `# Learned model (learned-v1 candidate) — ticket #214, fair-gate re-run`,
     ``,
-    `Season: ${input.season}. Git commit: \`${input.gitCommitSha}\` (this SHA determines whether the incumbent numbers below reflect ticket #207's minutes.ts revert — see file header, "THE INCUMBENT IS COMPUTED LIVE").`,
+    `Season: ${input.season}. Git commit: \`${input.gitCommitSha}\`.`,
     ``,
-    `Train/eval split: gameweek <= ${input.trainCutoffGameweek} is training data (${input.trainRowCount} row(s)); gameweek > ${input.trainCutoffGameweek} is held out (${input.evalRowCount} single-gameweek row(s), ${input.fiveGwEvalWindowCount} five-gameweek window(s)). The model never saw an eval-fold row's target during fitting — see splitByGameweekCutoff and this file's own leakage test.`,
+    input.incumbentMinutesModelNote,
     ``,
-    `## One-gameweek horizon (held-out fold only)`,
+    `Every threshold below is computed live, in this same run, on the same held-out fold as the model it is compared against — no figure is quoted from any previous report, for any position (ticket #214's own defect fix). The gate is repeated across ${input.splits.length} independent train/eval cutoffs (gameweek ${input.splits.map((s) => s.cutoff).join(', ')}) so a single-split result is never mistaken for a finding.`,
     ``,
-    buildResultTable(input.oneGw),
+    `## Results by split`,
     ``,
-    `## Five-gameweek horizon (held-out fold only) — the gate's own horizon`,
+    ...input.splits.map((s) => buildSplitSection(s)),
     ``,
-    buildResultTable(input.fiveGw),
+    `## Five-gameweek per-position summary across splits — the gate's own horizon`,
+    ``,
+    `Margin = learned model's Spearman minus the incumbent's, on that split's held-out fold. Positive means the learned model won that split.`,
+    ``,
+    buildCrossSplitSummaryTable(input.gates),
     ``,
     `## Gate`,
     ``,
+    `For every position: does the learned model beat the incumbent on the five-gameweek target, on a majority of splits? Beating a naive baseline is never sufficient — the incumbent already beats every naive baseline at every position except midfield and forward (docs/projection-model-backlog.md G15).`,
+    ``,
     buildGateTable(input.gates),
     ``,
-    verdictLine,
+    `## Verdict`,
+    ``,
+    ...verdictLines,
     ``,
   ].join('\n')
 }
@@ -1131,130 +1253,158 @@ async function main(): Promise<void> {
     }
 
     // ------------------------------------------------------------------
-    // 8. The split. Fit on train fold only.
+    // 8-10. REPEATED per split (ticket #214's own scope: "evaluate across
+    //    several train/eval cutoffs"). Every cutoff in
+    //    TRAIN_EVAL_GAMEWEEK_CUTOFFS gets its OWN split, its OWN model (fit
+    //    on that split's training fold only), and its OWN one-gameweek /
+    //    five-gameweek figures — learned, incumbent, and all three naive
+    //    baselines, all read from that split's held-out fold alone. A split
+    //    with an empty train or eval fold is skipped (recorded, never
+    //    silently dropped) rather than aborting the whole run — the other
+    //    splits still carry a genuine reading. `featureHistoryByPlayerGameweek`,
+    //    `lastGameweekInData`, `teamMatchRecords` and `clubFixtureSchedule`
+    //    are season-wide and computed once, outside the loop; they do not
+    //    depend on the split.
     // ------------------------------------------------------------------
-    const { trainRows, evalRows } = splitByGameweekCutoff(restrictedRows, TRAIN_EVAL_GAMEWEEK_CUTOFF)
-    if (trainRows.length === 0 || evalRows.length === 0) {
-      const message = `${JOB_NAME}: train (${trainRows.length}) or eval (${evalRows.length}) fold is empty for season=${season} at cutoff=${TRAIN_EVAL_GAMEWEEK_CUTOFF} — nothing to fit or evaluate.`
+    const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(featureHistoryRows)
+    const lastGameweekInData = computeLastGameweekInData(featureHistoryRows)
+
+    const splitResults: SplitResult[] = []
+    const fiveGwGateInputs: FiveGwSplitGateInput[] = []
+    const skippedCutoffs: number[] = []
+
+    for (const cutoff of TRAIN_EVAL_GAMEWEEK_CUTOFFS) {
+      const { trainRows, evalRows } = splitByGameweekCutoff(restrictedRows, cutoff)
+      if (trainRows.length === 0 || evalRows.length === 0) {
+        console.log(`${JOB_NAME}: skipping cutoff=${cutoff} — train (${trainRows.length}) or eval (${evalRows.length}) fold is empty for season=${season}.`)
+        skippedCutoffs.push(cutoff)
+        continue
+      }
+
+      const trainFeatureMatrix = trainRows.map((r) => buildLearnedFeatureVector(r.trainingRow, r.measured.position, r.trainingRow.opponent_team_codes, teamMatchRecords, r.gameweekId))
+      const trainTargets = trainRows.map((r) => r.measured.actualPoints)
+      const model = fitGradientBoostingModel(trainFeatureMatrix, trainTargets, DEFAULT_GBM_HYPERPARAMETERS)
+
+      // -- One-gameweek horizon, this split's held-out fold only. --
+      const learnedOneGwRows: GenericRankingRow[] = evalRows.map((r) => ({
+        position: r.measured.position,
+        groupId: r.gameweekId,
+        projected: predictWithGbm(model, buildLearnedFeatureVector(r.trainingRow, r.measured.position, r.trainingRow.opponent_team_codes, teamMatchRecords, r.gameweekId)),
+        actual: r.measured.actualPoints,
+      }))
+      const incumbentOneGwRows: GenericRankingRow[] = evalRows.map((r) => ({
+        position: r.measured.position,
+        groupId: r.gameweekId,
+        projected: r.measured.projectedPoints,
+        actual: r.measured.actualPoints,
+      }))
+      const learnedOneGw = summarizeGenericBaselineSpearman('Learned model candidate', learnedOneGwRows)
+      const incumbentOneGw = summarizeGenericBaselineSpearman('Incumbent baseline-v1', incumbentOneGwRows)
+      const naiveOneGwBaselines: BaselineSummary[] = summarizeBaselines(evalRows.map((r) => r.measured))
+
+      // -- Five-gameweek horizon — window candidates are THIS split's eval
+      //    fold rows (a window must START in the held-out range to be a
+      //    genuine held-out test for THIS split). --
+      const fiveGwExclusions = emptyFiveGameweekExclusionCounts()
+      const fiveGwMeasured: FiveGameweekRow[] = []
+      const learnedFiveGwRows: GenericRankingRow[] = []
+
+      for (const r of evalRows) {
+        const classification = classifyFiveGameweekRow(
+          r.playerCode,
+          r.measured,
+          lastGameweekInData,
+          featureHistoryByPlayerGameweek,
+          codeToPosition,
+          positionPriors,
+          actualByPlayerGameweek,
+          teamMatchRecords,
+          clubFixtureSchedule,
+        )
+        if (classification.kind === 'excluded') {
+          incrementFiveGameweekExclusion(fiveGwExclusions, classification.reason)
+          continue
+        }
+        fiveGwMeasured.push(classification.row)
+
+        const learnedTotal = predictLearnedFiveGameweekTotal(r.trainingRow, r.measured.position, r.gameweekId, teamMatchRecords, clubFixtureSchedule, model)
+        learnedFiveGwRows.push({ position: r.measured.position, groupId: r.gameweekId, projected: learnedTotal, actual: classification.row.actualPoints })
+      }
+      assertFiveGameweekReconciles(evalRows.length, fiveGwMeasured.length, fiveGwExclusions)
+
+      const incumbentFiveGwRows: GenericRankingRow[] = fiveGwMeasured.map((r) => ({ position: r.position, groupId: r.startGameweekId, projected: r.projectedPoints, actual: r.actualPoints }))
+      const learnedFiveGw = summarizeGenericBaselineSpearman('Learned model candidate', learnedFiveGwRows)
+      const incumbentFiveGw = summarizeGenericBaselineSpearman('Incumbent baseline-v1', incumbentFiveGwRows)
+      const naiveFiveGwBaselines: BaselineSummary[] = summarizeFiveGameweekBaselines(fiveGwMeasured)
+
+      const oneGw: HorizonResultRow[] = [
+        { label: learnedOneGw.label, seasonSpearman: learnedOneGw.seasonSpearman, byPosition: learnedOneGw.byPosition },
+        { label: incumbentOneGw.label, seasonSpearman: incumbentOneGw.seasonSpearman, byPosition: incumbentOneGw.byPosition },
+        ...naiveOneGwBaselines.map((b) => ({ label: b.label, seasonSpearman: b.seasonSpearman, byPosition: b.byPosition })),
+      ]
+      const fiveGw: HorizonResultRow[] = [
+        { label: learnedFiveGw.label, seasonSpearman: learnedFiveGw.seasonSpearman, byPosition: learnedFiveGw.byPosition },
+        { label: incumbentFiveGw.label, seasonSpearman: incumbentFiveGw.seasonSpearman, byPosition: incumbentFiveGw.byPosition },
+        ...naiveFiveGwBaselines.map((b) => ({ label: b.label, seasonSpearman: b.seasonSpearman, byPosition: b.byPosition })),
+      ]
+
+      splitResults.push({
+        cutoff,
+        trainRowCount: trainRows.length,
+        evalRowCount: evalRows.length,
+        fiveGwEvalWindowCount: fiveGwMeasured.length,
+        oneGw,
+        fiveGw,
+      })
+      fiveGwGateInputs.push({ cutoff, learnedByPosition: learnedFiveGw.byPosition, incumbentByPosition: incumbentFiveGw.byPosition })
+    }
+
+    if (splitResults.length === 0) {
+      const message = `${JOB_NAME}: every split (${TRAIN_EVAL_GAMEWEEK_CUTOFFS.join(', ')}) had an empty train or eval fold for season=${season} — nothing to fit or evaluate.`
       console.log(message)
       await recordJobRun(supabase, { status: 'failure', message, details: { season }, startedAt })
       process.exit(1)
       return
     }
 
-    const trainFeatureMatrix = trainRows.map((r) => buildLearnedFeatureVector(r.trainingRow, r.measured.position, r.trainingRow.opponent_team_codes, teamMatchRecords, r.gameweekId))
-    const trainTargets = trainRows.map((r) => r.measured.actualPoints)
-    const model = fitGradientBoostingModel(trainFeatureMatrix, trainTargets, DEFAULT_GBM_HYPERPARAMETERS)
-
     // ------------------------------------------------------------------
-    // 9. One-gameweek horizon, eval fold only.
+    // 11. The gate (across every split above), and the report.
     // ------------------------------------------------------------------
-    const learnedOneGwRows: GenericRankingRow[] = evalRows.map((r) => ({
-      position: r.measured.position,
-      groupId: r.gameweekId,
-      projected: predictWithGbm(model, buildLearnedFeatureVector(r.trainingRow, r.measured.position, r.trainingRow.opponent_team_codes, teamMatchRecords, r.gameweekId)),
-      actual: r.measured.actualPoints,
-    }))
-    const incumbentOneGwRows: GenericRankingRow[] = evalRows.map((r) => ({
-      position: r.measured.position,
-      groupId: r.gameweekId,
-      projected: r.measured.projectedPoints,
-      actual: r.measured.actualPoints,
-    }))
-    const learnedOneGw = summarizeGenericBaselineSpearman('Learned model candidate', learnedOneGwRows)
-    const incumbentOneGw = summarizeGenericBaselineSpearman('Incumbent baseline-v1', incumbentOneGwRows)
-    const naiveOneGwBaselines: BaselineSummary[] = summarizeBaselines(evalRows.map((r) => r.measured))
-    const constantOneGwSpearman = computeGenericConstantBaselineSpearman(evalRows.map((r) => r.measured.actualPoints))
+    const gates = buildGateResults(fiveGwGateInputs)
 
-    // ------------------------------------------------------------------
-    // 10. Five-gameweek horizon — window candidates are the EVAL fold's own
-    //     single-gameweek rows (a window must START in the held-out range
-    //     to be a genuine held-out test). classifyFiveGameweekRow (imported,
-    //     unmodified) decides which windows are measurable at all; this job
-    //     only supplies a second model's prediction for the windows it
-    //     already accepted.
-    // ------------------------------------------------------------------
-    const featureHistoryByPlayerGameweek = buildFeatureHistoryIndex(featureHistoryRows)
-    const lastGameweekInData = computeLastGameweekInData(featureHistoryRows)
-
-    const fiveGwExclusions = emptyFiveGameweekExclusionCounts()
-    const fiveGwMeasured: FiveGameweekRow[] = []
-    const learnedFiveGwRows: GenericRankingRow[] = []
-
-    for (const r of evalRows) {
-      const classification = classifyFiveGameweekRow(
-        r.playerCode,
-        r.measured,
-        lastGameweekInData,
-        featureHistoryByPlayerGameweek,
-        codeToPosition,
-        positionPriors,
-        actualByPlayerGameweek,
-        teamMatchRecords,
-        clubFixtureSchedule,
-      )
-      if (classification.kind === 'excluded') {
-        incrementFiveGameweekExclusion(fiveGwExclusions, classification.reason)
-        continue
-      }
-      fiveGwMeasured.push(classification.row)
-
-      const learnedTotal = predictLearnedFiveGameweekTotal(r.trainingRow, r.measured.position, r.gameweekId, teamMatchRecords, clubFixtureSchedule, model)
-      learnedFiveGwRows.push({ position: r.measured.position, groupId: r.gameweekId, projected: learnedTotal, actual: classification.row.actualPoints })
-    }
-    assertFiveGameweekReconciles(evalRows.length, fiveGwMeasured.length, fiveGwExclusions)
-
-    const incumbentFiveGwRows: GenericRankingRow[] = fiveGwMeasured.map((r) => ({ position: r.position, groupId: r.startGameweekId, projected: r.projectedPoints, actual: r.actualPoints }))
-    const learnedFiveGw = summarizeGenericBaselineSpearman('Learned model candidate', learnedFiveGwRows)
-    const incumbentFiveGw = summarizeGenericBaselineSpearman('Incumbent baseline-v1', incumbentFiveGwRows)
-    const naiveFiveGwBaselines: BaselineSummary[] = summarizeFiveGameweekBaselines(fiveGwMeasured)
-
-    // ------------------------------------------------------------------
-    // 11. The gate, and the report.
-    // ------------------------------------------------------------------
-    const gates = buildGateResults(learnedFiveGw.byPosition, incumbentFiveGw.byPosition)
-
-    const oneGw: HorizonResultRow[] = [
-      { label: learnedOneGw.label, seasonSpearman: learnedOneGw.seasonSpearman, byPosition: learnedOneGw.byPosition },
-      { label: incumbentOneGw.label, seasonSpearman: incumbentOneGw.seasonSpearman, byPosition: incumbentOneGw.byPosition },
-      ...naiveOneGwBaselines.map((b) => ({ label: b.label, seasonSpearman: b.seasonSpearman, byPosition: b.byPosition })),
-    ]
-    const fiveGw: HorizonResultRow[] = [
-      { label: learnedFiveGw.label, seasonSpearman: learnedFiveGw.seasonSpearman, byPosition: learnedFiveGw.byPosition },
-      { label: incumbentFiveGw.label, seasonSpearman: incumbentFiveGw.seasonSpearman, byPosition: incumbentFiveGw.byPosition },
-      ...naiveFiveGwBaselines.map((b) => ({ label: b.label, seasonSpearman: b.seasonSpearman, byPosition: b.byPosition })),
-    ]
+    const incumbentMinutesModelNote =
+      `Incumbent figures reflect \`src/lib/projection/minutes.ts\` exactly as checked out at commit \`${gitCommitSha}\` above. ` +
+      `Ticket #213, running concurrently in this same batch on a separate branch, widens \`PlayerProjectionInput\` and changes what ` +
+      `\`estimateMinutes\` returns — this run predates that change (it was never visible in this job's worktree). A re-run after #213 ` +
+      `merges would read a different incumbent and should not be compared line-for-line against this one, or against report 12's ` +
+      `figures (a different fold methodology — single arbitrary split, not repeated splits).`
 
     const reportMarkdown = buildReportMarkdown({
       season,
       gitCommitSha,
-      trainCutoffGameweek: TRAIN_EVAL_GAMEWEEK_CUTOFF,
-      trainRowCount: trainRows.length,
-      evalRowCount: evalRows.length,
-      fiveGwEvalWindowCount: fiveGwMeasured.length,
-      oneGw,
-      fiveGw,
+      incumbentMinutesModelNote,
+      splits: splitResults,
       gates,
     })
     await mkdir(dirname(reportPath), { recursive: true })
     await writeFile(reportPath, reportMarkdown, 'utf8')
 
-    const anyFail = gates.some((g) => g.pass === false)
+    const shipCount = gates.filter((g) => g.verdict === 'ship').length
+    const doNotShipCount = gates.filter((g) => g.verdict === 'do-not-ship').length
+    const anyDoNotShip = doNotShipCount > 0
     const details: JsonRecord = {
       season,
       gitCommitSha,
-      trainCutoffGameweek: TRAIN_EVAL_GAMEWEEK_CUTOFF,
-      trainRowCount: trainRows.length,
-      evalRowCount: evalRows.length,
+      trainEvalGameweekCutoffs: TRAIN_EVAL_GAMEWEEK_CUTOFFS,
+      skippedCutoffs,
       missingTrainingFeaturesRowCount,
-      fiveGwEvalWindowCount: fiveGwMeasured.length,
-      constantOneGwSpearman,
+      splits: splitResults.map((s) => ({ cutoff: s.cutoff, trainRowCount: s.trainRowCount, evalRowCount: s.evalRowCount, fiveGwEvalWindowCount: s.fiveGwEvalWindowCount })),
       gates,
       reportPath,
     }
-    const message = `${JOB_NAME}: season ${season} — ${gates.filter((g) => g.pass === true).length}/${gates.length} gate line(s) passed. ${anyFail ? 'GATE FAILED — see report.' : 'No outright failure.'} Report written to ${reportPath}.`
+    const message = `${JOB_NAME}: season ${season} — ${shipCount}/${gates.length} position(s) SHIP, ${doNotShipCount}/${gates.length} DO NOT SHIP. Report written to ${reportPath}.`
     console.log(message)
-    if (anyFail) {
+    if (anyDoNotShip) {
       await recordJobRun(supabase, { status: 'failure', message, details, startedAt })
       process.exit(1)
       return
