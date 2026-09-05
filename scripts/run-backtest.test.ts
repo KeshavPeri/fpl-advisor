@@ -2617,7 +2617,7 @@ describe('computeOracleFiveGameweekEstimate — the fix itself: a TOTAL, not a r
   )
 })
 
-describe('checkOracleCeiling (ticket #187; ticket #201 retired the one-gameweek half — G14 — and extended the five-gameweek half to every position, not only the season aggregate)', () => {
+describe('checkOracleCeiling (ticket #187; ticket #201 retired the one-gameweek half — G14 — and extended the five-gameweek half to every position, not only the season aggregate; ticket #209 exempts Goalkeeper from the per-position half at five gameweeks — G16)', () => {
   const emptyByPosition = (): Record<string, PositionRankingSummary> =>
     Object.fromEntries(
       [GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD].map((p) => [
@@ -2651,43 +2651,79 @@ describe('checkOracleCeiling (ticket #187; ticket #201 retired the one-gameweek 
     expect(checkOracleCeiling(0.9, null, emptyByPosition() as never, emptyByPosition() as never)).toEqual({ ok: true, failures: [] })
   })
 
-  it('a per-position breach fails while the season aggregate PASSES — the exact defect LEARNINGS-second-build-wave.md §14 recorded: a bound checked only at the aggregate does not protect the breakdown', () => {
-    const modelByPosition = withPosition(GOALKEEPER, 0.3)
-    const oracleByPosition = withPosition(GOALKEEPER, 0.2)
+  it('a per-position breach fails while the season aggregate PASSES — the exact defect LEARNINGS-second-build-wave.md §14 recorded: a bound checked only at the aggregate does not protect the breakdown (DEFENDER — not exempt)', () => {
+    const modelByPosition = withPosition(DEFENDER, 0.3)
+    const oracleByPosition = withPosition(DEFENDER, 0.2)
     // Season aggregate: model 0.35 < oracle 0.5 — passes on its own.
     const result = checkOracleCeiling(0.35, 0.5, modelByPosition as never, oracleByPosition as never)
-    // Goalkeeper breakdown alone: model 0.3 >= oracle 0.2 — a breach the aggregate-only check would have missed entirely.
+    // Defender breakdown alone: model 0.3 >= oracle 0.2 — a breach the aggregate-only check would have missed entirely.
     expect(result.ok).toBe(false)
     expect(result.failures).toHaveLength(1)
-    expect(result.failures[0]).toMatch(/Goalkeeper/)
+    expect(result.failures[0]).toMatch(/Defender/)
     expect(result.failures[0]).toContain('0.300')
     expect(result.failures[0]).toContain('0.200')
   })
 
-  it('pins report 10\'s own goalkeeper figures — the new per-position check FAILS on model 0.240 vs oracle 0.201, naming Goalkeeper', () => {
-    const modelByPosition = withPosition(GOALKEEPER, 0.24, 520)
-    const oracleByPosition = withPosition(GOALKEEPER, 0.201, 512)
-    // The season aggregate itself passes on report 10 (model 0.397 < oracle 0.506) — only the breakdown catches this.
+  // ==========================================================================
+  // TICKET #209 — the goalkeeper exemption itself. See
+  // docs/projection-model-backlog.md G16 for the full argument.
+  // ==========================================================================
+
+  it('pins report 10\'s own goalkeeper figures — the per-position check does NOT fail on model 0.240 vs oracle 0.201, because Goalkeeper is exempt at five gameweeks (ticket #209 / G16)', () => {
+    const modelByPosition = withPosition(GOALKEEPER, 0.24, 616)
+    const oracleByPosition = withPosition(GOALKEEPER, 0.201, 616)
+    // The season aggregate itself passes on report 10 (model 0.397 < oracle 0.506), and the goalkeeper
+    // breakdown — a genuine breach in isolation — is now exempt, so this reports ok overall.
     const result = checkOracleCeiling(0.397, 0.506, modelByPosition as never, oracleByPosition as never)
-    expect(result.ok).toBe(false)
-    expect(result.failures).toHaveLength(1)
-    expect(result.failures[0]).toMatch(/Goalkeeper/)
-    expect(result.failures[0]).toContain('0.240')
-    expect(result.failures[0]).toContain('0.201')
+    expect(result).toEqual({ ok: true, failures: [] })
   })
 
-  it('reports every breaching position independently, naming each, alongside a season-aggregate failure', () => {
+  it('a named test proves every OTHER position still fails on a breach — only Goalkeeper is exempt (ticket #209 DoD)', () => {
+    // Same shape of breach as the retired goalkeeper test above (model >= oracle by the same margin),
+    // reproduced for every non-goalkeeper position in turn — each must still fail on its own.
+    const cases: Array<[number, string]> = [
+      [DEFENDER, 'Defender'],
+      [MIDFIELDER, 'Midfielder'],
+      [FORWARD, 'Forward'],
+    ]
+    for (const [position, name] of cases) {
+      const modelByPosition = withPosition(position, 0.3)
+      const oracleByPosition = withPosition(position, 0.2)
+      const result = checkOracleCeiling(0.35, 0.5, modelByPosition as never, oracleByPosition as never)
+      expect(result.ok).toBe(false)
+      expect(result.failures).toHaveLength(1)
+      expect(result.failures[0]).toContain(name)
+    }
+  })
+
+  it('a goalkeeper breach is silently dropped even when a genuine other-position breach is present alongside it — the exemption is scoped to Goalkeeper only, not a global loosening', () => {
     const modelByPosition = emptyByPosition()
     const oracleByPosition = emptyByPosition()
-    modelByPosition[GOALKEEPER] = { position: GOALKEEPER, n: 100, spearman: 0.3, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
-    oracleByPosition[GOALKEEPER] = { position: GOALKEEPER, n: 100, spearman: 0.2, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    modelByPosition[GOALKEEPER] = { position: GOALKEEPER, n: 616, spearman: 0.24, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    oracleByPosition[GOALKEEPER] = { position: GOALKEEPER, n: 616, spearman: 0.201, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
     modelByPosition[DEFENDER] = { position: DEFENDER, n: 100, spearman: 0.5, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
     oracleByPosition[DEFENDER] = { position: DEFENDER, n: 100, spearman: 0.4, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
     const result = checkOracleCeiling(0.6, 0.3, modelByPosition as never, oracleByPosition as never)
     expect(result.ok).toBe(false)
-    // Season aggregate (model 0.6 >= oracle 0.3) + Goalkeeper (0.3 >= 0.2) + Defender (0.5 >= 0.4) = 3.
+    // Season aggregate (model 0.6 >= oracle 0.3) + Defender (0.5 >= 0.4) = 2. NOT 3 — the goalkeeper
+    // breach (0.24 >= 0.201) is real by the same rule but must not appear in `failures` at all.
+    expect(result.failures).toHaveLength(2)
+    expect(result.failures.some((f) => /Goalkeeper/.test(f))).toBe(false)
+    expect(result.failures.some((f) => /Defender/.test(f))).toBe(true)
+  })
+
+  it('reports every breaching (non-goalkeeper) position independently, naming each, alongside a season-aggregate failure', () => {
+    const modelByPosition = emptyByPosition()
+    const oracleByPosition = emptyByPosition()
+    modelByPosition[MIDFIELDER] = { position: MIDFIELDER, n: 100, spearman: 0.3, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    oracleByPosition[MIDFIELDER] = { position: MIDFIELDER, n: 100, spearman: 0.2, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    modelByPosition[DEFENDER] = { position: DEFENDER, n: 100, spearman: 0.5, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    oracleByPosition[DEFENDER] = { position: DEFENDER, n: 100, spearman: 0.4, top10: { overlap: 0, n: 0 }, top20: { overlap: 0, n: 0 }, top10Refused: false, top20Refused: false }
+    const result = checkOracleCeiling(0.6, 0.3, modelByPosition as never, oracleByPosition as never)
+    expect(result.ok).toBe(false)
+    // Season aggregate (model 0.6 >= oracle 0.3) + Midfielder (0.3 >= 0.2) + Defender (0.5 >= 0.4) = 3.
     expect(result.failures).toHaveLength(3)
-    expect(result.failures.some((f) => /Goalkeeper/.test(f))).toBe(true)
+    expect(result.failures.some((f) => /Midfielder/.test(f))).toBe(true)
     expect(result.failures.some((f) => /Defender/.test(f))).toBe(true)
   })
 
