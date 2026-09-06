@@ -1691,6 +1691,219 @@ a defect to iterate away.
 
 ---
 
+## G18 — Ticket #219, 5 Sep 2026: `penalties_order` ingested; xG-includes-penalties CONFIRMED
+## independently; Treatment A (reduced shrinkage for first-choice takers) measured and REJECTED —
+## it makes goal calibration worse, not better. NO MODEL CHANGE SHIPPED.
+
+Builds directly on ticket #218's penalty-duty diagnostic (the "#215" entry immediately above this
+one — the diagnostic ticket, PR #218 — the residual method is DEAD and this entry does not revive
+it). That entry answered whether the review's *proposed* fix works (no) and recommended, correctly,
+not chasing `penalties_order` for projection-accuracy purposes *without first measuring a candidate
+treatment*. This ticket does the measuring: it ingests the field for real (#218 only diagnosed
+against a live fetch, it wrote no migration and no ingest column), independently re-verifies the
+xG mechanism #218 argued for with a cleaner instrument, and tests the one candidate treatment #218
+did not build (a persistence-based shrinkage change, as opposed to the residual identification
+method #218 already killed). **Both are different questions from #218's — this entry does not
+repeat that measurement, it extends it.**
+
+### What shipped: the ingest only
+
+`supabase/migrations/20260905090000_players_penalties_order.sql` adds `public.players.penalties_order`
+(nullable smallint, no default — NOT YET APPLIED, see `supabase/README.md`).
+`scripts/ingest-fpl.ts`'s `mapPlayers` now reads it verbatim from `bootstrap-static/`, and
+`job_runs.details.playersWithPenaltiesOrder` reports the non-null count on every run.
+Live-checked while building this ticket, 5 Sep 2026: **61 of 652 elements** carry a non-null value,
+distributed 1: 20, 2: 17, 3: 15, 4: 6, 5: 3 — close to, not identical to, #218's own "64 of 652"
+figure from the same week (normal squad-list churn over a few days: transfers, injuries, position
+changes — not a data problem, and not investigated further here). Note the range: FPL publishes
+priority ranks up to **5**, not just the 1–3 the ticket's own definition of done anticipated;
+`mapPlayers` applies no range check and stores whatever the source sends, per the migration's own
+header.
+
+### Question 1 — does the ingested xG already include penalty value? CONFIRMED YES, independently,
+### with a cleaner instrument than #218's
+
+#218 already answered this ("the model's own input already prices penalty duty in, to first
+order") from individual live `bootstrap-static` penalty rows and eyeballed per-match CSV values
+(0.79–0.90 xG). This ticket's own instructions require settling it again "from the actual ingested
+data / source code," so it was re-measured with a cleaner, lower-noise method: **isolate player-match
+rows where the player's entire shot count that match WAS the penalty attempt** (`total_shots ==
+penalties_scored + penalties_missed`), so the match's whole `xg` figure is attributable to the
+penalty alone — no dilution from open-play shots mixed into the same aggregate.
+
+**Method and source.** Every one of FPL-Core-Insights' 38 `playermatchstats.csv` files for the
+complete 2025-2026 season (the same public source, over plain HTTPS, `scripts/ingest-core-insights.ts`
+already reads), fetched directly — this Builder session has no live Supabase project (the same
+limitation recorded throughout this file for G9/G11/G16/G17), but it does have outbound network
+access to the same public sources those jobs read, confirmed live at the start of this ticket.
+
+**Result: 25 isolated single-shot-penalty rows across the full season.**
+
+| Statistic | Value |
+|---|---|
+| n | 25 |
+| mean xG per penalty | 0.7899 |
+| median | 0.7900 |
+| min / max | 0.7884 / 0.7900 |
+| population stdev | 0.0003 |
+
+Every one of the 25 rows falls in a 0.0016-wide band around 0.79 — this is not noisy shot-level
+variation, it is FPL-Core-Insights' xG model treating "penalty kick" as close to a fixed-value
+event, independent of whether it was scored or missed (25 rows include both outcomes). This
+corroborates #218's 0.79–0.90 finding with a tighter, purpose-built instrument and the same
+conclusion, and traces the exact code path: `scripts/ingest-core-insights.ts` writes this CSV's
+`xg` column straight into `player_match_stats.xg` (`xg: toNumeric(record.xg)`);
+`src/lib/projection/rates.ts`'s `computePlayerRates`/`computeTwoStagePlayerRates` shrink that same
+column into `xgPer90`; `src/lib/projection/expectedPoints.ts`'s `expectedGoals = playerRates.xgPer90
+× minutesFraction × attackMultiplier × goalConversionFactor(position)` consumes it directly. There
+is no point in that chain where penalty value could be stripped out even if a designer wanted it
+to be — it is baked into the same number as every other shot the moment the CSV is read.
+
+**CONFIRMED: penalty value is already inside the ingested xG, at a nearly-fixed ~0.79 per attempt,
+regardless of outcome. Treatment B (an explicit penalty scoring term) would double-count against
+this and MUST NOT be built** — exactly the ticket's own stated condition for ruling it out, and
+exactly the G1-class defect (a second term pricing in value a first term already prices in) the
+ticket named as the risk. **Not built. `src/lib/projection/` has no penalty-specific scoring term
+before or after this ticket.**
+
+### Question 2 — Treatment A (reduced shrinkage for `penalties_order === 1` takers): MEASURED,
+### and it makes calibration WORSE, not better. REJECTED.
+
+**The hypothesis being tested**, stated in the ticket: a penalty taker's rate is more persistent
+than an equivalent-magnitude open-play rate (a penalty recurs by appointment; open play doesn't),
+so shrinking a taker's observed rate toward the position prior with the same `SHRINKAGE_K = 3` as
+everyone else under-credits him relative to a lower-`K` treatment that trusts his own observed rate
+more. This is a real, distinct, testable claim from Question 1 — the xG mechanism answers
+*whether* penalty value is in the rate, this asks whether the model shrinks that rate correctly.
+
+**Why a within-season split, not a live backtest.** This Builder session has no live Supabase
+project (same limitation as every "not yet read" entry in this file — G9/G11/G16/G17/§Question 1
+above), so `scripts/run-backtest.ts`'s live 5-gameweek harness cannot be run, and this ticket's
+scope forbids editing that file regardless (a different ticket owns it this batch). Reproducing the
+model's exact shrinkage formula and goal-conversion constants against the complete, already-played
+2025-2026 season — the same technique #218 used for its own residual measurement — gives a real,
+if within-season, test: split the 38-gameweek season into a "build" half (GW1–19, standing in for
+the personal-prior-building history a live projection would use) and a "held-out" half (GW20–38,
+standing in for the gameweeks a projection is trying to predict).
+
+**Reused, not reinvented:** `SHRINKAGE_K = 3` and the exact `shrunkRate` formula from
+`src/lib/projection/rates.ts`; `GOAL_CONVERSION_MIDFIELDER = 0.98` and `GOAL_CONVERSION_FORWARD =
+0.97` from `src/lib/projection/expectedPoints.ts`, verbatim, not re-derived. No fixture multiplier
+is applied on either side (this measurement isolates the shrinkage question only, exactly as
+`docs/model-review-2026-09-02.md`'s own neutral-fixture variant technique does elsewhere in this
+file for the same reason — isolating one mechanism from another).
+
+**Population.** Current (2026/27) `penalties_order === 1` players (20 total, live bootstrap-static,
+5 Sep 2026), joined to their 2025-2026 season record via the stable FPL `code` (never the
+per-season element id — same join rule this file states repeatedly, e.g. G6/G13). Of those, **16**
+had >= 450 minutes (5 nineties) in the held-out half (GW20–38) and so have a real actual-goals
+figure to calibrate against: Groß, Buendía, Gibbs-White, Szoboszlai, Calvert-Lewin, Haaland,
+Palmer, Saka, Kroupi.Jr, Thiago, Barry, Mateta, B.Fernandes, Solanke, Diarra, Osula. The remaining
+**175** qualifying Midfielders/Forwards (>= 450 held-out-half minutes, any penalty role or none)
+serve as the position-level population the falsification check's own wording ("forward and
+midfield goal calibration") asks about.
+
+**Treatment A tested at three shrinkage strengths, applied ONLY to the 16 takers** (`K = 2`, `1`,
+`0.5`, against the shipped `K = 3` baseline) — a lower `K` trusts the taker's own observed
+build-half rate more and the position prior less, exactly the direction the hypothesis argues for:
+
+**Takers subgroup — goal calibration (actual / predicted, summed over all 16):**
+
+| K | Sum actual | Sum predicted | Actual / Predicted | MAE |
+|---|---|---|---|---|
+| 3 (shipped) | 98 | 98.15 | **0.998** | 2.384 |
+| 2 (Treatment A) | 98 | 99.88 | 0.981 | 2.395 |
+| 1 (Treatment A) | 98 | 102.01 | 0.961 | 2.430 |
+| 0.5 (Treatment A) | 98 | 103.39 | 0.948 | 2.453 |
+
+The shipped `K = 3` default is already calibrated almost exactly right for this specific
+population — 0.998, effectively 1.0. **Every tested reduction in `K` moves the ratio further from
+1.0, monotonically, not closer.** MAE moves the same direction, monotonically, though more mildly.
+This is the opposite of the ticket's own hypothesis: there is no under-crediting here for a lower
+`K` to recover.
+
+**The same effect holds at the full position level, once the 16 takers are blended back into the
+175 controls (191 total) — the literal population the falsification check names:**
+
+| Position | K | Sum actual | Sum predicted | Actual / Predicted |
+|---|---|---|---|---|
+| Forward (n=39) | 3 (shipped) | 203 | 206.08 | 0.9851 |
+| Forward (n=39) | 1-for-takers (Treatment A) | 203 | 208.09 | **0.9755 (worse)** |
+| Midfielder (n=152) | 3 (shipped) | 312 | 331.67 | 0.9407 |
+| Midfielder (n=152) | 1-for-takers (Treatment A) | 312 | 333.51 | **0.9355 (worse)** |
+
+Both positions already run slightly hot (predicted > actual) even at `K = 3`; Treatment A pushes
+both further in that same direction. **This alone fails the falsification check's primary bar
+("Forward and midfield goal calibration must IMPROVE") outright — it does not merely fail to help,
+every tested strength makes it worse, and worse in proportion to how aggressively it is applied.**
+
+**Spearman rank correlation (predicted vs actual), same 191-player population, `K = 1` for
+takers only vs the `K = 3` baseline — checked per the falsification check's second bar even
+though the first bar already fails:**
+
+| Population | K=3 baseline | Treatment A (K=1-for-takers) |
+|---|---|---|
+| All Forward + Midfielder (n=191) | 0.7214 | 0.7209 |
+| Forward only (n=39) | 0.6648 | 0.6688 |
+| Midfielder only (n=152) | 0.6511 | 0.6507 |
+
+Flat to negligible in both directions — a wash, not a clean pass or fail on this bar alone, and
+irrelevant given the calibration bar already failed decisively.
+
+**Why, mechanistically — tied back to Question 1's finding.** The ticket's hypothesis assumed a
+taker's true output needs recovering from under a too-strong shrinkage. But Question 1 established
+that penalty credit is real, present, and reliably ~0.79 per attempt in the taker's OWN observed
+xG regardless of scoring outcome — his elevated rate is already sitting in the number `K = 3`
+shrinks, not missing from it. Shrinkage's job is to guard against one half-season's own sampling
+noise being over-trusted; for this specific population (already-established, high-minutes
+players), `K = 3`'s existing level was already tuned about right for that noise, and reducing it
+does not recover a missing signal — it re-injects exactly the single-half noise the shrinkage
+exists to dampen. This is the same shape of finding G10 recorded for defcon's own `k = 5`:
+shrinkage strength is generic across the underlying count it shrinks (`rates.ts`'s own header
+states this explicitly), and there was no population-specific persistence gap here for a
+population-specific `K` to fix.
+
+**Overlap check — measured exactly, not argued.** The falsification check requires stating whether
+the players a treatment lifts match `penalties_order`, "not the dead residual method's ... list."
+Reusing `scripts/penalty-duty-diagnostic.ts`'s own exported `aggregateSeasonTotals`/
+`identifyPenaltyDutyCandidates` (unmodified — this ticket does not touch that file) against the
+same 2025-2026 CSVs and the live `penalties_order` list: the residual method flags **20** candidates
+season-long; the current `penalties_order === 1` list has **20** players; **only 3 names appear on
+both** (Kroupi.Jr, Osula, Solanke) — an 85% disjoint pair of lists, confirming by direct
+measurement, not by construction alone, that Treatment A's population (gated explicitly on
+`penalties_order`) is a different population from the dead residual method's own flagged list. (The
+qualifying-population and candidate-count figures here — 369/20 — differ slightly from #218's own
+339/21 due to this reproduction's simpler position resolution; the overlap conclusion is
+insensitive to that small difference either way.)
+
+**Sample-size caveat, stated plainly.** 16 takers, ~98 held-out-half actual goals, is a real but
+modest-scale sample. The direction is unambiguous and monotonic across four tested `K` values (3,
+2, 1, 0.5), which is a strong shape for a genuine effect rather than sampling noise, but a future
+re-measurement across an actual season boundary (build on 2025-26, evaluate on 2026-27 as it
+completes) would be a stronger instrument than this within-season half-split, were this ever
+revisited. Not attempted here — out of this ticket's scope, and not warranted by a result this
+one-directional.
+
+### Recommendation: SHIP NEITHER TREATMENT
+
+1. **Treatment B (explicit penalty scoring term): not built.** Question 1 confirms it would
+   double-count against xG's own ~0.79-per-attempt penalty credit — exactly the ticket's own
+   stated condition for ruling it out before writing a line of it.
+2. **Treatment A (reduced shrinkage for first-choice takers): built as a measurement only, not
+   shipped.** It fails the falsification check's primary bar outright — Forward and Midfielder
+   goal calibration get WORSE at every tested strength, not better — so per the ticket's own
+   instruction, it is not applied.
+3. **`src/lib/projection/rates.ts` and `src/lib/projection/expectedPoints.ts` are UNCHANGED by
+   this ticket.** Reading them was necessary to answer both questions; nothing found in either
+   measurement warranted editing them.
+4. **Penalty duty stays closed**, per #218's own recommendation, now reaffirmed with a second,
+   independent xG instrument and one tested (not merely argued) candidate fix that did not clear
+   its own bar. If this is ever reopened, start from a genuine season-boundary backtest (the
+   caveat above), not from re-proposing either treatment measured here on the same within-season
+   evidence.
+5. **What this ticket DOES leave behind:** `public.players.penalties_order`, ingested and counted,
+   for any future, separately-scoped use (e.g. a UI "penalty taker" badge) — see the migration's
+   own header for why that is a live option this ticket does not itself pursue.
 ## Ticket #220, 5 Sep 2026: closing out the model programme — three threads recorded together,
 ## because they are the same finding read three times: this model is at its ceiling, an
 ## experiment answered its question inside budget, and a correctly-specified gate did not stop
