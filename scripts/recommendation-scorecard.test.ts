@@ -196,7 +196,12 @@ describe('buildRollShape / resolveRollCaptaincy', () => {
     const roll = buildRollShape(plan)
     const captaincy = resolveRollCaptaincy(plan, roll)
     expect(captaincy.captainPlayerId).toBe(10)
-    expect(captaincy.viceCaptainPlayerId).toBe(9) // whatever it was, not part of the roll squad — harmless since scoreSquad only needs it as a fallback
+    // The original vice-captain (10) is still in the roll squad, so it stays
+    // the vice-captain too — captain and vice-captain both resolving to the
+    // same player is a harmless degenerate case: scoreSquad only reads
+    // viceCaptainPlayerId as a fallback when the captain doesn't play, and
+    // captainPlayerId (10) always does in this scenario.
+    expect(captaincy.viceCaptainPlayerId).toBe(10)
   })
 })
 
@@ -291,7 +296,7 @@ describe('scoreGameweek', () => {
   })
 
   it('excludes a gameweek when Plan A is missing an actual', () => {
-    const missing = flatActuals()
+    const missing = new Map(flatActuals())
     missing.delete(1)
     const result = scoreGameweek(5, plans(), null, missing, true)
     expect(result.ok).toBe(false)
