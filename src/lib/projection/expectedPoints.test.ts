@@ -1015,3 +1015,44 @@ describe('expectedEvents: expectedCbi and expectedRecoveries (ticket #78, unaffe
     )
   })
 })
+
+describe(
+  'ticket #225: projectPlayerFixture is byte-identical regardless of a penalties_order value ' +
+    'bolted onto its input -- PlayerProjectionInput has no such field today (see ' +
+    "docs/projection-model-backlog.md's G18/G19 entries for why no treatment reads it), and this " +
+    'is the regression guard that a future change wiring it in without updating this test would trip',
+  () => {
+    it('is unaffected whether penalties_order is 1, null, or absent from the input object', () => {
+      // A realistic first-choice-taker-shaped player: non-zero xG/xA, real minutes, a
+      // non-neutral fixture -- not all-zero inputs, so a hidden coupling would actually show up
+      // as a numeric difference rather than 0 === 0 by coincidence.
+      const takerLike = player({
+        position: FORWARD,
+        recentMinutes: [90, 90, 88, 90, 74],
+        seasonMinutesPerMatch: 87,
+        rateHistory: { minutesPlayed: 900, totalXg: 6, totalXa: 1.5, totalSaves: 0, totalCbi: 4, totalRecoveries: 9 },
+        ratePositionPrior: { xgPer90: 0.4, xaPer90: 0.2, savesPer90: 0, cbiPer90: 0.5, recoveriesPer90: 1 },
+      })
+      const favourableFixture = fixture({ teamElo: 1650, opponentElo: 1400 })
+
+      const baseline = projectPlayerFixture(takerLike, favourableFixture)
+
+      // Simulates the exact leak this ticket exists to guard against: a future
+      // scripts/project-points.ts change starts passing the raw `penalties_order` column
+      // through onto the object handed to projectPlayerFixture, without the formula itself
+      // being updated to read it. Attached via a variable (not an inline object literal), so
+      // TypeScript's excess-property check does not mask the very case being tested.
+      const withOrderOne = { ...takerLike, penalties_order: 1 } as PlayerProjectionInput
+      const withOrderNull = { ...takerLike, penalties_order: null } as PlayerProjectionInput
+      const withoutTheField = { ...takerLike } as PlayerProjectionInput
+
+      const projectionOrderOne = projectPlayerFixture(withOrderOne, favourableFixture)
+      const projectionOrderNull = projectPlayerFixture(withOrderNull, favourableFixture)
+      const projectionWithoutField = projectPlayerFixture(withoutTheField, favourableFixture)
+
+      expect(projectionOrderOne).toStrictEqual(baseline)
+      expect(projectionOrderNull).toStrictEqual(baseline)
+      expect(projectionWithoutField).toStrictEqual(baseline)
+    })
+  },
+)
