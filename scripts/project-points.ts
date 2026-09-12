@@ -111,6 +111,8 @@ import {
   LEAGUE_BASELINE_GOALS_PER_TEAM,
   projectPlayerFixture,
   allocateFixtureBonus,
+  buildTeamMatchRecords,
+  computeTeamStrengthAsOf,
   type PlayerRates,
   type PlayerRateHistory,
   type RateHistoryMatch,
@@ -119,6 +121,8 @@ import {
   type FixtureProjection,
   type FixtureProjectionComponents,
   type FixtureBonusEntry,
+  type FixtureSource,
+  type TeamMatchRecord,
 } from '../src/lib/projection/index.ts'
 import type { DefensiveContributionMatch } from '../src/lib/projection/types.ts'
 
@@ -251,6 +255,28 @@ interface GameweekRow {
 interface TeamRow {
   id: number
   elo: number | null
+  /**
+   * Ticket #229. Non-null means this club's `elo` is PRESERVED, not
+   * confirmed fresh this run (see the `teams_elo_stale_since` migration) --
+   * the signal that decides whether tier 1 (fresh elo) of
+   * resolveFixtureExpectedScore may be used for this club at all.
+   */
+  elo_stale_since: string | null
+  /**
+   * Ticket #229. FPL's stable club code -- NOT the same value as `id` (an
+   * internal FPL team id). This is the join key onto
+   * `player_match_stats.team_code`/`opponent_team_code`, which is what lets
+   * this job look up a club's point-in-time team-strength record.
+   */
+  code: number | null
+}
+
+/** Ticket #229. The two facts about a club (keyed by `teams.id`) resolveFixtureExpectedScore's precedence needs beyond the elo value itself -- see TeamRow's own field comments. */
+export interface TeamMetadata {
+  /** True when `teams.elo_stale_since` is non-null for this club. */
+  eloStale: boolean
+  /** `teams.code` -- null only for a club row missing that column value; never the same id space as `teams.id`. */
+  code: number | null
 }
 
 interface PlayerRow {
@@ -300,6 +326,18 @@ export interface MatchStatsRow {
    * position-prior computation below — see resolvePriorRowPosition.
    */
   element_type: number | null
+  /**
+   * Ticket #229. This row's own match identifier -- the point-in-time
+   * team-strength table's grouping key (one entry per resolvable
+   * (match_id, team_code) pair, see teamStrength.ts's buildTeamMatchRecords).
+   */
+  match_id: string
+  /** Ticket #229. This row's own club code (public.teams.code), never an FPL team id -- see teamStrength.ts. */
+  team_code: number | null
+  /** Ticket #229. The opponent faced in this match, same code space as team_code. */
+  opponent_team_code: number | null
+  /** Ticket #229. Per-player-on-pitch team goals conceded -- see teamStrength.ts's header on why the MAX across a team's players in one match is the correct team figure. */
+  team_goals_conceded: number | null
 }
 
 // ============================================================================
@@ -442,6 +480,91 @@ export function effectiveRatePositionPrior(
 ): PlayerRates {
   if (coverage !== 'neither') return positionPrior
   return priceAdjustedPositionPrior(positionPrior, nowCost, positionMedianCost)
+}
+
+// ============================================================================
+// Ticket #229 — point-in-time team strength, pulled out as its own
+// independently-testable pure function (same technique as every other
+// section here): main()'s Supabase read can't be exercised without a live
+// project, but filtering rows to CURRENT_SEASON and handing them to
+// src/lib/projection/teamStrength.ts's own buildTeamMatchRecords has no I/O
+// of its own.
+// ============================================================================
+
+/**
+ * The point-in-time team-strength table, built ONLY from THIS season's
+ * `player_match_stats` rows — last season's results must not feed this
+ * season's strength, or this reproduces the exact bug this ticket exists to
+ * fix (a rating frozen on stale evidence). Reuses
+ * `buildTeamMatchRecords` (src/lib/projection/teamStrength.ts) UNMODIFIED —
+ * the max-across-players goals-conceded correction lives there, once, and is
+ * not re-derived here. Built from the SAME `matchStatsRows` already fetched
+ * in section 4 above — no additional Supabase round trip, per the ticket's
+ * own "no additional Supabase round trip" requirement.
+ *
+ * Named test: last season's matches are excluded from the strength table
+ * (a CURRENT_SEASON row and a differently-seasoned row for the same two
+ * clubs produce a table that reflects only the former).
+ */
+export function buildCurrentSeasonTeamMatchRecords(
+  rows: readonly MatchStatsRow[],
+  currentSeason: string = CURRENT_SEASON,
+): TeamMatchRecord[] {
+  const currentSeasonRows = rows.filter((row) => row.season === currentSeason)
+  return buildTeamMatchRecords(
+    currentSeasonRows.map((row) => ({
+      matchId: row.match_id,
+      gameweek: row.gameweek,
+      teamCode: row.team_code,
+      opponentTeamCode: row.opponent_team_code,
+      teamGoalsConceded: row.team_goals_conceded,
+    })),
+  )
+}
+
+/**
+ * One fixture's `FixtureContext` (ticket #229) — pulled out as its own pure
+ * function, separate from `buildCurrentSeasonTeamMatchRecords` above, so the
+ * WIRING that feeds `resolveFixtureExpectedScore`'s precedence (not only the
+ * underlying elo/team-strength primitives, already tested in
+ * src/lib/projection/) is independently provable without a live Supabase
+ * project. `ownTeamId`/`opponentTeamId` are `teams.id` values (the same
+ * space `eloByTeamId` and `teamMetadataById` are keyed on); `teamStrength`/
+ * `opponentTeamStrength` are `undefined` — never a guessed record — whenever
+ * a club's own `teams.code` fails to resolve, which `resolveFixtureExpectedScore`
+ * already treats exactly like insufficient history (falls through to the
+ * next precedence tier).
+ */
+export function buildFixtureContext(params: {
+  fixtureId: number
+  isHome: boolean
+  fplDifficulty: number
+  leagueBaselineGoals: number
+  ownTeamId: number
+  opponentTeamId: number
+  eloByTeamId: ReadonlyMap<number, number | null>
+  teamMetadataById: ReadonlyMap<number, TeamMetadata>
+  teamMatchRecords: readonly TeamMatchRecord[]
+  gameweekId: number
+}): FixtureContext {
+  const { fixtureId, isHome, fplDifficulty, leagueBaselineGoals, ownTeamId, opponentTeamId, eloByTeamId, teamMetadataById, teamMatchRecords, gameweekId } =
+    params
+  const ownMeta = teamMetadataById.get(ownTeamId)
+  const opponentMeta = teamMetadataById.get(opponentTeamId)
+  const ownCode = ownMeta?.code ?? null
+  const opponentCode = opponentMeta?.code ?? null
+  return {
+    fixtureId,
+    isHome,
+    teamElo: eloByTeamId.get(ownTeamId) ?? null,
+    opponentElo: eloByTeamId.get(opponentTeamId) ?? null,
+    teamEloStale: ownMeta?.eloStale ?? false,
+    opponentEloStale: opponentMeta?.eloStale ?? false,
+    fplDifficulty,
+    leagueBaselineGoals,
+    teamStrength: ownCode !== null ? computeTeamStrengthAsOf(teamMatchRecords, ownCode, gameweekId) : undefined,
+    opponentTeamStrength: opponentCode !== null ? computeTeamStrengthAsOf(teamMatchRecords, opponentCode, gameweekId) : undefined,
+  }
 }
 
 /** Reduces one season's worth of a player's match rows into the totals `computePlayerRates`/`computeTwoStagePlayerRates` expect. */
@@ -730,11 +853,22 @@ async function main(): Promise<void> {
     }
     assertRowCountMatches('players', playerRows.length, playersRowsExpectedByCount ?? 0)
 
-    const { data: teamRows, error: teamsError } = await supabase.from('teams').select('id, elo').returns<TeamRow[]>()
+    const { data: teamRows, error: teamsError } = await supabase
+      .from('teams')
+      .select('id, elo, elo_stale_since, code')
+      .returns<TeamRow[]>()
     if (teamsError) {
       throw new ProjectionError(`teams lookup failed: ${teamsError.message}`, 'teams')
     }
     const eloByTeamId = new Map<number, number | null>((teamRows ?? []).map((t) => [t.id, t.elo]))
+    // Ticket #229 -- the two extra facts resolveFixtureExpectedScore's
+    // precedence needs beyond the elo value itself: whether that elo is
+    // stale, and the club's own `code` (the join key onto
+    // player_match_stats.team_code/opponent_team_code, an entirely
+    // different id space from `teams.id`).
+    const teamMetadataById = new Map<number, TeamMetadata>(
+      (teamRows ?? []).map((t) => [t.id, { eloStale: t.elo_stale_since !== null, code: t.code }]),
+    )
 
     const { data: fixtureRows, error: fixturesError } = await supabase
       .from('fixtures')
@@ -808,7 +942,8 @@ async function main(): Promise<void> {
       supabase
         .from('player_match_stats')
         .select(
-          'player_code, season, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, element_type',
+          'player_code, season, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, element_type, ' +
+            'match_id, team_code, opponent_team_code, team_goals_conceded',
         )
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
         .order('player_id', { ascending: true })
@@ -882,6 +1017,14 @@ async function main(): Promise<void> {
       list.push(row)
       matchesByPlayerCode.set(row.player_code, list)
     }
+
+    // Ticket #229 -- the point-in-time team-strength table, CURRENT_SEASON
+    // only (see buildCurrentSeasonTeamMatchRecords's own doc). Built once,
+    // outside the per-player loop below: every fixture's own strength lookup
+    // (computeTeamStrengthAsOf, per gameweek, in section 5) reads this SAME
+    // table, filtered fresh each time to gameweeks strictly before the
+    // fixture's own gameweek -- the lookahead guard teamStrength.ts documents.
+    const teamMatchRecords = buildCurrentSeasonTeamMatchRecords(matchStatsRows)
 
     // Ticket #177 -- the POSITION PRIORS (and the defcon position prior)
     // are built from EVERY qualifying row, resolved via
@@ -1068,14 +1211,18 @@ async function main(): Promise<void> {
           const isHome = f.team_h === player.team_id
           const opponentTeamId = isHome ? f.team_a : f.team_h
           const fplDifficulty = (isHome ? f.team_h_difficulty : f.team_a_difficulty) ?? DEFAULT_FPL_DIFFICULTY
-          return {
+          return buildFixtureContext({
             fixtureId: f.id,
             isHome,
-            teamElo: eloByTeamId.get(player.team_id) ?? null,
-            opponentElo: eloByTeamId.get(opponentTeamId) ?? null,
             fplDifficulty,
             leagueBaselineGoals,
-          }
+            ownTeamId: player.team_id,
+            opponentTeamId,
+            eloByTeamId,
+            teamMetadataById,
+            teamMatchRecords,
+            gameweekId: gw.id,
+          })
         })
 
         for (const fixtureContext of fixtureContexts) {
@@ -1191,6 +1338,14 @@ async function main(): Promise<void> {
     }
 
     let fixtureEloFallbackCount = 0
+    // Ticket #229 -- which precedence tier supplied each staged fixture's
+    // expectedScore. fixtureSourceCounts.fdr === fixtureEloFallbackCount
+    // exactly, by construction (eloFallbackUsed is defined as exactly
+    // fixtureSource === 'fdr') -- kept as two separate job_runs.details
+    // entries because fixtureEloFallbackCount is the pre-existing name this
+    // job's consumers already read; fixtureSourceCounts is the new,
+    // complete breakdown across all four tiers.
+    const fixtureSourceCounts: Record<FixtureSource, number> = { elo: 0, 'team-strength': 0, 'stale-elo': 0, fdr: 0 }
     const rowsToUpsert: JsonRecord[] = []
 
     for (const key of playerGwKeys) {
@@ -1199,6 +1354,7 @@ async function main(): Promise<void> {
 
       for (const fp of fixtureProjections) {
         if (fp.modelInputs.eloFallbackUsed) fixtureEloFallbackCount++
+        fixtureSourceCounts[fp.modelInputs.fixtureSource]++
       }
 
       const expectedPoints = fixtureProjections.reduce((sum, fp) => sum + fp.expectedPoints, 0)
@@ -1290,6 +1446,9 @@ async function main(): Promise<void> {
       playersPriceAdjustedScaledUp,
       playersPriceAdjustedScaledDown,
       fixtureEloFallbackCount,
+      // Ticket #229 -- see the counter's own comment above for how this
+      // relates to fixtureEloFallbackCount.
+      fixtureSourceCounts,
       leagueBaselineGoalsSource,
       leagueBaselineGoals,
       playersRowsFetched: playerRows.length,
