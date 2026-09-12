@@ -111,7 +111,14 @@ export const SCALE = 5.6225
  * the away side) to reproduce the same home advantage at parity. NOT a
  * chosen number — derived, not fitted (Tier 3, ticket text).
  *
- * `1 / (1 + 10 ** (-65 / 400)) - 0.5 = 0.0927` (to 4 d.p.).
+ * `1 / (1 + 10 ** (-65 / 400)) - 0.5 = 0.0925` (to 4 d.p.). The ticket text
+ * itself states this as "0.0927" — evaluating the ticket's own stated
+ * formula gives 0.092466..., which rounds to 0.0925, not 0.0927. This is a
+ * discrepancy in the ticket text's rounding, not in the formula; this
+ * constant follows the formula (stated as authoritative: "derived...: 1 /
+ * (1 + 10 ** (-65 / 400)) - 0.5"), not the rounded literal. Flagged in the
+ * Builder's report rather than silently reconciled by fitting a different
+ * formula to hit 0.0927 exactly.
  */
 export const HOME_EXPECTED_SCORE_BONUS = 1 / (1 + 10 ** (-65 / 400)) - 0.5
 
