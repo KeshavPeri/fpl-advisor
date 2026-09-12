@@ -206,6 +206,56 @@ compressing the gap between the best players and the rest, which is precisely th
 or captaincy recommendation turns on (see the worked GW1 case in the addendum below). Ticket #78
 narrows that gap; whether it closes it correctly is a question for the backtest, not this file.
 
+**Validated for the first time — ticket #224, 11 Sep 2026. The "no validation exists" line above
+is no longer true, from a different source than `player_match_stats`.** The unfalsifiability
+described above is specific to `player_match_stats` (FPL-Core-Insights), and that source's gap is
+permanent — see the previous two paragraphs, unchanged and still correct about that source. It is
+not the only possible source, though: the FPL API's own `event/{gw}/live/` endpoint
+(`stats.bonus`, `stats.bps`), fetched by hand and verified on 11 Sep 2026, carries both fields
+verbatim, for the current season. Ticket #224 adds `public.gameweek_live_stats` (one row per
+finished, past-lockdown gameweek × `player_code`, populated by `scripts/ingest-gameweek-live-stats.ts`
+reusing `scripts/settle-predictions.ts`'s own lockdown rule) and `scripts/bonus-validation-report.ts`
+(read-only), which compares `player_projections.components.points.bonusPoints` against this real
+figure — mean projected bonus, mean actual bonus, and the signed error between them, both overall
+and restricted to each gameweek's own top 20 projected players by `expected_points` ("because that
+is the population the allocator actually moves" — docs/model-review-2026-09-02.md §1h, which asked
+for exactly this).
+
+**The limitation is permanent in the other direction, and is exactly as real as `player_match_stats`'s
+own gap.** `event/{gw}/live/` serves the CURRENT season only — there is no equivalent for a past
+season, and never will be. This instrument can validate 2026/27 gameweeks as they finish (three, as
+of this ticket) and can never look further back than that. It is not a substitute for a full-season
+backtest (item 32) — it is a slow, always-current accumulator: exactly one more gameweek of evidence
+every week the app runs, forever bounded to "this season and no earlier."
+
+**Not yet run against live data — the first reading is still open work, same as G9/G10/G11's own
+first runs.** This Builder session has no live Supabase project (the same limitation those three
+entries already record for their own first reads), and the migration is not yet applied — see
+`supabase/README.md`. Neither script has executed against real rows, so this entry deliberately
+states no mean, no signed error, and no verdict on whether the allocator over- or under-projects —
+inventing one here would be exactly the false precision `product-brief.md` §8 forbids. The next
+step is dispatching `scripts/ingest-gameweek-live-stats.ts` then `scripts/bonus-validation-report.ts`
+against the live project, once the migration is applied, and reading what comes back.
+
+**BPS is stored but not yet compared.** `gameweek_live_stats.bps` is ingested alongside `bonus` (the
+allocator models a *share of BPS*, so bps may turn out the more informative comparison — see that
+table's own migration header) but no persisted "projected BPS" figure exists anywhere in this repo
+to compare it against: `expectedBps` (`src/lib/projection/bonus.ts`) is an intermediate value
+`scripts/project-points.ts` computes and discards, never written to `player_projections`. Comparing
+against real bps is future work for whichever ticket adds that persisted figure — not attempted here.
+
+**Other `event/{gw}/live/` `stats` fields exist and are not ingested by this ticket — noted as a
+future surface, deliberately left alone.** The endpoint's `stats` object also carries `starts`,
+`defensive_contribution`, `saves`, `yellow_cards`, `red_cards`, `penalties_saved`,
+`penalties_missed`, `own_goals`, `influence`, `creativity`, `threat`, `ict_index`,
+`clearances_blocks_interceptions`, `recoveries`, `tackles`, the `expected_*` family
+(`expected_goals`, `expected_assists`, `expected_goal_involvements`, `expected_goals_conceded`) and
+`in_dreamteam`/`played` — none of these are written to `gameweek_live_stats`, per this ticket's own
+scope ("this ticket is about bonus"). Most already have a projected or actual counterpart elsewhere
+in this repo (`player_match_stats` for the defensive/attacking counts, `players` for the season
+cumulative FPL-published versions); a per-gameweek, current-season-only copy of them would only be
+worth adding if a future ticket finds a concrete use `player_match_stats` cannot already serve.
+
 ---
 
 ## G4 — Cards, own goals and penalty misses are not modelled
