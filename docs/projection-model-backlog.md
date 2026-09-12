@@ -2173,6 +2173,113 @@ than here and in this ticket's own PR body/report.
 
 ---
 
+## G19 — Ticket #225, 11 Sep 2026: G18's verdict reconfirmed via a second, independent live
+## endpoint; a regression test now locks the non-coupling in code; still SHIP NEITHER TREATMENT
+
+**This entry does not re-litigate G18.** Ticket #225 asked the same two questions G18 (ticket
+#219, PR #221, merged) already answered — this Builder session's first act was re-reading G18 in
+full and confirming, from `git log` and `supabase/README.md`, that #219 is on `main`. Redoing its
+measurement from scratch would have repeated work already done and risked second-guessing a
+result that was rejected on a real, monotonic calibration failure, not on absence of evidence —
+exactly what the "close out the model programme" entry above (ticket #220, Thread 3) already warns
+against ("no further constant already measured against these metrics is to be re-tuned"). So this
+entry adds only the two things G18 did not cover, per the orchestrator/Analyst's explicit scoping:
+an independent cross-check via a second live endpoint, and a regression test at the model layer.
+**Nothing in `src/lib/projection/rates.ts` or `src/lib/projection/expectedPoints.ts` changed as a
+result — both are confirmed still exactly as G18 left them.**
+
+### The independent check: `event/{gw}/live/`, read directly, 11 Sep 2026
+
+G18's xG-includes-penalties finding was built entirely from FPL-Core-Insights' per-match CSVs.
+This ticket's own text asked for the second source it names: FPL's own `event/{gw}/live/`
+endpoint, which publishes `expected_goals` and `penalties_missed` **per player per gameweek** —
+read directly (no dependency on ticket #224's new table, which this ticket does not assume exists
+on `main`).
+
+**What the endpoint actually contains, checked before trusting it.** `event/{gw}/live/`'s
+per-element `stats` block has `penalties_missed` (a count) and `expected_goals` (a per-gameweek
+total), but **no `penalties_scored` field at all** — confirmed by inspecting the raw JSON directly.
+So, unlike G18's isolated-single-shot-row method (which could isolate a scored penalty because the
+source CSV carries `penalties_scored`/`penalties_missed`/`total_shots` per match), this endpoint
+can only give a clean, unambiguous signal on a **missed** penalty: a miss proves an attempted spot
+kick without needing to disentangle it from open-play goals in the same match.
+
+**Live read, 2026/27 season, gameweeks 1–3 (the only finished gameweeks as of 11 Sep 2026):
+scanning every element's `stats.penalties_missed` across all three gameweeks turns up exactly one
+match with a penalty miss — Thiago (`penalties_order = 1`), gameweek 1.** His full `event/1/live/`
+line: 82 minutes, 0 goals, `penalties_missed: 1`, **`expected_goals: "1.00"`**, 0 points. This is
+the same player #218's own cross-check named as "the 1 player, Thiago, with any penalty miss on
+record" for 2025-2026 — the pattern repeats in the new season on the new endpoint.
+
+**Reading it against the hypothesis.** If FPL's own live `expected_goals` figure excluded penalty
+value, a missed spot kick — zero goals, one shot from open play plus whatever else he did that
+match — would not plausibly reach 1.00 xG in a single 90. Landing at exactly that level on a match
+where he is independently known to have missed a penalty is consistent with the same ~0.79-ish
+penalty credit G18 measured from the CSV source being present here too, on a different data
+provider path (FPL's own official live stats, not FPL-Core-Insights). **This corroborates G18's
+Question 1 finding from the second, independent instrument the ticket asked for. It does not
+overturn it, and one match is not a new statistical claim — it is a single-point sanity check,
+reported as exactly that, not inflated into its own measurement.**
+
+**Current `penalties_order = 1` roster, re-checked live, 11 Sep 2026 (for the record, since
+populations drift — G18 itself notes this): 20 players** — B.Fernandes, Barry, Buendía,
+Calvert-Lewin, Clarke, Diarra, Gibbs-White, Gonzalo, Groß, Haaland, Kroupi.Jr, Mateta, McBurnie,
+Osula, Palmer, Saka, Solanke, Szoboszlai, Thiago, Wright. Four names (Clarke, Gonzalo, McBurnie,
+Wright) were not on G18's own 5 September list — ordinary squad/role churn, exactly as G18's own
+"1: 20, 2: 17..." vs "1: 20, 2: 19..." note anticipated, not investigated further here (out of
+this ticket's scope).
+
+**The overlap check this ticket's own text asks for, restated against the current list, not
+recomputed from scratch (G18 already did the measurement; recomputing it against the same
+2025-2026 CSVs would reproduce the same 3/20 figure G18 reports).** None of the four names this
+ticket's own context paragraph uses as its illustration of #218's dead residual method (Romero,
+Mount, Madueke, Doku) appear anywhere in the current `penalties_order = 1` list above. This is
+consistent with, not a replacement for, G18's own directly-measured figure: the residual method's
+20 flagged candidates and the `penalties_order = 1` list of 20 overlap on only 3 names (Kroupi.Jr,
+Osula, Solanke) — an 85% disjoint pair. Since neither treatment ships (next section), there is no
+"lifted" population for this ticket to check in the first place; the check that matters is that
+the population Treatment A *would* have touched is not the dead method's own list, and G18 already
+proved that directly.
+
+### Regression test added: a player is unaffected by `penalties_order` at the model layer
+
+**Why this needed a real test, not just an observation.** `scripts/project-points.ts`'s own
+players `select(...)` (the query that reads `public.players` into this job) does not select
+`penalties_order` at all — confirmed by reading it. Combined with G18's finding that
+`src/lib/projection/rates.ts` and `expectedPoints.ts` were left unchanged, the field cannot reach
+the model layer today, by construction. `scripts/ingest-fpl.test.ts` already covers the ingest
+layer's own null-handling (FPL sends `null` for a player with no recorded penalty-taking role, and
+`mapPlayers` must store `null`, never coerce it to `0`) — that is a different layer and does not
+cover the claim this ticket's DoD makes, which is about the *model* never varying its output
+because of this field.
+
+**The test:** `src/lib/projection/expectedPoints.test.ts`, new `describe` block, ticket #225 named
+in its title. Builds one `PlayerProjectionInput` shaped like a real first-choice penalty taker
+(non-zero `xgPer90`, realistic minutes, a live, non-neutral fixture) and calls `projectPlayerFixture`
+twice: once on that object as-is, once on a shallow copy with an extra `penalties_order: 1`
+property attached (simulating what would happen if a future `project-points.ts` change started
+passing the raw column through without wiring it into the formula, the exact leak this ticket
+exists to guard against) — then asserts the two `FixtureProjection` results are `toStrictEqual`.
+A second case repeats it with `penalties_order: null` explicitly, and a third with the property
+absent entirely, all three asserted equal to each other. **`PlayerProjectionInput` has no
+`penaltiesOrder`/`penalties_order` field in its own type today, so `projectPlayerFixture` cannot
+read it — this test is what turns that structural fact into an enforced regression: if a later
+ticket adds such a field to the type and starts branching on it, this test fails until it is
+deliberately updated, which is exactly the point.**
+
+### Recommendation: unchanged — SHIP NEITHER TREATMENT (reaffirming G18, not re-deciding it)
+
+1. Treatment B: still not built, still ruled out as double-counting (G18, reconfirmed by the
+   `event/{gw}/live/` read above).
+2. Treatment A: still not shipped. G18's within-season measurement (fails Forward/Midfielder
+   calibration monotonically at every tested `K`) is the only measurement of this treatment that
+   exists or was needed; nothing in this ticket's narrower scope re-ran it, per the
+   orchestrator/Analyst's explicit instruction not to re-litigate an already-measured constant.
+3. `src/lib/projection/rates.ts` and `src/lib/projection/expectedPoints.ts`: **confirmed
+   unchanged** by this ticket — the only edit under `src/` is the new regression test in
+   `expectedPoints.test.ts`, which asserts current behaviour, it does not alter it.
+4. Penalty duty stays closed, now reconfirmed a third time (review → #218 → #219/G18 → this
+   ticket), each from an independent instrument, all agreeing.
 ## G19 — Ticket #223, 11 Sep 2026: the 2025/26 recommendation-level replay cannot be built — no
 ## historical price record exists anywhere in this database
 
