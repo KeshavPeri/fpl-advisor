@@ -69,13 +69,17 @@
 // competition, a player over the 38-match season cap, a tracked job whose
 // most recent run failed or is stale, a missing required env var that would
 // itself make the notification absent (Supabase or Telegram credentials),
-// or the deadline having passed with no scheduled notification ever sent.
-// WARN: degrades quality without breaking the chain — a team with a null
-// ClubElo rating, a horizon fixture falling back to FPL's own difficulty
-// scale, a projection row count slightly (not drastically) under the
-// player count, a missing FPL_ENTRY_ID (squad can still be entered
-// manually). See decisions/ticket-69.md for the two calls that were
-// genuinely ambiguous (all-zero projection rows; TELEGRAM_* severity).
+// the deadline having passed with no scheduled notification ever sent, a
+// team with no ClubElo rating or a horizon fixture falling back to FPL's
+// own difficulty scale, or a team's ClubElo rating stale beyond
+// ELO_STALE_HOURS (ticket #230 — see check 6's own section below for why a
+// whole-season model defect on live data is exactly the failure mode this
+// file exists to catch, and why "never an automatic failure" was wrong).
+// WARN: degrades quality without breaking the chain — a projection row
+// count slightly (not drastically) under the player count, a missing
+// FPL_ENTRY_ID (squad can still be entered manually). See
+// decisions/ticket-69.md for the two calls that were genuinely ambiguous
+// (all-zero projection rows; TELEGRAM_* severity).
 //
 // ============================================================================
 // job_runs.job_name — 'solver-run' is shared by THREE scripts.
@@ -168,6 +172,19 @@ const MAX_PREMIER_LEAGUE_MATCHES_PER_SEASON = 38
  * stopped. One named constant, one comment, per the ticket's own Notes.
  */
 const STALE_JOB_HOURS = 36
+
+/**
+ * Staleness threshold for check 6 (team ratings), ticket #230. `teams.elo_stale_since`
+ * (supabase/migrations/20260901090000_teams_elo_stale_since.sql, ticket #176) is set the
+ * FIRST time a team's rating cannot be reconfirmed against the ingested season file and left
+ * untouched on every subsequent run it stays unconfirmed — so its age is how long the rating
+ * has gone without a fresh source value, not how long since it was last checked. A rating that
+ * has gone 240 hours (ten days) without reconfirmation has missed at least one full round of
+ * fixtures. Judgement call, stated as such, following the same pattern as this file's own
+ * `staleHoursThreshold = 36` in check 8 above — no calibration data exists yet for exactly
+ * where this line should sit. Tier 3, decided here. See decisions/ticket-230.md.
+ */
+const ELO_STALE_HOURS = 240
 
 /**
  * Coverage tolerances for check 3 (projections). A row COUNT slightly under
@@ -622,7 +639,13 @@ export function checkSolver(input: SolverCheckInput): CheckResult {
 }
 
 // ----------------------------------------------------------------------------
-// 6. Team ratings — never an automatic failure, per the ticket.
+// 6. Team ratings — ticket #230, superseding #69's "never an automatic
+//    failure" call. Check 6 tested `elo === null` and nothing else, which
+//    measures PRESENCE when the thing that matters is FRESHNESS: it passed
+//    on 12 Sept 2026 while every rating in the table was four months old
+//    and stamped stale via `teams.elo_stale_since` (ticket #176) — a signal
+//    this check never read. Now FAILs on a missing rating, an FDR-fallback
+//    fixture, OR a rating stale beyond ELO_STALE_HOURS. See decisions/ticket-230.md.
 // ----------------------------------------------------------------------------
 
 export interface TeamRatingsCheckInput {
@@ -630,22 +653,36 @@ export interface TeamRatingsCheckInput {
   totalTeamsCount: number
   fixturesFallbackCount: number
   totalFixturesInHorizon: number
+  /** Count of "teams" rows with a non-null elo_stale_since older than ELO_STALE_HOURS. */
+  staleEloTeamsCount: number
+  /** Age, in days, of the single oldest non-null elo_stale_since mark across ALL teams — reported as evidence on every verdict (including pass), not only when it drives a fail. Null when no team has a stale mark at all. */
+  oldestStaleMarkAgeDays: number | null
 }
 
 export function checkTeamRatings(input: TeamRatingsCheckInput): CheckResult {
-  const { nullEloTeamsCount, totalTeamsCount, fixturesFallbackCount, totalFixturesInHorizon } = input
-  const values = { nullEloTeamsCount, totalTeamsCount, fixturesFallbackCount, totalFixturesInHorizon }
+  const { nullEloTeamsCount, totalTeamsCount, fixturesFallbackCount, totalFixturesInHorizon, staleEloTeamsCount, oldestStaleMarkAgeDays } = input
+  const values = { nullEloTeamsCount, totalTeamsCount, fixturesFallbackCount, totalFixturesInHorizon, staleEloTeamsCount, oldestStaleMarkAgeDays }
   if (nullEloTeamsCount > 0 || fixturesFallbackCount > 0) {
     return {
       id: 'team-ratings',
-      verdict: 'warn',
+      verdict: 'fail',
       reason:
         `${nullEloTeamsCount}/${totalTeamsCount} team(s) have no ClubElo rating; ` +
         `${fixturesFallbackCount}/${totalFixturesInHorizon} fixture(s) in the ${PREFLIGHT_HORIZON}-gameweek horizon fall back to FPL difficulty.`,
       values,
     }
   }
-  return { id: 'team-ratings', verdict: 'pass', reason: 'every team has a ClubElo rating; no horizon fixture uses the FDR fallback.', values }
+  if (staleEloTeamsCount > 0) {
+    return {
+      id: 'team-ratings',
+      verdict: 'fail',
+      reason:
+        `${staleEloTeamsCount}/${totalTeamsCount} team(s) have a ClubElo rating stale beyond ${(ELO_STALE_HOURS / 24).toFixed(0)} days ` +
+        `(oldest stale mark: ${oldestStaleMarkAgeDays !== null ? oldestStaleMarkAgeDays.toFixed(1) : 'unknown'} days old).`,
+      values,
+    }
+  }
+  return { id: 'team-ratings', verdict: 'pass', reason: 'every team has a ClubElo rating; no horizon fixture uses the FDR fallback; no rating is stale.', values }
 }
 
 // ----------------------------------------------------------------------------
@@ -1116,6 +1153,7 @@ interface GameweekRow {
 interface TeamRow {
   id: number
   elo: number | null
+  elo_stale_since: string | null
 }
 
 interface FixtureRow {
@@ -1466,7 +1504,7 @@ async function main(): Promise<void> {
     } else {
       const teamsRead = await safeFetchAllPages<TeamRow>(
         'teams',
-        (from, to) => supabase.from('teams').select('id, elo').order('id', { ascending: true }).range(from, to).returns<TeamRow[]>(),
+        (from, to) => supabase.from('teams').select('id, elo, elo_stale_since').order('id', { ascending: true }).range(from, to).returns<TeamRow[]>(),
         () => supabase.from('teams').select('*', { count: 'exact', head: true }),
       )
       if (teamsRead.error) {
@@ -1500,11 +1538,24 @@ async function main(): Promise<void> {
             const fixturesFallbackCount = fixturesRead.rows.filter(
               (f) => (eloById.get(f.team_h) ?? null) === null || (eloById.get(f.team_a) ?? null) === null,
             ).length
+            // Ticket #230: elo_stale_since is set the first time a rating goes
+            // unconfirmed and left untouched on every run it stays that way
+            // (supabase/migrations/20260901090000_teams_elo_stale_since.sql),
+            // so its age IS the length of the unconfirmed streak. Computed over
+            // ALL non-null marks, not only ones past the threshold, so
+            // oldestStaleMarkAgeDays is meaningful evidence even on a pass.
+            const staleAgeHoursByTeam = teamsRead.rows
+              .filter((t) => t.elo_stale_since !== null)
+              .map((t) => (nowMs - new Date(t.elo_stale_since as string).getTime()) / MS_PER_HOUR)
+            const staleEloTeamsCount = staleAgeHoursByTeam.filter((ageHours) => ageHours > ELO_STALE_HOURS).length
+            const oldestStaleMarkAgeDays = staleAgeHoursByTeam.length > 0 ? Math.max(...staleAgeHoursByTeam) / 24 : null
             teamRatingsCheck = checkTeamRatings({
               nullEloTeamsCount,
               totalTeamsCount: teamsRead.rows.length,
               fixturesFallbackCount,
               totalFixturesInHorizon: fixturesRead.rows.length,
+              staleEloTeamsCount,
+              oldestStaleMarkAgeDays,
             })
           }
         }
