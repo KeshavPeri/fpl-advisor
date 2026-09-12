@@ -7,12 +7,15 @@ import {
   evaluateCaptaincy,
   pairedNetGap,
   pickDecisionForGameweek,
+  pickLatestSnapshotByGameweek,
   reconcile,
   renderScorecard,
+  resolvePlanA,
   resolveRollCaptaincy,
   scoreGameweek,
   scoreSquad,
   shapeContainsPlayer,
+  snapshotToPlanRecord,
   summarizeCaptaincy,
   sumGross,
   sumNet,
@@ -20,6 +23,7 @@ import {
   type DecisionRecord,
   type GameweekPlans,
   type PlanRecord,
+  type RawPlanSnapshot,
   type ScoredEntity,
   type SquadSlot,
 } from './recommendation-scorecard.ts'
@@ -283,6 +287,148 @@ describe('pickDecisionForGameweek', () => {
   })
 })
 
+// ============================================================================
+// ticket #231 — freezing the issued recommendation at send time.
+// Player CODE throughout in the snapshot; player_id throughout everywhere
+// else in this file (deltas.md D9, and this file's own "JOIN KEY" header
+// note on why player_id is the right key HERE).
+// ============================================================================
+
+describe('snapshotToPlanRecord', () => {
+  const CODE_TO_ID = new Map<number, number>([
+    [5001, 1],
+    [5002, 2],
+    [5003, 9],
+    [5004, 10],
+  ])
+
+  function rawSnapshot(overrides: Partial<RawPlanSnapshot> = {}): RawPlanSnapshot {
+    return {
+      isRoll: false,
+      transferIn: { code: 5001 },
+      transferOut: { code: 5002 },
+      captainPlayerCode: 5003,
+      viceCaptainPlayerCode: 5004,
+      startingXi: [5001, 5003],
+      benchOrder: [5004],
+      hitCost: 4,
+      ...overrides,
+    }
+  }
+
+  it('translates every player code to the current players.id via codeToPlayerId', () => {
+    const outcome = snapshotToPlanRecord(5, rawSnapshot(), CODE_TO_ID)
+    expect(outcome).toEqual({
+      ok: true,
+      plan: {
+        gameweekId: 5,
+        planIndex: 0,
+        isRoll: false,
+        transferInPlayerId: 1,
+        transferOutPlayerId: 2,
+        captainPlayerId: 9,
+        viceCaptainPlayerId: 10,
+        startingXi: [{ playerId: 1 }, { playerId: 9 }],
+        benchOrder: [{ playerId: 10 }],
+        hitCost: 4,
+      },
+    })
+  })
+
+  it('a roll snapshot (no transfer) translates to null transferIn/Out player ids, never a fabricated player', () => {
+    const outcome = snapshotToPlanRecord(5, rawSnapshot({ isRoll: true, transferIn: null, transferOut: null }), CODE_TO_ID)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.plan.transferInPlayerId).toBeNull()
+    expect(outcome.plan.transferOutPlayerId).toBeNull()
+  })
+
+  it('fails closed, naming the code, when a player code has no row in the current players table', () => {
+    const outcome = snapshotToPlanRecord(5, rawSnapshot({ captainPlayerCode: 9999 }), CODE_TO_ID)
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.detail).toContain('9999')
+    expect(outcome.detail).toContain('gameweek 5')
+  })
+
+  it('names every missing code at once, not just the first', () => {
+    const outcome = snapshotToPlanRecord(5, rawSnapshot({ captainPlayerCode: 9999, viceCaptainPlayerCode: 8888 }), CODE_TO_ID)
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.detail).toContain('9999')
+    expect(outcome.detail).toContain('8888')
+  })
+})
+
+describe('pickLatestSnapshotByGameweek', () => {
+  it('keeps the most recently sent snapshot per gameweek, regardless of input order', () => {
+    const older: RawPlanSnapshot = { isRoll: true, transferIn: null, transferOut: null, captainPlayerCode: 1, viceCaptainPlayerCode: 2, startingXi: [], benchOrder: [], hitCost: 0 }
+    const newer: RawPlanSnapshot = { isRoll: false, transferIn: { code: 9 }, transferOut: { code: 8 }, captainPlayerCode: 1, viceCaptainPlayerCode: 2, startingXi: [], benchOrder: [], hitCost: 4 }
+    const map = pickLatestSnapshotByGameweek([
+      { recommendation_gameweek_id: 5, plan_index: 0, sent_at: '2026-08-24T10:00:00Z', plan_snapshot: newer },
+      { recommendation_gameweek_id: 5, plan_index: 0, sent_at: '2026-08-23T00:00:00Z', plan_snapshot: older },
+    ])
+    expect(map.get(5)).toBe(newer)
+  })
+
+  it('keeps separate gameweeks separate', () => {
+    const a: RawPlanSnapshot = { isRoll: true, transferIn: null, transferOut: null, captainPlayerCode: 1, viceCaptainPlayerCode: 2, startingXi: [], benchOrder: [], hitCost: 0 }
+    const b: RawPlanSnapshot = { isRoll: true, transferIn: null, transferOut: null, captainPlayerCode: 3, viceCaptainPlayerCode: 4, startingXi: [], benchOrder: [], hitCost: 0 }
+    const map = pickLatestSnapshotByGameweek([
+      { recommendation_gameweek_id: 5, plan_index: 0, sent_at: '2026-08-23T00:00:00Z', plan_snapshot: a },
+      { recommendation_gameweek_id: 6, plan_index: 0, sent_at: '2026-08-30T00:00:00Z', plan_snapshot: b },
+    ])
+    expect(map.get(5)).toBe(a)
+    expect(map.get(6)).toBe(b)
+  })
+})
+
+describe('resolvePlanA — the scorecard prefers the snapshot, and falls back cleanly when there is none (ticket #231)', () => {
+  const CODE_TO_ID = new Map<number, number>([
+    [5001, 1],
+    [5003, 9],
+    [5004, 10],
+  ])
+
+  const recommendationsPlanA = standardPlan({ captainPlayerId: 999, hitCost: 8 }) // deliberately DIFFERENT from the snapshot below, so "prefers" is provable, not coincidental.
+
+  const snapshot: RawPlanSnapshot = {
+    isRoll: true,
+    transferIn: null,
+    transferOut: null,
+    captainPlayerCode: 5003,
+    viceCaptainPlayerCode: 5004,
+    startingXi: [5001, 5003, 5004],
+    benchOrder: [],
+    hitCost: 0,
+  }
+
+  it('prefers the frozen plan_snapshot over the mutable recommendations row when one is present and resolves cleanly', () => {
+    const resolved = resolvePlanA(5, recommendationsPlanA, snapshot, CODE_TO_ID)
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) return
+    expect(resolved.source).toBe('snapshot')
+    // Proves it is really the snapshot's own data, not the recommendations
+    // row's — the two disagree on captain and hit cost by construction above.
+    expect(resolved.plan.captainPlayerId).toBe(9)
+    expect(resolved.plan.hitCost).toBe(0)
+    expect(resolved.plan).not.toEqual(recommendationsPlanA)
+  })
+
+  it('falls back cleanly to the recommendations-derived Plan A when no snapshot was recorded for this gameweek, and says so via `source`', () => {
+    const resolved = resolvePlanA(5, recommendationsPlanA, undefined, CODE_TO_ID)
+    expect(resolved).toEqual({ ok: true, source: 'recommendations', plan: recommendationsPlanA })
+  })
+
+  it('a snapshot that cannot be reconstructed today is reported as a failure, never silently downgraded to recommendations', () => {
+    const unresolvable: RawPlanSnapshot = { ...snapshot, captainPlayerCode: 424242 }
+    const resolved = resolvePlanA(5, recommendationsPlanA, unresolvable, CODE_TO_ID)
+    expect(resolved.ok).toBe(false)
+    if (resolved.ok) return
+    expect(resolved.detail).toContain('424242')
+  })
+})
+
 describe('scoreGameweek', () => {
   function plans(overrides: Partial<GameweekPlans> = {}): GameweekPlans {
     return { a: standardPlan(), b: null, c: null, ...overrides }
@@ -398,6 +544,7 @@ describe('reconcile', () => {
       {
         gameweekId: 4,
         ok: true,
+        planASource: 'recommendations',
         planA: { label: 'Plan A', grossPoints: 1, hitCost: 0, netPoints: 1, effectiveCaptainPlayerId: null, captainPromotedToVice: false },
         planB: null,
         planC: null,
@@ -447,6 +594,7 @@ describe('renderScorecard', () => {
         {
           gameweekId: 1,
           ok: true,
+          planASource: 'recommendations',
           planA: { label: 'Plan A', grossPoints: 40, hitCost: 0, netPoints: 40, effectiveCaptainPlayerId: 1, captainPromotedToVice: false },
           planB: null,
           planC: null,
@@ -463,5 +611,26 @@ describe('renderScorecard', () => {
     expect(report).toContain('more settled gameweek(s) needed')
     expect(report).toContain('No 2025/26 replay')
     expect(report).toContain('upserted in place')
+  })
+
+  it('names the Plan A source per scored gameweek — ticket #231: a scorecard that silently mixes frozen and mutable sources is worse than one that says which it had', () => {
+    const entity = (label: string): ScoredEntity => ({ label, grossPoints: 40, hitCost: 0, netPoints: 40, effectiveCaptainPlayerId: 1, captainPromotedToVice: false })
+    const report = renderScorecard({
+      generatedAtIso: '2026-09-11T00:00:00Z',
+      results: [
+        { gameweekId: 1, ok: true, planASource: 'snapshot', planA: entity('Plan A'), planB: null, planC: null, roll: entity('Roll'), actual: null, captaincy: null },
+        { gameweekId: 2, ok: true, planASource: 'recommendations', planA: entity('Plan A'), planB: null, planC: null, roll: entity('Roll'), actual: null, captaincy: null },
+      ],
+      counters: { gameweeksRead: 2, gameweeksScored: 2, excludedUnsettled: 0, excludedMissingActuals: 0, excludedReconstructionFailed: 0 },
+      conflictingPlayerCount: 0,
+    })
+
+    // Both source labels appear, and specifically on the row for the
+    // gameweek that has them — not just present somewhere in the report.
+    const gw1Row = report.split('\n').find((line) => line.startsWith('| 1 |'))
+    const gw2Row = report.split('\n').find((line) => line.startsWith('| 2 |'))
+    expect(gw1Row).toContain('snapshot')
+    expect(gw2Row).toContain('recommendations')
+    expect(report).toContain('1/2 scored gameweek(s) use the frozen')
   })
 })
