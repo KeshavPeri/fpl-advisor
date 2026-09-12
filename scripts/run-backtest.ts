@@ -402,6 +402,41 @@ import {
   type GameweekProjection,
   type PlayerProjectionInput,
 } from '../src/lib/projection/expectedPoints.ts'
+// Ticket #229 — the point-in-time team-strength construction (originally
+// written and calibrated IN THIS FILE by ticket #175) now lives in
+// src/lib/projection/teamStrength.ts, shared with the live projection
+// (expectedPoints.ts's resolveFixtureExpectedScore). Re-exported below so
+// this file's own tests (run-backtest.test.ts) that exercise it as part of
+// THIS file's higher-level functions need no import-path change; the
+// functions' own dedicated unit tests moved to teamStrength.test.ts
+// alongside the implementation — see that file, not this one, for their
+// bodies. Nothing about the arithmetic changed in the move.
+import {
+  MIN_TEAM_PRIOR_MATCHES,
+  NEUTRAL_EXPECTED_SCORE_VALUE,
+  SCALE,
+  buildTeamMatchRecords,
+  computeFixtureExpectedScore,
+  computeTeamStrengthAsOf,
+  fixtureHasSufficientHistory,
+  teamStrengthRate,
+  type MatchStatsForTeamStrength,
+  type TeamMatchRecord,
+  type TeamStrengthRecord,
+} from '../src/lib/projection/teamStrength.ts'
+export {
+  MIN_TEAM_PRIOR_MATCHES,
+  NEUTRAL_EXPECTED_SCORE_VALUE,
+  SCALE,
+  buildTeamMatchRecords,
+  computeFixtureExpectedScore,
+  computeTeamStrengthAsOf,
+  fixtureHasSufficientHistory,
+  teamStrengthRate,
+  type MatchStatsForTeamStrength,
+  type TeamMatchRecord,
+  type TeamStrengthRecord,
+}
 
 const JOB_NAME = 'run-backtest'
 const FEATURE_HISTORY_MIGRATION = 'supabase/migrations/20260827090000_feature_history.sql'
@@ -1124,169 +1159,21 @@ function buildNeutralFixtureContext(gameweekId: number): FixtureContext {
 }
 
 // ============================================================================
-// FIXTURE-AWARE EXPECTED SCORE — ticket #175. Pure, no I/O below this point:
-// every function takes already-fetched rows/records, never reads Supabase
-// itself. Replaces the neutral fplDifficulty=3 fixture (expectedScore
-// exactly 0.5, every multiplier exactly 1.0) every measured row used before
-// this ticket with a point-in-time team-strength comparison, built ONLY
-// from player_match_stats rows strictly before the row being projected.
+// FIXTURE-AWARE EXPECTED SCORE — ticket #175, MOVED by ticket #229 to
+// src/lib/projection/teamStrength.ts (MIN_TEAM_PRIOR_MATCHES,
+// NEUTRAL_EXPECTED_SCORE_VALUE, SCALE, MatchStatsForTeamStrength,
+// TeamMatchRecord, buildTeamMatchRecords, TeamStrengthRecord,
+// computeTeamStrengthAsOf, teamStrengthRate, fixtureHasSufficientHistory,
+// computeFixtureExpectedScore — imported and re-exported above, not
+// redefined here) so the live projection (expectedPoints.ts's
+// resolveFixtureExpectedScore) can share exactly the same construction
+// rather than carrying a second copy. See that file's own header for the
+// full "WHAT IT IS" and the SCALE calibration. What remains below this
+// point (buildClubFixtureSchedule and everything after) is ticket #193's
+// own, later work — the published club-fixture-SCHEDULE for the
+// five-gameweek window, a different concern from team strength, and it
+// still lives here.
 // ============================================================================
-
-/**
- * Ticket #175. A team's point-in-time strength needs at least this many
- * PRIOR matches (strictly before the row's own gameweek) on EACH side of a
- * fixture before expectedScore is computed from a real comparison — below
- * this, both teams fall back to NEUTRAL_EXPECTED_SCORE_VALUE (0.5), the same
- * "average fixture" every row used before this ticket. A single early match
- * is too noisy to base a fixture adjustment on (one red card or one own
- * goal swings a one-match average wildly). 3 is a JUDGEMENT call (ticket
- * text: "state the minimum as a judgement in the code comment"), not a
- * derived value — high enough to smooth a one-match outlier, low enough
- * that most of the season gets a real fixture signal rather than sitting at
- * the neutral fallback (every team has played its 3rd match by gameweek 4,
- * assuming no early postponement).
- */
-export const MIN_TEAM_PRIOR_MATCHES = 3
-
-/**
- * Ticket #175. The expectedScore value used whenever a fixture cannot be
- * given a real point-in-time strength comparison. Matches fixture.ts's own
- * "0.5 = a coin flip / an average fixture" convention exactly — the same
- * value DIFFICULTY_EXPECTED_SCORE[3] and an even elo matchup both resolve
- * to — never a different number invented for this fallback.
- */
-export const NEUTRAL_EXPECTED_SCORE_VALUE = 0.5
-
-/**
- * Ticket #175. The one free parameter in the point-in-time strength ->
- * expectedScore construction below (see computeFixtureExpectedScore):
- * `expectedScore = clamp(0.5 + (ownRate - opponentRate) / SCALE, 0, 1)`.
- *
- * CALIBRATED, NOT CHOSEN (ticket text) — set so the spread of the
- * expectedScore values this construction produces over the 2025-2026
- * measured population matches the spread of the elo-derived expectedScore
- * already stored in `player_projections.components` on live data:
- * `SCALE = stdDev(ownRate - opponentRate, over every resolvable fixture) /
- * stdDev(live elo-derived expectedScore)`.
- *
- * THE TWO OBSERVED DISTRIBUTIONS.
- *
- * Target (live elo-derived expectedScore, `player_projections.components`,
- * rows where `eloFallbackUsed` is false — i.e. a real elo comparison, never
- * the coarser 5-value FDR fallback): n = 3,181, mean = 0.5003,
- * population stdDev = 0.1701, min = 0.1238, max = 0.8762. Obtained by
- * Keshav running a hand, read-only query directly against Supabase — NOT an
- * in-run read from this job. This job has no Supabase access at all and
- * never will (confirmed); the DoD's original phrasing asking for "an in-run
- * read" was a specification error, not something to keep retrying via
- * credentials.
- *
- * This construction's own delta (`ownRate - opponentRate`), 2025-2026,
- * Premier League only, over every resolvable fixture with sufficient prior
- * history on both sides (MIN_TEAM_PRIOR_MATCHES): n = 698 (349 matches x 2
- * perspectives, mean exactly 0 by construction — every match contributes
- * +delta and -delta), population stdDev = 0.9564. Computed by reconstructing
- * player_match_stats from FPL-Core-Insights' own public per-gameweek CSVs
- * (no Supabase needed for this side — confirmed reachable) via a throwaway
- * script that reused this file's own buildTeamMatchRecords/
- * computeTeamStrengthAsOf/teamStrengthRate/fixtureHasSufficientHistory and
- * scripts/ingest-core-insights.ts's own buildClubCodeBySlug/
- * buildTeamCodeMap/toMatchStatRow UNMODIFIED, never re-derived — the
- * reconstruction's own row counts matched the ticket's stated population
- * exactly before this number was trusted (15,340 of 15,340 total rows;
- * 12,754 Premier League rows; 12,613 of 12,754 = 98.9% opponent_team_code
- * resolved). The script was run via `npx tsx`, never committed.
- *
- * SCALE = 0.9564 / 0.1701 = 5.6225.
- */
-export const SCALE = 5.6225
-
-/**
- * One `player_match_stats` row's fields needed to build the point-in-time
- * team-strength table — team_code (which club these particular stats
- * belong to), opponent_team_code (the club faced, so a team's opponent in
- * one match can be found without re-parsing match_id), and
- * team_goals_conceded (per-player-on-pitch, not a team total — see this
- * file's header on why the MAX across a team's players in one match is the
- * correct team figure, never the average or the first row found).
- */
-export interface MatchStatsForTeamStrength {
-  matchId: string
-  gameweek: number
-  teamCode: number | null
-  opponentTeamCode: number | null
-  teamGoalsConceded: number | null
-}
-
-/** One resolvable (team, match) outcome: this team's own goals conceded (the max across its players who appeared) and goals scored (the SAME match's opponent's own max-conceded figure — "the opponent's conceded figure for that same match", ticket text verbatim). */
-export interface TeamMatchRecord {
-  matchId: string
-  gameweek: number
-  teamCode: number
-  goalsConceded: number
-  goalsScored: number
-}
-
-interface TeamMatchAccumulator {
-  matchId: string
-  gameweek: number
-  teamCode: number
-  opponentTeamCode: number | null
-  goalsConceded: number | null
-}
-
-/** Ignores a null side rather than treating it as 0 — a team's goals-conceded figure is "not yet seen a non-null row" until it genuinely has one, and 0 (a clean sheet) must never be indistinguishable from "unknown". */
-function maxIgnoringNull(a: number | null, b: number | null): number | null {
-  if (a === null) return b
-  if (b === null) return a
-  return Math.max(a, b)
-}
-
-/**
- * One row per (matchId, teamCode) actually resolvable to BOTH a real
- * goals-conceded figure (max across that team's own players' rows) AND a
- * real goals-scored figure (the SAME match's opponent's own max-conceded
- * figure, found via opponent_team_code — never by re-parsing match_id) — a
- * match where either side is missing contributes NOTHING to the
- * point-in-time strength table (never a guessed 0), so a team's `matches`
- * count below reflects only genuinely known outcomes. Built once per run
- * over the SAME `player_match_stats` rows already fetched for actuals — no
- * extra Supabase call. Named tests: a normal match, a match with a player
- * substituted before a late goal, and a 0-0 (proving 0 is preserved, never
- * treated as "unknown" and skipped).
- */
-export function buildTeamMatchRecords(rows: readonly MatchStatsForTeamStrength[]): TeamMatchRecord[] {
-  const byKey = new Map<string, TeamMatchAccumulator>()
-  const keyOf = (matchId: string, teamCode: number): string => `${matchId}::${teamCode}`
-
-  for (const row of rows) {
-    if (row.teamCode === null) continue
-    const key = keyOf(row.matchId, row.teamCode)
-    const existing = byKey.get(key)
-    byKey.set(key, {
-      matchId: row.matchId,
-      gameweek: row.gameweek,
-      teamCode: row.teamCode,
-      opponentTeamCode: existing?.opponentTeamCode ?? row.opponentTeamCode,
-      goalsConceded: maxIgnoringNull(existing?.goalsConceded ?? null, row.teamGoalsConceded),
-    })
-  }
-
-  const records: TeamMatchRecord[] = []
-  for (const acc of byKey.values()) {
-    if (acc.goalsConceded === null || acc.opponentTeamCode === null) continue
-    const opponentAcc = byKey.get(keyOf(acc.matchId, acc.opponentTeamCode))
-    if (opponentAcc === undefined || opponentAcc.goalsConceded === null) continue
-    records.push({
-      matchId: acc.matchId,
-      gameweek: acc.gameweek,
-      teamCode: acc.teamCode,
-      goalsConceded: acc.goalsConceded,
-      goalsScored: opponentAcc.goalsConceded,
-    })
-  }
-  return records
-}
 
 function clubScheduleKey(teamCode: number, gameweek: number): string {
   return `${teamCode}:${gameweek}`
@@ -1348,62 +1235,6 @@ export function buildClubFixtureSchedule(rows: readonly MatchStatsForTeamStrengt
 /** Looks up one club's scheduled opponent(s) for one gameweek — `[]` (never `undefined`) for a club with no schedule entry that gameweek, the blank-gameweek case. The single place `clubScheduleKey`'s exact string format matters, so callers (and tests) never need to know it. */
 export function lookupClubFixtureSchedule(schedule: ReadonlyMap<string, readonly (number | null)[]>, teamCode: number, gameweek: number): readonly (number | null)[] {
   return schedule.get(clubScheduleKey(teamCode, gameweek)) ?? []
-}
-
-/** A team's summed prior record as of one point in time — see computeTeamStrengthAsOf. */
-export interface TeamStrengthRecord {
-  matches: number
-  goalsScored: number
-  goalsConceded: number
-}
-
-/**
- * Sums every one of `teamCode`'s resolvable match records with gameweek
- * STRICTLY BEFORE `beforeGameweek` — THE LOOKAHEAD GUARD (ticket text: "the
- * most important test in the ticket"). A gameweek-N row must never see a
- * gameweek-N or later record; `r.gameweek < beforeGameweek`, never `<=`,
- * is the entire guard.
- */
-export function computeTeamStrengthAsOf(records: readonly TeamMatchRecord[], teamCode: number, beforeGameweek: number): TeamStrengthRecord {
-  const prior = records.filter((r) => r.teamCode === teamCode && r.gameweek < beforeGameweek)
-  return {
-    matches: prior.length,
-    goalsScored: prior.reduce((sum, r) => sum + r.goalsScored, 0),
-    goalsConceded: prior.reduce((sum, r) => sum + r.goalsConceded, 0),
-  }
-}
-
-/** (goalsScored - goalsConceded) per prior match — 0 with no prior matches (never divides by zero; MIN_TEAM_PRIOR_MATCHES in computeFixtureExpectedScore is what actually decides whether this value is trusted). */
-export function teamStrengthRate(record: TeamStrengthRecord): number {
-  return record.matches > 0 ? (record.goalsScored - record.goalsConceded) / record.matches : 0
-}
-
-/** Whether computeFixtureExpectedScore would use a REAL point-in-time comparison for this pair (both teams meet MIN_TEAM_PRIOR_MATCHES) rather than the neutral fallback — the SAME gate that function applies internally, exposed separately only for the report's fixture-coverage counters (never a second, divergent rule). */
-export function fixtureHasSufficientHistory(own: TeamStrengthRecord, opponent: TeamStrengthRecord): boolean {
-  return own.matches >= MIN_TEAM_PRIOR_MATCHES && opponent.matches >= MIN_TEAM_PRIOR_MATCHES
-}
-
-function clampUnit(value: number): number {
-  if (value < 0) return 0
-  if (value > 1) return 1
-  return value
-}
-
-/**
- * Ticket #175. The point-in-time analogue of fixture.ts's elo-derived
- * expectedScore, built from each team's (goalsScored - goalsConceded) per
- * prior match (see file header, "THE CONSTRUCTION"). Falls back to
- * NEUTRAL_EXPECTED_SCORE_VALUE when either team has fewer than
- * MIN_TEAM_PRIOR_MATCHES resolvable prior matches — never a guessed
- * adjustment from thin evidence. Named tests: exactly 0.5 for two teams
- * with identical prior records (the delta cancels to 0 regardless of
- * SCALE); clamped to [0, 1] for a lopsided delta; the neutral fallback
- * below the minimum.
- */
-export function computeFixtureExpectedScore(own: TeamStrengthRecord, opponent: TeamStrengthRecord, scale: number): number {
-  if (!fixtureHasSufficientHistory(own, opponent)) return NEUTRAL_EXPECTED_SCORE_VALUE
-  const delta = teamStrengthRate(own) - teamStrengthRate(opponent)
-  return clampUnit(0.5 + delta / scale)
 }
 
 /**
