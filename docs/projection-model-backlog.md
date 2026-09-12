@@ -2120,3 +2120,59 @@ than here and in this ticket's own PR body/report.
 > blocks a ticket rather than the run. Either way, the fix is a process step, not a sharper-worded
 > instruction to the Builder — the Builder in this instance could not have done anything differently
 > with the tools it had.
+
+---
+
+## G19 — Ticket #223, 11 Sep 2026: the 2025/26 recommendation-level replay cannot be built — no
+## historical price record exists anywhere in this database
+
+**Recorded, not solved.** feature-list item 32's remaining, larger piece — replaying what the
+solver would have recommended across the whole 2025/26 season, and scoring that replay against the
+real mini-league result (`product-brief.md` §2's "Backtest harness simulating 2025/26 against the
+actual mini-league result") — is not attempted by this ticket and should not be attempted by a
+future one without first reading this entry.
+
+**Why it cannot be built from what this database holds.** A season-length replay is a claim about
+what the solver would have picked *under a real transfer budget, every week* — optimising under a
+budget constraint is the solver's whole job (`product-brief.md` §6c), and a replay that ignores it
+does not measure the solver, it measures a fantasy version of the solver that never has to choose.
+No table in this database records what any player cost during 2025/26:
+
+- `player_match_stats` (the only 2025/26-scoped table with per-player rows at all — see G9/G10's
+  backtest harness) has no price column. It was never meant to carry one; it is FPL-Core-Insights'
+  match-statistics export, not a price history.
+- `players.now_cost` holds exactly one number per player — the CURRENT price, overwritten every
+  ingest (`scripts/ingest-fpl.ts`) — never a per-gameweek history for any season, past or present.
+- No other table stores a price at any point in time for any past gameweek.
+
+A replay built on today's prices instead (the only prices this database has) would be silently
+wrong in a specific, well-understood direction: it would let the replayed solver "afford" transfers
+that were actually well outside 2025/26's budget (most players' prices only rise over a season) and
+would misprice the budget trade-offs that made real transfer decisions hard in the first place. That
+is not a smaller, honest approximation the way G9's neutral-fixture or single-averaged-match
+approximations are (both stated and bounded, both revisited and improved by later tickets) — it is
+a different, unbounded error with no sanity check available to catch it, because there is no
+historical price ground truth in this database to check it against either.
+
+**What would unblock it.** A per-gameweek price history for 2025/26 — every player's `now_cost` as
+it stood at each gameweek's deadline, not just today's value. This does not exist in
+FPL-Core-Insights (verified against its published CSVs for this ticket's own #78/#127 precedent of
+checking a source's actual columns rather than assuming — see G3) and would need either a new
+external source or a reconstruction from FPL's own historical `element-summary`/`history` endpoints
+if those retain season-long price series. Either path is a **new external data source or a new,
+substantial ingest** — a Tier 2 decision (`escalation.md`) requiring its own verification ticket,
+exactly the shape of work `product-brief.md` §6a/§6b's existing source decisions went through. Nothing
+about it is attempted here.
+
+**What was built instead, and why it is the better use of the same instinct.** Ticket #223 built
+`scripts/recommendation-scorecard.ts` — a scorecard that scores the recommendations THIS APP HAS
+ACTUALLY ISSUED, this season, against what actually happened, using only `recommendations`,
+`recommendation_decisions` and `prediction_log` (all of which already carry a real price-aware
+decision — the solver ran under the real budget at the time, whatever it was). It cannot answer "how
+would the 2025/26 season have gone" — nothing can, without the missing price history above — but it
+answers a related, forward-looking, and arguably more useful question every week from now on: was
+each transfer and captaincy call actually good. Ticket #223's own scope text states this plainly:
+"the value here is that it compounds… by December it is the most important report in the repo." The
+sample is three or four gameweeks today and grows by one every week; the 2025/26 replay's sample
+would be one season, once, and frozen the day this repo stops being able to answer "what did that
+player cost."
