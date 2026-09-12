@@ -7,7 +7,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { determineCurrentGameweekId, main, readTelegramEnv, runSend, sendTelegramMessage, type GameweekRow, type TelegramEnv } from './send-telegram.js'
+import {
+  buildPlanSnapshot,
+  determineCurrentGameweekId,
+  main,
+  readTelegramEnv,
+  runSend,
+  sendTelegramMessage,
+  type GameweekRow,
+  type PlanSnapshot,
+  type RecommendationRowForSnapshot,
+  type TelegramEnv,
+} from './send-telegram.js'
 import { applyWindowMarker, composeCurrentMessage } from '../src/lib/notification/index.ts'
 
 const ORIGINAL_ENV = { ...process.env }
@@ -362,5 +373,188 @@ describe('runSend — trigger-scoped duplicate suppression (ticket #90)', () => 
     const base = composeCurrentMessage({ reasonLines: [ROLL_HEADLINE], planB: null, solverStatus: { isOptimal: true, status: 'Optimal' } })
     expect(applyWindowMarker(base, 'deadline_24h').endsWith(base)).toBe(true)
     expect(applyWindowMarker(base, 'deadline_10h').endsWith(base)).toBe(true)
+  })
+})
+
+// ============================================================================
+// buildPlanSnapshot — ticket #231, pure — no I/O. Player CODE throughout,
+// never player_id (deltas.md D9).
+// ============================================================================
+
+describe('buildPlanSnapshot (ticket #231)', () => {
+  const TRANSFER_ROW: RecommendationRowForSnapshot = {
+    gameweek_id: 9,
+    plan_index: 0,
+    is_roll: false,
+    transfer_in_player_id: 101,
+    transfer_in_player_code: 5001,
+    transfer_out_player_id: 102,
+    transfer_out_player_code: 5002,
+    captain_player_code: 5001,
+    vice_captain_player_code: 5003,
+    starting_xi: [
+      { playerId: 101, playerCode: 5001 },
+      { playerId: 103, playerCode: 5003 },
+    ],
+    bench_order: [{ playerId: 104, playerCode: 5004 }],
+    hit_cost: 4,
+    net_points: 55.5,
+    confidence_band: 'marginal',
+  }
+
+  it('carries player codes and names for the transfer in/out, codes only for captain/vice-captain and the XI/bench, plus the model version', () => {
+    const snapshot = buildPlanSnapshot(TRANSFER_ROW, { transferInName: 'Palmer', transferOutName: 'Saka' }, 'baseline-v1')
+    const expected: PlanSnapshot = {
+      gameweekId: 9,
+      planIndex: 0,
+      modelVersion: 'baseline-v1',
+      isRoll: false,
+      transferIn: { code: 5001, name: 'Palmer' },
+      transferOut: { code: 5002, name: 'Saka' },
+      captainPlayerCode: 5001,
+      viceCaptainPlayerCode: 5003,
+      startingXi: [5001, 5003],
+      benchOrder: [5004],
+      hitCost: 4,
+      expectedPoints: 55.5,
+      confidenceBand: 'marginal',
+    }
+    expect(snapshot).toEqual(expected)
+  })
+
+  it('a roll plan (no transfer) snapshots null transferIn/transferOut, never a fabricated player', () => {
+    const rollRow: RecommendationRowForSnapshot = {
+      ...TRANSFER_ROW,
+      is_roll: true,
+      transfer_in_player_id: null,
+      transfer_in_player_code: null,
+      transfer_out_player_id: null,
+      transfer_out_player_code: null,
+    }
+    const snapshot = buildPlanSnapshot(rollRow, { transferInName: null, transferOutName: null }, 'baseline-v1')
+    expect(snapshot.isRoll).toBe(true)
+    expect(snapshot.transferIn).toBeNull()
+    expect(snapshot.transferOut).toBeNull()
+  })
+
+  it('never fabricates a transfer name when the code is present but the name lookup came back empty', () => {
+    const snapshot = buildPlanSnapshot(TRANSFER_ROW, { transferInName: null, transferOutName: null }, 'baseline-v1')
+    expect(snapshot.transferIn).toBeNull()
+    expect(snapshot.transferOut).toBeNull()
+  })
+})
+
+// ============================================================================
+// runSend + plan_snapshot — ticket #231's own named tests: written on a
+// successful send, and written on a failed send too (a failed Telegram
+// delivery is still a recommendation the model produced).
+// ============================================================================
+
+describe('runSend records plan_snapshot on the notifications row (ticket #231)', () => {
+  const SNAPSHOT_HEADLINE = 'Transfer Saka out, Palmer in.'
+
+  beforeEach(() => {
+    resetTables({
+      gameweeks: [{ id: 9, deadline_time: futureIsoDate(72) }],
+      recommendations: [
+        {
+          gameweek_id: 9,
+          plan_index: 0,
+          solver_run_id: 1,
+          is_roll: false,
+          transfer_in_player_id: 101,
+          transfer_in_player_code: 5001,
+          transfer_out_player_id: 102,
+          transfer_out_player_code: 5002,
+          captain_player_code: 5001,
+          vice_captain_player_code: 5003,
+          starting_xi: [
+            { playerId: 101, playerCode: 5001 },
+            { playerId: 103, playerCode: 5003 },
+          ],
+          bench_order: [{ playerId: 104, playerCode: 5004 }],
+          hit_cost: 4,
+          net_points: 55.5,
+          confidence_band: 'marginal',
+        },
+      ],
+      recommendation_reasons: [{ gameweek_id: 9, plan_index: 0, order_index: 0, reason: SNAPSHOT_HEADLINE }],
+      solver_runs: [{ id: 1, solver_status: 'Optimal' }],
+      players: [
+        { id: 101, web_name: 'Palmer' },
+        { id: 102, web_name: 'Saka' },
+      ],
+    })
+  })
+
+  const EXPECTED_SNAPSHOT: PlanSnapshot = {
+    gameweekId: 9,
+    planIndex: 0,
+    modelVersion: 'baseline-v1',
+    isRoll: false,
+    transferIn: { code: 5001, name: 'Palmer' },
+    transferOut: { code: 5002, name: 'Saka' },
+    captainPlayerCode: 5001,
+    viceCaptainPlayerCode: 5003,
+    startingXi: [5001, 5003],
+    benchOrder: [5004],
+    hitCost: 4,
+    expectedPoints: 55.5,
+    confidenceBand: 'marginal',
+  }
+
+  it('a successful send writes a non-null plan_snapshot built from the exact rows the message was composed from', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, result: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(fetchImpl as unknown as typeof fetch)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const outcome = await runSend('manual', fakeSupabase as unknown as SupabaseClient, UNIT_TEST_TELEGRAM_ENV, new Date())
+
+    logSpy.mockRestore()
+    fetchSpy.mockRestore()
+
+    expect(outcome).toBe('sent')
+    expect(tables.notifications).toHaveLength(1)
+    expect(tables.notifications[0].outcome).toBe('sent')
+    expect(tables.notifications[0].plan_snapshot).toEqual(EXPECTED_SNAPSHOT)
+  })
+
+  it('a failed Telegram send ALSO writes a non-null plan_snapshot — a failed delivery is still a recommendation the model produced', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: false, description: 'Internal Server Error' }), { status: 500, headers: { 'Content-Type': 'application/json' } }),
+    )
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(fetchImpl as unknown as typeof fetch)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const outcome = await runSend('manual', fakeSupabase as unknown as SupabaseClient, UNIT_TEST_TELEGRAM_ENV, new Date())
+
+    logSpy.mockRestore()
+    errorSpy.mockRestore()
+    fetchSpy.mockRestore()
+
+    expect(outcome).toBe('failed')
+    expect(tables.notifications).toHaveLength(1)
+    expect(tables.notifications[0].outcome).toBe('failed')
+    expect(tables.notifications[0].plan_snapshot).toEqual(EXPECTED_SNAPSHOT)
+  }, 10_000)
+
+  it('an infeasible/no-recommendation send (no plan referenced) writes a null plan_snapshot, never a guessed one', async () => {
+    resetTables({
+      gameweeks: [{ id: 9, deadline_time: futureIsoDate(72) }],
+      solver_runs: [{ id: 1, gameweek_id: 9, solver_status: 'Infeasible' }],
+    })
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, result: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(fetchImpl as unknown as typeof fetch)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const outcome = await runSend('manual', fakeSupabase as unknown as SupabaseClient, UNIT_TEST_TELEGRAM_ENV, new Date())
+
+    logSpy.mockRestore()
+    fetchSpy.mockRestore()
+
+    expect(outcome).toBe('sent')
+    expect(tables.notifications[0].send_kind).toBe('infeasible')
+    expect(tables.notifications[0].plan_snapshot).toBeNull()
   })
 })
