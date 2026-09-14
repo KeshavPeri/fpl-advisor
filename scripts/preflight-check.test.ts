@@ -463,25 +463,58 @@ describe('checkSolver', () => {
 })
 
 // ============================================================================
-// 6. Team ratings — never an automatic failure.
+// 6. Team ratings — ticket #230. FAILs on a missing rating, an FDR-fallback
+// fixture, OR a rating stale beyond ELO_STALE_HOURS (240h / 10 days).
 // ============================================================================
 
 describe('checkTeamRatings', () => {
-  it('pass: every team rated, no fallback fixtures', () => {
-    const result = checkTeamRatings({ nullEloTeamsCount: 0, totalTeamsCount: 20, fixturesFallbackCount: 0, totalFixturesInHorizon: 25 })
+  const freshInput = {
+    nullEloTeamsCount: 0,
+    totalTeamsCount: 20,
+    fixturesFallbackCount: 0,
+    totalFixturesInHorizon: 25,
+    staleEloTeamsCount: 0,
+    oldestStaleMarkAgeDays: null as number | null,
+  }
+
+  it('pass: all fresh — every team rated, no fallback fixtures, no stale marks', () => {
+    const result = checkTeamRatings(freshInput)
     expect(result.verdict).toBe('pass')
   })
 
-  it('warn (never fail): some teams have no ClubElo rating', () => {
-    const result = checkTeamRatings({ nullEloTeamsCount: 3, totalTeamsCount: 20, fixturesFallbackCount: 0, totalFixturesInHorizon: 25 })
-    expect(result.verdict).toBe('warn')
+  it('pass: a stale mark newer than the threshold passes', () => {
+    // 3 days old — well under the 10-day threshold, so it does not count
+    // toward staleEloTeamsCount, but its age is still reported as evidence.
+    const result = checkTeamRatings({ ...freshInput, staleEloTeamsCount: 0, oldestStaleMarkAgeDays: 3 })
+    expect(result.verdict).toBe('pass')
+    expect(result.values.oldestStaleMarkAgeDays).toBe(3)
+  })
+
+  it('fail: one stale fails', () => {
+    const result = checkTeamRatings({ ...freshInput, staleEloTeamsCount: 1, oldestStaleMarkAgeDays: 121.4 })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('1/20')
+    expect(result.reason).toContain('10 days')
+    expect(result.reason).toContain('121.4')
+  })
+
+  it('fail: a null elo still fails as it does today', () => {
+    const result = checkTeamRatings({ ...freshInput, nullEloTeamsCount: 3 })
+    expect(result.verdict).toBe('fail')
     expect(result.reason).toContain('3/20')
   })
 
-  it('warn (never fail): some horizon fixtures fall back to FPL difficulty', () => {
-    const result = checkTeamRatings({ nullEloTeamsCount: 0, totalTeamsCount: 20, fixturesFallbackCount: 4, totalFixturesInHorizon: 25 })
-    expect(result.verdict).toBe('warn')
+  it('fail: some horizon fixtures fall back to FPL difficulty', () => {
+    const result = checkTeamRatings({ ...freshInput, fixturesFallbackCount: 4 })
+    expect(result.verdict).toBe('fail')
     expect(result.reason).toContain('4/25')
+  })
+
+  it('reports staleEloTeamsCount, totalTeamsCount and oldestStaleMarkAgeDays in values regardless of verdict', () => {
+    const result = checkTeamRatings({ ...freshInput, staleEloTeamsCount: 2, oldestStaleMarkAgeDays: 15.5 })
+    expect(result.values.staleEloTeamsCount).toBe(2)
+    expect(result.values.totalTeamsCount).toBe(20)
+    expect(result.values.oldestStaleMarkAgeDays).toBe(15.5)
   })
 })
 
