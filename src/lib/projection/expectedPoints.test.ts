@@ -25,9 +25,12 @@ import {
   goalConversionFactor,
   projectPlayerFixture,
   projectPlayerGameweek,
+  resolveFixtureExpectedScore,
   type FixtureContext,
+  type FixtureSource,
   type PlayerProjectionInput,
 } from './expectedPoints.ts'
+import { computeFixtureExpectedScore, HOME_EXPECTED_SCORE_BONUS, MIN_TEAM_PRIOR_MATCHES, SCALE, type TeamStrengthRecord } from './teamStrength.ts'
 
 const zeroRates = { xgPer90: 0, xaPer90: 0, savesPer90: 0, cbiPer90: 0, recoveriesPer90: 0 }
 
@@ -1056,3 +1059,115 @@ describe(
     })
   },
 )
+
+// ============================================================================
+// Ticket #229 — fixtureSource precedence: fresh elo > sufficient team-strength
+// history > stale elo > FDR. eloFallbackUsed redefined as exactly
+// fixtureSource === 'fdr'.
+// ============================================================================
+
+describe('resolveFixtureExpectedScore: the four-tier precedence (ticket #229)', () => {
+  // Sufficient team-strength history on both sides -- well above
+  // MIN_TEAM_PRIOR_MATCHES -- with a rate gap chosen so team-strength's own
+  // expectedScore is FAR from whatever the elo tiers would produce, so a test
+  // asserting "elo wins" or "stale-elo wins" cannot pass by the two
+  // constructions coincidentally agreeing.
+  const strongHistory: TeamStrengthRecord = { matches: 10, goalsScored: 25, goalsConceded: 5 } // rate = 2.0
+  const weakHistory: TeamStrengthRecord = { matches: 10, goalsScored: 5, goalsConceded: 25 } // rate = -2.0
+  const insufficientHistory: TeamStrengthRecord = { matches: MIN_TEAM_PRIOR_MATCHES - 1, goalsScored: 25, goalsConceded: 5 }
+
+  it('TIER 1: fresh elo wins over sufficient team-strength history -- both present, elo not stale', () => {
+    const f = fixture({
+      teamElo: 1600,
+      opponentElo: 1500,
+      isHome: true,
+      teamStrength: strongHistory,
+      opponentTeamStrength: weakHistory,
+    })
+    const { expectedScoreValue, fixtureSource } = resolveFixtureExpectedScore(f)
+    expect(fixtureSource).toBe('elo')
+    expect(expectedScoreValue).toBe(expectedScore(1600, 1500, true))
+    // Sanity: this is NOT what team-strength would have given -- proves the
+    // two tiers really do disagree here, so "elo wins" is a meaningful claim.
+    const homeAdjustment = HOME_EXPECTED_SCORE_BONUS
+    expect(expectedScoreValue).not.toBeCloseTo(computeFixtureExpectedScore(strongHistory, weakHistory, SCALE, homeAdjustment), 6)
+  })
+
+  it("TIER 1 requires BOTH teams' elo fresh -- either side stale drops out of tier 1", () => {
+    const ownStale = fixture({ teamElo: 1600, opponentElo: 1500, teamEloStale: true, teamStrength: strongHistory, opponentTeamStrength: weakHistory })
+    const opponentStale = fixture({ teamElo: 1600, opponentElo: 1500, opponentEloStale: true, teamStrength: strongHistory, opponentTeamStrength: weakHistory })
+    expect(resolveFixtureExpectedScore(ownStale).fixtureSource).not.toBe('elo')
+    expect(resolveFixtureExpectedScore(opponentStale).fixtureSource).not.toBe('elo')
+  })
+
+  it('TIER 2: sufficient team-strength history wins over stale elo', () => {
+    const f = fixture({
+      teamElo: 1600,
+      opponentElo: 1500,
+      teamEloStale: true,
+      opponentEloStale: true,
+      isHome: true,
+      teamStrength: strongHistory,
+      opponentTeamStrength: weakHistory,
+    })
+    const { expectedScoreValue, fixtureSource } = resolveFixtureExpectedScore(f)
+    expect(fixtureSource).toBe('team-strength')
+    expect(expectedScoreValue).toBe(computeFixtureExpectedScore(strongHistory, weakHistory, SCALE, HOME_EXPECTED_SCORE_BONUS))
+    // Not the (stale) elo comparison -- proves tier 2 really did win, not
+    // coincidentally match tier 3's own number.
+    expect(expectedScoreValue).not.toBeCloseTo(expectedScore(1600, 1500, true), 6)
+  })
+
+  it('TIER 2 passes +HOME_EXPECTED_SCORE_BONUS when home, -HOME_EXPECTED_SCORE_BONUS when away', () => {
+    const home = fixture({ teamElo: null, opponentElo: null, isHome: true, teamStrength: strongHistory, opponentTeamStrength: weakHistory })
+    const away = fixture({ teamElo: null, opponentElo: null, isHome: false, teamStrength: strongHistory, opponentTeamStrength: weakHistory })
+    expect(resolveFixtureExpectedScore(home).expectedScoreValue).toBe(
+      computeFixtureExpectedScore(strongHistory, weakHistory, SCALE, HOME_EXPECTED_SCORE_BONUS),
+    )
+    expect(resolveFixtureExpectedScore(away).expectedScoreValue).toBe(
+      computeFixtureExpectedScore(strongHistory, weakHistory, SCALE, -HOME_EXPECTED_SCORE_BONUS),
+    )
+  })
+
+  it('TIER 3: stale elo beats insufficient team-strength history', () => {
+    const f = fixture({
+      teamElo: 1600,
+      opponentElo: 1500,
+      teamEloStale: true,
+      isHome: true,
+      teamStrength: insufficientHistory,
+      opponentTeamStrength: strongHistory,
+    })
+    const { expectedScoreValue, fixtureSource } = resolveFixtureExpectedScore(f)
+    expect(fixtureSource).toBe('stale-elo')
+    expect(expectedScoreValue).toBe(expectedScore(1600, 1500, true))
+  })
+
+  it('TIER 3 also wins when team-strength is entirely absent (undefined), not merely thin', () => {
+    const f = fixture({ teamElo: 1600, opponentElo: 1500, teamEloStale: true, isHome: true })
+    expect(resolveFixtureExpectedScore(f).fixtureSource).toBe('stale-elo')
+  })
+
+  it('TIER 4: nothing available falls to FDR', () => {
+    const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 4 })
+    const { expectedScoreValue, fixtureSource } = resolveFixtureExpectedScore(f)
+    expect(fixtureSource).toBe('fdr')
+    expect(expectedScoreValue).toBe(expectedScoreFromDifficulty(4))
+  })
+
+  it('TIER 4 also applies when elo is null but team-strength is present yet insufficient', () => {
+    const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 2, teamStrength: insufficientHistory, opponentTeamStrength: strongHistory })
+    expect(resolveFixtureExpectedScore(f).fixtureSource).toBe('fdr')
+  })
+
+  it.each<[string, Partial<FixtureContext>, FixtureSource]>([
+    ['elo', { teamElo: 1600, opponentElo: 1500 }, 'elo'],
+    ['team-strength', { teamElo: null, opponentElo: null, teamStrength: strongHistory, opponentTeamStrength: weakHistory }, 'team-strength'],
+    ['stale-elo', { teamElo: 1600, opponentElo: 1500, teamEloStale: true }, 'stale-elo'],
+    ['fdr', { teamElo: null, opponentElo: null }, 'fdr'],
+  ])('eloFallbackUsed on the combiner\'s own output is exactly fixtureSource === \'fdr\' -- %s tier', (_label, overrides, expectedSource) => {
+    const projection = projectPlayerFixture(player(), fixture(overrides))
+    expect(projection.modelInputs.fixtureSource).toBe(expectedSource)
+    expect(projection.modelInputs.eloFallbackUsed).toBe(expectedSource === 'fdr')
+  })
+})

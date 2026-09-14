@@ -28,6 +28,7 @@ import {
   expectedScore,
   expectedScoreFromDifficulty,
 } from './fixture.ts'
+import { computeFixtureExpectedScore, fixtureHasSufficientHistory, HOME_EXPECTED_SCORE_BONUS, SCALE, type TeamStrengthRecord } from './teamStrength.ts'
 import {
   ASSIST_POINTS,
   GOALS_CONCEDED_DIVISOR,
@@ -468,10 +469,100 @@ export interface FixtureContext {
   teamElo: number | null
   /** The opponent's elo in this fixture. Null triggers the same FDR fallback as a null teamElo. */
   opponentElo: number | null
-  /** FPL's own 1-5 FDR for this team in this fixture (team_h_difficulty or team_a_difficulty, whichever applies), used only when either elo above is null. */
+  /**
+   * Ticket #229. True when this team's OWN `teams.elo_stale_since` is
+   * non-null — the rating shown is preserved, not confirmed fresh this run
+   * (see `teams_elo_stale_since` migration). Optional, defaults to `false`
+   * (not stale) when omitted, so every pre-#229 caller — every existing test
+   * and every scripts/run-backtest.ts construction, which never faces the
+   * elo table at all — is an EXACT no-op: with both stale flags absent, the
+   * precedence below behaves exactly as the old two-branch elo/FDR logic did.
+   */
+  teamEloStale?: boolean
+  /** The opponent's own elo-staleness flag — see teamEloStale above. */
+  opponentEloStale?: boolean
+  /** FPL's own 1-5 FDR for this team in this fixture (team_h_difficulty or team_a_difficulty, whichever applies), used only when neither elo tier below applies. */
   fplDifficulty: number
   /** Resolved league-wide average goals per team per match — see fixture.ts's LEAGUE_BASELINE_GOALS_PER_TEAM and scripts/project-points.ts's runtime computation. */
   leagueBaselineGoals: number
+  /**
+   * Ticket #229. This team's point-in-time team-strength record (see
+   * teamStrength.ts), used only when the fresh-elo tier below is
+   * unavailable. `undefined` means "no record to offer" — falls straight
+   * through to the next precedence tier, exactly like a team with fewer than
+   * `MIN_TEAM_PRIOR_MATCHES` does. Optional so every pre-#229 caller is an
+   * EXACT no-op.
+   */
+  teamStrength?: TeamStrengthRecord
+  /** The opponent's own point-in-time team-strength record — see teamStrength above. */
+  opponentTeamStrength?: TeamStrengthRecord
+}
+
+/**
+ * Ticket #229. Which of the four precedence tiers supplied a fixture's
+ * expectedScore — see `resolveFixtureExpectedScore`'s own comment for the
+ * exact order. Surfaced on `FixtureModelInputs` so the reasoning screen, the
+ * calibration/backtest reports, and job_runs.details can all see WHICH
+ * instrument produced a fixture's number, not only the number itself.
+ */
+export type FixtureSource = 'elo' | 'team-strength' | 'stale-elo' | 'fdr'
+
+/**
+ * Ticket #229. The fixture's expectedScore, resolved through this exact
+ * precedence — each tier tried in order, falling through only when the
+ * tier's own data is missing or insufficient:
+ *
+ *   1. FRESH ELO — both teamElo/opponentElo non-null AND neither team's own
+ *      elo is marked stale (`teamEloStale`/`opponentEloStale` both false).
+ *      Identical to the pre-#229 elo formula — this is what keeps current
+ *      behaviour unchanged and makes the job self-heal automatically if
+ *      ClubElo ever comes back.
+ *   2. TEAM-STRENGTH — both `teamStrength`/`opponentTeamStrength` present
+ *      AND meet `MIN_TEAM_PRIOR_MATCHES` (`fixtureHasSufficientHistory`,
+ *      teamStrength.ts — the SAME gate the backtest itself uses, never a
+ *      second, divergent rule). Only reached once tier 1 has already failed.
+ *   3. STALE ELO — teamElo/opponentElo both non-null but tier 1 failed
+ *      (stale, or tier 2 had insufficient history) — better than nothing
+ *      early in a season, before enough current-season matches exist for
+ *      tier 2.
+ *   4. FDR — the pre-existing FPL-difficulty fallback, unchanged. Reached
+ *      only when nothing above resolves.
+ *
+ * Named tests cover all four tiers plus the fall-through order between them
+ * (fresh elo beats sufficient history; stale elo loses to sufficient
+ * history; stale elo beats insufficient history; nothing available falls to
+ * FDR).
+ */
+export function resolveFixtureExpectedScore(fixture: FixtureContext): { expectedScoreValue: number; fixtureSource: FixtureSource } {
+  const hasElo = fixture.teamElo !== null && fixture.opponentElo !== null
+  const eloIsFresh = hasElo && !fixture.teamEloStale && !fixture.opponentEloStale
+  if (eloIsFresh) {
+    return {
+      expectedScoreValue: expectedScore(fixture.teamElo as number, fixture.opponentElo as number, fixture.isHome),
+      fixtureSource: 'elo',
+    }
+  }
+
+  if (
+    fixture.teamStrength !== undefined &&
+    fixture.opponentTeamStrength !== undefined &&
+    fixtureHasSufficientHistory(fixture.teamStrength, fixture.opponentTeamStrength)
+  ) {
+    const homeAdjustment = fixture.isHome ? HOME_EXPECTED_SCORE_BONUS : -HOME_EXPECTED_SCORE_BONUS
+    return {
+      expectedScoreValue: computeFixtureExpectedScore(fixture.teamStrength, fixture.opponentTeamStrength, SCALE, homeAdjustment),
+      fixtureSource: 'team-strength',
+    }
+  }
+
+  if (hasElo) {
+    return {
+      expectedScoreValue: expectedScore(fixture.teamElo as number, fixture.opponentElo as number, fixture.isHome),
+      fixtureSource: 'stale-elo',
+    }
+  }
+
+  return { expectedScoreValue: expectedScoreFromDifficulty(fixture.fplDifficulty), fixtureSource: 'fdr' }
 }
 
 export interface FixtureProjectionComponents {
@@ -526,8 +617,19 @@ export interface FixtureModelInputs {
   /** The attacking multiplier applied to xgPer90/xaPer90 for this fixture -- see fixture.ts's attackingMultiplier (damped to its measured slope, ticket #182). */
   attackingMultiplier: number
   pCleanSheet: number
-  /** True when this fixture's expectedScore came from the FPL-FDR fallback in fixture.ts because a team's elo was null. Counted in job_runs.details by the job. */
+  /**
+   * Ticket #229 — redefined. Exactly `fixtureSource === 'fdr'`: whether this
+   * fixture's expectedScore came from the FPL-FDR fallback specifically, not
+   * (as before #229) a proxy for "either team's elo was null". Those two
+   * stopped being the same thing once the team-strength and stale-elo tiers
+   * were inserted between fresh elo and FDR — see `resolveFixtureExpectedScore`.
+   * Kept as its own field, rather than replaced outright by `fixtureSource`,
+   * because job_runs.details' existing fallback counter reads this name and
+   * still means what it always meant: "the coarse FDR fallback was used".
+   */
   eloFallbackUsed: boolean
+  /** Ticket #229 — which precedence tier supplied `expectedScore` above. See `resolveFixtureExpectedScore`'s own comment for the exact order. */
+  fixtureSource: FixtureSource
 }
 
 export interface FixtureProjection {
@@ -557,10 +659,8 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
   const playerRates = computePlayerRates(player.rateHistory, player.ratePositionPrior)
   const defconHitRate = estimateDefconHitRate(player.position, player.defconMatches, player.defconPositionPrior)
 
-  const eloFallbackUsed = fixture.teamElo === null || fixture.opponentElo === null
-  const expectedScoreValue = eloFallbackUsed
-    ? expectedScoreFromDifficulty(fixture.fplDifficulty)
-    : expectedScore(fixture.teamElo as number, fixture.opponentElo as number, fixture.isHome)
+  const { expectedScoreValue, fixtureSource } = resolveFixtureExpectedScore(fixture)
+  const eloFallbackUsed = fixtureSource === 'fdr'
 
   const attackMultiplier = attackingMultiplier(expectedScoreValue)
   const savesMultiplier = defensiveMultiplier(expectedScoreValue)
@@ -640,6 +740,7 @@ export function projectPlayerFixture(player: PlayerProjectionInput, fixture: Fix
       attackingMultiplier: attackMultiplier,
       pCleanSheet,
       eloFallbackUsed,
+      fixtureSource,
     },
     expectedEvents: {
       expectedGoals,

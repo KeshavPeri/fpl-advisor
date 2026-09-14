@@ -38,8 +38,15 @@ import { effectiveRatePositionPrior, medianNowCostByPosition } from './project-p
 // their own), imported and exercised directly so the survivorship-bias fix
 // is provable on constructed rows, not only grepped.
 import { resolvePriorRowPosition, buildPositionPriorMatches, type MatchStatsRow } from './project-points.ts'
+// Ticket #229: same reasoning -- buildCurrentSeasonTeamMatchRecords and
+// buildFixtureContext are plain pure functions (no Supabase call of their
+// own), imported and exercised directly so the season-exclusion guarantee
+// and the resolveFixtureExpectedScore wiring are provable on constructed
+// rows, not only grepped.
+import { buildCurrentSeasonTeamMatchRecords, buildFixtureContext, type TeamMetadata } from './project-points.ts'
 import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
 import { computeTwoStagePlayerRates } from '../src/lib/projection/rates.ts'
+import { MIN_TEAM_PRIOR_MATCHES, type TeamMatchRecord } from '../src/lib/projection/teamStrength.ts'
 
 const sourcePath = fileURLToPath(new URL('./project-points.ts', import.meta.url))
 const source = readFileSync(sourcePath, 'utf8')
@@ -529,6 +536,11 @@ function matchRow(overrides: Partial<MatchStatsRow> = {}): MatchStatsRow {
     tackles: 1,
     recoveries: 2,
     element_type: null,
+    // Ticket #229 -- sensible defaults for the four new team-strength columns.
+    match_id: 'm1',
+    team_code: null,
+    opponent_team_code: null,
+    team_goals_conceded: null,
     ...overrides,
   }
 }
@@ -755,5 +767,198 @@ describe('project-points.ts — projected population unchanged (ticket #177)', (
   it('rowsToUpsert (and therefore player_projections) is built by iterating playerGwKeys, which is populated only inside the playerRows loop above', () => {
     expect(source).toMatch(/for \(const key of playerGwKeys\)/)
     expect(source).toMatch(/playerGwKeys\.push\(/)
+  })
+})
+
+// ============================================================================
+// Ticket #229 — point-in-time team strength replaces frozen ClubElo whenever
+// the elo table cannot be trusted. buildCurrentSeasonTeamMatchRecords and
+// buildFixtureContext are plain pure functions, imported and exercised
+// directly (same technique as every #113/#119/#177 helper above).
+// ============================================================================
+
+describe('buildCurrentSeasonTeamMatchRecords (ticket #229)', () => {
+  it("last season's matches are excluded from the strength table -- a historical row for the same two clubs contributes nothing", () => {
+    const rows: MatchStatsRow[] = [
+      matchRow({ season: '2025-2026', match_id: 'old-m1', gameweek: 5, team_code: 10, opponent_team_code: 20, team_goals_conceded: 3 }),
+      matchRow({ season: '2025-2026', match_id: 'old-m1', gameweek: 5, team_code: 20, opponent_team_code: 10, team_goals_conceded: 0 }),
+    ]
+    expect(buildCurrentSeasonTeamMatchRecords(rows, '2026-2027')).toEqual([])
+  })
+
+  it('a CURRENT_SEASON row DOES contribute -- proves the filter is season equality, not "exclude everything"', () => {
+    const rows: MatchStatsRow[] = [
+      matchRow({ season: '2026-2027', match_id: 'new-m1', gameweek: 2, team_code: 10, opponent_team_code: 20, team_goals_conceded: 1 }),
+      matchRow({ season: '2026-2027', match_id: 'new-m1', gameweek: 2, team_code: 20, opponent_team_code: 10, team_goals_conceded: 2 }),
+    ]
+    const records = buildCurrentSeasonTeamMatchRecords(rows, '2026-2027')
+    expect(records).toHaveLength(2)
+    expect(records.find((r) => r.teamCode === 10)).toEqual({ matchId: 'new-m1', gameweek: 2, teamCode: 10, goalsConceded: 1, goalsScored: 2 })
+  })
+
+  it('a mix of both seasons for the SAME two clubs: only the current-season match is reflected in the table', () => {
+    const rows: MatchStatsRow[] = [
+      matchRow({ season: '2025-2026', match_id: 'old-m1', gameweek: 30, team_code: 10, opponent_team_code: 20, team_goals_conceded: 5 }), // would dominate if not excluded
+      matchRow({ season: '2025-2026', match_id: 'old-m1', gameweek: 30, team_code: 20, opponent_team_code: 10, team_goals_conceded: 0 }),
+      matchRow({ season: '2026-2027', match_id: 'new-m1', gameweek: 2, team_code: 10, opponent_team_code: 20, team_goals_conceded: 1 }),
+      matchRow({ season: '2026-2027', match_id: 'new-m1', gameweek: 2, team_code: 20, opponent_team_code: 10, team_goals_conceded: 2 }),
+    ]
+    const records = buildCurrentSeasonTeamMatchRecords(rows, '2026-2027')
+    expect(records).toHaveLength(2) // not 4 -- the 2025-2026 match never entered the table
+    expect(records.find((r) => r.teamCode === 10)?.goalsConceded).toBe(1) // not 5, the stale figure
+  })
+
+  it('defaults currentSeason to CURRENT_SEASON when the parameter is omitted', () => {
+    const rows: MatchStatsRow[] = [
+      matchRow({ season: CURRENT_SEASON, match_id: 'm1', gameweek: 2, team_code: 10, opponent_team_code: 20, team_goals_conceded: 1 }),
+      matchRow({ season: '2025-2026', match_id: 'm1', gameweek: 2, team_code: 10, opponent_team_code: 20, team_goals_conceded: 9 }),
+    ]
+    expect(buildCurrentSeasonTeamMatchRecords(rows)).toEqual(buildCurrentSeasonTeamMatchRecords(rows, CURRENT_SEASON))
+  })
+})
+
+describe('buildFixtureContext (ticket #229)', () => {
+  const OWN_TEAM_ID = 1
+  const OPPONENT_TEAM_ID = 2
+  const eloByTeamId = new Map<number, number | null>([
+    [OWN_TEAM_ID, 1700],
+    [OPPONENT_TEAM_ID, 1500],
+  ])
+  const freshMetadata: TeamMetadata = { eloStale: false, code: 100 }
+  const staleMetadata: TeamMetadata = { eloStale: true, code: 100 }
+  const opponentMetadata: TeamMetadata = { eloStale: false, code: 200 }
+
+  it('passes teamElo/opponentElo/isHome/fplDifficulty/leagueBaselineGoals through unchanged', () => {
+    const teamMetadataById = new Map([
+      [OWN_TEAM_ID, freshMetadata],
+      [OPPONENT_TEAM_ID, opponentMetadata],
+    ])
+    const ctx = buildFixtureContext({
+      fixtureId: 42,
+      isHome: true,
+      fplDifficulty: 3,
+      leagueBaselineGoals: 1.45,
+      ownTeamId: OWN_TEAM_ID,
+      opponentTeamId: OPPONENT_TEAM_ID,
+      eloByTeamId,
+      teamMetadataById,
+      teamMatchRecords: [],
+      gameweekId: 5,
+    })
+    expect(ctx.fixtureId).toBe(42)
+    expect(ctx.isHome).toBe(true)
+    expect(ctx.fplDifficulty).toBe(3)
+    expect(ctx.leagueBaselineGoals).toBe(1.45)
+    expect(ctx.teamElo).toBe(1700)
+    expect(ctx.opponentElo).toBe(1500)
+  })
+
+  it('teamEloStale/opponentEloStale reflect each club\'s own teamMetadataById entry', () => {
+    const teamMetadataById = new Map([
+      [OWN_TEAM_ID, staleMetadata],
+      [OPPONENT_TEAM_ID, opponentMetadata],
+    ])
+    const ctx = buildFixtureContext({
+      fixtureId: 1,
+      isHome: true,
+      fplDifficulty: 3,
+      leagueBaselineGoals: 1.45,
+      ownTeamId: OWN_TEAM_ID,
+      opponentTeamId: OPPONENT_TEAM_ID,
+      eloByTeamId,
+      teamMetadataById,
+      teamMatchRecords: [],
+      gameweekId: 5,
+    })
+    expect(ctx.teamEloStale).toBe(true)
+    expect(ctx.opponentEloStale).toBe(false)
+  })
+
+  it('a club missing from teamMetadataById defaults to eloStale=false and an unresolved code (never a guessed strength record)', () => {
+    const teamMetadataById = new Map<number, TeamMetadata>() // neither club resolves
+    const ctx = buildFixtureContext({
+      fixtureId: 1,
+      isHome: true,
+      fplDifficulty: 3,
+      leagueBaselineGoals: 1.45,
+      ownTeamId: OWN_TEAM_ID,
+      opponentTeamId: OPPONENT_TEAM_ID,
+      eloByTeamId: new Map(),
+      teamMetadataById,
+      teamMatchRecords: [],
+      gameweekId: 5,
+    })
+    expect(ctx.teamElo).toBeNull()
+    expect(ctx.opponentElo).toBeNull()
+    expect(ctx.teamEloStale).toBe(false)
+    expect(ctx.opponentEloStale).toBe(false)
+    expect(ctx.teamStrength).toBeUndefined()
+    expect(ctx.opponentTeamStrength).toBeUndefined()
+  })
+
+  it("teamStrength/opponentTeamStrength are computed from teamMatchRecords via each club's OWN code, strictly before gameweekId", () => {
+    const teamMetadataById = new Map([
+      [OWN_TEAM_ID, freshMetadata], // code 100
+      [OPPONENT_TEAM_ID, opponentMetadata], // code 200
+    ])
+    const teamMatchRecords: TeamMatchRecord[] = [
+      // Own club (code 100): MIN_TEAM_PRIOR_MATCHES prior matches, all before gameweek 5.
+      ...Array.from({ length: MIN_TEAM_PRIOR_MATCHES }, (_, i) => ({ matchId: `own-${i}`, gameweek: i + 1, teamCode: 100, goalsConceded: 0, goalsScored: 2 })),
+      // A LATER match for the own club -- must NOT be counted (the lookahead guard).
+      { matchId: 'own-later', gameweek: 5, teamCode: 100, goalsConceded: 9, goalsScored: 0 },
+      // Opponent (code 200): only ONE prior match -- insufficient history.
+      { matchId: 'opp-1', gameweek: 1, teamCode: 200, goalsConceded: 1, goalsScored: 1 },
+    ]
+    const ctx = buildFixtureContext({
+      fixtureId: 1,
+      isHome: true,
+      fplDifficulty: 3,
+      leagueBaselineGoals: 1.45,
+      ownTeamId: OWN_TEAM_ID,
+      opponentTeamId: OPPONENT_TEAM_ID,
+      eloByTeamId: new Map(),
+      teamMetadataById,
+      teamMatchRecords,
+      gameweekId: 5,
+    })
+    expect(ctx.teamStrength).toEqual({ matches: MIN_TEAM_PRIOR_MATCHES, goalsScored: MIN_TEAM_PRIOR_MATCHES * 2, goalsConceded: 0 })
+    expect(ctx.opponentTeamStrength).toEqual({ matches: 1, goalsScored: 1, goalsConceded: 1 })
+  })
+})
+
+describe('project-points.ts — ticket #229 source invariants', () => {
+  it('the teams select reads elo_stale_since and code alongside the existing elo/id columns -- no extra Supabase round trip, same select', () => {
+    expect(source).toMatch(/\.from\('teams'\)\s*\n?\s*\.select\(\s*['"][^'"]*\bid\b[^'"]*\belo\b[^'"]*\belo_stale_since\b[^'"]*\bcode\b[^'"]*['"]/)
+  })
+
+  it('the player_match_stats select reads match_id, team_code, opponent_team_code and team_goals_conceded alongside the existing columns -- the SAME select, per the ticket\'s "no additional Supabase round trip" requirement', () => {
+    expect(source).toMatch(/\.from\('player_match_stats'\)[\s\S]{0,40}\.select\(/)
+    expect(source).toMatch(/\bmatch_id\b/)
+    expect(source).toMatch(/\bteam_code\b/)
+    expect(source).toMatch(/\bopponent_team_code\b/)
+    expect(source).toMatch(/\bteam_goals_conceded\b/)
+    // Only ONE player_match_stats DATA select in the whole file (the count-only
+    // checks use `.select('*', { count: 'exact', head: true })`, a different
+    // shape) -- the new columns must ride on that one read, not a second one.
+    const dataSelectOccurrences = source.split(/\.select\(\s*\n?\s*['"][^'"]*\bplayer_code\b/).length - 1
+    expect(dataSelectOccurrences).toBe(1)
+  })
+
+  it('the point-in-time team-strength table is built from matchStatsRows -- the SAME rows already fetched for player_match_stats, never a second Supabase read', () => {
+    expect(source).toMatch(/buildCurrentSeasonTeamMatchRecords\(matchStatsRows\)/)
+  })
+
+  it('teamMatchRecords is built exactly once in the whole file -- not per player, not per gameweek', () => {
+    const occurrences = source.split('buildCurrentSeasonTeamMatchRecords(matchStatsRows)').length - 1
+    expect(occurrences).toBe(1)
+  })
+
+  it('the fixture-context construction calls buildFixtureContext, not a hand-built object literal -- the wiring this file owns is tested above, not duplicated inline', () => {
+    expect(source).toMatch(/return buildFixtureContext\(\{/)
+  })
+
+  it('job_runs.details carries the new fixtureSourceCounts breakdown alongside the pre-existing fixtureEloFallbackCount', () => {
+    expect(source).toMatch(/fixtureEloFallbackCount/)
+    expect(source).toMatch(/fixtureSourceCounts/)
   })
 })
