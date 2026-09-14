@@ -109,6 +109,9 @@ const JOB_NAME = 'send-telegram'
 const NOTIFICATIONS_MIGRATION = 'supabase/migrations/20260818090000_notifications.sql'
 const RECOMMENDATIONS_MIGRATION = 'supabase/migrations/20260817090000_recommendations.sql'
 
+/** Must match scripts/project-points.ts's own MODEL_VERSION — duplicated, not imported; every scripts/*.ts job is a standalone entry point (see CLAUDE.md's note on small helpers and every prior job's own header). */
+const MODEL_VERSION = 'baseline-v1'
+
 const TELEGRAM_API_BASE_URL = 'https://api.telegram.org'
 const TELEGRAM_MAX_ATTEMPTS = 3
 const TELEGRAM_BASE_DELAY_MS = 300
@@ -263,6 +266,104 @@ export function determineCurrentGameweekId(gwRows: readonly GameweekRow[], nowMs
   const next = sorted.find((gw) => new Date(gw.deadline_time).getTime() > nowMs)
   const target = next ?? sorted[sorted.length - 1]
   return target.id
+}
+
+// ============================================================================
+// plan_snapshot — ticket #231. Freezes the structured plan into `notifications`
+// at send time, in the SAME insert that already records the send. Built ONLY
+// from the exact `recommendations` row (RecommendationRowForSnapshot) and the
+// two player names (PlanSnapshotNames) this file already reads to compose
+// message_text — no second read of recommendations/recommendation_reasons,
+// no re-read after sending. See supabase/migrations/20260913090000_
+// notifications_plan_snapshot.sql for the column and the "because".
+//
+// Player CODE throughout, never player_id — deltas.md D9, code is the stable
+// cross-season key and this is a permanent record.
+// ============================================================================
+
+/** One {playerId, playerCode} entry as stored in recommendations.starting_xi / .bench_order jsonb (scripts/generate-recommendations.ts's PlanPlayerRef). */
+export interface RawSquadRef {
+  playerId: number
+  playerCode: number | null
+}
+
+/** The exact columns this file reads off the `recommendations` row for gameweek_id/plan_index 0 — the same row already read to compose message_text, never re-read. */
+export interface RecommendationRowForSnapshot {
+  gameweek_id: number
+  plan_index: number
+  is_roll: boolean
+  transfer_in_player_id: number | null
+  transfer_in_player_code: number | null
+  transfer_out_player_id: number | null
+  transfer_out_player_code: number | null
+  captain_player_code: number | null
+  vice_captain_player_code: number | null
+  starting_xi: unknown
+  bench_order: unknown
+  hit_cost: number
+  net_points: number
+  confidence_band: string
+}
+
+/** web_name for the transfer-in/out player ids, when a transfer is recommended (never fetched for a roll plan). */
+export interface PlanSnapshotNames {
+  transferInName: string | null
+  transferOutName: string | null
+}
+
+export interface PlanSnapshotPlayerRef {
+  code: number
+  name: string
+}
+
+export interface PlanSnapshot {
+  gameweekId: number
+  planIndex: number
+  modelVersion: string
+  isRoll: boolean
+  transferIn: PlanSnapshotPlayerRef | null
+  transferOut: PlanSnapshotPlayerRef | null
+  captainPlayerCode: number
+  viceCaptainPlayerCode: number
+  startingXi: number[]
+  benchOrder: number[]
+  hitCost: number
+  expectedPoints: number
+  confidenceBand: string
+}
+
+function extractCodes(value: unknown): number[] {
+  if (!Array.isArray(value)) return []
+  return (value as RawSquadRef[]).filter((ref) => ref.playerCode !== null).map((ref) => ref.playerCode as number)
+}
+
+/**
+ * Pure — no I/O, no Date.now(). Takes exactly the recommendations row and the
+ * two names this file already has in hand and produces the jsonb value for
+ * notifications.plan_snapshot. Never called when no plan was referenced by
+ * the message (infeasible / no_recommendation sends) — see runSend().
+ */
+export function buildPlanSnapshot(row: RecommendationRowForSnapshot, names: PlanSnapshotNames, modelVersion: string): PlanSnapshot {
+  const transferIn =
+    row.transfer_in_player_code !== null && names.transferInName !== null ? { code: row.transfer_in_player_code, name: names.transferInName } : null
+  const transferOut =
+    row.transfer_out_player_code !== null && names.transferOutName !== null ? { code: row.transfer_out_player_code, name: names.transferOutName } : null
+
+  return {
+    gameweekId: row.gameweek_id,
+    planIndex: row.plan_index,
+    modelVersion,
+    isRoll: row.is_roll,
+    transferIn,
+    transferOut,
+    captainPlayerCode: row.captain_player_code as number,
+    viceCaptainPlayerCode: row.vice_captain_player_code as number,
+    startingXi: extractCodes(row.starting_xi),
+    benchOrder: extractCodes(row.bench_order),
+    hitCost: row.hit_cost,
+    expectedPoints: row.net_points,
+    confidenceBand: row.confidence_band,
+  }
 }
 
 // ============================================================================
@@ -429,6 +530,11 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
     let messageText: string
     let recommendationGameweekId: number | null = null
     let planIndexSent: number | null = null
+    // ticket #231: null exactly when no plan is referenced by the message
+    // (an 'infeasible' or 'no_recommendation' send below never sets this) —
+    // matches this table's own recommendation_gameweek_id/plan_index
+    // NULL-together pair.
+    let planSnapshot: PlanSnapshot | null = null
 
     if (availability.kind === 'none') {
       // ------------------------------------------------------------------
@@ -460,12 +566,20 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
       recommendationGameweekId = targetGw
       planIndexSent = 0
 
+      // ticket #231: this select carries every column buildPlanSnapshot()
+      // needs — the same single read of this row that solver_run_id already
+      // came from, not a second one. See RecommendationRowForSnapshot's own
+      // doc comment.
       const { data: recRow, error: recRowError } = await supabase
         .from('recommendations')
-        .select('solver_run_id')
+        .select(
+          'solver_run_id, gameweek_id, plan_index, is_roll, transfer_in_player_id, transfer_in_player_code, ' +
+            'transfer_out_player_id, transfer_out_player_code, captain_player_code, vice_captain_player_code, ' +
+            'starting_xi, bench_order, hit_cost, net_points, confidence_band',
+        )
         .eq('gameweek_id', targetGw)
         .eq('plan_index', 0)
-        .maybeSingle<{ solver_run_id: number | null }>()
+        .maybeSingle<{ solver_run_id: number | null } & RecommendationRowForSnapshot>()
       if (recRowError) throw new SendTelegramError(`recommendations row lookup failed: ${recRowError.message}`, 'recommendations')
       if (!recRow) {
         throw new SendTelegramError(
@@ -474,6 +588,32 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
           'recommendations',
         )
       }
+
+      // ticket #231: player names for the snapshot's transfer in/out — a
+      // bounded lookup of at most two ids (no pagination needed, same
+      // precedent as every other small/bounded read in this file), never
+      // fetched at all for a roll plan. This is a NEW query (players is not
+      // recommendations/recommendation_reasons), not a second read of the
+      // rows the message itself was built from.
+      const namePlayerIds = [recRow.transfer_in_player_id, recRow.transfer_out_player_id].filter((id): id is number => id !== null)
+      let namesById = new Map<number, string>()
+      if (namePlayerIds.length > 0) {
+        const { data: playerRows, error: playerRowsError } = await supabase
+          .from('players')
+          .select('id, web_name')
+          .in('id', namePlayerIds)
+          .returns<{ id: number; web_name: string }[]>()
+        if (playerRowsError) throw new SendTelegramError(`players lookup failed: ${playerRowsError.message}`, 'players')
+        namesById = new Map((playerRows ?? []).map((p) => [p.id, p.web_name]))
+      }
+      planSnapshot = buildPlanSnapshot(
+        recRow,
+        {
+          transferInName: recRow.transfer_in_player_id !== null ? (namesById.get(recRow.transfer_in_player_id) ?? null) : null,
+          transferOutName: recRow.transfer_out_player_id !== null ? (namesById.get(recRow.transfer_out_player_id) ?? null) : null,
+        },
+        MODEL_VERSION,
+      )
 
       const { rows: reasonRows, error: reasonError } = await fetchAllPages<{ plan_index: number; order_index: number; reason: string }>((from, to) =>
         supabase
@@ -597,6 +737,11 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
       http_status: sendOutcome.status,
       telegram_error: sendOutcome.errorText,
       trigger,
+      // ticket #231: written here, in this SAME insert, on both a successful
+      // AND a failed send — this is the one and only write of the row, so
+      // there is no separate "write it on failure too" branch to keep in
+      // sync with this one.
+      plan_snapshot: planSnapshot,
     })
     if (notifInsertError) {
       if (isMissingTable(notifInsertError, 'notifications')) {

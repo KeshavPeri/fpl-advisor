@@ -178,6 +178,7 @@ const JOB_NAME = 'recommendation-scorecard'
 const RECOMMENDATIONS_MIGRATION = 'supabase/migrations/20260817090000_recommendations.sql'
 const RECOMMENDATION_DECISIONS_MIGRATION = 'supabase/migrations/20260823090000_recommendation_decisions.sql'
 const PREDICTION_LOG_MIGRATION = 'supabase/migrations/20260821090000_prediction_log.sql'
+const NOTIFICATIONS_PLAN_SNAPSHOT_MIGRATION = 'supabase/migrations/20260913090000_notifications_plan_snapshot.sql'
 
 const DEFAULT_REPORT_PATH = './out/recommendation-scorecard.md'
 
@@ -495,6 +496,14 @@ export type GameweekExclusionReason = 'unsettled' | 'missingActuals' | 'reconstr
 export interface GameweekScored {
   gameweekId: number
   ok: true
+  /** Ticket #231: which source Plan A was built from for THIS gameweek —
+   *  'snapshot' when notifications.plan_snapshot was present and usable,
+   *  'recommendations' otherwise (every row before this ticket, or a
+   *  snapshot present but not usable — see main()'s own fallback). The
+   *  report must state this per scored gameweek: a scorecard that silently
+   *  mixes frozen and mutable sources is worse than one that says which it
+   *  had (this ticket's own DoD). */
+  planASource: PlanASource
   planA: ScoredEntity
   planB: ScoredEntity | null
   planC: ScoredEntity | null
@@ -527,6 +536,8 @@ export function scoreGameweek(
   decision: DecisionRecord | null,
   actuals: ActualsByPlayer,
   isSettled: boolean,
+  /** Ticket #231. Defaults to 'recommendations' so every call site written before this ticket (including this file's own pre-existing tests) keeps its exact prior behaviour untouched. */
+  planASource: PlanASource = 'recommendations',
 ): GameweekResult {
   if (!isSettled) {
     return {
@@ -621,6 +632,7 @@ export function scoreGameweek(
   return {
     gameweekId,
     ok: true,
+    planASource,
     planA: toEntity('Plan A', scoredA, plans.a.hitCost),
     planB: scoredB ? toEntity('Plan B', scoredB, plans.b!.hitCost) : null,
     planC: scoredC ? toEntity('Plan C', scoredC, plans.c!.hitCost) : null,
@@ -776,6 +788,22 @@ function isMissingTable(error: PostgrestLikeError, tableName: string): boolean {
   return new RegExp(tableName).test(message) && /schema cache|does not exist|relation.*does not exist/i.test(message)
 }
 
+/**
+ * Ticket #231's own migration may not be applied yet on a given database —
+ * see supabase/README.md's own "a migration file on `main` does not mean it
+ * has been applied" rule. 42703 is Postgres's own undefined_column code;
+ * PostgREST surfaces the same fact as a message naming the column. Same
+ * precedent as scripts/build-feature-history.ts's own isMissingColumn.
+ * Checked so this script degrades to "every gameweek falls back to
+ * `recommendations`" rather than crashing outright when run against a
+ * database that has not applied 20260913090000_notifications_plan_snapshot.sql yet.
+ */
+function isMissingColumn(error: PostgrestLikeError, columnName: string): boolean {
+  if (error.code === '42703') return true
+  const message = error.message ?? ''
+  return new RegExp(columnName).test(message) && /does not exist/i.test(message)
+}
+
 // ----------------------------------------------------------------------------
 // job_runs
 // ----------------------------------------------------------------------------
@@ -847,6 +875,146 @@ function toPlanRecord(row: RecommendationRow): PlanRecord {
     benchOrder: toSquadSlots(row.bench_order),
     hitCost: row.hit_cost,
   }
+}
+
+// ----------------------------------------------------------------------------
+// plan_snapshot — ticket #231. Plan A, frozen at send time in
+// notifications.plan_snapshot (supabase/migrations/20260913090000_
+// notifications_plan_snapshot.sql), read here in PREFERENCE to the mutable
+// `recommendations` row for the same gameweek — see this file's OWN header,
+// "recommendations IS UPSERTED IN PLACE", the exact defect this exists to
+// fix. Falls back to `recommendations` cleanly for every row before this
+// ticket (plan_snapshot null) or when writing it failed for some other
+// reason. This shape mirrors scripts/send-telegram.ts's own PlanSnapshot —
+// duplicated, not imported, same "every scripts/*.ts job is a standalone
+// entry point" convention as MODEL_VERSION elsewhere in this repo. Only the
+// fields scoreGameweek's pure functions actually need are read here
+// (expectedPoints/confidenceBand/modelVersion are reporting-only fields on
+// the stored jsonb and are not needed to reconstruct a PlanRecord).
+// ----------------------------------------------------------------------------
+
+export type PlanASource = 'snapshot' | 'recommendations'
+
+/** The subset of scripts/send-telegram.ts's PlanSnapshot this file needs to rebuild a PlanRecord. Player CODE throughout, never player_id (deltas.md D9) — this file resolves code -> the CURRENT season's players.id itself, via codeToPlayerId, exactly once, at the boundary where the frozen snapshot meets this script's own player_id-keyed scoring (see file header, "JOIN KEY"). */
+export interface RawPlanSnapshot {
+  isRoll: boolean
+  transferIn: { code: number } | null
+  transferOut: { code: number } | null
+  captainPlayerCode: number
+  viceCaptainPlayerCode: number
+  startingXi: number[]
+  benchOrder: number[]
+  hitCost: number
+}
+
+export type SnapshotPlanRecordOutcome = { ok: true; plan: PlanRecord } | { ok: false; detail: string }
+
+/**
+ * Translates a frozen plan_snapshot (player CODE) into this script's own
+ * PlanRecord (player_id) via codeToPlayerId — the CURRENT `players` table's
+ * own code -> id mapping, read once for every gameweek (see main()). Fails
+ * closed, never guesses: if any code the snapshot names (transfer in/out,
+ * captain, vice-captain, or any XI/bench slot) has no current players row,
+ * the WHOLE gameweek is reported as a reconstruction failure — the same
+ * "exclude the whole gameweek, never partially score it" discipline
+ * scoreGameweek's own contract already uses for a decision that cannot be
+ * reconstructed. Pure — no I/O.
+ */
+export function snapshotToPlanRecord(gameweekId: number, snapshot: RawPlanSnapshot, codeToPlayerId: ReadonlyMap<number, number>): SnapshotPlanRecordOutcome {
+  const missingCodes: number[] = []
+  const resolve = (code: number): number | undefined => {
+    const id = codeToPlayerId.get(code)
+    if (id === undefined) missingCodes.push(code)
+    return id
+  }
+
+  const transferInPlayerId = snapshot.transferIn ? (resolve(snapshot.transferIn.code) ?? null) : null
+  const transferOutPlayerId = snapshot.transferOut ? (resolve(snapshot.transferOut.code) ?? null) : null
+  const captainPlayerId = resolve(snapshot.captainPlayerCode)
+  const viceCaptainPlayerId = resolve(snapshot.viceCaptainPlayerCode)
+  const startingXi: SquadSlot[] = snapshot.startingXi.map((code) => ({ playerId: resolve(code) ?? -1 }))
+  const benchOrder: SquadSlot[] = snapshot.benchOrder.map((code) => ({ playerId: resolve(code) ?? -1 }))
+
+  if (missingCodes.length > 0) {
+    const uniqueCodes = [...new Set(missingCodes)]
+    return {
+      ok: false,
+      detail:
+        `plan_snapshot for gameweek ${gameweekId} names player code(s) ${uniqueCodes.join(', ')} with no matching row in the ` +
+        'current players table — cannot reconstruct Plan A from the frozen snapshot.',
+    }
+  }
+
+  return {
+    ok: true,
+    plan: {
+      gameweekId,
+      planIndex: 0,
+      isRoll: snapshot.isRoll,
+      transferInPlayerId,
+      transferOutPlayerId,
+      captainPlayerId: captainPlayerId as number,
+      viceCaptainPlayerId: viceCaptainPlayerId as number,
+      startingXi,
+      benchOrder,
+      hitCost: snapshot.hitCost,
+    },
+  }
+}
+
+export type ResolvedPlanA = { ok: true; source: PlanASource; plan: PlanRecord } | { ok: false; detail: string }
+
+/**
+ * The one decision point ticket #231 adds: PREFERS a frozen plan_snapshot
+ * over the mutable `recommendations` row for the same gameweek whenever one
+ * was recorded and every player code in it still resolves; FALLS BACK
+ * cleanly (and says so, via `source`) to the `recommendations`-derived Plan A
+ * otherwise — no snapshot at all (every gameweek before this ticket
+ * shipped), or a snapshot whose codes can no longer be resolved (reported as
+ * a reconstruction failure instead, never silently downgraded). Pure — no
+ * I/O — so this exact preference/fallback behaviour is unit-testable without
+ * a live Supabase project; main() is a thin wrapper around it.
+ */
+export function resolvePlanA(
+  gameweekId: number,
+  recommendationsPlanA: PlanRecord,
+  rawSnapshot: RawPlanSnapshot | undefined,
+  codeToPlayerId: ReadonlyMap<number, number>,
+): ResolvedPlanA {
+  if (!rawSnapshot) {
+    return { ok: true, source: 'recommendations', plan: recommendationsPlanA }
+  }
+  const outcome = snapshotToPlanRecord(gameweekId, rawSnapshot, codeToPlayerId)
+  if (!outcome.ok) {
+    return { ok: false, detail: outcome.detail }
+  }
+  return { ok: true, source: 'snapshot', plan: outcome.plan }
+}
+
+interface NotificationSnapshotRow {
+  recommendation_gameweek_id: number
+  plan_index: number
+  sent_at: string
+  plan_snapshot: RawPlanSnapshot
+}
+
+/**
+ * Ticket #231. When more than one notifications row carries a usable
+ * plan_snapshot for the same gameweek (a daily refresh changed the plan
+ * between the 24h and 10h windows, or a re-run), the most recently sent one
+ * is the frozen record of what Keshav was actually shown closest to the real
+ * deadline — the same "latest wins" reasoning scripts/send-telegram.ts's own
+ * "most recent gameweek_id present" rule already uses for `recommendations`.
+ * Pure — no I/O, no Date.now() (sent_at strings are compared, not read from
+ * the clock).
+ */
+export function pickLatestSnapshotByGameweek(rows: readonly NotificationSnapshotRow[]): Map<number, RawPlanSnapshot> {
+  const bySortedSentAt = [...rows].sort((a, b) => new Date(a.sent_at).getTime() - new Date(b.sent_at).getTime())
+  const result = new Map<number, RawPlanSnapshot>()
+  for (const row of bySortedSentAt) {
+    result.set(row.recommendation_gameweek_id, row.plan_snapshot)
+  }
+  return result
 }
 
 interface DecisionRow {
@@ -1009,9 +1177,11 @@ export function renderScorecard(input: RenderScorecardInput): string {
   )
   lines.push('')
   lines.push(
-    '**recommendations is upserted in place.** Plan A/B/C below are whatever this table currently holds for that ' +
+    '**recommendations is upserted in place.** Plan B/C below (and Plan A on any gameweek without a usable ' +
+      '`notifications.plan_snapshot` — see the Source column) are whatever this table currently holds for that ' +
       'gameweek, which is not necessarily what was shown or sent at the real deadline if the recommendation job has ' +
-      'run again since.',
+      'run again since. Ticket #231 closes this gap for Plan A specifically, on every gameweek where a snapshot was ' +
+      'frozen at send time.',
   )
   lines.push('')
 
@@ -1045,14 +1215,25 @@ export function renderScorecard(input: RenderScorecardInput): string {
     lines.push('')
   }
 
+  const snapshotSourced = scored.filter((gw) => gw.planASource === 'snapshot').length
+  lines.push(
+    `**Plan A source (ticket #231):** ${snapshotSourced}/${scored.length} scored gameweek(s) use the frozen ` +
+      '`notifications.plan_snapshot` recorded at send time (what Keshav was actually sent); the rest fall back to the ' +
+      'mutable `recommendations` table (every gameweek before this ticket shipped, or one whose snapshot could not ' +
+      'be reconstructed — see the Source column below and any reconstruction-failed row above). A scorecard that ' +
+      'silently mixed the two would be worse than one that states which it used.',
+  )
+  lines.push('')
+
   lines.push('## Per-gameweek')
   lines.push('')
-  lines.push('| Gameweek | Plan A | Plan B | Plan C | Roll | Actual |')
-  lines.push('|---|---|---|---|---|---|')
+  lines.push('| Gameweek | Source | Plan A | Plan B | Plan C | Roll | Actual |')
+  lines.push('|---|---|---|---|---|---|---|')
   for (const gw of scored) {
     const actualCell = gw.actual ? `${gw.actual.kind}: ${fmtEntity(gw.actual.entity)}` : 'no decision recorded'
+    const sourceCell = gw.planASource === 'snapshot' ? 'snapshot (frozen)' : 'recommendations (mutable)'
     lines.push(
-      `| ${gw.gameweekId} | ${fmtEntity(gw.planA)} | ${fmtEntity(gw.planB)} | ${fmtEntity(gw.planC)} | ${fmtEntity(gw.roll)} | ${actualCell} |`,
+      `| ${gw.gameweekId} | ${sourceCell} | ${fmtEntity(gw.planA)} | ${fmtEntity(gw.planB)} | ${fmtEntity(gw.planC)} | ${fmtEntity(gw.roll)} | ${actualCell} |`,
     )
   }
   lines.push('')
@@ -1183,6 +1364,72 @@ async function main(): Promise<void> {
       .sort((a, b) => a - b)
 
     // ------------------------------------------------------------------
+    // 1b. notifications.plan_snapshot — ticket #231. The frozen Plan A,
+    //     preferred over `recommendations` for every gameweek where a usable
+    //     one exists (see this file's own header, "recommendations IS
+    //     UPSERTED IN PLACE" — the defect this closes). Degrades gracefully,
+    //     via isMissingColumn, when the migration has not been applied yet:
+    //     every gameweek then simply falls back to `recommendations`, same
+    //     as before this ticket.
+    // ------------------------------------------------------------------
+    let latestSnapshotByGameweek = new Map<number, RawPlanSnapshot>()
+    {
+      const { rows: notificationRows, error: notificationsError } = await fetchAllPages<NotificationSnapshotRow>((from, to) =>
+        supabase
+          .from('notifications')
+          .select('recommendation_gameweek_id, plan_index, sent_at, plan_snapshot')
+          .eq('plan_index', 0)
+          .not('plan_snapshot', 'is', null)
+          .order('sent_at', { ascending: true })
+          .range(from, to)
+          .returns<NotificationSnapshotRow[]>(),
+      )
+      if (notificationsError) {
+        if (isMissingColumn(notificationsError, 'plan_snapshot')) {
+          console.log(
+            `${JOB_NAME}: notifications.plan_snapshot does not exist yet — apply ${NOTIFICATIONS_PLAN_SNAPSHOT_MIGRATION} to start ` +
+              'freezing Plan A at send time. Every gameweek below falls back to the mutable "recommendations" table.',
+          )
+        } else if (isMissingTable(notificationsError, 'notifications')) {
+          console.log(`${JOB_NAME}: the "notifications" table does not exist yet — every gameweek below falls back to "recommendations".`)
+        } else {
+          throw new ScorecardError(`notifications lookup failed: ${notificationsError.message}`, 'notifications')
+        }
+      } else {
+        const { count: notificationsExpectedCount, error: notificationsCountError } = await supabase
+          .from('notifications')
+          .select('*', { count: 'exact', head: true })
+          .eq('plan_index', 0)
+          .not('plan_snapshot', 'is', null)
+        if (notificationsCountError) {
+          throw new ScorecardError(`notifications count check failed: ${notificationsCountError.message}`, 'notifications')
+        }
+        assertRowCountMatches('notifications (plan_snapshot)', notificationRows.length, notificationsExpectedCount ?? 0)
+        latestSnapshotByGameweek = pickLatestSnapshotByGameweek(notificationRows)
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // 1c. players — the CURRENT season's code -> id map, the one place a
+    //     frozen plan_snapshot's player CODEs are translated to this
+    //     script's own player_id-keyed scoring (file header, "JOIN KEY").
+    //     Only fetched when at least one usable snapshot exists.
+    // ------------------------------------------------------------------
+    const codeToPlayerId = new Map<number, number>()
+    if (latestSnapshotByGameweek.size > 0) {
+      const { rows: playerRows, error: playersError } = await fetchAllPages<{ id: number; code: number | null }>((from, to) =>
+        supabase.from('players').select('id, code').order('id', { ascending: true }).range(from, to).returns<{ id: number; code: number | null }[]>(),
+      )
+      if (playersError) throw new ScorecardError(`players lookup failed: ${playersError.message}`, 'players')
+      const { count: playersExpectedCount, error: playersCountError } = await supabase.from('players').select('*', { count: 'exact', head: true })
+      if (playersCountError) throw new ScorecardError(`players count check failed: ${playersCountError.message}`, 'players')
+      assertRowCountMatches('players', playerRows.length, playersExpectedCount ?? 0)
+      for (const row of playerRows) {
+        if (row.code !== null) codeToPlayerId.set(row.code, row.id)
+      }
+    }
+
+    // ------------------------------------------------------------------
     // 2. recommendation_decisions — every decision ever recorded.
     // ------------------------------------------------------------------
     const {
@@ -1257,13 +1504,30 @@ async function main(): Promise<void> {
     const { byGameweek: actualsByGameweek, conflictingPlayerCount } = buildActualsByGameweek(predictionLogRows)
 
     // ------------------------------------------------------------------
-    // 4. Score every gameweek that has a Plan A.
+    // 4. Score every gameweek that has a Plan A. Ticket #231: Plan A comes
+    //    from the frozen notifications.plan_snapshot when one exists and
+    //    every player code in it resolves against the current players
+    //    table; otherwise (no snapshot recorded, or one recorded before this
+    //    ticket shipped, or a code that no longer resolves) it falls back to
+    //    `recommendations`, exactly as every gameweek was scored before this
+    //    ticket. Plan B/C are never sourced from a snapshot — out of scope,
+    //    see this file's own header note on ticket #231.
     // ------------------------------------------------------------------
     const results: GameweekResult[] = gameweekIds.map((gameweekId) => {
       const plans = plansByGameweek.get(gameweekId)!
       const decision = pickDecisionForGameweek(decisionsByGameweek.get(gameweekId) ?? [])
       const actuals = actualsByGameweek.get(gameweekId) ?? new Map()
-      return scoreGameweek(gameweekId, plans, decision, actuals, actuals.size > 0)
+      const isSettled = actuals.size > 0
+
+      const resolved = resolvePlanA(gameweekId, plans.a, latestSnapshotByGameweek.get(gameweekId), codeToPlayerId)
+      if (!resolved.ok) {
+        // A snapshot was recorded but cannot be reconstructed today (a named
+        // player code no longer resolves) — excluded by name, never silently
+        // downgraded to the mutable table, which would hide exactly the kind
+        // of drift this column exists to catch.
+        return { gameweekId, ok: false, reason: 'reconstructionFailed', detail: resolved.detail }
+      }
+      return scoreGameweek(gameweekId, { a: resolved.plan, b: plans.b, c: plans.c }, decision, actuals, isSettled, resolved.source)
     })
 
     const counters = reconcile(results)
