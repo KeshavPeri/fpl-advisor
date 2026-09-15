@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFENDER, FORWARD, GOALKEEPER, MIDFIELDER } from '../scoring/types.ts'
 import type { Position } from '../scoring/types.ts'
-import { allocateFixtureBonus, expectedBps, type FixtureBonusEntry } from './bonus.ts'
+import { ALPHA, allocateFixtureBonus, expectedBps, MAX_BONUS_POINTS_PER_PLAYER_FIXTURE, type FixtureBonusEntry } from './bonus.ts'
 import type { FixtureExpectedEvents } from './expectedPoints.ts'
 
 function events(overrides: Partial<FixtureExpectedEvents> = {}): FixtureExpectedEvents {
@@ -190,5 +190,121 @@ describe('allocateFixtureBonus: zero excess', () => {
 
   it('an empty entries array returns an empty result, no error', () => {
     expect(allocateFixtureBonus([])).toEqual([])
+  })
+
+  it('zero excess still allocates zero with no NaN at a non-default (sharpened) alpha too -- the zero-excess guard runs BEFORE the ^alpha step', () => {
+    const entries = [entry(1, DEFENDER), entry(2, GOALKEEPER), entry(3, MIDFIELDER)]
+    const results = allocateFixtureBonus(entries, 5)
+    for (const result of results) {
+      expect(result.bonusPoints).toBe(0)
+      expect(result.clamped).toBe(false)
+      expect(Number.isNaN(result.bonusPoints)).toBe(false)
+    }
+  })
+})
+
+// ============================================================================
+// ALPHA (ticket #237) -- the five named tests the ticket's Definition of Done requires.
+// ============================================================================
+
+describe('allocateFixtureBonus: ALPHA (ticket #237)', () => {
+  it('DoD 1 -- ALPHA = 1 reproduces the pre-#237 (ticket #78) linear-share allocation exactly, entry by entry', () => {
+    const entries = [
+      entry(1, FORWARD, { expectedGoals: 0.1 }), // excess 2.4
+      entry(2, MIDFIELDER, { expectedAssists: 0.2 }), // excess 1.8
+      entry(3, DEFENDER, { pCleanSheet: 0.1, pSixtyPlus: 1 }), // excess 1.2
+      entry(4, DEFENDER), // excess 0
+    ]
+    // The pre-#237 formula, computed independently here (not by calling the function under
+    // test with a different alpha) so this is a real regression check, not a tautology.
+    const excess = [2.4, 1.8, 1.2, 0]
+    const totalExcess = excess.reduce((sum, e) => sum + e, 0)
+    const preTicket237Shares = excess.map((e) => (e / totalExcess) * 6)
+
+    const results = allocateFixtureBonus(entries, 1)
+    results.forEach((result, i) => {
+      expect(result.bonusPoints).toBeCloseTo(preTicket237Shares[i], 12)
+      expect(result.clamped).toBe(false)
+    })
+
+    // The exported ALPHA constant's CURRENT (placeholder) value is 1 -- so calling with no
+    // explicit alpha argument at all must match too. This assertion is expected to start
+    // failing the moment ALPHA is recalibrated away from 1, which is deliberate: it is the
+    // trip-wire that forces the explicit alpha=1 call above (the real regression check) to be
+    // kept in sync rather than silently relying on the default.
+    expect(ALPHA).toBe(1)
+    expect(allocateFixtureBonus(entries)).toEqual(results)
+  })
+
+  it('DoD 2 -- a higher ALPHA concentrates the share on the highest-excess entry (and away from the others), strictly', () => {
+    const entries = [
+      entry(1, FORWARD, { expectedGoals: 0.15 }), // excess 3.6 -- dominant
+      entry(2, MIDFIELDER, { expectedAssists: 0.3 }), // excess 2.7
+      entry(3, DEFENDER, { pCleanSheet: 0.2, pSixtyPlus: 1 }), // excess 2.4
+    ]
+    const linear = allocateFixtureBonus(entries, 1)
+    const sharpened = allocateFixtureBonus(entries, 2.5)
+
+    const dominantLinear = linear.find((r) => r.id === 1)!.bonusPoints
+    const dominantSharpened = sharpened.find((r) => r.id === 1)!.bonusPoints
+    expect(dominantSharpened).toBeGreaterThan(dominantLinear)
+
+    // Both smaller entries lose share as alpha rises -- concentration, not just a rescale.
+    for (const id of [2, 3]) {
+      const before = linear.find((r) => r.id === id)!.bonusPoints
+      const after = sharpened.find((r) => r.id === id)!.bonusPoints
+      expect(after).toBeLessThan(before)
+    }
+  })
+
+  it('DoD 3 -- the per-fixture total is still 6 (+/- 0.01) at a sharpened ALPHA when nothing clamps', () => {
+    const entries = [
+      entry(1, FORWARD, { expectedGoals: 0.15 }), // excess 3.6
+      entry(2, MIDFIELDER, { expectedAssists: 0.3 }), // excess 2.7
+      entry(3, DEFENDER, { pCleanSheet: 0.2, pSixtyPlus: 1 }), // excess 2.4
+    ]
+    const results = allocateFixtureBonus(entries, 1.5)
+    expect(results.every((r) => !r.clamped)).toBe(true)
+    const total = results.reduce((sum, r) => sum + r.bonusPoints, 0)
+    expect(total).toBeGreaterThanOrEqual(5.99)
+    expect(total).toBeLessThanOrEqual(6.01)
+  })
+
+  it('DoD 4 -- all-zero excess still returns all zeroes with no divide-by-zero at a sharpened ALPHA', () => {
+    const entries = [entry(1, DEFENDER), entry(2, MIDFIELDER)]
+    const results = allocateFixtureBonus(entries, 3)
+    for (const result of results) {
+      expect(result.bonusPoints).toBe(0)
+      expect(Number.isNaN(result.bonusPoints)).toBe(false)
+    }
+  })
+
+  it('DoD 5 -- a clamped entry at a sharpened ALPHA still leaves its residual unallocated, not redistributed to the others', () => {
+    const entries = [
+      entry(1, DEFENDER, { expectedCbi: 5.4 }), // excess 1.8 -- dominant, but NOT enough to clamp at alpha=1 (2.84 of 6)
+      entry(2, DEFENDER, { expectedCbi: 3 }), // excess 1.0
+      entry(3, DEFENDER, { expectedCbi: 3 }), // excess 1.0, identical to player 2
+    ]
+    // Confirm this shape does NOT clamp at alpha=1 (so the comparison below is meaningful --
+    // sharpening is what causes the clamp, not the shape alone).
+    const linear = allocateFixtureBonus(entries, 1)
+    expect(linear.every((r) => !r.clamped)).toBe(true)
+
+    const sharpened = allocateFixtureBonus(entries, 3)
+    const dominant = sharpened.find((r) => r.id === 1)!
+    expect(dominant.clamped).toBe(true)
+    expect(dominant.bonusPoints).toBe(MAX_BONUS_POINTS_PER_PLAYER_FIXTURE)
+
+    const total = sharpened.reduce((sum, r) => sum + r.bonusPoints, 0)
+    expect(total).toBeLessThan(6.0)
+
+    // The two identical, non-dominant entries still split what's left identically -- not a
+    // redistribution rule of their own, just their own (equal) proportional share of the
+    // un-clamped remainder.
+    const p2 = sharpened.find((r) => r.id === 2)!
+    const p3 = sharpened.find((r) => r.id === 3)!
+    expect(p2.clamped).toBe(false)
+    expect(p3.clamped).toBe(false)
+    expect(p2.bonusPoints).toBeCloseTo(p3.bonusPoints, 10)
   })
 })
