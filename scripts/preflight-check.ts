@@ -1889,6 +1889,67 @@ async function main(): Promise<void> {
     checks.push(leagueBaselineGoalsCheck)
 
     // --------------------------------------------------------------------
+    // 12. Current-season match data completeness — ticket #236. Independent
+    //    of the target gameweek, and independent of check 7's own reads
+    //    above (check 7 counts globally; this counts a narrower, current-
+    //    season-only population — see checkCurrentSeasonMatchData's own file
+    //    header). Four count-only head:true queries, each exempt from
+    //    pagination under this file's own convention (see file header).
+    // --------------------------------------------------------------------
+    const currentSeasonRowCountRead = await safeCount('player_match_stats', () =>
+      supabase
+        .from('player_match_stats')
+        .select('*', { count: 'exact', head: true })
+        .eq('season', CURRENT_SEASON)
+        .eq('competition', PREMIER_LEAGUE_COMPETITION),
+    )
+    const opponentTeamCodeNullCountRead = await safeCount('player_match_stats', () =>
+      supabase
+        .from('player_match_stats')
+        .select('*', { count: 'exact', head: true })
+        .eq('season', CURRENT_SEASON)
+        .eq('competition', PREMIER_LEAGUE_COMPETITION)
+        .is('opponent_team_code', null),
+    )
+    const teamCodeNullCountRead = await safeCount('player_match_stats', () =>
+      supabase
+        .from('player_match_stats')
+        .select('*', { count: 'exact', head: true })
+        .eq('season', CURRENT_SEASON)
+        .eq('competition', PREMIER_LEAGUE_COMPETITION)
+        .is('team_code', null),
+    )
+    const elementTypeNullCountRead = await safeCount('player_match_stats', () =>
+      supabase
+        .from('player_match_stats')
+        .select('*', { count: 'exact', head: true })
+        .eq('season', CURRENT_SEASON)
+        .eq('competition', PREMIER_LEAGUE_COMPETITION)
+        .is('element_type', null),
+    )
+
+    let currentSeasonMatchDataCheck: CheckResult
+    if (currentSeasonRowCountRead.error) {
+      currentSeasonMatchDataCheck = buildCannotEvaluateResult('current-season-match-data', currentSeasonRowCountRead.error)
+    } else if (opponentTeamCodeNullCountRead.error) {
+      currentSeasonMatchDataCheck = buildCannotEvaluateResult('current-season-match-data', opponentTeamCodeNullCountRead.error)
+    } else if (teamCodeNullCountRead.error) {
+      currentSeasonMatchDataCheck = buildCannotEvaluateResult('current-season-match-data', teamCodeNullCountRead.error)
+    } else if (elementTypeNullCountRead.error) {
+      currentSeasonMatchDataCheck = buildCannotEvaluateResult('current-season-match-data', elementTypeNullCountRead.error)
+    } else {
+      currentSeasonMatchDataCheck = checkCurrentSeasonMatchData({
+        currentSeasonRowCount: currentSeasonRowCountRead.count,
+        opponentTeamCodeNullCount: opponentTeamCodeNullCountRead.count,
+        teamCodeNullCount: teamCodeNullCountRead.count,
+        elementTypeNullCount: elementTypeNullCountRead.count,
+        maxNullShare: MAX_NULL_SHARE,
+        warnNullShareFloor: WARN_NULL_SHARE_FLOOR,
+      })
+    }
+    checks.push(currentSeasonMatchDataCheck)
+
+    // --------------------------------------------------------------------
     // Report + job_runs.
     // --------------------------------------------------------------------
     const overallVerdict = computeOverallVerdict(checks)
