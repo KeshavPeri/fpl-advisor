@@ -71,13 +71,20 @@
 // itself make the notification absent (Supabase or Telegram credentials),
 // the deadline having passed with no scheduled notification ever sent, a
 // team with no ClubElo rating or a horizon fixture falling back to FPL's
-// own difficulty scale, or a team's ClubElo rating stale beyond
+// own difficulty scale, a team's ClubElo rating stale beyond
 // ELO_STALE_HOURS (ticket #230 — see check 6's own section below for why a
 // whole-season model defect on live data is exactly the failure mode this
-// file exists to catch, and why "never an automatic failure" was wrong).
+// file exists to catch, and why "never an automatic failure" was wrong), or
+// — check 12, ticket #236, the same failure mode again — zero current-season
+// player_match_stats rows, or a current-season opponent_team_code /
+// team_code / element_type null share exceeding MAX_NULL_SHARE (10%): a
+// blank source column (teams.csv's own fotmob_name) silently emptied
+// opponent_team_code on every current-season row for four gameweeks while
+// check 7 (which only counts `competition`) kept passing.
 // WARN: degrades quality without breaking the chain — a projection row
 // count slightly (not drastically) under the player count, a missing
-// FPL_ENTRY_ID (squad can still be entered manually). See
+// FPL_ENTRY_ID (squad can still be entered manually), or a check-12 null
+// share between WARN_NULL_SHARE_FLOOR (2%) and MAX_NULL_SHARE (10%). See
 // decisions/ticket-69.md for the two calls that were genuinely ambiguous
 // (all-zero projection rows; TELEGRAM_* severity).
 //
@@ -237,6 +244,31 @@ const LEAGUE_BASELINE_MIN_FINISHED_FIXTURES = 20
  */
 const LEAGUE_BASELINE_GOALS_MIN_PLAUSIBLE = 1.0
 const LEAGUE_BASELINE_GOALS_MAX_PLAUSIBLE = 2.5
+
+/**
+ * Must match scripts/project-points.ts's own CURRENT_SEASON — duplicated,
+ * not imported, same convention as MODEL_VERSION above. Ticket #236, check
+ * 12 (current-season match data completeness).
+ */
+const CURRENT_SEASON = '2026-2027'
+
+/**
+ * Ticket #236, check 12. `data/2026-2027/teams.csv` published `fotmob_name`
+ * blank for all twenty clubs since the season began, so
+ * scripts/ingest-core-insights.ts's club-slug map came back empty and every
+ * current-season player_match_stats row's opponent_team_code (and, in
+ * principle, team_code and element_type — any column that same blank-source
+ * failure mode could silently empty) came back NULL. Nothing in check 7
+ * (match-data) counts these three columns — it only counts `competition` —
+ * so preflight reported PASS every night for four gameweeks. Ten percent is
+ * a judgement call, stated as such here, following the same pattern as
+ * check 8's STALE_JOB_HOURS: a handful of unresolvable rows (an odd fixture
+ * slug, a mid-season signing) is normal; a tenth of the season's rows is a
+ * broken pipeline. Tier 3, decided here.
+ */
+const MAX_NULL_SHARE = 0.1
+/** The floor above which a null share WARNs rather than PASSes — same Tier 3 judgement call as MAX_NULL_SHARE above. */
+const WARN_NULL_SHARE_FLOOR = 0.02
 
 // ============================================================================
 // Env
@@ -993,6 +1025,128 @@ export function checkLeagueBaselineGoals(input: LeagueBaselineGoalsCheckInput): 
   }
 }
 
+// ----------------------------------------------------------------------------
+// 12. Current-season match data completeness — ticket #236.
+// ----------------------------------------------------------------------------
+//
+// THE INCIDENT THIS CHECK EXISTS TO CATCH. `data/2026-2027/teams.csv` has
+// published `fotmob_name` blank for all twenty clubs since the season began.
+// scripts/ingest-core-insights.ts builds its club-slug map from that column
+// and correctly refuses to guess when it is empty, so
+// player_match_stats.opponent_team_code came back NULL on EVERY
+// current-season row. Preflight ran every night and reported PASS, because
+// check 7 (match-data, above — left exactly as it is; this is a new check,
+// not an edit to that one) only counts `competition`, never
+// opponent_team_code, team_code or element_type. It took a hand-run
+// diagnostic four gameweeks into the season to find it.
+//
+// SCOPE. Only player_match_stats rows with season = CURRENT_SEASON and
+// competition = PREMIER_LEAGUE_COMPETITION — the population these three
+// columns actually feed the current projection for. Historical-season rows
+// and non-Premier-League rows are out of scope for this ticket.
+//
+// ZERO ROWS IS ITS OWN FAILURE, NEVER A SILENT PASS. A null share is a
+// fraction of `currentSeasonRowCount`; computed over zero rows that fraction
+// is either 0/0 or undefined depending on how it's guarded, and either one
+// must never be allowed to read as "0% null, therefore healthy" — zero
+// current-season rows means the ingest is not writing this season at all,
+// which is a worse failure than any null share. This function checks for
+// that case FIRST, before any share is computed, and returns a FAIL with a
+// reason distinct from every null-share reason below.
+//
+// THRESHOLDS. FAIL when any of the three shares exceeds MAX_NULL_SHARE
+// (0.10); WARN between WARN_NULL_SHARE_FLOOR (0.02) and MAX_NULL_SHARE
+// inclusive; PASS below WARN_NULL_SHARE_FLOOR. See those constants' own
+// comments near the top of this file for why 10%/2% are judgement calls, not
+// derived numbers.
+
+export interface CurrentSeasonMatchDataCheckInput {
+  currentSeasonRowCount: number
+  opponentTeamCodeNullCount: number
+  teamCodeNullCount: number
+  elementTypeNullCount: number
+  maxNullShare: number
+  warnNullShareFloor: number
+}
+
+/** One column's null share against a NON-ZERO total, classified against the two thresholds. Never called when total is 0 — checkCurrentSeasonMatchData handles that case before this is reached. */
+function nullShareVerdict(nullCount: number, total: number, maxNullShare: number, warnNullShareFloor: number): Verdict {
+  const share = nullCount / total
+  if (share > maxNullShare) return 'fail'
+  if (share >= warnNullShareFloor) return 'warn'
+  return 'pass'
+}
+
+export function checkCurrentSeasonMatchData(input: CurrentSeasonMatchDataCheckInput): CheckResult {
+  const { currentSeasonRowCount, opponentTeamCodeNullCount, teamCodeNullCount, elementTypeNullCount, maxNullShare, warnNullShareFloor } = input
+
+  if (currentSeasonRowCount === 0) {
+    return {
+      id: 'current-season-match-data',
+      verdict: 'fail',
+      reason:
+        `no current-season (${CURRENT_SEASON}) "${PREMIER_LEAGUE_COMPETITION}" player_match_stats rows exist at all — ` +
+        'the ingest is not writing this season, not a healthy 0% null share.',
+      values: {
+        currentSeasonRowCount,
+        opponentTeamCodeNullShare: null,
+        teamCodeNullShare: null,
+        elementTypeNullShare: null,
+        maxNullShare,
+        warnNullShareFloor,
+      },
+    }
+  }
+
+  const opponentTeamCodeNullShare = opponentTeamCodeNullCount / currentSeasonRowCount
+  const teamCodeNullShare = teamCodeNullCount / currentSeasonRowCount
+  const elementTypeNullShare = elementTypeNullCount / currentSeasonRowCount
+
+  const values = {
+    currentSeasonRowCount,
+    opponentTeamCodeNullCount,
+    opponentTeamCodeNullShare,
+    teamCodeNullCount,
+    teamCodeNullShare,
+    elementTypeNullCount,
+    elementTypeNullShare,
+    maxNullShare,
+    warnNullShareFloor,
+  }
+
+  const columns = [
+    { label: 'opponentTeamCodeNullShare', share: opponentTeamCodeNullShare, verdict: nullShareVerdict(opponentTeamCodeNullCount, currentSeasonRowCount, maxNullShare, warnNullShareFloor) },
+    { label: 'teamCodeNullShare', share: teamCodeNullShare, verdict: nullShareVerdict(teamCodeNullCount, currentSeasonRowCount, maxNullShare, warnNullShareFloor) },
+    { label: 'elementTypeNullShare', share: elementTypeNullShare, verdict: nullShareVerdict(elementTypeNullCount, currentSeasonRowCount, maxNullShare, warnNullShareFloor) },
+  ] as const
+
+  const overall = worstVerdict(columns.map((c) => c.verdict))
+  const evidence =
+    `${currentSeasonRowCount} current-season (${CURRENT_SEASON}) "${PREMIER_LEAGUE_COMPETITION}" row(s): ` +
+    columns.map((c) => `${c.label}=${(c.share * 100).toFixed(1)}%`).join(', ') + '.'
+
+  if (overall === 'pass') {
+    return {
+      id: 'current-season-match-data',
+      verdict: 'pass',
+      reason: `${evidence} All below the ${(warnNullShareFloor * 100).toFixed(0)}% warn floor.`,
+      values,
+    }
+  }
+
+  const flagged = columns
+    .filter((c) => c.verdict !== 'pass')
+    .map(
+      (c) =>
+        `${c.label} ${(c.share * 100).toFixed(1)}% is ${
+          c.verdict === 'fail' ? `above the ${(maxNullShare * 100).toFixed(0)}% fail threshold` : `at or above the ${(warnNullShareFloor * 100).toFixed(0)}% warn floor`
+        }`,
+    )
+    .join('; ')
+
+  return { id: 'current-season-match-data', verdict: overall, reason: `${evidence} ${flagged}.`, values }
+}
+
 // ============================================================================
 // Report generation — pure formatting, not independently unit-tested (not a
 // DoD item; the assertion logic above is), kept out of main() for the same
@@ -1013,6 +1167,7 @@ const CHECK_ORDER: readonly string[] = [
   'notifications',
   'configuration',
   'league-baseline-goals',
+  'current-season-match-data',
 ]
 
 const CHECK_TITLES: Readonly<Record<string, string>> = {
@@ -1027,6 +1182,7 @@ const CHECK_TITLES: Readonly<Record<string, string>> = {
   notifications: 'Notifications',
   configuration: 'Configuration',
   'league-baseline-goals': 'League baseline goals',
+  'current-season-match-data': 'Current-season match data completeness',
 }
 
 function formatValues(values: JsonRecord): string {
