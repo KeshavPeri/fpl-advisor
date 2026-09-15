@@ -73,6 +73,7 @@
 // assertRowCountMatches. This file writes nothing but its own job_runs row.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { MAX_BONUS_POINTS_PER_PLAYER_FIXTURE } from '../src/lib/projection/bonus.ts'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
 
 const JOB_NAME = 'bonus-validation-report'
@@ -180,6 +181,142 @@ export function extractProjectedBonus(components: unknown): number | null {
   if (typeof points !== 'object' || points === null || Array.isArray(points)) return null
   const bonusPoints = (points as Record<string, unknown>).bonusPoints
   return typeof bonusPoints === 'number' && Number.isFinite(bonusPoints) ? bonusPoints : null
+}
+
+// ============================================================================
+// Per-fixture reconstruction (ticket #237) — PURE. Neither `gameweek_live_stats` nor
+// `player_projections` stores a per-fixture "clamped" flag or a per-fixture bonus split (a
+// player's `components.points.bonusPoints` is the SUM across every fixture he was staged for
+// that gameweek, aggregated by scripts/project-points.ts's own step 6) -- so both figures below
+// are reconstructed from what IS already stored, not read off a new column:
+//
+//  - `components.fixtures[].fixtureId` (see scripts/project-points.ts's row-construction code,
+//    `fixtures: fixtureProjections.map((fp) => fp.modelInputs)`, each with its own `fixtureId`)
+//    lets rows be grouped by the REAL fixture they belong to, not just by gameweek — a gameweek
+//    has ~10 concurrent fixtures, each with its own separate 6-point pool.
+//  - "Clamped" is INFERRED, never read off a stored flag: a player-fixture whose stored
+//    `bonusPoints` is at (or numerically indistinguishable from) MAX_BONUS_POINTS_PER_PLAYER_FIXTURE
+//    (imported from src/lib/projection/bonus.ts, never re-typed here) is treated as clamped. This
+//    is a safe proxy for a SINGLE-fixture player-gameweek specifically (see the exclusion below):
+//    allocateFixtureBonus only ever writes bonusPoints === 3.0 for an entry it clamped — a raw
+//    share landing on exactly 3.0 without clamping is not impossible in principle but is not
+//    something floating-point arithmetic on continuous inputs produces in practice.
+//
+// A player-gameweek is EXCLUDED from both figures (counted, never guessed) when its own bonus
+// cannot be attributed to exactly one fixture:
+//  - zero fixtures that gameweek (a genuine blank gameweek — his club did not play) — a real,
+//    legitimate zero, just not a fixture to attribute a total to;
+//  - two or more fixtures that gameweek (a double gameweek) — bonusPoints is their SUM, and
+//    splitting it back into per-fixture pieces (which one was clamped, if either) is not
+//    recoverable from the aggregate alone, same "count both, report both, fix neither" precedent
+//    docs/projection-model-backlog.md's G10 already uses for run-backtest.ts's own multi-fixture
+//    rows;
+//  - components.fixtures (or components.points.bonusPoints) itself unreadable — same "excluded,
+//    never guessed" discipline every other extractor in this file already follows.
+// ============================================================================
+
+/** Reads components.fixtures[].fixtureId. Returns null (never []) when the structure itself is unreadable — distinct from a genuine empty array (a real blank gameweek, not a parsing failure). */
+export function extractFixtureIds(components: unknown): number[] | null {
+  if (typeof components !== 'object' || components === null || Array.isArray(components)) return null
+  const fixtures = (components as Record<string, unknown>).fixtures
+  if (!Array.isArray(fixtures)) return null
+  const ids: number[] = []
+  for (const f of fixtures) {
+    if (typeof f !== 'object' || f === null || Array.isArray(f)) return null
+    const fixtureId = (f as Record<string, unknown>).fixtureId
+    if (typeof fixtureId !== 'number' || !Number.isFinite(fixtureId)) return null
+    ids.push(fixtureId)
+  }
+  return ids
+}
+
+export interface SingleFixtureBonusRow {
+  playerCode: number
+  fixtureId: number
+  projectedBonus: number
+}
+
+export interface ExtractSingleFixtureRowsResult {
+  rows: SingleFixtureBonusRow[]
+  /** Rows with 0 fixtures this gameweek — a genuine blank gameweek, not a parsing failure. */
+  zeroFixtureRows: number
+  /** Rows with 2+ fixtures this gameweek — a double gameweek; bonusPoints is their sum and cannot be split back per-fixture. */
+  multiFixtureRows: number
+  /** Rows whose components.points.bonusPoints or components.fixtures could not be read at all. */
+  incompleteData: number
+}
+
+export function extractSingleFixtureBonusRows(rows: readonly RawProjectedRow[]): ExtractSingleFixtureRowsResult {
+  const out: SingleFixtureBonusRow[] = []
+  let zeroFixtureRows = 0
+  let multiFixtureRows = 0
+  let incompleteData = 0
+  for (const row of rows) {
+    const projectedBonus = extractProjectedBonus(row.components)
+    const fixtureIds = extractFixtureIds(row.components)
+    if (projectedBonus === null || fixtureIds === null) {
+      incompleteData++
+      continue
+    }
+    if (fixtureIds.length === 0) {
+      zeroFixtureRows++
+      continue
+    }
+    if (fixtureIds.length >= 2) {
+      multiFixtureRows++
+      continue
+    }
+    out.push({ playerCode: row.playerCode, fixtureId: fixtureIds[0], projectedBonus })
+  }
+  return { rows: out, zeroFixtureRows, multiFixtureRows, incompleteData }
+}
+
+/** Floating-point slop allowed when inferring "clamped" from a stored bonusPoints figure — see file header. */
+const CLAMPED_INFERENCE_EPSILON = 1e-9
+
+/** One gameweek's per-fixture reconstruction, BEFORE any mean is taken — kept as the raw per-fixture totals array (not a pre-computed mean) specifically so pooling across gameweeks can sum the underlying fixtures, never average of means, matching this file's own "Pooling across gameweeks" convention. */
+export interface FixtureAllocationRaw {
+  /** One entry per real fixture this gameweek that had at least one single-fixture-attributable player — that fixture's total allocated bonus (sum of every such player's projectedBonus). */
+  fixtureTotals: number[]
+  clampedPlayerFixtureCount: number
+  zeroFixtureRowsExcluded: number
+  multiFixtureRowsExcluded: number
+  incompleteDataExcluded: number
+}
+
+/** Groups by real fixture (component.fixtures[].fixtureId), over EVERY projected row for the gameweek — not just rows matched to an actual — because a fixture's real allocated total includes every player staged for it, matched or not, exactly like scripts/project-points.ts's own allocateFixtureBonus call groups every staged player, not only ones this report can later reconcile against gameweek_live_stats. */
+export function computeFixtureAllocationRaw(projectedRaw: readonly RawProjectedRow[]): FixtureAllocationRaw {
+  const { rows, zeroFixtureRows, multiFixtureRows, incompleteData } = extractSingleFixtureBonusRows(projectedRaw)
+
+  const totalsByFixture = new Map<number, number>()
+  let clampedPlayerFixtureCount = 0
+  for (const row of rows) {
+    totalsByFixture.set(row.fixtureId, (totalsByFixture.get(row.fixtureId) ?? 0) + row.projectedBonus)
+    if (row.projectedBonus >= MAX_BONUS_POINTS_PER_PLAYER_FIXTURE - CLAMPED_INFERENCE_EPSILON) clampedPlayerFixtureCount++
+  }
+
+  return {
+    fixtureTotals: [...totalsByFixture.values()],
+    clampedPlayerFixtureCount,
+    zeroFixtureRowsExcluded: zeroFixtureRows,
+    multiFixtureRowsExcluded: multiFixtureRows,
+    incompleteDataExcluded: incompleteData,
+  }
+}
+
+export interface FixtureAllocationStats {
+  fixturesMeasured: number
+  /** Mean of fixtureTotals — null (never 0) when no fixture could be measured, same "unmeasured mean must never read as measured and zero" rule as computeBonusComparisonStats. */
+  meanAllocatedTotal: number | null
+  clampedPlayerFixtureCount: number
+}
+
+export function summarizeFixtureAllocation(fixtureTotals: readonly number[], clampedPlayerFixtureCount: number): FixtureAllocationStats {
+  if (fixtureTotals.length === 0) {
+    return { fixturesMeasured: 0, meanAllocatedTotal: null, clampedPlayerFixtureCount }
+  }
+  const sum = fixtureTotals.reduce((s, t) => s + t, 0)
+  return { fixturesMeasured: fixtureTotals.length, meanAllocatedTotal: sum / fixtureTotals.length, clampedPlayerFixtureCount }
 }
 
 // ============================================================================
@@ -303,6 +440,10 @@ export interface GameweekBonusReport {
   projectedWithNoStoredBonus: number
   projectedWithNoActual: number
   actualWithNoProjected: number
+  /** Ticket #237 — the raw per-fixture reconstruction (clamped count + fixture totals), kept unsummarised so poolGameweekReports can pool fixtures across gameweeks, not average of means. */
+  fixtureAllocationRaw: FixtureAllocationRaw
+  /** Ticket #237 — this gameweek's own clamped count + mean per-fixture allocated total. */
+  fixtureAllocation: FixtureAllocationStats
 }
 
 export function buildGameweekBonusReport(
@@ -324,6 +465,9 @@ export function buildGameweekBonusReport(
   const matchedCodes = new Set(overallMatch.matched.map((m) => m.playerCode))
   const actualWithNoProjected = actual.filter((a) => !matchedCodes.has(a.playerCode)).length
 
+  const fixtureAllocationRaw = computeFixtureAllocationRaw(projectedRaw)
+  const fixtureAllocation = summarizeFixtureAllocation(fixtureAllocationRaw.fixtureTotals, fixtureAllocationRaw.clampedPlayerFixtureCount)
+
   return {
     gameweekId,
     overall,
@@ -335,6 +479,8 @@ export function buildGameweekBonusReport(
     projectedWithNoStoredBonus: skippedNoStoredBonus,
     projectedWithNoActual: overallMatch.unmatchedCount,
     actualWithNoProjected,
+    fixtureAllocationRaw,
+    fixtureAllocation,
   }
 }
 
@@ -347,13 +493,18 @@ export interface SeasonBonusReport {
   gameweeksMeasured: number
   overall: BonusComparisonStats
   top20: BonusComparisonStats
+  /** Ticket #237 — pooled from every measured gameweek's own fixtureTotals array (never a mean of means), matching this file's existing pooling convention. */
+  fixtureAllocation: FixtureAllocationStats
 }
 
 export function poolGameweekReports(reports: readonly GameweekBonusReport[]): SeasonBonusReport {
+  const pooledFixtureTotals = reports.flatMap((r) => r.fixtureAllocationRaw.fixtureTotals)
+  const pooledClampedCount = reports.reduce((sum, r) => sum + r.fixtureAllocationRaw.clampedPlayerFixtureCount, 0)
   return {
     gameweeksMeasured: reports.length,
     overall: computeBonusComparisonStats(reports.flatMap((r) => r.overallMatched)),
     top20: computeBonusComparisonStats(reports.flatMap((r) => r.top20Matched)),
+    fixtureAllocation: summarizeFixtureAllocation(pooledFixtureTotals, pooledClampedCount),
   }
 }
 
@@ -372,22 +523,37 @@ function renderStatsRow(label: string, stats: BonusComparisonStats): string {
 
 const STATS_TABLE_HEADER = '| Population | n | Mean projected bonus | Mean actual bonus | Mean signed error (actual − projected) |\n|---|---|---|---|---|'
 
+function renderFixtureAllocationLine(stats: FixtureAllocationStats, raw: FixtureAllocationRaw): string {
+  const meanText = stats.meanAllocatedTotal === null ? 'n/a' : stats.meanAllocatedTotal.toFixed(3)
+  return (
+    `Fixture allocation (ticket #237): ${stats.fixturesMeasured} fixture(s) reconstructed, ` +
+    `mean per-fixture allocated total **${meanText}** (of 6.00), ${stats.clampedPlayerFixtureCount} player-fixture(s) inferred clamped ` +
+    `(bonusPoints at ${MAX_BONUS_POINTS_PER_PLAYER_FIXTURE.toFixed(1)}). Excluded from this reconstruction: ${raw.zeroFixtureRowsExcluded} ` +
+    `blank-gameweek row(s), ${raw.multiFixtureRowsExcluded} multi-fixture (double-gameweek) row(s), ${raw.incompleteDataExcluded} row(s) ` +
+    'with unreadable bonus/fixture data.'
+  )
+}
+
 export function renderGameweekSection(report: GameweekBonusReport): string {
   const rows = [renderStatsRow('All matched players', report.overall), renderStatsRow(`Top ${TOP_N_PROJECTED} projected`, report.top20)]
   const reconciliation =
     `Projected rows read: ${report.projectedRowsTotal} · no stored bonus figure: ${report.projectedWithNoStoredBonus} · ` +
     `no matching live stats row: ${report.projectedWithNoActual} · live rows with no matching projection: ${report.actualWithNoProjected}` +
     (report.topProjectedUnmatched > 0 ? ` · **${report.topProjectedUnmatched} of the top ${TOP_N_PROJECTED} had no actual row**` : '')
-  return `### Gameweek ${report.gameweekId}\n\n${STATS_TABLE_HEADER}\n${rows.join('\n')}\n\n${reconciliation}`
+  return (
+    `### Gameweek ${report.gameweekId}\n\n${STATS_TABLE_HEADER}\n${rows.join('\n')}\n\n${reconciliation}\n\n` +
+    renderFixtureAllocationLine(report.fixtureAllocation, report.fixtureAllocationRaw)
+  )
 }
 
-export function renderSeasonSection(season: SeasonBonusReport): string {
+export function renderSeasonSection(season: SeasonBonusReport, pooledFixtureAllocationRaw: FixtureAllocationRaw): string {
   const rows = [renderStatsRow('All matched players', season.overall), renderStatsRow(`Top ${TOP_N_PROJECTED} projected (pooled)`, season.top20)]
   return (
     `### Pooled across all ${season.gameweeksMeasured} measured gameweek(s)\n\n` +
     `${STATS_TABLE_HEADER}\n${rows.join('\n')}\n\n` +
     'Pooled from the underlying matched player-gameweek rows, not from a mean of each gameweek\'s own mean — see this file\'s ' +
-    'own header, "Pooling across gameweeks".'
+    'own header, "Pooling across gameweeks".\n\n' +
+    renderFixtureAllocationLine(season.fixtureAllocation, pooledFixtureAllocationRaw)
   )
 }
 
@@ -421,7 +587,15 @@ export function renderReport(reports: readonly GameweekBonusReport[], generatedA
   }
 
   sections.push('## Per gameweek\n\n' + reports.map(renderGameweekSection).join('\n\n'))
-  sections.push('## Season\n\n' + renderSeasonSection(poolGameweekReports(reports)))
+  const season = poolGameweekReports(reports)
+  const pooledFixtureAllocationRaw: FixtureAllocationRaw = {
+    fixtureTotals: reports.flatMap((r) => r.fixtureAllocationRaw.fixtureTotals),
+    clampedPlayerFixtureCount: season.fixtureAllocation.clampedPlayerFixtureCount,
+    zeroFixtureRowsExcluded: reports.reduce((sum, r) => sum + r.fixtureAllocationRaw.zeroFixtureRowsExcluded, 0),
+    multiFixtureRowsExcluded: reports.reduce((sum, r) => sum + r.fixtureAllocationRaw.multiFixtureRowsExcluded, 0),
+    incompleteDataExcluded: reports.reduce((sum, r) => sum + r.fixtureAllocationRaw.incompleteDataExcluded, 0),
+  }
+  sections.push('## Season\n\n' + renderSeasonSection(season, pooledFixtureAllocationRaw))
   sections.push(
     '## What this does and does not tell us\n\n' +
       '- **BPS is stored but not compared here** — `gameweek_live_stats.bps` is ingested for a future ticket; no persisted ' +
@@ -598,6 +772,7 @@ async function main(): Promise<void> {
         projectedWithNoActual: r.projectedWithNoActual,
         actualWithNoProjected: r.actualWithNoProjected,
         topProjectedUnmatched: r.topProjectedUnmatched,
+        fixtureAllocation: r.fixtureAllocation,
       })),
       season,
     }
@@ -608,6 +783,8 @@ async function main(): Promise<void> {
       `mean actual bonus ${season.overall.meanActualBonus?.toFixed(3) ?? 'n/a'}, signed error ${season.overall.meanSignedError?.toFixed(3) ?? 'n/a'}. ` +
       `Top ${TOP_N_PROJECTED} n=${season.top20.sampleSize}, mean projected bonus ${season.top20.meanProjectedBonus?.toFixed(3) ?? 'n/a'}, ` +
       `mean actual bonus ${season.top20.meanActualBonus?.toFixed(3) ?? 'n/a'}, signed error ${season.top20.meanSignedError?.toFixed(3) ?? 'n/a'}. ` +
+      `Fixture allocation (ticket #237): ${season.fixtureAllocation.fixturesMeasured} fixture(s), mean per-fixture total ` +
+      `${season.fixtureAllocation.meanAllocatedTotal?.toFixed(3) ?? 'n/a'}, ${season.fixtureAllocation.clampedPlayerFixtureCount} clamped. ` +
       'Only 2026/27 gameweeks can ever be measured — see the report\'s own "three-gameweek limitation" section.'
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {
