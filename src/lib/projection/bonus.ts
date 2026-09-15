@@ -132,7 +132,7 @@ export const MAX_BONUS_POINTS_PER_PLAYER_FIXTURE = 3.0
  * TWO GAMEWEEKS IS THIN. State this plainly for whoever reads the eventual fitted value: the
  * instrument (`gameweek_live_stats`) gains exactly one gameweek of evidence per week the season
  * progresses, and ALPHA must be RE-FITTED and RE-CHECKED once ten finished gameweeks are on
- * record -- see `docs/projection-model-backlog.md`'s G14 entry, added by this ticket.
+ * record -- see `docs/projection-model-backlog.md`'s G20 entry, added by this ticket.
  */
 export const ALPHA = 1
 
