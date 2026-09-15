@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildTeamMatchRecords,
+  buildTeamMatchRecordsFromFixtures,
   computeFixtureExpectedScore,
   computeTeamStrengthAsOf,
   fixtureHasSufficientHistory,
@@ -18,6 +19,7 @@ import {
   NEUTRAL_EXPECTED_SCORE_VALUE,
   SCALE,
   teamStrengthRate,
+  type FixtureResultRow,
   type MatchStatsForTeamStrength,
   type TeamStrengthRecord,
 } from './teamStrength.ts'
@@ -236,6 +238,124 @@ describe('computeFixtureExpectedScore: homeAdjustment (ticket #229)', () => {
   it('does NOT apply homeAdjustment when history is insufficient — the neutral fallback stays exactly NEUTRAL_EXPECTED_SCORE_VALUE, not neutral-plus-adjustment', () => {
     const thin: TeamStrengthRecord = { matches: MIN_TEAM_PRIOR_MATCHES - 1, goalsScored: 20, goalsConceded: 0 }
     expect(computeFixtureExpectedScore(thin, weak, 4, 0.09)).toBe(NEUTRAL_EXPECTED_SCORE_VALUE)
+  })
+})
+
+// ============================================================================
+// Ticket #235 — buildTeamMatchRecordsFromFixtures. See teamStrength.ts's own
+// header section for the "because" (blank fotmob_name -> the player_match_stats
+// path never fires for the current season).
+// ============================================================================
+
+function fixtureResultRow(overrides: Partial<FixtureResultRow> & Pick<FixtureResultRow, 'fixtureId' | 'gameweek' | 'homeTeamId' | 'awayTeamId'>): FixtureResultRow {
+  return {
+    homeScore: null,
+    awayScore: null,
+    finished: false,
+    ...overrides,
+  }
+}
+
+const CODE_BY_ID = new Map<number, number | null>([
+  [1, 10], // home team id 1 -> code 10
+  [2, 20], // away team id 2 -> code 20
+])
+
+describe('buildTeamMatchRecordsFromFixtures (ticket #235)', () => {
+  it('a finished fixture produces two mirrored records', () => {
+    const rows: FixtureResultRow[] = [
+      fixtureResultRow({ fixtureId: 39, gameweek: 4, homeTeamId: 1, awayTeamId: 2, homeScore: 2, awayScore: 1, finished: true }),
+    ]
+    const { records, unresolvableTeamCodeCount } = buildTeamMatchRecordsFromFixtures(rows, CODE_BY_ID)
+    expect(records).toHaveLength(2)
+    expect(records.find((r) => r.teamCode === 10)).toEqual({ matchId: '39', gameweek: 4, teamCode: 10, goalsScored: 2, goalsConceded: 1 })
+    expect(records.find((r) => r.teamCode === 20)).toEqual({ matchId: '39', gameweek: 4, teamCode: 20, goalsScored: 1, goalsConceded: 2 })
+    expect(unresolvableTeamCodeCount).toBe(0)
+  })
+
+  it('an unfinished fixture produces none, even with real-looking scores present', () => {
+    const rows: FixtureResultRow[] = [
+      fixtureResultRow({ fixtureId: 1, gameweek: 1, homeTeamId: 1, awayTeamId: 2, homeScore: 1, awayScore: 0, finished: false }),
+    ]
+    expect(buildTeamMatchRecordsFromFixtures(rows, CODE_BY_ID).records).toEqual([])
+  })
+
+  it('a null score (either side) produces none for that fixture -- never a guessed 0', () => {
+    const homeNull: FixtureResultRow[] = [
+      fixtureResultRow({ fixtureId: 1, gameweek: 1, homeTeamId: 1, awayTeamId: 2, homeScore: null, awayScore: 0, finished: true }),
+    ]
+    const awayNull: FixtureResultRow[] = [
+      fixtureResultRow({ fixtureId: 2, gameweek: 1, homeTeamId: 1, awayTeamId: 2, homeScore: 1, awayScore: null, finished: true }),
+    ]
+    expect(buildTeamMatchRecordsFromFixtures(homeNull, CODE_BY_ID).records).toEqual([])
+    expect(buildTeamMatchRecordsFromFixtures(awayNull, CODE_BY_ID).records).toEqual([])
+  })
+
+  it("an unresolvable teams.id produces no record for that side only and is counted -- the OTHER side still resolves normally", () => {
+    const rows: FixtureResultRow[] = [
+      fixtureResultRow({ fixtureId: 5, gameweek: 2, homeTeamId: 1, awayTeamId: 999, homeScore: 3, awayScore: 0, finished: true }),
+    ]
+    const { records, unresolvableTeamCodeCount } = buildTeamMatchRecordsFromFixtures(rows, CODE_BY_ID)
+    expect(records).toHaveLength(1)
+    expect(records[0]).toEqual({ matchId: '5', gameweek: 2, teamCode: 10, goalsScored: 3, goalsConceded: 0 })
+    expect(unresolvableTeamCodeCount).toBe(1)
+  })
+
+  it('a teams.id present in the map but mapped to a null code is treated the same as absent -- counted, never a guessed code', () => {
+    const codeByIdWithNull = new Map<number, number | null>([[1, 10], [2, null]])
+    const rows: FixtureResultRow[] = [
+      fixtureResultRow({ fixtureId: 6, gameweek: 2, homeTeamId: 1, awayTeamId: 2, homeScore: 1, awayScore: 1, finished: true }),
+    ]
+    const { records, unresolvableTeamCodeCount } = buildTeamMatchRecordsFromFixtures(rows, codeByIdWithNull)
+    expect(records).toHaveLength(1)
+    expect(records[0].teamCode).toBe(10)
+    expect(unresolvableTeamCodeCount).toBe(1)
+  })
+
+  it('both sides unresolvable: no records, both counted', () => {
+    const rows: FixtureResultRow[] = [
+      fixtureResultRow({ fixtureId: 7, gameweek: 2, homeTeamId: 998, awayTeamId: 999, homeScore: 1, awayScore: 1, finished: true }),
+    ]
+    const { records, unresolvableTeamCodeCount } = buildTeamMatchRecordsFromFixtures(rows, CODE_BY_ID)
+    expect(records).toEqual([])
+    expect(unresolvableTeamCodeCount).toBe(2)
+  })
+
+  it("two fixtures between the SAME two clubs (e.g. the reverse fixture, or what would be \"last season's\" meeting if such a row were ever present) are kept as two independent records, never collapsed -- matchId (the fixture id) distinguishes them, not team pairing", () => {
+    const rows: FixtureResultRow[] = [
+      // First meeting: team 1 at home, wins 3-0.
+      fixtureResultRow({ fixtureId: 1, gameweek: 2, homeTeamId: 1, awayTeamId: 2, homeScore: 3, awayScore: 0, finished: true }),
+      // Reverse fixture, later in the season: team 2 at home, wins 1-0. A
+      // DIFFERENT fixture id -- if fixture identity were ignored and only
+      // the team pairing mattered, this would overwrite or merge with the
+      // first row instead of contributing its own separate record.
+      fixtureResultRow({ fixtureId: 30, gameweek: 20, homeTeamId: 2, awayTeamId: 1, homeScore: 1, awayScore: 0, finished: true }),
+    ]
+    const { records } = buildTeamMatchRecordsFromFixtures(rows, CODE_BY_ID)
+    expect(records).toHaveLength(4) // 2 fixtures x 2 sides each -- nothing merged
+    const team10Records = records.filter((r) => r.teamCode === 10)
+    expect(team10Records).toHaveLength(2)
+    expect(team10Records.map((r) => r.matchId).sort()).toEqual(['1', '30'])
+    // Each fixture's own result is preserved independently -- team 10 scored
+    // 3 in fixture 1 and 0 in fixture 30, never averaged or overwritten.
+    expect(team10Records.find((r) => r.matchId === '1')).toMatchObject({ goalsScored: 3, goalsConceded: 0 })
+    expect(team10Records.find((r) => r.matchId === '30')).toMatchObject({ goalsScored: 0, goalsConceded: 1 })
+  })
+
+  it('an empty input produces no records and a zero count, not an error', () => {
+    const { records, unresolvableTeamCodeCount } = buildTeamMatchRecordsFromFixtures([], CODE_BY_ID)
+    expect(records).toEqual([])
+    expect(unresolvableTeamCodeCount).toBe(0)
+  })
+
+  it('feeds computeTeamStrengthAsOf correctly end to end -- the lookahead guard still holds on fixture-sourced records', () => {
+    const rows: FixtureResultRow[] = [
+      fixtureResultRow({ fixtureId: 1, gameweek: 1, homeTeamId: 1, awayTeamId: 2, homeScore: 2, awayScore: 0, finished: true }),
+      fixtureResultRow({ fixtureId: 2, gameweek: 4, homeTeamId: 1, awayTeamId: 2, homeScore: 9, awayScore: 0, finished: true }), // must NOT be seen "before gameweek 4"
+    ]
+    const { records } = buildTeamMatchRecordsFromFixtures(rows, CODE_BY_ID)
+    const strength = computeTeamStrengthAsOf(records, 10, 4)
+    expect(strength).toEqual({ matches: 1, goalsScored: 2, goalsConceded: 0 })
   })
 })
 

@@ -29,11 +29,12 @@
 // This file reimplements nothing from project-points.ts or the pure
 // projection modules. It imports project-points.ts's own buildFixtureContext
 // (the exact wiring that decides teamElo/opponentElo/teamEloStale/
-// opponentEloStale/teamStrength/opponentTeamStrength for one fixture) and
-// CURRENT_SEASON, and src/lib/projection/teamStrength.ts's own
-// buildTeamMatchRecords/computeTeamStrengthAsOf and
-// src/lib/projection/expectedPoints.ts's own resolveFixtureExpectedScore —
-// the SAME functions the live job runs. The only new logic here is
+// opponentEloStale/teamStrength/opponentTeamStrength for one fixture),
+// toFixtureResultRows and teamCodeByIdFrom (ticket #235's fixtures -> team
+// -strength wiring), and src/lib/projection/teamStrength.ts's own
+// buildTeamMatchRecordsFromFixtures/computeTeamStrengthAsOf/teamStrengthRate
+// and src/lib/projection/expectedPoints.ts's own resolveFixtureExpectedScore
+// — the SAME functions the live job runs. The only new logic here is
 // `frozenEloExpectedScore`, a deliberate RECONSTRUCTION of the pre-#229
 // two-tier logic (fresh elo, else FDR — never consulting staleness), kept
 // here rather than in the shared library because it exists ONLY to answer
@@ -66,14 +67,55 @@
 // Either failing STOPS the job (status 'failure', non-zero exit) exactly
 // like scripts/run-backtest.ts's own sanity bounds — the report is still
 // written either way, for diagnosis.
+//
+// ============================================================================
+// TICKET #235 — the gate was defective, and #229's own record source never
+// fired for the current season. Both fixed here.
+// ============================================================================
+// #229's diagnostic reported PASS on live data (15 Sept 2026, gameweek 5)
+// while EVERY row resolved to `stale-elo` — the `team-strength` tier was
+// never reached, because player_match_stats.opponent_team_code is NULL on
+// every current-season row (FPL-Core-Insights publishes `fotmob_name` blank
+// for all twenty clubs this season; see teamStrength.ts's own header). Gate
+// 2 (the variance comparison) passed VACUOUSLY: with the new path never
+// running, the "point-in-time" and "frozen-elo" populations were the exact
+// same numbers, so their stdDevs matched exactly and the comparison could
+// never fail. A gate that only compares a new path against an old one passes
+// vacuously whenever the new path does not run — a gate design defect, not a
+// data problem.
+//
+// This ticket fixes BOTH halves:
+//   1. The RECORD SOURCE: teamMatchRecords is now built from
+//      public.fixtures (real results: team_h/team_a/team_h_score/
+//      team_a_score/finished), via project-points.ts's own
+//      toFixtureResultRows/teamCodeByIdFrom and teamStrength.ts's own
+//      buildTeamMatchRecordsFromFixtures — never reimplemented here, and no
+//      player_match_stats read for this purpose any more.
+//   2. The GATE: checkTeamStrengthSourceGate is a NEW, PRIMARY gate — at
+//      least one examined fixture must resolve to source `team-strength`,
+//      or the job exits non-zero regardless of what the other two gates
+//      say. checkVarianceGate is extended to ALSO fail when every row's
+//      point-in-time and frozen-elo columns are numerically identical
+//      (`allRowsIdentical`) — identical columns are proof the new path did
+//      nothing, not evidence that it preserved spread. The Man Utd v Man
+//      City gate is unchanged in logic, re-ranked to a bonus check (it was
+//      always one specific reported fixture, never the main gate). The
+//      report additionally prints the full point-in-time strength table —
+//      every club, matches, goals scored/conceded, teamStrengthRate, sorted
+//      by rate — without which there is no way to see whether the ratings
+//      are sensible, only whether they changed.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { fetchAllPages, assertRowCountMatches } from './lib/paginate.ts'
-import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
-import { buildFixtureContext, CURRENT_SEASON, type TeamMetadata } from './project-points.ts'
-import { buildTeamMatchRecords, type TeamMatchRecord } from '../src/lib/projection/teamStrength.ts'
+import { buildFixtureContext, teamCodeByIdFrom, toFixtureResultRows, type FixtureRow, type TeamMetadata } from './project-points.ts'
+import {
+  buildTeamMatchRecordsFromFixtures,
+  computeTeamStrengthAsOf,
+  MIN_TEAM_PRIOR_MATCHES,
+  teamStrengthRate,
+  type TeamMatchRecord,
+} from '../src/lib/projection/teamStrength.ts'
 import { resolveFixtureExpectedScore, type FixtureContext, type FixtureSource } from '../src/lib/projection/expectedPoints.ts'
 import { expectedScore, expectedScoreFromDifficulty } from '../src/lib/projection/fixture.ts'
 
@@ -205,24 +247,13 @@ export interface DiagnosticTeamRow {
   elo_stale_since: string | null
 }
 
-interface FixtureRow {
-  id: number
-  event_id: number | null
-  team_h: number
-  team_a: number
-  team_h_difficulty: number | null
-  team_a_difficulty: number | null
-}
-
-/** The minimal player_match_stats shape this script needs — team-strength construction only, unlike project-points.ts's much wider select. */
-export interface DiagnosticMatchStatsRow {
-  season: string
-  gameweek: number
-  match_id: string
-  team_code: number | null
-  opponent_team_code: number | null
-  team_goals_conceded: number | null
-}
+// Ticket #235: FixtureRow is now imported from project-points.ts (see the
+// top-of-file import) rather than re-declared here — this script's own
+// fixtures read needs the SAME wider shape (team_h_score/team_a_score/
+// finished, not just the difficulty columns) to build the point-in-time
+// team-strength table the same way project-points.ts does, and a second,
+// narrower local copy would be exactly the kind of drift this ticket exists
+// to prevent (its own file header: "REUSE, NOT REIMPLEMENTATION").
 
 // ============================================================================
 // Pure computation — no I/O. Unit-tested against constructed rows.
@@ -324,15 +355,59 @@ export function populationStandardDeviation(values: readonly number[]): number {
 export interface VarianceGateResult {
   frozenStdDev: number
   pointInTimeStdDev: number
-  /** True (PASS) when the point-in-time spread is AT LEAST as wide as the frozen-elo spread — never narrower. */
+  /**
+   * Ticket #235. True when the point-in-time expectedScore is numerically
+   * IDENTICAL to the frozen-elo expectedScore for EVERY row examined — the
+   * exact condition that let #229's own diagnostic pass vacuously (all
+   * twenty rows resolved to `stale-elo`, so the "new" and "old" populations
+   * were literally the same numbers, and their stdDevs matched exactly).
+   * Identical columns are proof the new path did nothing, not evidence that
+   * it preserved spread (ticket text, verbatim) — see `passed` below, which
+   * now fails on this alone even when the stdDev comparison alone would pass
+   * (it trivially does when the two populations are identical: stdDev(x) >=
+   * stdDev(x) is always true).
+   */
+  allRowsIdentical: boolean
+  /** True (PASS) when the point-in-time spread is AT LEAST as wide as the frozen-elo spread AND the two columns are not identical on every row (ticket #235 — see `allRowsIdentical`). */
   passed: boolean
 }
 
-/** Falsification gate #2 (ticket text, verbatim): the point-in-time expectedScore's spread must not be LOWER than the frozen-elo expectedScore's, over the same fixtures. */
+/**
+ * Falsification gate #2 (ticket text, verbatim, extended by ticket #235 to
+ * be non-vacuous): the point-in-time expectedScore's spread must not be
+ * LOWER than the frozen-elo expectedScore's, over the same fixtures, AND the
+ * two columns must not be identical on every row — a gate that only compares
+ * a new path against an old one passes vacuously whenever the new path never
+ * runs (ticket #235's own "Problem" section, the gate defect #229's report
+ * hid behind).
+ */
 export function checkVarianceGate(rows: readonly Pick<DiagnosticRow, 'frozenEloExpectedScore' | 'pointInTimeExpectedScore'>[]): VarianceGateResult {
   const frozenStdDev = populationStandardDeviation(rows.map((r) => r.frozenEloExpectedScore))
   const pointInTimeStdDev = populationStandardDeviation(rows.map((r) => r.pointInTimeExpectedScore))
-  return { frozenStdDev, pointInTimeStdDev, passed: pointInTimeStdDev >= frozenStdDev }
+  const allRowsIdentical = rows.length > 0 && rows.every((r) => r.frozenEloExpectedScore === r.pointInTimeExpectedScore)
+  return { frozenStdDev, pointInTimeStdDev, allRowsIdentical, passed: pointInTimeStdDev >= frozenStdDev && !allRowsIdentical }
+}
+
+export interface TeamStrengthSourceGateResult {
+  /** How many of the examined rows resolved to fixtureSource === 'team-strength'. */
+  count: number
+  /** True (PASS) when count > 0. */
+  passed: boolean
+}
+
+/**
+ * Ticket #235 — NEW gate, and the PRIMARY one (ticket text, verbatim): at
+ * least one fixture in the examined gameweek must resolve to source
+ * `team-strength`. This is the condition whose absence let #229's own
+ * diagnostic pass: all twenty rows resolved to `stale-elo`, the
+ * `team-strength` tier was never reached, and neither pre-existing gate
+ * (Man Utd v Man City; the variance comparison) was actually checking for
+ * that. If NO row resolves to `team-strength`, the fix is not running and
+ * the job must exit non-zero, regardless of what the other two gates say.
+ */
+export function checkTeamStrengthSourceGate(rows: readonly Pick<DiagnosticRow, 'fixtureSource'>[]): TeamStrengthSourceGateResult {
+  const count = rows.filter((r) => r.fixtureSource === 'team-strength').length
+  return { count, passed: count > 0 }
 }
 
 export type ManUtdGateStatus = 'pass' | 'fail' | 'not-applicable'
@@ -343,12 +418,16 @@ export interface ManUtdGateResult {
 }
 
 /**
- * Falsification gate #1 (ticket text, verbatim): the Man Utd v Man City
+ * Falsification gate (ticket text, verbatim): the Man Utd v Man City
  * fixture's point-in-time expectedScore for Man Utd must be < 0.5. Searched
  * by FPL short name, not by assuming it is gameweek 4 or any particular
  * fixture id — if that exact pairing is not among the rows this run
  * examined (e.g. a later dispatch, once gameweek 4 is no longer next),
  * 'not-applicable' is reported explicitly rather than a guessed pass/fail.
+ *
+ * Ticket #235, point 3 of "Fix the gate": unchanged logic, but re-ranked —
+ * this was always a BONUS check (one specific reported fixture), never the
+ * primary one. `checkTeamStrengthSourceGate` above is now the primary gate.
  */
 export function checkManUtdVsManCityGate(rows: readonly DiagnosticRow[]): ManUtdGateResult {
   const row = rows.find((r) => r.teamShortName === MAN_UTD_SHORT_NAME && r.opponentShortName === MAN_CITY_SHORT_NAME)
@@ -364,38 +443,93 @@ function fmtGateStatus(status: ManUtdGateStatus): string {
   return status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : 'NOT APPLICABLE (fixture not found in this run\'s population)'
 }
 
+/** Ticket #235, point 4 of "Fix the gate": one club's point-in-time strength, for the full report table — every club, its matches, goals scored, goals conceded and teamStrengthRate. */
+export interface TeamStrengthTableRow {
+  teamId: number
+  teamName: string
+  teamShortName: string
+  matches: number
+  goalsScored: number
+  goalsConceded: number
+  rate: number
+  /** True when `matches >= MIN_TEAM_PRIOR_MATCHES` — this club's `rate` reflects a REAL comparison (`fixtureHasSufficientHistory`'s own gate, teamStrength.ts), not just an insufficient early-season sample. The ticket's falsification-gate item 3 ("every club has at least 3 matches") is read off this column, row by row. */
+  meetsMinimum: boolean
+}
+
+/**
+ * Ticket #235, point 4 of "Fix the gate": the full point-in-time strength
+ * table, one row per club with a resolvable `teams.code` (a club with none
+ * cannot have a strength record built at all — never guessed, never
+ * silently skipped without being excluded here for a stated reason), sorted
+ * by `rate` descending (strongest first) — "without it there is no way to
+ * see whether the ratings are sensible, only whether they changed" (ticket
+ * text, verbatim).
+ */
+export function buildTeamStrengthTable(params: {
+  teamsById: ReadonlyMap<number, DiagnosticTeamRow>
+  teamMatchRecords: readonly TeamMatchRecord[]
+  beforeGameweek: number
+}): TeamStrengthTableRow[] {
+  const { teamsById, teamMatchRecords, beforeGameweek } = params
+  const rows: TeamStrengthTableRow[] = []
+  for (const team of teamsById.values()) {
+    if (team.code === null) continue // no resolvable teams.code -- cannot build a strength record, never guessed
+    const record = computeTeamStrengthAsOf(teamMatchRecords, team.code, beforeGameweek)
+    rows.push({
+      teamId: team.id,
+      teamName: team.name,
+      teamShortName: team.short_name,
+      matches: record.matches,
+      goalsScored: record.goalsScored,
+      goalsConceded: record.goalsConceded,
+      rate: teamStrengthRate(record),
+      meetsMinimum: record.matches >= MIN_TEAM_PRIOR_MATCHES,
+    })
+  }
+  return rows.sort((a, b) => b.rate - a.rate)
+}
+
 export interface ReportData {
   generatedAt: Date
   gameweekId: number
   rows: DiagnosticRow[]
+  teamStrengthSourceGate: TeamStrengthSourceGateResult
   manUtdGate: ManUtdGateResult
-
   varianceGate: VarianceGateResult
+  strengthTable: TeamStrengthTableRow[]
 }
 
 export function generateReportMarkdown(data: ReportData): string {
   const lines: string[] = []
-  lines.push('# Team-strength diagnostic — ticket #229')
+  lines.push('# Team-strength diagnostic — tickets #229 / #235')
   lines.push('')
   lines.push(`Generated: ${data.generatedAt.toISOString()} · Job: \`${JOB_NAME}\` · Gameweek examined: ${data.gameweekId}`)
   lines.push('')
   lines.push('## Falsification gate')
   lines.push('')
+  // Ticket #235: the team-strength-source gate is listed FIRST and labelled
+  // the PRIMARY gate ("Fix the gate", point 1) -- it is the condition whose
+  // absence let #229's own diagnostic pass vacuously.
   lines.push(
-    `1. **Man Utd v Man City, point-in-time expectedScore for Man Utd < 0.5:** ${fmtGateStatus(data.manUtdGate.status)}` +
+    `1. **PRIMARY — at least one fixture resolves to source \`team-strength\`:** ${data.teamStrengthSourceGate.passed ? 'PASS' : 'FAIL'} ` +
+      `(${data.teamStrengthSourceGate.count} of ${data.rows.length} row(s))`,
+  )
+  lines.push(
+    `2. **Point-in-time expectedScore spread >= frozen-elo expectedScore spread, AND the two columns are not identical on every row:** ` +
+      `${data.varianceGate.passed ? 'PASS' : 'FAIL'} (frozen-elo population stdDev: ${fmtEs(data.varianceGate.frozenStdDev)}; ` +
+      `point-in-time population stdDev: ${fmtEs(data.varianceGate.pointInTimeStdDev)}; all rows identical: ${data.varianceGate.allRowsIdentical})`,
+  )
+  lines.push(
+    `3. **Bonus check — Man Utd v Man City, point-in-time expectedScore for Man Utd < 0.5:** ${fmtGateStatus(data.manUtdGate.status)}` +
       (data.manUtdGate.manUtdPointInTimeExpectedScore === null
         ? ''
         : ` (value: ${fmtEs(data.manUtdGate.manUtdPointInTimeExpectedScore)})`),
   )
-  lines.push(
-    `2. **Point-in-time expectedScore spread >= frozen-elo expectedScore spread:** ${data.varianceGate.passed ? 'PASS' : 'FAIL'} ` +
-      `(frozen-elo population stdDev: ${fmtEs(data.varianceGate.frozenStdDev)}; point-in-time population stdDev: ${fmtEs(data.varianceGate.pointInTimeStdDev)})`,
-  )
   lines.push('')
-  const overallVerdict = data.manUtdGate.status !== 'fail' && data.varianceGate.passed
+  const overallVerdict = data.teamStrengthSourceGate.passed && data.varianceGate.passed && data.manUtdGate.status !== 'fail'
   lines.push(
     overallVerdict
-      ? '**Overall: PASS.** Both conditions of the falsification gate are satisfied (or not applicable). Proceed.'
+      ? '**Overall: PASS.** Every condition of the falsification gate is satisfied (or not applicable). Proceed.'
       : '**Overall: STOP.** At least one falsification condition failed — the diagnosis needs revisiting before this fix is merged.',
   )
   lines.push('')
@@ -412,11 +546,28 @@ export function generateReportMarkdown(data: ReportData): string {
   lines.push('')
   lines.push(
     '**Reading this table.** "Frozen-elo expectedScore" is exactly what shipped before ticket #229 — a non-null `teams.elo` on both ' +
-      'sides was always trusted, staleness never consulted. "Point-in-time expectedScore" is this ticket\'s new four-tier precedence ' +
+      'sides was always trusted, staleness never consulted. "Point-in-time expectedScore" is the live four-tier precedence ' +
       '(`src/lib/projection/expectedPoints.ts`\'s `resolveFixtureExpectedScore`); "Source" names which tier supplied it — `elo` (fresh, ' +
-      'unchanged behaviour), `team-strength` (this ticket\'s fix), `stale-elo` (better than nothing early season), or `fdr` (the ' +
-      'pre-existing coarse fallback, unchanged).',
+      'unchanged behaviour), `team-strength` (built from `public.fixtures`\' real results — ticket #235), `stale-elo` (better than ' +
+      'nothing early season), or `fdr` (the pre-existing coarse fallback, unchanged).',
   )
+  lines.push('')
+  lines.push('## Point-in-time team strength — every club, sorted by rate')
+  lines.push('')
+  lines.push(
+    'Ticket #235, point 4 of "Fix the gate": without this table there is no way to see whether the ratings are sensible, ' +
+      `only whether they changed. "Meets minimum" is \`matches >= MIN_TEAM_PRIOR_MATCHES\` (${MIN_TEAM_PRIOR_MATCHES}) — a ` +
+      'club below it is still shown, but its rate is not yet trusted by resolveFixtureExpectedScore (falsification-gate item 3).',
+  )
+  lines.push('')
+  lines.push('| Team | Matches | Goals scored | Goals conceded | teamStrengthRate | Meets minimum |')
+  lines.push('|---|---|---|---|---|---|')
+  for (const row of data.strengthTable) {
+    lines.push(
+      `| ${row.teamName} | ${row.matches} | ${row.goalsScored} | ${row.goalsConceded} | ${row.rate.toFixed(4)} | ` +
+        `${row.meetsMinimum ? 'yes' : 'NO'} |`,
+    )
+  }
   lines.push('')
   return lines.join('\n')
 }
@@ -478,109 +629,103 @@ async function main(): Promise<void> {
     )
 
     // --------------------------------------------------------------------
-    // 3. Fixtures for the next gameweek only — "the next gameweek's
-    //    fixtures", ticket text verbatim, not a multi-gameweek horizon.
+    // 3. Fixtures — ticket #235: ONE unfiltered read of the whole table
+    //    (the per-gameweek filter this query used to carry is gone), same
+    //    shape and same "no additional Supabase round trip" reasoning as
+    //    project-points.ts's own fixtures read (see that file's section
+    //    2/3 comment) — this now serves TWO purposes that used to need two
+    //    separate reads: (a) the next gameweek's own fixtures, for the
+    //    fixture-by-fixture comparison table (unchanged in substance from
+    //    before this ticket — "the next gameweek's fixtures", ticket #229
+    //    text verbatim), and (b) the point-in-time team-strength table,
+    //    which needs the WHOLE season's results, not just the next
+    //    gameweek's (not-yet-played) fixtures. Not paginated: up to 380
+    //    rows, same bound as project-points.ts's own unpaginated fixtures
+    //    read (decisions/ticket-43.md).
     // --------------------------------------------------------------------
-    const { data: fixtureRows, error: fixturesError } = await supabase
+    const { data: allFixtureRowsData, error: fixturesError } = await supabase
       .from('fixtures')
-      .select('id, event_id, team_h, team_a, team_h_difficulty, team_a_difficulty')
-      .eq('event_id', gameweekId)
+      .select('id, event_id, team_h, team_a, team_h_difficulty, team_a_difficulty, team_h_score, team_a_score, finished')
       .returns<FixtureRow[]>()
     if (fixturesError) {
       throw new TeamStrengthDiagnosticError(`fixtures lookup failed: ${fixturesError.message}`, 'fixtures')
     }
-    if (!fixtureRows || fixtureRows.length === 0) {
+    const allFixtureRows = allFixtureRowsData ?? []
+    const gameweekFixtureRows = allFixtureRows.filter((f) => f.event_id === gameweekId)
+    if (gameweekFixtureRows.length === 0) {
       throw new TeamStrengthDiagnosticError(`no fixtures found for gameweek ${gameweekId} (is_next). Run scripts/ingest-fpl.ts first.`, 'fixtures')
     }
 
     // --------------------------------------------------------------------
-    // 4. player_match_stats — CURRENT_SEASON, Premier League only, filtered
-    //    IN THE QUERY (this script needs no other season's rows at all, so,
-    //    unlike project-points.ts, the season filter belongs in the query
-    //    itself, not applied in memory afterward). Paginated and
-    //    count-verified, same convention as every other job in scripts/.
+    // 4. The point-in-time team-strength table — ticket #235: built from
+    //    `public.fixtures` (real results), via the SAME wiring
+    //    project-points.ts uses (toFixtureResultRows/teamCodeByIdFrom/
+    //    buildTeamMatchRecordsFromFixtures), never reimplemented here. No
+    //    player_match_stats read at all any more for this purpose — see the
+    //    file header's "REUSE, NOT REIMPLEMENTATION" and
+    //    teamStrength.ts's own header for the "because" (blank
+    //    fotmob_name -> the player_match_stats path never fires for the
+    //    current season).
     // --------------------------------------------------------------------
-    const {
-      rows: matchStatsRows,
-      error: matchStatsError,
-      pages: matchStatsPagesFetched,
-    } = await fetchAllPages<DiagnosticMatchStatsRow>((from, to) =>
-      supabase
-        .from('player_match_stats')
-        .select('season, gameweek, match_id, team_code, opponent_team_code, team_goals_conceded')
-        .eq('competition', PREMIER_LEAGUE_COMPETITION)
-        .eq('season', CURRENT_SEASON)
-        .order('match_id', { ascending: true })
-        .range(from, to)
-        .returns<DiagnosticMatchStatsRow[]>(),
-    )
-    if (matchStatsError) {
-      if (isMissingTable(matchStatsError, 'player_match_stats')) {
-        throw new TeamStrengthDiagnosticError(
-          'the "player_match_stats" table does not exist. Apply supabase/migrations/20260811170000_player_match_stats.sql first.',
-          'player_match_stats',
-        )
-      }
-      throw new TeamStrengthDiagnosticError(`player_match_stats lookup failed: ${matchStatsError.message}`, 'player_match_stats')
-    }
-    const { count: matchStatsRowsExpectedByCount, error: matchStatsCountError } = await supabase
-      .from('player_match_stats')
-      .select('*', { count: 'exact', head: true })
-      .eq('competition', PREMIER_LEAGUE_COMPETITION)
-      .eq('season', CURRENT_SEASON)
-    if (matchStatsCountError) {
-      throw new TeamStrengthDiagnosticError(`player_match_stats count check failed: ${matchStatsCountError.message}`, 'player_match_stats')
-    }
-    assertRowCountMatches('player_match_stats', matchStatsRows.length, matchStatsRowsExpectedByCount ?? 0)
-
-    const teamMatchRecords = buildTeamMatchRecords(
-      matchStatsRows.map((row) => ({
-        matchId: row.match_id,
-        gameweek: row.gameweek,
-        teamCode: row.team_code,
-        opponentTeamCode: row.opponent_team_code,
-        teamGoalsConceded: row.team_goals_conceded,
-      })),
-    )
+    const teamCodeById = teamCodeByIdFrom(teamMetadataById)
+    const { records: teamMatchRecords } = buildTeamMatchRecordsFromFixtures(toFixtureResultRows(allFixtureRows), teamCodeById)
 
     // --------------------------------------------------------------------
-    // 5. Build the comparison rows, both team perspectives per fixture.
+    // 5. Build the comparison rows, both team perspectives per fixture in
+    //    the next gameweek only.
     // --------------------------------------------------------------------
-    const rows: DiagnosticRow[] = fixtureRows.flatMap((fixture) =>
+    const rows: DiagnosticRow[] = gameweekFixtureRows.flatMap((fixture) =>
       buildDiagnosticRows({ fixture, gameweekId, teamsById, eloByTeamId, teamMetadataById, teamMatchRecords }),
     )
 
     // --------------------------------------------------------------------
-    // 6. The falsification gate.
+    // 6. The falsification gate — ticket #235: the team-strength-source gate
+    //    is the new PRIMARY one; the variance gate is now non-vacuous (also
+    //    fails when every row is identical); the Man Utd v Man City gate is
+    //    unchanged, re-ranked to a bonus check. ANY of the three failing
+    //    stops the job.
     // --------------------------------------------------------------------
+    const teamStrengthSourceGate = checkTeamStrengthSourceGate(rows)
     const manUtdGate = checkManUtdVsManCityGate(rows)
     const varianceGate = checkVarianceGate(rows)
 
     // --------------------------------------------------------------------
-    // 7. Report + job_runs.
+    // 7. The full point-in-time strength table (ticket #235, point 4 of "Fix
+    //    the gate") — every club, sorted by rate, evaluated AS OF the
+    //    examined gameweek (the same point in time buildDiagnosticRows
+    //    itself queries for each fixture above).
     // --------------------------------------------------------------------
-    const reportData: ReportData = { generatedAt: new Date(), gameweekId, rows, manUtdGate, varianceGate }
+    const strengthTable = buildTeamStrengthTable({ teamsById, teamMatchRecords, beforeGameweek: gameweekId })
+
+    // --------------------------------------------------------------------
+    // 8. Report + job_runs.
+    // --------------------------------------------------------------------
+    const reportData: ReportData = { generatedAt: new Date(), gameweekId, rows, teamStrengthSourceGate, manUtdGate, varianceGate, strengthTable }
     const reportMarkdown = generateReportMarkdown(reportData)
     await mkdir(dirname(reportPath), { recursive: true })
     await writeFile(reportPath, reportMarkdown, 'utf8')
 
     details = {
       gameweekId,
-      fixturesExamined: fixtureRows.length,
+      fixturesExamined: gameweekFixtureRows.length,
       rowsCompared: rows.length,
-      matchStatsRowsRead: matchStatsRows.length,
-      matchStatsPagesFetched,
+      teamMatchRecordsBuilt: teamMatchRecords.length,
+      teamStrengthSourceGate,
       manUtdGate,
       varianceGate,
       reportPath,
     }
 
-    if (manUtdGate.status === 'fail' || !varianceGate.passed) {
+    // Ticket #235: the team-strength-source gate is the PRIMARY condition —
+    // "if none does, the fix is not running and the job must exit non-zero"
+    // (ticket text, verbatim). ANY of the three failing stops the job.
+    if (!teamStrengthSourceGate.passed || manUtdGate.status === 'fail' || !varianceGate.passed) {
       const message =
         `${JOB_NAME}: falsification gate FAILED for gameweek ${gameweekId} — ` +
+        `team-strength-source gate: ${teamStrengthSourceGate.passed ? 'pass' : 'fail'} (${teamStrengthSourceGate.count} row(s)); ` +
         `Man Utd/Man City gate: ${manUtdGate.status}; variance gate: ${varianceGate.passed ? 'pass' : 'fail'} ` +
-        `(frozen stdDev ${fmtEs(varianceGate.frozenStdDev)}, point-in-time stdDev ${fmtEs(varianceGate.pointInTimeStdDev)}). ` +
-        `Report written to ${reportPath} for diagnosis.`
+        `(frozen stdDev ${fmtEs(varianceGate.frozenStdDev)}, point-in-time stdDev ${fmtEs(varianceGate.pointInTimeStdDev)}, ` +
+        `all rows identical: ${varianceGate.allRowsIdentical}). Report written to ${reportPath} for diagnosis.`
       console.error(message)
       await recordJobRun(supabase, { status: 'failure', message, details, startedAt })
       process.exit(1)
@@ -588,8 +733,9 @@ async function main(): Promise<void> {
     }
 
     const message =
-      `${JOB_NAME}: gameweek ${gameweekId} — ${rows.length} row(s) compared across ${fixtureRows.length} fixture(s). ` +
-      `Falsification gate PASSED. Report written to ${reportPath}.`
+      `${JOB_NAME}: gameweek ${gameweekId} — ${rows.length} row(s) compared across ${gameweekFixtureRows.length} fixture(s), ` +
+      `${teamMatchRecords.length} team-match record(s) built from public.fixtures. Falsification gate PASSED ` +
+      `(${teamStrengthSourceGate.count} row(s) resolved to team-strength). Report written to ${reportPath}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {

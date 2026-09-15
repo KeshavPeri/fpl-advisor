@@ -111,8 +111,9 @@ import {
   LEAGUE_BASELINE_GOALS_PER_TEAM,
   projectPlayerFixture,
   allocateFixtureBonus,
-  buildTeamMatchRecords,
+  buildTeamMatchRecordsFromFixtures,
   computeTeamStrengthAsOf,
+  MIN_TEAM_PRIOR_MATCHES,
   type PlayerRates,
   type PlayerRateHistory,
   type RateHistoryMatch,
@@ -123,6 +124,7 @@ import {
   type FixtureBonusEntry,
   type FixtureSource,
   type TeamMatchRecord,
+  type FixtureResultRow,
 } from '../src/lib/projection/index.ts'
 import type { DefensiveContributionMatch } from '../src/lib/projection/types.ts'
 
@@ -290,18 +292,24 @@ interface PlayerRow {
   now_cost: number
 }
 
-interface FixtureRow {
+export interface FixtureRow {
   id: number
   event_id: number | null
   team_h: number
   team_a: number
   team_h_difficulty: number | null
   team_a_difficulty: number | null
-}
-
-interface FinishedFixtureRow {
+  /**
+   * Ticket #235. The actual final score -- null until FPL posts a real
+   * result. Combined with `finished` below to build this season's
+   * point-in-time team-strength table from REAL results (`public.fixtures`),
+   * never from `player_match_stats.match_id`-derived opponent columns --
+   * see src/lib/projection/teamStrength.ts's own header for the "because".
+   */
   team_h_score: number | null
   team_a_score: number | null
+  /** Ticket #235. True only once FPL has posted a real result -- a postponed or in-flight fixture must contribute nothing to team strength, never a guessed 0. */
+  finished: boolean
 }
 
 export interface MatchStatsRow {
@@ -326,18 +334,6 @@ export interface MatchStatsRow {
    * position-prior computation below — see resolvePriorRowPosition.
    */
   element_type: number | null
-  /**
-   * Ticket #229. This row's own match identifier -- the point-in-time
-   * team-strength table's grouping key (one entry per resolvable
-   * (match_id, team_code) pair, see teamStrength.ts's buildTeamMatchRecords).
-   */
-  match_id: string
-  /** Ticket #229. This row's own club code (public.teams.code), never an FPL team id -- see teamStrength.ts. */
-  team_code: number | null
-  /** Ticket #229. The opponent faced in this match, same code space as team_code. */
-  opponent_team_code: number | null
-  /** Ticket #229. Per-player-on-pitch team goals conceded -- see teamStrength.ts's header on why the MAX across a team's players in one match is the correct team figure. */
-  team_goals_conceded: number | null
 }
 
 // ============================================================================
@@ -483,48 +479,56 @@ export function effectiveRatePositionPrior(
 }
 
 // ============================================================================
-// Ticket #229 — point-in-time team strength, pulled out as its own
-// independently-testable pure function (same technique as every other
-// section here): main()'s Supabase read can't be exercised without a live
-// project, but filtering rows to CURRENT_SEASON and handing them to
-// src/lib/projection/teamStrength.ts's own buildTeamMatchRecords has no I/O
-// of its own.
+// Ticket #235 — point-in-time team strength, sourced from public.fixtures
+// (real results) instead of player_match_stats' match_id-derived opponent
+// columns. Pulled out as small, independently-testable pure functions (same
+// technique as every other section here): main()'s Supabase read can't be
+// exercised without a live project, but mapping this file's own FixtureRow
+// shape onto teamStrength.ts's FixtureResultRow, and teamMetadataById onto a
+// plain teams.id -> teams.code map, have no I/O of their own. See
+// src/lib/projection/teamStrength.ts's own header for the full "because"
+// (blank fotmob_name -> the player_match_stats path never fires for the
+// current season); see git history for the player_match_stats-based
+// construction this replaces.
 // ============================================================================
 
 /**
- * The point-in-time team-strength table, built ONLY from THIS season's
- * `player_match_stats` rows — last season's results must not feed this
- * season's strength, or this reproduces the exact bug this ticket exists to
- * fix (a rating frozen on stale evidence). Reuses
- * `buildTeamMatchRecords` (src/lib/projection/teamStrength.ts) UNMODIFIED —
- * the max-across-players goals-conceded correction lives there, once, and is
- * not re-derived here. Built from the SAME `matchStatsRows` already fetched
- * in section 4 above — no additional Supabase round trip, per the ticket's
- * own "no additional Supabase round trip" requirement.
- *
- * Named test: last season's matches are excluded from the strength table
- * (a CURRENT_SEASON row and a differently-seasoned row for the same two
- * clubs produce a table that reflects only the former).
+ * Maps this file's own `FixtureRow` shape onto
+ * `src/lib/projection/teamStrength.ts`'s `FixtureResultRow` — the pure
+ * function's input type. A row whose `event_id` is null (a blank-gameweek
+ * fixture with no gameweek assigned yet) is dropped here: it can never be a
+ * genuine result for any real gameweek and must not be guessed into one.
  */
-export function buildCurrentSeasonTeamMatchRecords(
-  rows: readonly MatchStatsRow[],
-  currentSeason: string = CURRENT_SEASON,
-): TeamMatchRecord[] {
-  const currentSeasonRows = rows.filter((row) => row.season === currentSeason)
-  return buildTeamMatchRecords(
-    currentSeasonRows.map((row) => ({
-      matchId: row.match_id,
-      gameweek: row.gameweek,
-      teamCode: row.team_code,
-      opponentTeamCode: row.opponent_team_code,
-      teamGoalsConceded: row.team_goals_conceded,
-    })),
-  )
+export function toFixtureResultRows(rows: readonly FixtureRow[]): FixtureResultRow[] {
+  return rows
+    .filter((f): f is FixtureRow & { event_id: number } => f.event_id !== null)
+    .map((f) => ({
+      fixtureId: f.id,
+      gameweek: f.event_id,
+      homeTeamId: f.team_h,
+      awayTeamId: f.team_a,
+      homeScore: f.team_h_score,
+      awayScore: f.team_a_score,
+      finished: f.finished,
+    }))
+}
+
+/**
+ * `teams.id -> teams.code`, straight off `teamMetadataById` (already built
+ * from the `teams` read in section 2) — the join key
+ * `buildTeamMatchRecordsFromFixtures` needs to turn `fixtures.team_h`/
+ * `team_a` (an FPL team id) into the `teams.code` space
+ * `computeTeamStrengthAsOf` keys on (`deltas.md` D9). Pulled out as its own
+ * function purely so the mapping itself — not just the underlying
+ * `teamMetadataById` values — is directly assertable in a test.
+ */
+export function teamCodeByIdFrom(teamMetadataById: ReadonlyMap<number, TeamMetadata>): Map<number, number | null> {
+  return new Map(Array.from(teamMetadataById.entries()).map(([id, meta]) => [id, meta.code]))
 }
 
 /**
  * One fixture's `FixtureContext` (ticket #229) — pulled out as its own pure
- * function, separate from `buildCurrentSeasonTeamMatchRecords` above, so the
+ * function, separate from the record-building helpers above, so the
  * WIRING that feeds `resolveFixtureExpectedScore`'s precedence (not only the
  * underlying elo/team-strength primitives, already tested in
  * src/lib/projection/) is independently provable without a live Supabase
@@ -810,7 +814,6 @@ async function main(): Promise<void> {
       )
     }
     const horizonGameweeks = gwRows.slice(nextIndex, nextIndex + PROJECTION_HORIZON)
-    const horizonGwIds = horizonGameweeks.map((gw) => gw.id)
 
     // --------------------------------------------------------------------
     // 2. Reference data: players, teams, fixtures in the horizon.
@@ -870,16 +873,31 @@ async function main(): Promise<void> {
       (teamRows ?? []).map((t) => [t.id, { eloStale: t.elo_stale_since !== null, code: t.code }]),
     )
 
+    // Ticket #235: ONE unfiltered read of the whole `fixtures` table (no
+    // `.in('event_id', ...)` filter any more) — up to 380 rows, well under
+    // the 1,000-row db-max-rows ceiling (see decisions/ticket-43.md), and it
+    // now serves THREE purposes that used to need two separate Supabase
+    // round trips: (a) the horizon fixtures' own `team_h_difficulty`/
+    // `team_a_difficulty` (section 5 below), (b) `leagueBaselineGoals`
+    // (section 3, immediately below — this replaces what used to be a
+    // second, `finished = true`-filtered query), and (c) the point-in-time
+    // team-strength table, built from this SAME read plus `teamMetadataById`
+    // above (see `toFixtureResultRows`/`teamCodeByIdFrom`,
+    // `buildTeamMatchRecordsFromFixtures` below) — needs the WHOLE season's
+    // fixtures, not just the horizon, or a team would never accumulate any
+    // prior matches. Net effect: ONE fewer Supabase round trip than before
+    // this ticket, comfortably inside the ticket's own "no additional
+    // Supabase round trip" requirement.
     const { data: fixtureRows, error: fixturesError } = await supabase
       .from('fixtures')
-      .select('id, event_id, team_h, team_a, team_h_difficulty, team_a_difficulty')
-      .in('event_id', horizonGwIds)
+      .select('id, event_id, team_h, team_a, team_h_difficulty, team_a_difficulty, team_h_score, team_a_score, finished')
       .returns<FixtureRow[]>()
     if (fixturesError) {
       throw new ProjectionError(`fixtures lookup failed: ${fixturesError.message}`, 'fixtures')
     }
+    const allFixtureRows = fixtureRows ?? []
     const fixturesByGw = new Map<number, FixtureRow[]>()
-    for (const fixture of fixtureRows ?? []) {
+    for (const fixture of allFixtureRows) {
       if (fixture.event_id === null) continue
       const list = fixturesByGw.get(fixture.event_id) ?? []
       list.push(fixture)
@@ -888,22 +906,15 @@ async function main(): Promise<void> {
 
     // --------------------------------------------------------------------
     // 3. League baseline goals: computed from finished fixtures at runtime
-    //    when enough exist, else the named placeholder constant.
-    //
-    //    Not paginated: a 20-team season plays 380 fixtures total, well
-    //    under the 1,000-row db-max-rows ceiling, and that total cannot
-    //    grow mid-season — see decisions/ticket-43.md for the full audit.
+    //    when enough exist, else the named placeholder constant. Ticket
+    //    #235: derived from the SAME `allFixtureRows` read above — this used
+    //    to be its own separate `.eq('finished', true)` query; see that
+    //    read's own comment for why merging it in is safe (same ≤380-row
+    //    bound, same "left unpaginated" precedent, decisions/ticket-43.md).
     // --------------------------------------------------------------------
-    const { data: finishedFixtures, error: finishedError } = await supabase
-      .from('fixtures')
-      .select('team_h_score, team_a_score')
-      .eq('finished', true)
-      .returns<FinishedFixtureRow[]>()
-    if (finishedError) {
-      throw new ProjectionError(`finished-fixtures lookup failed: ${finishedError.message}`, 'fixtures')
-    }
-    const scoredFinished = (finishedFixtures ?? []).filter(
-      (f): f is { team_h_score: number; team_a_score: number } => f.team_h_score !== null && f.team_a_score !== null,
+    const scoredFinished = allFixtureRows.filter(
+      (f): f is FixtureRow & { team_h_score: number; team_a_score: number } =>
+        f.finished && f.team_h_score !== null && f.team_a_score !== null,
     )
 
     let leagueBaselineGoals: number
@@ -933,6 +944,16 @@ async function main(): Promise<void> {
     //    composes correctly. A row whose competition is NULL or a known
     //    non-Premier-League value is excluded here and counted separately
     //    below — never assumed Premier League.
+    //
+    //    Ticket #235: no longer selects match_id/team_code/
+    //    opponent_team_code/team_goals_conceded — ticket #229 added those
+    //    four columns here to build the point-in-time team-strength table
+    //    from player_match_stats; that construction is replaced by
+    //    public.fixtures (see toFixtureResultRows/teamCodeByIdFrom/
+    //    buildTeamMatchRecordsFromFixtures below), so this file no longer
+    //    reads them. `.order('match_id', ...)` is kept below purely for
+    //    stable, deterministic pagination ordering — it does not require the
+    //    column to be selected.
     // --------------------------------------------------------------------
     const {
       rows: matchStatsRows,
@@ -941,10 +962,7 @@ async function main(): Promise<void> {
     } = await fetchAllPages<MatchStatsRow>((from, to) =>
       supabase
         .from('player_match_stats')
-        .select(
-          'player_code, season, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, element_type, ' +
-            'match_id, team_code, opponent_team_code, team_goals_conceded',
-        )
+        .select('player_code, season, gameweek, minutes_played, xg, xa, saves, clearances, blocks, interceptions, tackles, recoveries, element_type')
         .eq('competition', PREMIER_LEAGUE_COMPETITION)
         .order('player_id', { ascending: true })
         .order('match_id', { ascending: true })
@@ -1018,13 +1036,40 @@ async function main(): Promise<void> {
       matchesByPlayerCode.set(row.player_code, list)
     }
 
-    // Ticket #229 -- the point-in-time team-strength table, CURRENT_SEASON
-    // only (see buildCurrentSeasonTeamMatchRecords's own doc). Built once,
-    // outside the per-player loop below: every fixture's own strength lookup
+    // Ticket #235 -- the point-in-time team-strength table, built from
+    // public.fixtures (real results), never from player_match_stats'
+    // match_id-derived opponent columns -- see teamStrength.ts's own header
+    // and toFixtureResultRows/teamCodeByIdFrom above for the "because". Built
+    // once, outside the per-player loop below, from the SAME `allFixtureRows`
+    // and `teamMetadataById` already read in section 2 -- no additional
+    // Supabase round trip. Every fixture's own strength lookup
     // (computeTeamStrengthAsOf, per gameweek, in section 5) reads this SAME
     // table, filtered fresh each time to gameweeks strictly before the
     // fixture's own gameweek -- the lookahead guard teamStrength.ts documents.
-    const teamMatchRecords = buildCurrentSeasonTeamMatchRecords(matchStatsRows)
+    const teamCodeById = teamCodeByIdFrom(teamMetadataById)
+    const { records: teamMatchRecords, unresolvableTeamCodeCount: teamStrengthUnresolvableTeamCodeCount } =
+      buildTeamMatchRecordsFromFixtures(toFixtureResultRows(allFixtureRows), teamCodeById)
+
+    // Ticket #235 -- "Report what happened": how many clubs' point-in-time
+    // strength meets MIN_TEAM_PRIOR_MATCHES, evaluated AS OF the next
+    // gameweek (the start of the projection horizon) -- the same point in
+    // time every fixture context in section 5 below actually queries for the
+    // FIRST fixture of the horizon. A distinct-codes set, not "count teams",
+    // because teamMetadataById is keyed by teams.id and more than one id can
+    // never share a code, but a club with no resolvable code (teamCodeById
+    // entry null/missing) cannot be evaluated at all and is correctly
+    // excluded from both the numerator and the denominator here.
+    const distinctTeamCodesForStrength = new Set(
+      Array.from(teamMetadataById.values())
+        .map((meta) => meta.code)
+        .filter((code): code is number => code !== null),
+    )
+    let clubsMeetingMinTeamPriorMatches = 0
+    for (const code of distinctTeamCodesForStrength) {
+      if (computeTeamStrengthAsOf(teamMatchRecords, code, horizonGameweeks[0].id).matches >= MIN_TEAM_PRIOR_MATCHES) {
+        clubsMeetingMinTeamPriorMatches++
+      }
+    }
 
     // Ticket #177 -- the POSITION PRIORS (and the defcon position prior)
     // are built from EVERY qualifying row, resolved via
@@ -1449,6 +1494,14 @@ async function main(): Promise<void> {
       // Ticket #229 -- see the counter's own comment above for how this
       // relates to fixtureEloFallbackCount.
       fixtureSourceCounts,
+      // Ticket #235 -- "Report what happened": the fixtures-sourced
+      // team-strength construction itself, printed here AND in the console
+      // message below so a failure like #229's (the tier never firing) is
+      // visible without running the diagnostic by hand.
+      teamMatchRecordsBuilt: teamMatchRecords.length,
+      teamStrengthUnresolvableTeamCodeCount,
+      clubsMeetingMinTeamPriorMatches,
+      clubsEligibleForTeamStrength: distinctTeamCodesForStrength.size,
       leagueBaselineGoalsSource,
       leagueBaselineGoals,
       playersRowsFetched: playerRows.length,
@@ -1503,7 +1556,12 @@ async function main(): Promise<void> {
       `${meanProjectedBonusAmongLikelyStarters.toFixed(2)} among likely starters. Position priors: ` +
       `${priorRowsContributing} row(s) contributing (${priorRowsContributingNoRosterEntry} with no current-roster ` +
       `entry), ${priorRowsSkippedNoPosition} skipped (no resolvable position), ${priorRowsSkippedNoPlayerCode} ` +
-      `skipped (no player_code).`
+      `skipped (no player_code). Team strength (ticket #235, sourced from public.fixtures): ` +
+      `${teamMatchRecords.length} team-match record(s) built, ${teamStrengthUnresolvableTeamCodeCount} side(s) ` +
+      `dropped for an unresolvable teams.code, ${clubsMeetingMinTeamPriorMatches}/${distinctTeamCodesForStrength.size} ` +
+      `club(s) meeting MIN_TEAM_PRIOR_MATCHES as of gameweek ${horizonGameweeks[0].id}. Fixture source breakdown: ` +
+      `elo ${fixtureSourceCounts.elo}, team-strength ${fixtureSourceCounts['team-strength']}, ` +
+      `stale-elo ${fixtureSourceCounts['stale-elo']}, fdr ${fixtureSourceCounts.fdr}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {

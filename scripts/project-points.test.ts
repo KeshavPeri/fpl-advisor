@@ -38,12 +38,17 @@ import { effectiveRatePositionPrior, medianNowCostByPosition } from './project-p
 // their own), imported and exercised directly so the survivorship-bias fix
 // is provable on constructed rows, not only grepped.
 import { resolvePriorRowPosition, buildPositionPriorMatches, type MatchStatsRow } from './project-points.ts'
-// Ticket #229: same reasoning -- buildCurrentSeasonTeamMatchRecords and
-// buildFixtureContext are plain pure functions (no Supabase call of their
-// own), imported and exercised directly so the season-exclusion guarantee
-// and the resolveFixtureExpectedScore wiring are provable on constructed
-// rows, not only grepped.
-import { buildCurrentSeasonTeamMatchRecords, buildFixtureContext, type TeamMetadata } from './project-points.ts'
+// Ticket #229: same reasoning -- buildFixtureContext is a plain pure
+// function (no Supabase call of its own), imported and exercised directly so
+// the resolveFixtureExpectedScore wiring is provable on constructed rows,
+// not only grepped.
+import { buildFixtureContext, type TeamMetadata } from './project-points.ts'
+// Ticket #235: same reasoning -- toFixtureResultRows and teamCodeByIdFrom
+// are plain pure functions (no Supabase call of their own), imported and
+// exercised directly so the fixtures -> team-strength wiring is provable on
+// constructed rows, not only grepped. Replaces buildCurrentSeasonTeamMatchRecords
+// (deleted this ticket -- see git history and teamStrength.ts's own header).
+import { toFixtureResultRows, teamCodeByIdFrom, type FixtureRow } from './project-points.ts'
 import { GOALKEEPER, DEFENDER, MIDFIELDER, FORWARD } from '../src/lib/scoring/types.ts'
 import { computeTwoStagePlayerRates } from '../src/lib/projection/rates.ts'
 import { MIN_TEAM_PRIOR_MATCHES, type TeamMatchRecord } from '../src/lib/projection/teamStrength.ts'
@@ -536,11 +541,6 @@ function matchRow(overrides: Partial<MatchStatsRow> = {}): MatchStatsRow {
     tackles: 1,
     recoveries: 2,
     element_type: null,
-    // Ticket #229 -- sensible defaults for the four new team-strength columns.
-    match_id: 'm1',
-    team_code: null,
-    opponent_team_code: null,
-    team_goals_conceded: null,
     ...overrides,
   }
 }
@@ -772,48 +772,71 @@ describe('project-points.ts — projected population unchanged (ticket #177)', (
 
 // ============================================================================
 // Ticket #229 — point-in-time team strength replaces frozen ClubElo whenever
-// the elo table cannot be trusted. buildCurrentSeasonTeamMatchRecords and
-// buildFixtureContext are plain pure functions, imported and exercised
-// directly (same technique as every #113/#119/#177 helper above).
+// the elo table cannot be trusted. buildFixtureContext is a plain pure
+// function, imported and exercised directly (same technique as every
+// #113/#119/#177 helper above).
+//
+// Ticket #235 — the RECORDS that feed buildFixtureContext's
+// teamMatchRecords parameter now come from public.fixtures (real results),
+// not from player_match_stats' match_id-derived opponent columns. The pure
+// record-building function itself (buildTeamMatchRecordsFromFixtures) is
+// tested in src/lib/projection/teamStrength.test.ts, alongside its sibling
+// buildTeamMatchRecords; this file tests only the WIRING this file owns --
+// toFixtureResultRows and teamCodeByIdFrom -- the same split this file
+// already uses for buildFixtureContext vs. the primitives it calls.
 // ============================================================================
 
-describe('buildCurrentSeasonTeamMatchRecords (ticket #229)', () => {
-  it("last season's matches are excluded from the strength table -- a historical row for the same two clubs contributes nothing", () => {
-    const rows: MatchStatsRow[] = [
-      matchRow({ season: '2025-2026', match_id: 'old-m1', gameweek: 5, team_code: 10, opponent_team_code: 20, team_goals_conceded: 3 }),
-      matchRow({ season: '2025-2026', match_id: 'old-m1', gameweek: 5, team_code: 20, opponent_team_code: 10, team_goals_conceded: 0 }),
-    ]
-    expect(buildCurrentSeasonTeamMatchRecords(rows, '2026-2027')).toEqual([])
+/** Builds a FixtureRow with sensible defaults, overridable per field. */
+function fixtureRow(overrides: Partial<FixtureRow> & Pick<FixtureRow, 'id' | 'team_h' | 'team_a'>): FixtureRow {
+  return {
+    event_id: 1,
+    team_h_difficulty: 3,
+    team_a_difficulty: 3,
+    team_h_score: null,
+    team_a_score: null,
+    finished: false,
+    ...overrides,
+  }
+}
+
+describe('toFixtureResultRows (ticket #235)', () => {
+  it('maps id/event_id/team_h/team_a/team_h_score/team_a_score/finished onto the pure module\'s FixtureResultRow shape', () => {
+    const rows = toFixtureResultRows([
+      fixtureRow({ id: 39, event_id: 4, team_h: 1, team_a: 2, team_h_score: 2, team_a_score: 1, finished: true }),
+    ])
+    expect(rows).toEqual([{ fixtureId: 39, gameweek: 4, homeTeamId: 1, awayTeamId: 2, homeScore: 2, awayScore: 1, finished: true }])
   })
 
-  it('a CURRENT_SEASON row DOES contribute -- proves the filter is season equality, not "exclude everything"', () => {
-    const rows: MatchStatsRow[] = [
-      matchRow({ season: '2026-2027', match_id: 'new-m1', gameweek: 2, team_code: 10, opponent_team_code: 20, team_goals_conceded: 1 }),
-      matchRow({ season: '2026-2027', match_id: 'new-m1', gameweek: 2, team_code: 20, opponent_team_code: 10, team_goals_conceded: 2 }),
-    ]
-    const records = buildCurrentSeasonTeamMatchRecords(rows, '2026-2027')
-    expect(records).toHaveLength(2)
-    expect(records.find((r) => r.teamCode === 10)).toEqual({ matchId: 'new-m1', gameweek: 2, teamCode: 10, goalsConceded: 1, goalsScored: 2 })
+  it('drops a row whose event_id is null (a blank-gameweek fixture) -- never guessed into a gameweek', () => {
+    const rows = toFixtureResultRows([fixtureRow({ id: 1, event_id: null, team_h: 1, team_a: 2 })])
+    expect(rows).toEqual([])
   })
 
-  it('a mix of both seasons for the SAME two clubs: only the current-season match is reflected in the table', () => {
-    const rows: MatchStatsRow[] = [
-      matchRow({ season: '2025-2026', match_id: 'old-m1', gameweek: 30, team_code: 10, opponent_team_code: 20, team_goals_conceded: 5 }), // would dominate if not excluded
-      matchRow({ season: '2025-2026', match_id: 'old-m1', gameweek: 30, team_code: 20, opponent_team_code: 10, team_goals_conceded: 0 }),
-      matchRow({ season: '2026-2027', match_id: 'new-m1', gameweek: 2, team_code: 10, opponent_team_code: 20, team_goals_conceded: 1 }),
-      matchRow({ season: '2026-2027', match_id: 'new-m1', gameweek: 2, team_code: 20, opponent_team_code: 10, team_goals_conceded: 2 }),
-    ]
-    const records = buildCurrentSeasonTeamMatchRecords(rows, '2026-2027')
-    expect(records).toHaveLength(2) // not 4 -- the 2025-2026 match never entered the table
-    expect(records.find((r) => r.teamCode === 10)?.goalsConceded).toBe(1) // not 5, the stale figure
+  it('an empty input produces an empty output, not an error', () => {
+    expect(toFixtureResultRows([])).toEqual([])
+  })
+})
+
+describe('teamCodeByIdFrom (ticket #235)', () => {
+  it('maps teams.id -> teams.code straight off teamMetadataById', () => {
+    const teamMetadataById = new Map<number, TeamMetadata>([
+      [1, { eloStale: false, code: 10 }],
+      [2, { eloStale: true, code: 20 }],
+    ])
+    const result = teamCodeByIdFrom(teamMetadataById)
+    expect(result.get(1)).toBe(10)
+    expect(result.get(2)).toBe(20)
   })
 
-  it('defaults currentSeason to CURRENT_SEASON when the parameter is omitted', () => {
-    const rows: MatchStatsRow[] = [
-      matchRow({ season: CURRENT_SEASON, match_id: 'm1', gameweek: 2, team_code: 10, opponent_team_code: 20, team_goals_conceded: 1 }),
-      matchRow({ season: '2025-2026', match_id: 'm1', gameweek: 2, team_code: 10, opponent_team_code: 20, team_goals_conceded: 9 }),
-    ]
-    expect(buildCurrentSeasonTeamMatchRecords(rows)).toEqual(buildCurrentSeasonTeamMatchRecords(rows, CURRENT_SEASON))
+  it('a club with no resolvable code (code: null) maps to null, not dropped from the map entirely', () => {
+    const teamMetadataById = new Map<number, TeamMetadata>([[1, { eloStale: false, code: null }]])
+    const result = teamCodeByIdFrom(teamMetadataById)
+    expect(result.has(1)).toBe(true)
+    expect(result.get(1)).toBeNull()
+  })
+
+  it('an empty input produces an empty map, not an error', () => {
+    expect(teamCodeByIdFrom(new Map())).toEqual(new Map())
   })
 })
 
@@ -931,28 +954,6 @@ describe('project-points.ts — ticket #229 source invariants', () => {
     expect(source).toMatch(/\.from\('teams'\)\s*\n?\s*\.select\(\s*['"][^'"]*\bid\b[^'"]*\belo\b[^'"]*\belo_stale_since\b[^'"]*\bcode\b[^'"]*['"]/)
   })
 
-  it('the player_match_stats select reads match_id, team_code, opponent_team_code and team_goals_conceded alongside the existing columns -- the SAME select, per the ticket\'s "no additional Supabase round trip" requirement', () => {
-    expect(source).toMatch(/\.from\('player_match_stats'\)[\s\S]{0,40}\.select\(/)
-    expect(source).toMatch(/\bmatch_id\b/)
-    expect(source).toMatch(/\bteam_code\b/)
-    expect(source).toMatch(/\bopponent_team_code\b/)
-    expect(source).toMatch(/\bteam_goals_conceded\b/)
-    // Only ONE player_match_stats DATA select in the whole file (the count-only
-    // checks use `.select('*', { count: 'exact', head: true })`, a different
-    // shape) -- the new columns must ride on that one read, not a second one.
-    const dataSelectOccurrences = source.split(/\.select\(\s*\n?\s*['"][^'"]*\bplayer_code\b/).length - 1
-    expect(dataSelectOccurrences).toBe(1)
-  })
-
-  it('the point-in-time team-strength table is built from matchStatsRows -- the SAME rows already fetched for player_match_stats, never a second Supabase read', () => {
-    expect(source).toMatch(/buildCurrentSeasonTeamMatchRecords\(matchStatsRows\)/)
-  })
-
-  it('teamMatchRecords is built exactly once in the whole file -- not per player, not per gameweek', () => {
-    const occurrences = source.split('buildCurrentSeasonTeamMatchRecords(matchStatsRows)').length - 1
-    expect(occurrences).toBe(1)
-  })
-
   it('the fixture-context construction calls buildFixtureContext, not a hand-built object literal -- the wiring this file owns is tested above, not duplicated inline', () => {
     expect(source).toMatch(/return buildFixtureContext\(\{/)
   })
@@ -960,5 +961,80 @@ describe('project-points.ts — ticket #229 source invariants', () => {
   it('job_runs.details carries the new fixtureSourceCounts breakdown alongside the pre-existing fixtureEloFallbackCount', () => {
     expect(source).toMatch(/fixtureEloFallbackCount/)
     expect(source).toMatch(/fixtureSourceCounts/)
+  })
+})
+
+// ============================================================================
+// Ticket #235 — team strength sourced from public.fixtures (real results),
+// not player_match_stats' match_id-derived opponent columns. Source
+// invariants only: main()'s Supabase reads can't be exercised without a live
+// project (see file header); toFixtureResultRows/teamCodeByIdFrom are
+// exercised directly above.
+// ============================================================================
+
+describe('project-points.ts — ticket #235 source invariants', () => {
+  it('the player_match_stats select no longer reads match_id, team_code, opponent_team_code or team_goals_conceded -- that construction is replaced by public.fixtures', () => {
+    const matchStatsSelectMatch = source.match(/\.from\('player_match_stats'\)[\s\S]{0,10}\.select\(\s*\n?\s*['"][^'"]*['"]/)
+    expect(matchStatsSelectMatch).not.toBeNull()
+    const matchStatsSelectText = matchStatsSelectMatch![0]
+    expect(matchStatsSelectText).not.toMatch(/\bmatch_id\b/)
+    expect(matchStatsSelectText).not.toMatch(/\bteam_code\b/)
+    expect(matchStatsSelectText).not.toMatch(/\bopponent_team_code\b/)
+    expect(matchStatsSelectText).not.toMatch(/\bteam_goals_conceded\b/)
+  })
+
+  it('buildCurrentSeasonTeamMatchRecords no longer exists anywhere in the file', () => {
+    expect(source).not.toMatch(/buildCurrentSeasonTeamMatchRecords/)
+  })
+
+  it('the fixtures select reads team_h_score, team_a_score and finished alongside the existing columns -- the SAME select already reading team_h_difficulty/team_a_difficulty, per the ticket\'s "no additional Supabase round trip" requirement', () => {
+    const fixturesSelectMatch = source.match(/\.from\('fixtures'\)[\s\S]{0,10}\.select\(\s*\n?\s*['"][^'"]*['"]/)
+    expect(fixturesSelectMatch).not.toBeNull()
+    const fixturesSelectText = fixturesSelectMatch![0]
+    expect(fixturesSelectText).toMatch(/\bteam_h_difficulty\b/)
+    expect(fixturesSelectText).toMatch(/\bteam_a_difficulty\b/)
+    expect(fixturesSelectText).toMatch(/\bteam_h_score\b/)
+    expect(fixturesSelectText).toMatch(/\bteam_a_score\b/)
+    expect(fixturesSelectText).toMatch(/\bfinished\b/)
+  })
+
+  it('there is exactly ONE fixtures DATA select in the whole file -- the ticket #229 horizon-only read and the separate finished-only read are merged into one, never two', () => {
+    const occurrences = source.split(/\.from\('fixtures'\)/).length - 1
+    expect(occurrences).toBe(1)
+  })
+
+  it('the fixtures read is no longer filtered to the horizon gameweeks -- team strength needs the WHOLE season\'s results, not just the upcoming ones', () => {
+    expect(source).not.toMatch(/\.in\('event_id',\s*horizonGwIds\)/)
+  })
+
+  it('the point-in-time team-strength table is built from buildTeamMatchRecordsFromFixtures, fed by toFixtureResultRows(allFixtureRows) and teamCodeByIdFrom(teamMetadataById) -- never a second Supabase read', () => {
+    expect(source).toMatch(/buildTeamMatchRecordsFromFixtures\(\s*toFixtureResultRows\(allFixtureRows\),\s*teamCodeById\s*\)/)
+  })
+
+  it('teamMatchRecords is built exactly once in the whole file -- not per player, not per gameweek', () => {
+    const occurrences = source.split('buildTeamMatchRecordsFromFixtures(').length - 1
+    expect(occurrences).toBe(1)
+  })
+
+  it('job_runs.details and the console message both carry the new team-strength counters (ticket #235 "Report what happened")', () => {
+    expect(source).toMatch(/teamMatchRecordsBuilt/)
+    expect(source).toMatch(/clubsMeetingMinTeamPriorMatches/)
+    expect(source).toMatch(/teamStrengthUnresolvableTeamCodeCount/)
+    // The console message (the `const message =` string built for
+    // console.log, not just job_runs.details) must ALSO surface these --
+    // ticket text: "must print, in its console summary AND in
+    // job_runs.details". Checked by grepping inside the message template
+    // literal specifically, not just anywhere in the file.
+    const messageStart = source.indexOf('const message =\n      `${JOB_NAME}: projected')
+    expect(messageStart).toBeGreaterThan(-1)
+    const messageEnd = source.indexOf('console.log(message)', messageStart)
+    const messageText = source.slice(messageStart, messageEnd)
+    expect(messageText).toMatch(/team-match record/)
+    expect(messageText).toMatch(/MIN_TEAM_PRIOR_MATCHES/)
+    expect(messageText).toMatch(/Fixture source breakdown/)
+  })
+
+  it('MIN_TEAM_PRIOR_MATCHES is imported from teamStrength.ts, not re-declared', () => {
+    expect(source).toMatch(/import\s*\{[^}]*\bMIN_TEAM_PRIOR_MATCHES\b[^}]*\}\s*from\s*['"]\.\.\/src\/lib\/projection\/index\.ts['"]/)
   })
 })
