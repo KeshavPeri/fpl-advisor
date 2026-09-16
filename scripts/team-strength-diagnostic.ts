@@ -127,6 +127,34 @@ const DEFAULT_REPORT_PATH = './out/team-strength-diagnostic.md'
 const DEFAULT_FPL_DIFFICULTY = 3
 
 /**
+ * Ticket #242. Gate 2's band — a window around SCALE's own 0.1701
+ * calibration target (src/lib/projection/teamStrength.ts), replacing the
+ * old one-sided floor (>= frozen-elo spread), which could only catch a
+ * spread that was too NARROW and let a 74% over-dispersion (0.2957 against
+ * the 0.1701 target) sail through on 16 Sept 2026's live run.
+ */
+const TEAM_STRENGTH_STDDEV_MIN = 0.14
+const TEAM_STRENGTH_STDDEV_MAX = 0.2
+
+/**
+ * Ticket #242. Gate 4 — no examined fixture's point-in-time expectedScore
+ * may fall outside this band. A guard on top of the aggregate stdDev check
+ * (gate 2): a correctly shrunk population can still, in principle, hide one
+ * pathological row behind an otherwise-healthy stdDev, and the ticket's own
+ * "Problem" section reported exact certainties (1.0000 / 0.0000) this gate
+ * exists to catch directly, row by row, rather than only in aggregate.
+ * Matches src/lib/projection/teamStrength.ts's own MIN_EXPECTED_SCORE /
+ * MAX_EXPECTED_SCORE clamp bounds' spirit, but is INTENTIONALLY a tighter,
+ * independent band ([0.10, 0.90] vs. the clamp's [0.05, 0.95]) — the clamp
+ * is a last-resort guard against certainty, this gate is the falsification
+ * check that the shrinkage upstream of it is actually doing its job, so it
+ * must fail before a fixture ever gets anywhere near the clamp's own
+ * boundary.
+ */
+const EXPECTED_SCORE_BOUND_MIN = 0.1
+const EXPECTED_SCORE_BOUND_MAX = 0.9
+
+/**
  * FPL's own stable short names for the two clubs the falsification gate
  * names explicitly — Tier 3, matching FPL's bootstrap-static convention
  * (never a numeric team id, which is not stable across seasons the way the
@@ -362,30 +390,60 @@ export interface VarianceGateResult {
    * twenty rows resolved to `stale-elo`, so the "new" and "old" populations
    * were literally the same numbers, and their stdDevs matched exactly).
    * Identical columns are proof the new path did nothing, not evidence that
-   * it preserved spread (ticket text, verbatim) — see `passed` below, which
-   * now fails on this alone even when the stdDev comparison alone would pass
-   * (it trivially does when the two populations are identical: stdDev(x) >=
-   * stdDev(x) is always true).
+   * it preserved spread (ticket text, verbatim) — retained by ticket #242
+   * as a second, independent defect signal alongside the new band check
+   * below (see `passed`).
    */
   allRowsIdentical: boolean
-  /** True (PASS) when the point-in-time spread is AT LEAST as wide as the frozen-elo spread AND the two columns are not identical on every row (ticket #235 — see `allRowsIdentical`). */
+  /** True (PASS) when `pointInTimeStdDev` falls within [TEAM_STRENGTH_STDDEV_MIN, TEAM_STRENGTH_STDDEV_MAX] AND the two columns are not identical on every row (ticket #235 — see `allRowsIdentical`). */
   passed: boolean
 }
 
 /**
- * Falsification gate #2 (ticket text, verbatim, extended by ticket #235 to
- * be non-vacuous): the point-in-time expectedScore's spread must not be
- * LOWER than the frozen-elo expectedScore's, over the same fixtures, AND the
- * two columns must not be identical on every row — a gate that only compares
- * a new path against an old one passes vacuously whenever the new path never
- * runs (ticket #235's own "Problem" section, the gate defect #229's report
- * hid behind).
+ * Falsification gate #2 — ticket #235 made this non-vacuous (fails when
+ * every row is identical to the frozen-elo column); ticket #242 makes it a
+ * BAND, not a floor. The original ">= frozen-elo spread" comparison was
+ * one-sided — it could only catch a point-in-time spread that was too
+ * NARROW, never one that was too WIDE. On 16 Sept 2026 live data it let a
+ * 74% over-dispersion (point-in-time population stdDev 0.2957 against
+ * SCALE's own 0.1701 calibration target — src/lib/projection/teamStrength.ts)
+ * sail straight through, because 0.2957 >= the frozen-elo comparison stdDev.
+ * The fix: check the point-in-time stdDev directly against a band around
+ * the 0.1701 target ([TEAM_STRENGTH_STDDEV_MIN, TEAM_STRENGTH_STDDEV_MAX] =
+ * [0.14, 0.20]) instead of against the frozen-elo column at all — a
+ * construction with the right amount of spread does not need to be
+ * compared to the (unrelated, and itself none too precise) old elo figure
+ * to be judged correct.
  */
 export function checkVarianceGate(rows: readonly Pick<DiagnosticRow, 'frozenEloExpectedScore' | 'pointInTimeExpectedScore'>[]): VarianceGateResult {
   const frozenStdDev = populationStandardDeviation(rows.map((r) => r.frozenEloExpectedScore))
   const pointInTimeStdDev = populationStandardDeviation(rows.map((r) => r.pointInTimeExpectedScore))
   const allRowsIdentical = rows.length > 0 && rows.every((r) => r.frozenEloExpectedScore === r.pointInTimeExpectedScore)
-  return { frozenStdDev, pointInTimeStdDev, allRowsIdentical, passed: pointInTimeStdDev >= frozenStdDev && !allRowsIdentical }
+  const withinBand = pointInTimeStdDev >= TEAM_STRENGTH_STDDEV_MIN && pointInTimeStdDev <= TEAM_STRENGTH_STDDEV_MAX
+  return { frozenStdDev, pointInTimeStdDev, allRowsIdentical, passed: withinBand && !allRowsIdentical }
+}
+
+export interface ExpectedScoreBoundGateResult {
+  /** Every row whose point-in-time expectedScore fell outside [EXPECTED_SCORE_BOUND_MIN, EXPECTED_SCORE_BOUND_MAX] — never just a count, so the report can name the offending fixture(s) directly. */
+  outOfBoundRows: DiagnosticRow[]
+  /** True (PASS) when `outOfBoundRows` is empty. */
+  passed: boolean
+}
+
+/**
+ * Falsification gate #4 (ticket #242, new). No examined fixture's
+ * point-in-time expectedScore may fall outside [EXPECTED_SCORE_BOUND_MIN,
+ * EXPECTED_SCORE_BOUND_MAX] = [0.10, 0.90]. If any does, the shrinkage
+ * upstream (src/lib/projection/teamStrength.ts's TEAM_STRENGTH_SHRINKAGE_K)
+ * is insufficient regardless of what the aggregate stdDev (gate 2) says —
+ * an aggregate check can hide one pathological row behind an otherwise
+ * healthy population; this gate catches it directly. Specifically named in
+ * the ticket text: Nott'm Forest v Coventry City must no longer resolve to
+ * 1.0000 / 0.0000.
+ */
+export function checkExpectedScoreBoundGate(rows: readonly DiagnosticRow[]): ExpectedScoreBoundGateResult {
+  const outOfBoundRows = rows.filter((r) => r.pointInTimeExpectedScore < EXPECTED_SCORE_BOUND_MIN || r.pointInTimeExpectedScore > EXPECTED_SCORE_BOUND_MAX)
+  return { outOfBoundRows, passed: outOfBoundRows.length === 0 }
 }
 
 export interface TeamStrengthSourceGateResult {
@@ -496,6 +554,7 @@ export interface ReportData {
   teamStrengthSourceGate: TeamStrengthSourceGateResult
   manUtdGate: ManUtdGateResult
   varianceGate: VarianceGateResult
+  expectedScoreBoundGate: ExpectedScoreBoundGateResult
   strengthTable: TeamStrengthTableRow[]
 }
 
@@ -515,18 +574,30 @@ export function generateReportMarkdown(data: ReportData): string {
       `(${data.teamStrengthSourceGate.count} of ${data.rows.length} row(s))`,
   )
   lines.push(
-    `2. **Point-in-time expectedScore spread >= frozen-elo expectedScore spread, AND the two columns are not identical on every row:** ` +
-      `${data.varianceGate.passed ? 'PASS' : 'FAIL'} (frozen-elo population stdDev: ${fmtEs(data.varianceGate.frozenStdDev)}; ` +
-      `point-in-time population stdDev: ${fmtEs(data.varianceGate.pointInTimeStdDev)}; all rows identical: ${data.varianceGate.allRowsIdentical})`,
+    `2. **Point-in-time expectedScore population stdDev falls within [${TEAM_STRENGTH_STDDEV_MIN}, ${TEAM_STRENGTH_STDDEV_MAX}] ` +
+      `(ticket #242 — a band around SCALE's own 0.1701 calibration target, not a floor against frozen-elo any more), ` +
+      `AND the two columns are not identical on every row:** ${data.varianceGate.passed ? 'PASS' : 'FAIL'} ` +
+      `(point-in-time population stdDev: ${fmtEs(data.varianceGate.pointInTimeStdDev)}; ` +
+      `frozen-elo population stdDev, for reference only: ${fmtEs(data.varianceGate.frozenStdDev)}; ` +
+      `all rows identical: ${data.varianceGate.allRowsIdentical})`,
   )
   lines.push(
-    `3. **Bonus check — Man Utd v Man City, point-in-time expectedScore for Man Utd < 0.5:** ${fmtGateStatus(data.manUtdGate.status)}` +
+    `3. **No fixture's point-in-time expectedScore falls outside [${EXPECTED_SCORE_BOUND_MIN}, ${EXPECTED_SCORE_BOUND_MAX}] (ticket #242, gate 4):** ` +
+      `${data.expectedScoreBoundGate.passed ? 'PASS' : 'FAIL'} (${data.expectedScoreBoundGate.outOfBoundRows.length} of ${data.rows.length} row(s) out of bound` +
+      (data.expectedScoreBoundGate.outOfBoundRows.length > 0
+        ? `: ${data.expectedScoreBoundGate.outOfBoundRows.map((r) => `${r.teamName} v ${r.opponentName} (${fmtEs(r.pointInTimeExpectedScore)})`).join('; ')}`
+        : '') +
+      ')',
+  )
+  lines.push(
+    `4. **Bonus check — Man Utd v Man City, point-in-time expectedScore for Man Utd < 0.5:** ${fmtGateStatus(data.manUtdGate.status)}` +
       (data.manUtdGate.manUtdPointInTimeExpectedScore === null
         ? ''
         : ` (value: ${fmtEs(data.manUtdGate.manUtdPointInTimeExpectedScore)})`),
   )
   lines.push('')
-  const overallVerdict = data.teamStrengthSourceGate.passed && data.varianceGate.passed && data.manUtdGate.status !== 'fail'
+  const overallVerdict =
+    data.teamStrengthSourceGate.passed && data.varianceGate.passed && data.expectedScoreBoundGate.passed && data.manUtdGate.status !== 'fail'
   lines.push(
     overallVerdict
       ? '**Overall: PASS.** Every condition of the falsification gate is satisfied (or not applicable). Proceed.'
@@ -680,14 +751,17 @@ async function main(): Promise<void> {
 
     // --------------------------------------------------------------------
     // 6. The falsification gate — ticket #235: the team-strength-source gate
-    //    is the new PRIMARY one; the variance gate is now non-vacuous (also
-    //    fails when every row is identical); the Man Utd v Man City gate is
-    //    unchanged, re-ranked to a bonus check. ANY of the three failing
+    //    is the PRIMARY one; the variance gate is non-vacuous (also fails
+    //    when every row is identical); the Man Utd v Man City gate is a
+    //    bonus check. Ticket #242: the variance gate is now a BAND (not a
+    //    floor against frozen-elo), and a new gate 4 checks every row's own
+    //    bound directly, not just the aggregate. ANY of the four failing
     //    stops the job.
     // --------------------------------------------------------------------
     const teamStrengthSourceGate = checkTeamStrengthSourceGate(rows)
     const manUtdGate = checkManUtdVsManCityGate(rows)
     const varianceGate = checkVarianceGate(rows)
+    const expectedScoreBoundGate = checkExpectedScoreBoundGate(rows)
 
     // --------------------------------------------------------------------
     // 7. The full point-in-time strength table (ticket #235, point 4 of "Fix
@@ -700,7 +774,16 @@ async function main(): Promise<void> {
     // --------------------------------------------------------------------
     // 8. Report + job_runs.
     // --------------------------------------------------------------------
-    const reportData: ReportData = { generatedAt: new Date(), gameweekId, rows, teamStrengthSourceGate, manUtdGate, varianceGate, strengthTable }
+    const reportData: ReportData = {
+      generatedAt: new Date(),
+      gameweekId,
+      rows,
+      teamStrengthSourceGate,
+      manUtdGate,
+      varianceGate,
+      expectedScoreBoundGate,
+      strengthTable,
+    }
     const reportMarkdown = generateReportMarkdown(reportData)
     await mkdir(dirname(reportPath), { recursive: true })
     await writeFile(reportPath, reportMarkdown, 'utf8')
@@ -713,19 +796,23 @@ async function main(): Promise<void> {
       teamStrengthSourceGate,
       manUtdGate,
       varianceGate,
+      expectedScoreBoundGate,
       reportPath,
     }
 
     // Ticket #235: the team-strength-source gate is the PRIMARY condition —
     // "if none does, the fix is not running and the job must exit non-zero"
-    // (ticket text, verbatim). ANY of the three failing stops the job.
-    if (!teamStrengthSourceGate.passed || manUtdGate.status === 'fail' || !varianceGate.passed) {
+    // (ticket text, verbatim). Ticket #242 adds the per-row bound gate. ANY
+    // of the four failing stops the job.
+    if (!teamStrengthSourceGate.passed || manUtdGate.status === 'fail' || !varianceGate.passed || !expectedScoreBoundGate.passed) {
       const message =
         `${JOB_NAME}: falsification gate FAILED for gameweek ${gameweekId} — ` +
         `team-strength-source gate: ${teamStrengthSourceGate.passed ? 'pass' : 'fail'} (${teamStrengthSourceGate.count} row(s)); ` +
         `Man Utd/Man City gate: ${manUtdGate.status}; variance gate: ${varianceGate.passed ? 'pass' : 'fail'} ` +
-        `(frozen stdDev ${fmtEs(varianceGate.frozenStdDev)}, point-in-time stdDev ${fmtEs(varianceGate.pointInTimeStdDev)}, ` +
-        `all rows identical: ${varianceGate.allRowsIdentical}). Report written to ${reportPath} for diagnosis.`
+        `(point-in-time stdDev ${fmtEs(varianceGate.pointInTimeStdDev)}, band [${TEAM_STRENGTH_STDDEV_MIN}, ${TEAM_STRENGTH_STDDEV_MAX}], ` +
+        `frozen stdDev for reference ${fmtEs(varianceGate.frozenStdDev)}, all rows identical: ${varianceGate.allRowsIdentical}); ` +
+        `expectedScore-bound gate: ${expectedScoreBoundGate.passed ? 'pass' : 'fail'} (${expectedScoreBoundGate.outOfBoundRows.length} row(s) outside ` +
+        `[${EXPECTED_SCORE_BOUND_MIN}, ${EXPECTED_SCORE_BOUND_MAX}]). Report written to ${reportPath} for diagnosis.`
       console.error(message)
       await recordJobRun(supabase, { status: 'failure', message, details, startedAt })
       process.exit(1)
