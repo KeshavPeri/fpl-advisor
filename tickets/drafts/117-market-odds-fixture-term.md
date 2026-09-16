@@ -53,24 +53,38 @@ The Odds API. Free tier, 500 requests a month.
 GET https://api.the-odds-api.com/v4/sports/soccer_epl/odds?regions=uk&markets=h2h&oddsFormat=decimal&apiKey=$ODDS_API_KEY
 ```
 
-One request returns every upcoming EPL fixture with h2h prices from multiple
-UK books. A daily run costs about 60 credits a month against a 500 limit.
+**Measured against the live key on 15 Sept 2026** — these are observed
+facts, not estimates:
+
+- One call returned **20 fixtures**, spanning `2026-09-18T19:00:00Z` to
+  `2026-10-12T19:00:00Z` — roughly four gameweeks of forward coverage.
+- Every fixture carried **21 bookmakers**.
+- The call cost **1 credit**; 499 of 500 remained. A daily run costs about 30
+  a month.
 
 Use the **median** across the returned bookmakers for each of the three
 prices, not the mean and not one chosen book. The median is robust to a
-single stale or mispriced feed, which is the realistic failure here.
+single stale or mispriced feed, which is the realistic failure here. With 21
+books the median is well-supported.
 
-### Only the near horizon
+### The horizon is whatever the API serves
 
-Bookmakers do not price five gameweeks ahead with any reliability, and The
-Odds API only returns fixtures with open markets. So:
+An earlier draft of this ticket guessed an 8-day window. The measurement
+above shows the API prices about 24 days ahead, so a fixed day-window would
+throw away three gameweeks of usable signal.
 
-- Fixtures in the **next 8 days** get the market term.
-- Everything further out keeps #114's team-strength term.
+The rule is therefore: **a fixture gets the market term when the API returned
+it with at least 3 books and the odds row is under 48 hours old. Everything
+else keeps #114's team-strength term.** No day-count window — the API's own
+coverage is the window.
 
-Say this explicitly in the code comment. A projection horizon where gameweek
-N+1 uses one instrument and N+2..N+5 use another is a deliberate design
-choice, not an inconsistency to paper over.
+Keep one sanity cap: ignore any returned fixture whose kickoff is more than
+**35 days** out. That is not a horizon rule, it is a guard against a
+malformed or long-dated market, and it should never fire in normal operation.
+
+A projection horizon where the near gameweeks use one instrument and the far
+ones use another is a deliberate design choice, not an inconsistency to paper
+over. Say so in the code comment.
 
 ## The failure mode this ticket must not repeat
 
@@ -82,7 +96,44 @@ that just cost four gameweeks when `fotmob_name` went blank and every
 So:
 
 - The name map is an **explicit, committed table** in the repo, not a fuzzy
-  match. Twenty rows.
+  match. It is reproduced in full below, verified on 15 Sept 2026 against
+  both the live API response and `data/2026-2027/teams.csv`. Copy it
+  verbatim into `scripts/lib/oddsClubNames.ts` — all twenty names came back
+  from a real call and all twenty resolved. Do not re-derive it, do not
+  normalise it, do not add a fallback matcher.
+
+```ts
+// The Odds API club name -> public.teams.code (deltas.md D9: code is the
+// stable cross-season key, never short_name and never the FPL team id).
+// Verified 15 Sept 2026 against a live soccer_epl h2h response (20 of 20
+// names resolved) and data/2026-2027/teams.csv.
+export const ODDS_CLUB_NAME_TO_TEAM_CODE: ReadonlyMap<string, number> = new Map([
+  ['Arsenal', 3],
+  ['Aston Villa', 7],
+  ['Bournemouth', 91],
+  ['Brentford', 94],
+  ['Brighton and Hove Albion', 36],
+  ['Chelsea', 8],
+  ['Coventry City', 9],
+  ['Crystal Palace', 31],
+  ['Everton', 11],
+  ['Fulham', 54],
+  ['Hull City', 88],
+  ['Ipswich Town', 40],
+  ['Leeds United', 2],
+  ['Liverpool', 14],
+  ['Manchester City', 43],
+  ['Manchester United', 1],
+  ['Newcastle United', 4],
+  ['Nottingham Forest', 17],
+  ['Sunderland', 56],
+  ['Tottenham Hotspur', 6],
+])
+```
+
+  **This table needs a new row every time a club is promoted.** That is the
+  one predictable way it breaks, it happens once a year, and the 80%
+  resolution floor below is what will catch it. Say so in the file header.
 - An unmapped name is **never guessed**. The row is skipped and counted, by
   name, in `job_runs.details`.
 - The ingest **fails loudly** — non-zero exit — when fewer than 80% of the
@@ -134,14 +185,15 @@ unless all three hold:**
 the report shows frozen-elo, team-strength and market-odds side by side for
 every fixture. Paste it into the PR body.
 
-## Manual steps before the Builder can run this
+## Credentials — already done
 
-1. Sign up at `the-odds-api.com` for a free key.
-2. Add `ODDS_API_KEY` to `.env` locally and to the repository secrets used by
-   `.github/workflows/scheduled-jobs.yml`.
-3. Add `ODDS_API_KEY` to preflight check 10's tracked environment variables.
+`ODDS_API_KEY` is live in `.env` and in the repository secrets as of 15 Sept
+2026, confirmed by `gh secret list` and by a successful call. Reference it in
+the workflow as `${{ secrets.ODDS_API_KEY }}`, matching the five existing
+secrets.
 
-Without the key the ingest cannot run and the gate cannot be evaluated.
+Add `ODDS_API_KEY` to preflight check 10's tracked environment variables (it
+tracks five today; this makes six).
 
 ## Definition of done
 
@@ -150,7 +202,8 @@ Without the key the ingest cannot run and the gate cannot be evaluated.
   across an even and an odd number of books; an unmapped club name is skipped
   and counted, never guessed; the 80% resolution floor fails the job; odds
   older than 48h are not used; fewer than 3 books falls through; a fixture
-  beyond the 8-day window falls through to team strength.
+  more than 35 days out is ignored; every one of the twenty names in
+  `ODDS_CLUB_NAME_TO_TEAM_CODE` resolves to a distinct code.
 - The ingest is added to `.github/workflows/scheduled-jobs.yml`, running daily
   before `project-points`, and to preflight check 8's tracked-job list.
 - Record the new migration in `supabase/README.md` in the existing format.
