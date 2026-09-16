@@ -11,6 +11,7 @@ import {
   UNRESOLVED_GAMEWEEK_REASON,
   buildCannotEvaluateResult,
   checkConfiguration,
+  checkCurrentSeasonMatchData,
   checkJobFreshness,
   checkLeagueBaselineGoals,
   checkMatchData,
@@ -814,5 +815,185 @@ describe('checkLeagueBaselineGoals', () => {
     const result = checkLeagueBaselineGoals({ ...base, jobRun: { source: 'computed', leagueBaselineGoals: 1.5 }, finishedFixtureCount: 42 })
     expect(result.verdict).toBe('pass')
     expect(result.reason).toContain('42')
+  })
+})
+
+// ============================================================================
+// 12. Current-season match data completeness — ticket #236. The
+// fotmob_name-blank-column incident: teams.csv published fotmob_name blank
+// for all twenty clubs, so every current-season opponent_team_code came
+// back NULL, and check 7 (match-data — untouched by this ticket, tested
+// above) never noticed because it only counts `competition`.
+// ============================================================================
+
+describe('checkCurrentSeasonMatchData', () => {
+  const thresholds = { maxNullShare: 0.1, warnNullShareFloor: 0.02 }
+
+  it('pass: every column fully populated (all null counts zero)', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 0,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('pass')
+    expect(result.reason).toContain('opponentTeamCodeNullShare=0.0%')
+    expect(result.reason).toContain('teamCodeNullShare=0.0%')
+    expect(result.reason).toContain('elementTypeNullShare=0.0%')
+  })
+
+  it('fail: opponent_team_code null on every row — the actual fotmob_name incident, reproduced', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 1000,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('opponentTeamCodeNullShare=100.0%')
+    expect(result.reason).toContain('above the 10% fail threshold')
+  })
+
+  it('fail: team_code null on every row', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 500,
+      opponentTeamCodeNullCount: 0,
+      teamCodeNullCount: 500,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('teamCodeNullShare=100.0%')
+  })
+
+  it('fail: element_type null on every row', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 500,
+      opponentTeamCodeNullCount: 0,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 500,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('elementTypeNullShare=100.0%')
+  })
+
+  it('warn: a share just under the fail threshold (9.9%, between the 2% and 10% bounds)', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 99,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('warn')
+    expect(result.reason).toContain('opponentTeamCodeNullShare=9.9%')
+    expect(result.reason).toContain('at or above the 2% warn floor')
+  })
+
+  it('boundary: a share just under the 2% warn floor still passes', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 19,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('pass')
+  })
+
+  it('boundary: a share exactly at the 10% fail threshold warns, not fails', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 100,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('warn')
+  })
+
+  it('boundary: a share just over the 10% fail threshold fails', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 101,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('fail')
+  })
+
+  it('fail: zero current-season rows fails with its own distinct reason, not a divide-by-zero or a false pass', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 0,
+      opponentTeamCodeNullCount: 0,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('no current-season')
+    expect(result.reason).toContain('ingest is not writing this season')
+    expect(result.reason).not.toContain('NaN')
+    expect(result.reason).not.toContain('Infinity')
+    // Distinct from every non-zero-row reason, which always names a share.
+    expect(result.reason).not.toMatch(/NullShare=/)
+    expect(result.values.opponentTeamCodeNullShare).toBeNull()
+    expect(result.values.teamCodeNullShare).toBeNull()
+    expect(result.values.elementTypeNullShare).toBeNull()
+  })
+
+  it('reports currentSeasonRowCount in values on every path, including the zero-row path', () => {
+    const populated = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 250,
+      opponentTeamCodeNullCount: 0,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(populated.values.currentSeasonRowCount).toBe(250)
+
+    const empty = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 0,
+      opponentTeamCodeNullCount: 0,
+      teamCodeNullCount: 0,
+      elementTypeNullCount: 0,
+      ...thresholds,
+    })
+    expect(empty.values.currentSeasonRowCount).toBe(0)
+  })
+
+  it('the worst of the three shares drives the overall verdict (one failing column fails the whole check)', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 950, // fail on its own
+      teamCodeNullCount: 30, // warn on its own
+      elementTypeNullCount: 0, // pass on its own
+      ...thresholds,
+    })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('opponentTeamCodeNullShare')
+  })
+
+  it('reports every figure in the Values line, not only the verdict', () => {
+    const result = checkCurrentSeasonMatchData({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 1000,
+      teamCodeNullCount: 5,
+      elementTypeNullCount: 2,
+      ...thresholds,
+    })
+    expect(result.values).toMatchObject({
+      currentSeasonRowCount: 1000,
+      opponentTeamCodeNullCount: 1000,
+      opponentTeamCodeNullShare: 1,
+      teamCodeNullCount: 5,
+      teamCodeNullShare: 0.005,
+      elementTypeNullCount: 2,
+      elementTypeNullShare: 0.002,
+    })
   })
 })
