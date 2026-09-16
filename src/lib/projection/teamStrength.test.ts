@@ -15,9 +15,13 @@ import {
   computeTeamStrengthAsOf,
   fixtureHasSufficientHistory,
   HOME_EXPECTED_SCORE_BONUS,
+  MAX_EXPECTED_SCORE,
+  MIN_EXPECTED_SCORE,
   MIN_TEAM_PRIOR_MATCHES,
   NEUTRAL_EXPECTED_SCORE_VALUE,
   SCALE,
+  shrunkTeamStrengthRate,
+  TEAM_STRENGTH_SHRINKAGE_K,
   teamStrengthRate,
   type FixtureResultRow,
   type MatchStatsForTeamStrength,
@@ -146,6 +150,12 @@ describe('teamStrengthRate', () => {
   it('is 0 with no prior matches, never a division by zero', () => {
     expect(teamStrengthRate({ matches: 0, goalsScored: 0, goalsConceded: 0 })).toBe(0)
   })
+
+  it('named test (ticket #242 DoD): is UNCHANGED by this ticket -- still the raw, unshrunk figure scripts/team-strength-diagnostic.ts\'s club table reports; shrinkage lives only in the new shrunkTeamStrengthRate, never here', () => {
+    const record = { matches: 4, goalsScored: 10, goalsConceded: 6 }
+    expect(teamStrengthRate(record)).toBe((record.goalsScored - record.goalsConceded) / record.matches)
+    expect(teamStrengthRate(record)).not.toBe(shrunkTeamStrengthRate(record, TEAM_STRENGTH_SHRINKAGE_K))
+  })
 })
 
 describe('fixtureHasSufficientHistory / MIN_TEAM_PRIOR_MATCHES (ticket #175)', () => {
@@ -159,22 +169,29 @@ describe('fixtureHasSufficientHistory / MIN_TEAM_PRIOR_MATCHES (ticket #175)', (
   })
 })
 
-describe('computeFixtureExpectedScore (ticket #175)', () => {
+describe('computeFixtureExpectedScore (ticket #175, clamp bounds and shrinkage default updated by ticket #242)', () => {
   const strong: TeamStrengthRecord = { matches: 10, goalsScored: 20, goalsConceded: 5 } // rate = 1.5
   const weak: TeamStrengthRecord = { matches: 10, goalsScored: 5, goalsConceded: 20 } // rate = -1.5
   const identicalA: TeamStrengthRecord = { matches: 6, goalsScored: 9, goalsConceded: 6 } // rate = 0.5
   const identicalB: TeamStrengthRecord = { matches: 3, goalsScored: 4.5, goalsConceded: 3 } // rate = 0.5, different matches
 
-  it('is exactly 0.5 when two teams have identical prior records — named test', () => {
+  it('is exactly 0.5 when two teams have identical prior records — named test — regardless of shrinkageK, since the SAME record shrinks to the SAME value and cancels', () => {
     expect(computeFixtureExpectedScore(identicalA, identicalA, 4)).toBe(0.5)
+    expect(computeFixtureExpectedScore(identicalA, identicalA, 4, 0, 0)).toBe(0.5)
+    expect(computeFixtureExpectedScore(identicalA, identicalA, 4, 0, 8)).toBe(0.5)
   })
 
-  it('is exactly 0.5 for two DIFFERENT teams whose RATE happens to be identical, regardless of scale — the delta cancels to 0, not an approximation', () => {
-    expect(computeFixtureExpectedScore(identicalA, identicalB, 1)).toBe(0.5)
-    expect(computeFixtureExpectedScore(identicalA, identicalB, 100)).toBe(0.5)
+  it('with shrinkageK = 0 (pre-#242 behaviour): 0.5 for two DIFFERENT teams whose RATE happens to be identical, regardless of scale — the delta cancels to 0, not an approximation', () => {
+    expect(computeFixtureExpectedScore(identicalA, identicalB, 1, 0, 0)).toBe(0.5)
+    expect(computeFixtureExpectedScore(identicalA, identicalB, 100, 0, 0)).toBe(0.5)
   })
 
-  it('a stronger team gets an expectedScore above 0.5, a weaker one below', () => {
+  it('ticket #242: with the DEFAULT (nonzero) shrinkageK, two teams with the SAME raw rate but DIFFERENT match counts no longer cancel to exactly 0.5 — shrinkage is sensitive to sample size by design (see the next describe block for the directional test)', () => {
+    const withDefaultShrinkage = computeFixtureExpectedScore(identicalA, identicalB, 4)
+    expect(withDefaultShrinkage).not.toBe(0.5)
+  })
+
+  it('a stronger team gets an expectedScore above 0.5, a weaker one below (default shrinkageK — symmetric here since both records have equal matches)', () => {
     const strongVsWeak = computeFixtureExpectedScore(strong, weak, 4)
     const weakVsStrong = computeFixtureExpectedScore(weak, strong, 4)
     expect(strongVsWeak).toBeGreaterThan(0.5)
@@ -182,12 +199,14 @@ describe('computeFixtureExpectedScore (ticket #175)', () => {
     expect(strongVsWeak + weakVsStrong).toBeCloseTo(1, 10) // symmetric around 0.5
   })
 
-  it('is clamped to exactly 1 for an extreme delta relative to scale, never a value above 1', () => {
-    expect(computeFixtureExpectedScore(strong, weak, 0.1)).toBe(1)
+  it('ticket #242: is clamped to exactly MAX_EXPECTED_SCORE (0.95) for an extreme delta relative to scale, never a value above it', () => {
+    expect(computeFixtureExpectedScore(strong, weak, 0.1)).toBe(MAX_EXPECTED_SCORE)
+    expect(computeFixtureExpectedScore(strong, weak, 0.1)).toBe(0.95)
   })
 
-  it('is clamped to exactly 0 for an extreme delta the other way, never a value below 0', () => {
-    expect(computeFixtureExpectedScore(weak, strong, 0.1)).toBe(0)
+  it('ticket #242: is clamped to exactly MIN_EXPECTED_SCORE (0.05) for an extreme delta the other way, never a value below it', () => {
+    expect(computeFixtureExpectedScore(weak, strong, 0.1)).toBe(MIN_EXPECTED_SCORE)
+    expect(computeFixtureExpectedScore(weak, strong, 0.1)).toBe(0.05)
   })
 
   it('falls back to NEUTRAL_EXPECTED_SCORE_VALUE (0.5) when EITHER team is below MIN_TEAM_PRIOR_MATCHES, even with a huge underlying delta', () => {
@@ -196,6 +215,89 @@ describe('computeFixtureExpectedScore (ticket #175)', () => {
     expect(computeFixtureExpectedScore(strong, thin, 4)).toBe(NEUTRAL_EXPECTED_SCORE_VALUE)
   })
 })
+
+// ============================================================================
+// Ticket #242 — shrinkage toward the league mean.
+// ============================================================================
+
+describe('shrunkTeamStrengthRate (ticket #242)', () => {
+  const record: TeamStrengthRecord = { matches: 10, goalsScored: 20, goalsConceded: 5 } // raw rate = 1.5
+
+  it('is (goalsScored - goalsConceded) / (matches + k)', () => {
+    expect(shrunkTeamStrengthRate(record, 5)).toBeCloseTo(15 / 15, 10) // = 1.0
+    expect(shrunkTeamStrengthRate(record, 0)).toBeCloseTo(15 / 10, 10) // = 1.5
+  })
+
+  it('named test: k = 0 reproduces teamStrengthRate\'s unshrunk figure exactly, not an approximation', () => {
+    expect(shrunkTeamStrengthRate(record, 0)).toBe(teamStrengthRate(record))
+  })
+
+  it('named test: a club with MORE matches is shrunk proportionally LESS than one with fewer, for the same raw rate', () => {
+    const fewerMatches: TeamStrengthRecord = { matches: 3, goalsScored: 4.5, goalsConceded: 3 } // raw rate 0.5
+    const moreMatches: TeamStrengthRecord = { matches: 30, goalsScored: 45, goalsConceded: 30 } // raw rate 0.5, same raw rate
+    const k = 5
+    const rawRate = teamStrengthRate(fewerMatches)
+    expect(rawRate).toBeCloseTo(teamStrengthRate(moreMatches), 10) // same starting point
+
+    const shrunkFewer = shrunkTeamStrengthRate(fewerMatches, k)
+    const shrunkMore = shrunkTeamStrengthRate(moreMatches, k)
+    // Both are pulled DOWN from the raw 0.5 toward the league mean (0), but
+    // the club with more matches is pulled proportionally less -- its
+    // shrunk rate sits CLOSER to the raw rate than the few-match club's does.
+    expect(Math.abs(shrunkMore - rawRate)).toBeLessThan(Math.abs(shrunkFewer - rawRate))
+    expect(shrunkFewer).toBeLessThan(shrunkMore)
+  })
+
+  it('shrinks toward exactly 0 (the league mean) as k grows arbitrarily large relative to matches', () => {
+    expect(shrunkTeamStrengthRate(record, 100_000)).toBeCloseTo(0, 3)
+  })
+})
+
+describe('TEAM_STRENGTH_SHRINKAGE_K (ticket #242)', () => {
+  it('is 5 -- see this file\'s own comment for the calibration (fitted on gameweek 5, 16 Sept 2026)', () => {
+    expect(TEAM_STRENGTH_SHRINKAGE_K).toBe(5)
+  })
+})
+
+describe('MIN_EXPECTED_SCORE / MAX_EXPECTED_SCORE (ticket #242)', () => {
+  it('are 0.05 and 0.95 -- no fixture is a certainty', () => {
+    expect(MIN_EXPECTED_SCORE).toBe(0.05)
+    expect(MAX_EXPECTED_SCORE).toBe(0.95)
+  })
+})
+
+describe('computeFixtureExpectedScore: shrinkageK parameter (ticket #242)', () => {
+  const strong: TeamStrengthRecord = { matches: 10, goalsScored: 20, goalsConceded: 5 }
+  const weak: TeamStrengthRecord = { matches: 10, goalsScored: 5, goalsConceded: 20 }
+
+  // scale = 20 (not 4, as elsewhere in this file) deliberately keeps both the
+  // shrunk and unshrunk values well inside (MIN_EXPECTED_SCORE,
+  // MAX_EXPECTED_SCORE) -- at scale 4 both clamp to the same boundary value
+  // and the two can no longer be told apart.
+  const wideScale = 20
+
+  it('defaults to TEAM_STRENGTH_SHRINKAGE_K -- calling with 4 args is byte-identical to passing it explicitly as the 5th', () => {
+    expect(computeFixtureExpectedScore(strong, weak, wideScale, 0)).toBe(computeFixtureExpectedScore(strong, weak, wideScale, 0, TEAM_STRENGTH_SHRINKAGE_K))
+  })
+
+  it('named test: shrinkageK = 0 reproduces the pre-#242 unshrunk figure exactly (the formula this repo shipped through ticket #235)', () => {
+    const preTicket242Value = clampToUnitForComparison(0.5 + (teamStrengthRate(strong) - teamStrengthRate(weak)) / wideScale)
+    expect(computeFixtureExpectedScore(strong, weak, wideScale, 0, 0)).toBeCloseTo(preTicket242Value, 10)
+  })
+
+  it('a nonzero shrinkageK pulls the expectedScore CLOSER to 0.5 than shrinkageK = 0 does, for the same inputs -- shrinkage narrows the spread, never widens it', () => {
+    const unshrunk = computeFixtureExpectedScore(strong, weak, wideScale, 0, 0)
+    const shrunk = computeFixtureExpectedScore(strong, weak, wideScale, 0, 5)
+    expect(Math.abs(shrunk - 0.5)).toBeLessThan(Math.abs(unshrunk - 0.5))
+  })
+})
+
+/** Test-only helper: the OLD [0, 1] clamp, to compute what pre-#242 code would have produced for comparison -- never used in production code, only to state an expected value without a second copy of the new clamp's bounds. */
+function clampToUnitForComparison(value: number): number {
+  if (value < 0) return 0
+  if (value > 1) return 1
+  return value
+}
 
 // ============================================================================
 // Ticket #229 — homeAdjustment (optional, defaults to 0) and
@@ -208,9 +310,13 @@ describe('computeFixtureExpectedScore: homeAdjustment (ticket #229)', () => {
   // A larger scale than the describe block above so strong-vs-weak lands well
   // inside (0, 1) rather than at the clamp boundary — the whole point of this
   // section is to observe homeAdjustment's effect on the UNCLAMPED value.
-  const wideScale = 20 // delta = 3.0, unadjusted expectedScore = 0.5 + 3/20 = 0.65
+  // shrinkageK is pinned to 0 explicitly throughout this block (ticket #242)
+  // so these tests isolate homeAdjustment's own effect from shrinkage's —
+  // shrinkage has its own describe blocks above. With k=0, delta = 3.0,
+  // unadjusted expectedScore = 0.5 + 3/20 = 0.65 (unchanged from before #242).
+  const wideScale = 20
 
-  it('defaults to 0 — calling with 3 args is byte-identical to calling with an explicit 0 as the 4th', () => {
+  it('defaults to 0 — calling with 3 args is byte-identical to calling with an explicit 0 as the 4th (shrinkageK held at its own default in both calls)', () => {
     // This is exactly how scripts/run-backtest.ts calls this function everywhere
     // in this repo (grep confirms no call site passes a 4th argument) — its
     // own legs carry no venue and must not start guessing one.
@@ -218,26 +324,33 @@ describe('computeFixtureExpectedScore: homeAdjustment (ticket #229)', () => {
   })
 
   it('a nonzero homeAdjustment shifts the result by exactly that amount, pre-clamp', () => {
-    const withoutAdjustment = computeFixtureExpectedScore(strong, weak, wideScale)
-    const withAdjustment = computeFixtureExpectedScore(strong, weak, wideScale, 0.05)
+    const withoutAdjustment = computeFixtureExpectedScore(strong, weak, wideScale, 0, 0)
+    const withAdjustment = computeFixtureExpectedScore(strong, weak, wideScale, 0.05, 0)
     expect(withoutAdjustment).toBeCloseTo(0.65, 10) // sanity-check the hand-computed comment above
     expect(withAdjustment).toBeCloseTo(withoutAdjustment + 0.05, 10)
   })
 
   it('a negative homeAdjustment (the away side) shifts the result down by exactly that amount', () => {
-    const withoutAdjustment = computeFixtureExpectedScore(strong, weak, wideScale)
-    const withAdjustment = computeFixtureExpectedScore(strong, weak, wideScale, -0.05)
+    const withoutAdjustment = computeFixtureExpectedScore(strong, weak, wideScale, 0, 0)
+    const withAdjustment = computeFixtureExpectedScore(strong, weak, wideScale, -0.05, 0)
     expect(withAdjustment).toBeCloseTo(withoutAdjustment - 0.05, 10)
   })
 
-  it('is still clamped to [0, 1] even with a homeAdjustment pushing past the boundary', () => {
-    expect(computeFixtureExpectedScore(strong, weak, 0.1, 0.5)).toBe(1)
-    expect(computeFixtureExpectedScore(weak, strong, 0.1, -0.5)).toBe(0)
+  it('ticket #242: is still clamped to [MIN_EXPECTED_SCORE, MAX_EXPECTED_SCORE] even with a homeAdjustment pushing past the boundary', () => {
+    expect(computeFixtureExpectedScore(strong, weak, 0.1, 0.5)).toBe(MAX_EXPECTED_SCORE)
+    expect(computeFixtureExpectedScore(weak, strong, 0.1, -0.5)).toBe(MIN_EXPECTED_SCORE)
   })
 
   it('does NOT apply homeAdjustment when history is insufficient — the neutral fallback stays exactly NEUTRAL_EXPECTED_SCORE_VALUE, not neutral-plus-adjustment', () => {
     const thin: TeamStrengthRecord = { matches: MIN_TEAM_PRIOR_MATCHES - 1, goalsScored: 20, goalsConceded: 0 }
     expect(computeFixtureExpectedScore(thin, weak, 4, 0.09)).toBe(NEUTRAL_EXPECTED_SCORE_VALUE)
+  })
+
+  it('ticket #242: two clubs with identical records still produce exactly 0.5 plus the home term, regardless of shrinkageK — named test', () => {
+    const identical: TeamStrengthRecord = { matches: 8, goalsScored: 12, goalsConceded: 8 }
+    expect(computeFixtureExpectedScore(identical, identical, wideScale, HOME_EXPECTED_SCORE_BONUS)).toBeCloseTo(0.5 + HOME_EXPECTED_SCORE_BONUS, 10)
+    expect(computeFixtureExpectedScore(identical, identical, wideScale, HOME_EXPECTED_SCORE_BONUS, 0)).toBeCloseTo(0.5 + HOME_EXPECTED_SCORE_BONUS, 10)
+    expect(computeFixtureExpectedScore(identical, identical, wideScale, HOME_EXPECTED_SCORE_BONUS, 8)).toBeCloseTo(0.5 + HOME_EXPECTED_SCORE_BONUS, 10)
   })
 })
 
