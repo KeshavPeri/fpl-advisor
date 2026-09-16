@@ -13,7 +13,9 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   buildDiagnosticRows,
+  buildTeamStrengthTable,
   checkManUtdVsManCityGate,
+  checkTeamStrengthSourceGate,
   checkVarianceGate,
   frozenEloExpectedScore,
   generateReportMarkdown,
@@ -24,8 +26,9 @@ import {
   type DiagnosticTeamRow,
 } from './team-strength-diagnostic.ts'
 import type { TeamMetadata } from './project-points.ts'
-import type { TeamMatchRecord } from '../src/lib/projection/teamStrength.ts'
+import { MIN_TEAM_PRIOR_MATCHES, type TeamMatchRecord } from '../src/lib/projection/teamStrength.ts'
 import { expectedScore, expectedScoreFromDifficulty } from '../src/lib/projection/fixture.ts'
+import type { FixtureSource } from '../src/lib/projection/expectedPoints.ts'
 
 const sourcePath = fileURLToPath(new URL('./team-strength-diagnostic.ts', import.meta.url))
 const source = readFileSync(sourcePath, 'utf8')
@@ -73,27 +76,34 @@ describe('populationStandardDeviation', () => {
 })
 
 // ============================================================================
-// checkVarianceGate — falsification gate #2
+// checkVarianceGate — falsification gate #2, extended by ticket #235 to be
+// non-vacuous.
 // ============================================================================
 
 describe('checkVarianceGate (falsification gate #2)', () => {
-  it('PASSES when the point-in-time spread is wider than the frozen-elo spread', () => {
+  it('PASSES when the point-in-time spread is wider than the frozen-elo spread and the columns are not identical', () => {
     const rows = [
       { frozenEloExpectedScore: 0.48, pointInTimeExpectedScore: 0.3 },
       { frozenEloExpectedScore: 0.52, pointInTimeExpectedScore: 0.7 },
     ]
     const result = checkVarianceGate(rows)
     expect(result.pointInTimeStdDev).toBeGreaterThan(result.frozenStdDev)
+    expect(result.allRowsIdentical).toBe(false)
     expect(result.passed).toBe(true)
   })
 
-  it('PASSES when the two spreads are exactly equal (>= is inclusive)', () => {
+  it('PASSES when the two spreads are exactly equal (>= is inclusive) and the underlying per-row values still differ', () => {
+    // The SAME two values (0.4, 0.6), swapped between the columns per row --
+    // so the population stdDev matches exactly (same multiset), but no row
+    // is individually identical between its own frozen-elo and point-in-time
+    // value: row 1 is 0.4 vs 0.6, row 2 is 0.6 vs 0.4.
     const rows = [
-      { frozenEloExpectedScore: 0.4, pointInTimeExpectedScore: 0.4 },
-      { frozenEloExpectedScore: 0.6, pointInTimeExpectedScore: 0.6 },
+      { frozenEloExpectedScore: 0.4, pointInTimeExpectedScore: 0.6 },
+      { frozenEloExpectedScore: 0.6, pointInTimeExpectedScore: 0.4 },
     ]
     const result = checkVarianceGate(rows)
     expect(result.frozenStdDev).toBe(result.pointInTimeStdDev)
+    expect(result.allRowsIdentical).toBe(false)
     expect(result.passed).toBe(true)
   })
 
@@ -105,6 +115,78 @@ describe('checkVarianceGate (falsification gate #2)', () => {
     const result = checkVarianceGate(rows)
     expect(result.pointInTimeStdDev).toBeLessThan(result.frozenStdDev)
     expect(result.passed).toBe(false)
+  })
+
+  // ==========================================================================
+  // Ticket #235 -- the gate defect that let #229's own diagnostic pass. When
+  // the new path never runs, point-in-time and frozen-elo are the SAME
+  // numbers, so their stdDevs match exactly and the pre-#235 gate passed
+  // vacuously. This is reproduced here EXACTLY as it happened on live data
+  // (20 rows, all `stale-elo`, frozen == point-in-time on every row).
+  // ==========================================================================
+  it('FAILS when every row is numerically identical between the two columns, even though the stdDev comparison alone would pass -- the exact #229 vacuous-pass scenario', () => {
+    const rows = [
+      { frozenEloExpectedScore: 0.849, pointInTimeExpectedScore: 0.849 },
+      { frozenEloExpectedScore: 0.3992, pointInTimeExpectedScore: 0.3992 },
+      { frozenEloExpectedScore: 0.553, pointInTimeExpectedScore: 0.553 },
+    ]
+    const result = checkVarianceGate(rows)
+    // The stdDev comparison ALONE would pass (equal populations -> equal
+    // stdDev, `>=` is inclusive) -- proving the failure comes specifically
+    // from allRowsIdentical, not from a coincidentally narrower spread.
+    expect(result.frozenStdDev).toBe(result.pointInTimeStdDev)
+    expect(result.allRowsIdentical).toBe(true)
+    expect(result.passed).toBe(false)
+  })
+
+  it('allRowsIdentical is false the moment even ONE row differs', () => {
+    const rows = [
+      { frozenEloExpectedScore: 0.5, pointInTimeExpectedScore: 0.5 },
+      { frozenEloExpectedScore: 0.5, pointInTimeExpectedScore: 0.6 }, // this one differs
+    ]
+    expect(checkVarianceGate(rows).allRowsIdentical).toBe(false)
+  })
+
+  it('allRowsIdentical is false (never vacuously true) on an empty row set', () => {
+    const result = checkVarianceGate([])
+    expect(result.allRowsIdentical).toBe(false)
+    expect(result.passed).toBe(true) // stdDev(0) >= stdDev(0), and allRowsIdentical is false -- unchanged from pre-#235 behaviour on no data
+  })
+})
+
+// ============================================================================
+// checkTeamStrengthSourceGate — ticket #235's NEW, PRIMARY gate.
+// ============================================================================
+
+describe('checkTeamStrengthSourceGate (ticket #235 -- the PRIMARY falsification gate)', () => {
+  it('PASSES when at least one row resolves to source team-strength', () => {
+    const rows: { fixtureSource: FixtureSource }[] = [{ fixtureSource: 'stale-elo' }, { fixtureSource: 'team-strength' }]
+    const result = checkTeamStrengthSourceGate(rows)
+    expect(result.count).toBe(1)
+    expect(result.passed).toBe(true)
+  })
+
+  it('FAILS when NO row resolves to team-strength -- the exact #229 scenario (all twenty rows stale-elo)', () => {
+    const rows: { fixtureSource: FixtureSource }[] = Array.from({ length: 20 }, () => ({ fixtureSource: 'stale-elo' as const }))
+    const result = checkTeamStrengthSourceGate(rows)
+    expect(result.count).toBe(0)
+    expect(result.passed).toBe(false)
+  })
+
+  it('FAILS on an empty row set, never a vacuous pass', () => {
+    const result = checkTeamStrengthSourceGate([])
+    expect(result.count).toBe(0)
+    expect(result.passed).toBe(false)
+  })
+
+  it('counts every matching row, not just whether one exists', () => {
+    const rows: { fixtureSource: FixtureSource }[] = [
+      { fixtureSource: 'team-strength' },
+      { fixtureSource: 'team-strength' },
+      { fixtureSource: 'elo' },
+      { fixtureSource: 'fdr' },
+    ]
+    expect(checkTeamStrengthSourceGate(rows).count).toBe(2)
   })
 })
 
@@ -304,35 +386,146 @@ describe('buildDiagnosticRows', () => {
 })
 
 // ============================================================================
+// buildTeamStrengthTable — ticket #235, point 4 of "Fix the gate": the full
+// point-in-time strength table, sorted by rate.
+// ============================================================================
+
+describe('buildTeamStrengthTable (ticket #235)', () => {
+  const MAN_UTD_ID = 1
+  const MAN_CITY_ID = 2
+  const manUtd: DiagnosticTeamRow = { id: MAN_UTD_ID, name: 'Man Utd', short_name: 'MUN', code: 10, elo: 1915, elo_stale_since: null }
+  const manCity: DiagnosticTeamRow = { id: MAN_CITY_ID, name: 'Man City', short_name: 'MCI', code: 20, elo: 1971, elo_stale_since: null }
+  const teamsById = new Map([
+    [MAN_UTD_ID, manUtd],
+    [MAN_CITY_ID, manCity],
+  ])
+
+  it('sorts by rate descending -- the stronger club (by teamStrengthRate) ranks first', () => {
+    const teamMatchRecords: TeamMatchRecord[] = [
+      { matchId: 'a', gameweek: 1, teamCode: 10, goalsScored: 0, goalsConceded: 2 }, // Man Utd: rate -2
+      { matchId: 'b', gameweek: 1, teamCode: 20, goalsScored: 3, goalsConceded: 0 }, // Man City: rate +3
+    ]
+    const table = buildTeamStrengthTable({ teamsById, teamMatchRecords, beforeGameweek: 5 })
+    expect(table).toHaveLength(2)
+    expect(table[0].teamName).toBe('Man City')
+    expect(table[0].rate).toBeGreaterThan(table[1].rate)
+    expect(table[1].teamName).toBe('Man Utd')
+  })
+
+  it('a club with no resolvable teams.code is excluded entirely, not shown with a guessed row', () => {
+    const teamsWithUnresolvable = new Map(teamsById)
+    teamsWithUnresolvable.set(3, { id: 3, name: 'Nocode FC', short_name: 'NFC', code: null, elo: null, elo_stale_since: null })
+    const table = buildTeamStrengthTable({ teamsById: teamsWithUnresolvable, teamMatchRecords: [], beforeGameweek: 5 })
+    expect(table.find((r) => r.teamName === 'Nocode FC')).toBeUndefined()
+    expect(table).toHaveLength(2) // just Man Utd and Man City, both 0 matches
+  })
+
+  it('meetsMinimum is true only at or above MIN_TEAM_PRIOR_MATCHES', () => {
+    const teamMatchRecords: TeamMatchRecord[] = Array.from({ length: MIN_TEAM_PRIOR_MATCHES }, (_, i) => ({
+      matchId: `m${i}`,
+      gameweek: i + 1,
+      teamCode: 10,
+      goalsScored: 1,
+      goalsConceded: 0,
+    }))
+    const table = buildTeamStrengthTable({ teamsById, teamMatchRecords, beforeGameweek: MIN_TEAM_PRIOR_MATCHES + 1 })
+    const manUtdRow = table.find((r) => r.teamName === 'Man Utd')!
+    const manCityRow = table.find((r) => r.teamName === 'Man City')!
+    expect(manUtdRow.matches).toBe(MIN_TEAM_PRIOR_MATCHES)
+    expect(manUtdRow.meetsMinimum).toBe(true)
+    expect(manCityRow.matches).toBe(0)
+    expect(manCityRow.meetsMinimum).toBe(false)
+  })
+
+  it('respects the lookahead guard: matches at or after beforeGameweek are not counted', () => {
+    const teamMatchRecords: TeamMatchRecord[] = [{ matchId: 'a', gameweek: 5, teamCode: 10, goalsScored: 9, goalsConceded: 0 }]
+    const table = buildTeamStrengthTable({ teamsById, teamMatchRecords, beforeGameweek: 5 })
+    expect(table.find((r) => r.teamName === 'Man Utd')?.matches).toBe(0)
+  })
+
+  it('a club with zero matches still appears, at rate 0 (never a guessed value or an omission)', () => {
+    const table = buildTeamStrengthTable({ teamsById, teamMatchRecords: [], beforeGameweek: 1 })
+    expect(table).toHaveLength(2)
+    for (const row of table) {
+      expect(row.matches).toBe(0)
+      expect(row.rate).toBe(0)
+      expect(row.meetsMinimum).toBe(false)
+    }
+  })
+
+  it('an empty teamsById produces an empty table, not an error', () => {
+    expect(buildTeamStrengthTable({ teamsById: new Map(), teamMatchRecords: [], beforeGameweek: 5 })).toEqual([])
+  })
+})
+
+// ============================================================================
 // generateReportMarkdown — smoke test, not a full snapshot.
 // ============================================================================
 
 describe('generateReportMarkdown', () => {
-  it('includes the gameweek, both gate verdicts, and one table row per fixture row', () => {
+  it('includes the gameweek, all three gate verdicts, one table row per fixture row, and the strength table', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
       rows: [diagnosticRow()],
+      teamStrengthSourceGate: { count: 1, passed: true },
       manUtdGate: { status: 'pass', manUtdPointInTimeExpectedScore: 0.3 },
-      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, passed: true },
+      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      strengthTable: [
+        { teamId: 1, teamName: 'Man Utd', teamShortName: 'MUN', matches: 4, goalsScored: 3, goalsConceded: 5, rate: -0.5, meetsMinimum: true },
+        { teamId: 2, teamName: 'Chelsea', teamShortName: 'CHE', matches: 4, goalsScored: 8, goalsConceded: 2, rate: 1.5, meetsMinimum: true },
+      ],
     })
     expect(markdown).toMatch(/Gameweek examined: 4/)
     expect(markdown).toMatch(/PASS/)
+    expect(markdown).toMatch(/PRIMARY/)
     expect(markdown).toMatch(/Man Utd/)
     expect(markdown).toMatch(/Man City/)
     expect(markdown).toMatch(/team-strength/)
     expect(markdown).toMatch(/Overall: PASS/)
+    expect(markdown).toMatch(/Point-in-time team strength/)
+    expect(markdown).toMatch(/Chelsea/)
+    expect(markdown).toMatch(/teamStrengthRate/)
   })
 
-  it('reports "Overall: STOP" when either gate fails', () => {
+  it('reports "Overall: STOP" when any of the three gates fails', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
       rows: [diagnosticRow()],
+      teamStrengthSourceGate: { count: 1, passed: true },
       manUtdGate: { status: 'fail', manUtdPointInTimeExpectedScore: 0.6 },
-      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, passed: true },
+      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      strengthTable: [],
     })
     expect(markdown).toMatch(/Overall: STOP/)
+  })
+
+  it('reports "Overall: STOP" when the team-strength-source gate (the PRIMARY gate) fails, even if the other two pass', () => {
+    const markdown = generateReportMarkdown({
+      generatedAt: new Date('2026-09-12T00:00:00Z'),
+      gameweekId: 4,
+      rows: [diagnosticRow({ fixtureSource: 'stale-elo' })],
+      teamStrengthSourceGate: { count: 0, passed: false },
+      manUtdGate: { status: 'pass', manUtdPointInTimeExpectedScore: 0.3 },
+      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.05, allRowsIdentical: true, passed: false },
+      strengthTable: [],
+    })
+    expect(markdown).toMatch(/Overall: STOP/)
+    expect(markdown).toMatch(/FAIL/)
+  })
+
+  it('renders an empty strength table without error', () => {
+    const markdown = generateReportMarkdown({
+      generatedAt: new Date('2026-09-12T00:00:00Z'),
+      gameweekId: 4,
+      rows: [diagnosticRow()],
+      teamStrengthSourceGate: { count: 1, passed: true },
+      manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
+      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      strengthTable: [],
+    })
+    expect(markdown).toMatch(/Point-in-time team strength/)
   })
 })
 
@@ -368,5 +561,52 @@ describe('ticket #229 out-of-scope boundaries', () => {
 
   it('never calls .delete( -- read-only, per its own header comment', () => {
     expect(source).not.toMatch(/\.delete\(\s*\)/)
+  })
+})
+
+// ============================================================================
+// Ticket #235 — source invariants. main() itself can't be exercised without
+// a live Supabase project (see file header), so the exit-non-zero wiring is
+// proven by grepping the real, shipped source for the exact condition —
+// same technique the rest of this file already uses.
+// ============================================================================
+
+describe('ticket #235 source invariants', () => {
+  it('main() exits non-zero when the team-strength-source gate fails -- named test that the diagnostic exits non-zero when no fixture resolves to team-strength', () => {
+    // checkTeamStrengthSourceGate's own unit tests (above) prove `passed` is
+    // false when no row resolves to team-strength. This proves main() ACTS
+    // on that: the failure `if` includes `!teamStrengthSourceGate.passed`,
+    // ahead of `process.exit(1)`, so a false `passed` here is sufficient on
+    // its own to fail the job regardless of the other two gates.
+    const failureCheckMatch = source.match(/if\s*\(([^)]*teamStrengthSourceGate\.passed[^)]*)\)\s*\{/)
+    expect(failureCheckMatch).not.toBeNull()
+    expect(failureCheckMatch![1]).toMatch(/!teamStrengthSourceGate\.passed/)
+    const failureBlockStart = source.indexOf(failureCheckMatch![0])
+    const failureBlockEnd = source.indexOf('process.exit(1)', failureBlockStart)
+    expect(failureBlockEnd).toBeGreaterThan(failureBlockStart)
+    // The same block must also call recordJobRun with status 'failure' --
+    // proving this is the real failure path, not a dead branch.
+    const failureBlock = source.slice(failureBlockStart, failureBlockEnd)
+    expect(failureBlock).toMatch(/status:\s*'failure'/)
+  })
+
+  it('checkTeamStrengthSourceGate is called and its result feeds the report AND job_runs.details', () => {
+    expect(source).toMatch(/const teamStrengthSourceGate = checkTeamStrengthSourceGate\(rows\)/)
+    expect(source).toMatch(/teamStrengthSourceGate,?\s*\n?\s*manUtdGate,?\s*\n?\s*varianceGate/) // ReportData construction
+  })
+
+  it('the point-in-time team-strength table is built via buildTeamStrengthTable and included in ReportData', () => {
+    expect(source).toMatch(/buildTeamStrengthTable\(\{/)
+    expect(source).toMatch(/strengthTable/)
+  })
+
+  it('the team-strength construction no longer reads player_match_stats at all -- it is built entirely from public.fixtures', () => {
+    expect(source).not.toMatch(/\.from\('player_match_stats'\)/)
+    expect(source).not.toMatch(/buildTeamMatchRecords\(/) // the OLD (player_match_stats) builder -- buildTeamMatchRecordsFromFixtures is a different name and does not match this pattern
+    expect(source).toMatch(/buildTeamMatchRecordsFromFixtures\(/)
+  })
+
+  it('the fixtures read is unfiltered (no `.eq(\'event_id\', gameweekId)` on the DATA select) -- team strength needs the whole season, not just the next gameweek', () => {
+    expect(source).not.toMatch(/\.eq\('event_id',\s*gameweekId\)/)
   })
 })
