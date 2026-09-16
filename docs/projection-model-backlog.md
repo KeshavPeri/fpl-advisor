@@ -228,14 +228,46 @@ of this ticket) and can never look further back than that. It is not a substitut
 backtest (item 32) — it is a slow, always-current accumulator: exactly one more gameweek of evidence
 every week the app runs, forever bounded to "this season and no earlier."
 
-**Not yet run against live data — the first reading is still open work, same as G9/G10/G11's own
-first runs.** This Builder session has no live Supabase project (the same limitation those three
-entries already record for their own first reads), and the migration is not yet applied — see
-`supabase/README.md`. Neither script has executed against real rows, so this entry deliberately
-states no mean, no signed error, and no verdict on whether the allocator over- or under-projects —
-inventing one here would be exactly the false precision `product-brief.md` §8 forbids. The next
-step is dispatching `scripts/ingest-gameweek-live-stats.ts` then `scripts/bonus-validation-report.ts`
-against the live project, once the migration is applied, and reading what comes back.
+**"Not yet run against live data" — SUPERSEDED, first read 15 Sep 2026, ticket #237.** The
+paragraph immediately below this one is kept for its own sake (it correctly recorded that no run
+had happened yet, as of 11 Sep 2026) but is no longer current — it has now been run, and it found
+exactly the shape the "flat allocator" theory predicted. Restricted to each gameweek's own top 20
+projected players, the model was short by roughly HALF: real bonus outscored projected bonus by
++0.209 pooled (+0.262 on GW2, +0.066 on GW3), while the whole-population signed error stayed within
+0.008–0.039 — the level (total bonus handed out) was right, the shape (who gets it) was flat. Full
+table:
+
+| Population | n | Mean projected | Mean actual | Signed error |
+|---|---|---|---|---|
+| Pooled, all matched players | 1867 | 0.064 | 0.103 | +0.039 |
+| Pooled, top 20 projected | 60 | 0.224 | 0.433 | +0.209 |
+| GW2, top 20 | 20 | 0.338 | 0.600 | +0.262 |
+| GW3, top 20 | 20 | 0.334 | 0.400 | +0.066 |
+| GW2, all players | 616 | 0.097 | 0.106 | +0.008 |
+| GW3, all players | 652 | 0.092 | 0.098 | +0.006 |
+
+**What #237 did in response.** `allocateFixtureBonus` (`src/lib/projection/bonus.ts`) generalised
+its linear share (`share_i = excess_i / totalExcess * 6`) to a power-law share
+(`share_i = excess_i^ALPHA / sum_j(excess_j^ALPHA) * 6`) — `ALPHA = 1` is an exact, bit-for-bit
+reproduction of the line above, so this is a strict generalisation, not a replacement, and the
+per-fixture total still sums to 6 whenever nothing clamps, for any `ALPHA`. A higher `ALPHA`
+concentrates the six points on the highest-excess players, closing the gap the table above measures.
+`scripts/bonus-validation-report.ts` now also reconstructs, per fixture (via
+`components.fixtures[].fixtureId`, already stored — no new column), the clamped player-fixture count
+and the mean per-fixture allocated total, so a future ALPHA change can be checked for the specific
+failure mode a sharper share risks: clamping eating the pool until fixtures stop summing anywhere
+near 6.
+
+**`ALPHA` itself is a PLACEHOLDER (value 1, a no-op) — the live fit could not be completed by the
+Builder session that shipped this mechanism, for the identical reason the first live read of this
+very report was itself blocked for eleven days (11–15 Sep 2026, the two paragraphs on this page):
+no Supabase credentials in a Builder session.** Ticket #237's own text specifies the fit exactly —
+minimise the absolute top-20 mean signed error on GW2 (n=616) alone, then evaluate (never re-fit)
+on GW3 (n=652) held out — and `src/lib/projection/bonus.ts`'s own `ALPHA` doc comment records the
+full procedure plus a scale-invariance shortcut that makes the fit a same-session, read-only query
+once real access exists (no code change needed to compute it). Until that hand-run query happens
+and the constant is updated, `ALPHA = 1` means the sharpening described above ships as dormant,
+tested, unused machinery — the table's gap is not yet closed in production.
 
 **BPS is stored but not yet compared.** `gameweek_live_stats.bps` is ingested alongside `bonus` (the
 allocator models a *share of BPS*, so bps may turn out the more informative comparison — see that
@@ -2333,3 +2365,41 @@ each transfer and captaincy call actually good. Ticket #223's own scope text sta
 sample is three or four gameweeks today and grows by one every week; the 2025/26 replay's sample
 would be one season, once, and frozen the day this repo stops being able to answer "what did that
 player cost."
+
+---
+
+## G20 — Ticket #237, 15 Sep 2026: the bonus share is sharpened by an exponent; ALPHA needs
+## re-fitting once ten finished gameweeks exist, not two
+
+See G3's own entry (updated by this ticket) for the full first-measurement table and what #237
+built in response. This entry records the one thing that is this ticket's own, going forward: a
+standing instruction about `ALPHA`'s durability, not a restatement of G3.
+
+**Two gameweeks is thin, and the instrument gains exactly one gameweek per week.**
+`gameweek_live_stats` can only ever hold CURRENT-SEASON, finished, past-lockdown gameweeks — see
+that table's own migration header, and G3's "the limitation is permanent in the other direction"
+paragraph. `ALPHA`'s fit-on-GW2/evaluate-on-GW3 methodology is the most rigorous split two
+gameweeks allow (fit and holdout genuinely separate, never the same data scoring itself), but it is
+still a fit on one gameweek and a check on one more — a single unusual fixture round (a run of
+red cards, an unusually bonus-heavy set of matches) could swing either figure meaningfully, and
+nothing in a two-gameweek sample would distinguish "ALPHA is wrong" from "this fortnight was
+unusual."
+
+**Standing instruction: `ALPHA` must be RE-FITTED and RE-CHECKED once ten finished gameweeks are on
+record — not tuned incrementally as each new gameweek lands, and not left untouched indefinitely
+either.** Ten is a judgement call, stated as one (same discipline `teamStrength.ts`'s
+`MIN_TEAM_PRIOR_MATCHES` comment uses for its own judgement call): enough gameweeks that one unusual
+week's influence on the fit is diluted rather than dominant, small enough that the wait is a matter
+of weeks, not a full season. When the re-fit happens, it should use the SAME discipline this
+ticket's methodology establishes — a genuine fit/holdout split (e.g. fit on the first n-2
+gameweeks, evaluate on the most recent 2, never fit and evaluate on the same rows) — not a pooled
+fit across every gameweek at once, which would make every future re-check circular in exactly the
+way G3/#237's own text warns against ("Fitting on both and then scoring on both would be
+circular").
+
+**What would make this urgent rather than routine.** If a future `scripts/bonus-validation-report.ts`
+run (any gameweek, not just a scheduled ten-gameweek checkpoint) shows the top-20 signed error
+drifting back toward its pre-#237 magnitude, or the mean per-fixture allocated total drifting toward
+or below the falsification gate's 5.70 floor, that is a signal to re-fit immediately rather than
+waiting for the ten-gameweek mark — the standing cadence above is a ceiling on how long to wait, not
+a floor on how soon a re-fit is allowed.
