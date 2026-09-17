@@ -16,6 +16,9 @@ import {
   buildTeamStrengthTable,
   checkExpectedScoreBoundGate,
   checkManUtdVsManCityGate,
+  checkMarketOddsLivenessGate,
+  checkMarketOddsVsTeamStrengthGate,
+  checkOverroundPlausibilityGate,
   checkTeamStrengthSourceGate,
   checkVarianceGate,
   frozenEloExpectedScore,
@@ -26,7 +29,7 @@ import {
   type DiagnosticRow,
   type DiagnosticTeamRow,
 } from './team-strength-diagnostic.ts'
-import type { TeamMetadata } from './project-points.ts'
+import type { FixtureOddsRow, TeamMetadata } from './project-points.ts'
 import { MIN_TEAM_PRIOR_MATCHES, type TeamMatchRecord } from '../src/lib/projection/teamStrength.ts'
 import { expectedScore, expectedScoreFromDifficulty } from '../src/lib/projection/fixture.ts'
 import type { FixtureSource } from '../src/lib/projection/expectedPoints.ts'
@@ -243,7 +246,7 @@ describe('checkTeamStrengthSourceGate (ticket #235 -- the PRIMARY falsification 
     const rows: { fixtureSource: FixtureSource }[] = [
       { fixtureSource: 'team-strength' },
       { fixtureSource: 'team-strength' },
-      { fixtureSource: 'elo' },
+      { fixtureSource: 'market-odds' },
       { fixtureSource: 'fdr' },
     ]
     expect(checkTeamStrengthSourceGate(rows).count).toBe(2)
@@ -266,6 +269,10 @@ function diagnosticRow(overrides: Partial<DiagnosticRow> = {}): DiagnosticRow {
     opponentShortName: MAN_CITY_SHORT_NAME,
     isHome: true,
     frozenEloExpectedScore: 0.513,
+    teamStrengthExpectedScore: 0.3,
+    marketOddsExpectedScore: null,
+    marketOddsBookCount: null,
+    marketOddsOverround: null,
     pointInTimeExpectedScore: 0.3,
     fixtureSource: 'team-strength',
     ...overrides,
@@ -304,6 +311,89 @@ describe('checkManUtdVsManCityGate (falsification gate #1)', () => {
     })
     const result = checkManUtdVsManCityGate([manCityRow])
     expect(result.status).toBe('not-applicable')
+  })
+})
+
+// ============================================================================
+// Ticket #238's own falsification gate — three NEW, additive pure gate
+// functions.
+// ============================================================================
+
+describe('checkMarketOddsLivenessGate (ticket #238, falsification-gate item 1)', () => {
+  it('PASSES when at least one row resolves to source market-odds', () => {
+    const rows: { fixtureSource: FixtureSource }[] = [{ fixtureSource: 'stale-elo' }, { fixtureSource: 'market-odds' }]
+    const result = checkMarketOddsLivenessGate(rows)
+    expect(result.count).toBe(1)
+    expect(result.passed).toBe(true)
+  })
+
+  it('FAILS when no row resolves to market-odds', () => {
+    const rows: { fixtureSource: FixtureSource }[] = [{ fixtureSource: 'team-strength' }, { fixtureSource: 'fdr' }]
+    const result = checkMarketOddsLivenessGate(rows)
+    expect(result.count).toBe(0)
+    expect(result.passed).toBe(false)
+  })
+
+  it('FAILS on an empty row set, never a vacuous pass', () => {
+    expect(checkMarketOddsLivenessGate([]).passed).toBe(false)
+  })
+})
+
+describe('checkMarketOddsVsTeamStrengthGate (ticket #238, falsification-gate item 2)', () => {
+  it('PASSES when at least one row\'s |marketOddsExpectedScore - teamStrengthExpectedScore| exceeds 0.02', () => {
+    const rows = [
+      diagnosticRow({ marketOddsExpectedScore: 0.7, teamStrengthExpectedScore: 0.5 }),
+      diagnosticRow({ marketOddsExpectedScore: null, teamStrengthExpectedScore: 0.5 }),
+    ]
+    const result = checkMarketOddsVsTeamStrengthGate(rows)
+    expect(result.maxAbsoluteDifference).toBeCloseTo(0.2, 10)
+    expect(result.passed).toBe(true)
+  })
+
+  it('FAILS when the largest observed difference stays at or below 0.02 -- identical columns mean the new path did nothing (ticket text, verbatim)', () => {
+    expect(checkMarketOddsVsTeamStrengthGate([diagnosticRow({ marketOddsExpectedScore: 0.51, teamStrengthExpectedScore: 0.5 })]).passed).toBe(false)
+    expect(checkMarketOddsVsTeamStrengthGate([diagnosticRow({ marketOddsExpectedScore: 0.5, teamStrengthExpectedScore: 0.5 })]).passed).toBe(false)
+  })
+
+  it('FAILS (maxAbsoluteDifference null) when no row carries a market-odds reading at all', () => {
+    const result = checkMarketOddsVsTeamStrengthGate([diagnosticRow({ marketOddsExpectedScore: null })])
+    expect(result.maxAbsoluteDifference).toBeNull()
+    expect(result.passed).toBe(false)
+  })
+
+  it('FAILS on an empty row set', () => {
+    expect(checkMarketOddsVsTeamStrengthGate([]).passed).toBe(false)
+  })
+})
+
+describe('checkOverroundPlausibilityGate (ticket #238, falsification-gate item 3)', () => {
+  it('PASSES when every row with an overround reading falls within [1.00, 1.15]', () => {
+    const rows = [diagnosticRow({ marketOddsOverround: 1.0 }), diagnosticRow({ marketOddsOverround: 1.15 }), diagnosticRow({ marketOddsOverround: 1.05 })]
+    const result = checkOverroundPlausibilityGate(rows)
+    expect(result.outOfRangeRows).toEqual([])
+    expect(result.fixturesWithOverround).toBe(3)
+    expect(result.passed).toBe(true)
+  })
+
+  it('FAILS and names the offending row when an overround falls outside [1.00, 1.15]', () => {
+    const badRow = diagnosticRow({ teamName: 'Fulham', opponentName: 'Everton', marketOddsOverround: 1.4 })
+    const result = checkOverroundPlausibilityGate([badRow])
+    expect(result.outOfRangeRows).toEqual([badRow])
+    expect(result.passed).toBe(false)
+  })
+
+  it('an overround below 1.00 (impossible for a real market) also FAILS', () => {
+    expect(checkOverroundPlausibilityGate([diagnosticRow({ marketOddsOverround: 0.99 })]).passed).toBe(false)
+  })
+
+  it('FAILS (never a vacuous pass) when no row carries an overround reading at all -- nothing to check is not evidence the prices are sane', () => {
+    const result = checkOverroundPlausibilityGate([diagnosticRow({ marketOddsOverround: null })])
+    expect(result.fixturesWithOverround).toBe(0)
+    expect(result.passed).toBe(false)
+  })
+
+  it('FAILS on an empty row set', () => {
+    expect(checkOverroundPlausibilityGate([]).passed).toBe(false)
   })
 })
 
@@ -443,6 +533,72 @@ describe('buildDiagnosticRows', () => {
     expect(manUtdRow.frozenEloExpectedScore).toBeGreaterThan(0.4)
     expect(manUtdRow.pointInTimeExpectedScore).toBeLessThan(manUtdRow.frozenEloExpectedScore)
   })
+
+  // ==========================================================================
+  // Ticket #238 -- market odds. teamStrengthExpectedScore is ALWAYS computed
+  // directly, regardless of which tier the live precedence actually picks;
+  // marketOddsExpectedScore is the raw fixture_odds reading, null when absent.
+  // ==========================================================================
+
+  it('teamStrengthExpectedScore is populated even when the live precedence picks a DIFFERENT tier (no oddsRow, stale elo on both sides, no team-strength history)', () => {
+    const rows = buildDiagnosticRows({
+      fixture: { id: 39, team_h: MAN_UTD_ID, team_a: MAN_CITY_ID, team_h_difficulty: 3, team_a_difficulty: 3 },
+      gameweekId: 4,
+      teamsById,
+      eloByTeamId,
+      teamMetadataById,
+      teamMatchRecords: [], // insufficient team-strength history -> falls to stale-elo
+    })
+    const manUtdRow = rows.find((r) => r.teamShortName === 'MUN')!
+    expect(manUtdRow.fixtureSource).toBe('stale-elo')
+    // No team-strength history -> the NEUTRAL fallback (0.5), not undefined/null.
+    expect(manUtdRow.teamStrengthExpectedScore).toBe(0.5)
+    expect(manUtdRow.marketOddsExpectedScore).toBeNull()
+    expect(manUtdRow.marketOddsBookCount).toBeNull()
+    expect(manUtdRow.marketOddsOverround).toBeNull()
+  })
+
+  it('with a fresh, sufficiently-booked oddsRow, the live precedence picks market-odds, AND the raw team-strength/market-odds columns are both populated for comparison', () => {
+    const oddsRow: FixtureOddsRow = { fixture_id: 39, fetched_at: new Date(1000).toISOString(), book_count: 21, p_home: 0.7, p_draw: 0.2, p_away: 0.1, overround: 1.05 }
+    const rows = buildDiagnosticRows({
+      fixture: { id: 39, team_h: MAN_UTD_ID, team_a: MAN_CITY_ID, team_h_difficulty: 3, team_a_difficulty: 3 },
+      gameweekId: 4,
+      teamsById,
+      eloByTeamId,
+      teamMetadataById,
+      teamMatchRecords: [],
+      oddsRow,
+      nowMs: 1000,
+    })
+    const manUtdRow = rows.find((r) => r.teamShortName === 'MUN')!
+    expect(manUtdRow.fixtureSource).toBe('market-odds')
+    expect(manUtdRow.pointInTimeExpectedScore).toBeCloseTo(0.7 + 0.5 * 0.2, 10) // home orientation
+    expect(manUtdRow.marketOddsExpectedScore).toBeCloseTo(0.7 + 0.5 * 0.2, 10)
+    expect(manUtdRow.marketOddsBookCount).toBe(21)
+    expect(manUtdRow.marketOddsOverround).toBe(1.05)
+    expect(manUtdRow.teamStrengthExpectedScore).toBe(0.5) // still the neutral fallback -- insufficient history, independent of the odds reading
+
+    const manCityRow = rows.find((r) => r.teamShortName === 'MCI')!
+    expect(manCityRow.marketOddsExpectedScore).toBeCloseTo(0.1 + 0.5 * 0.2, 10) // away orientation, same underlying row
+  })
+
+  it('a STALE oddsRow (older than 48h) does not win the live precedence, but its raw reading still appears in marketOddsExpectedScore for the diagnostic\'s own comparison', () => {
+    const oddsRow: FixtureOddsRow = { fixture_id: 39, fetched_at: new Date(0).toISOString(), book_count: 21, p_home: 0.7, p_draw: 0.2, p_away: 0.1, overround: 1.05 }
+    const fortyNineHoursMs = 49 * 60 * 60 * 1000
+    const rows = buildDiagnosticRows({
+      fixture: { id: 39, team_h: MAN_UTD_ID, team_a: MAN_CITY_ID, team_h_difficulty: 3, team_a_difficulty: 3 },
+      gameweekId: 4,
+      teamsById,
+      eloByTeamId,
+      teamMetadataById,
+      teamMatchRecords: [],
+      oddsRow,
+      nowMs: fortyNineHoursMs,
+    })
+    const manUtdRow = rows.find((r) => r.teamShortName === 'MUN')!
+    expect(manUtdRow.fixtureSource).not.toBe('market-odds')
+    expect(manUtdRow.marketOddsExpectedScore).toBeCloseTo(0.7 + 0.5 * 0.2, 10)
+  })
 })
 
 // ============================================================================
@@ -522,8 +678,15 @@ describe('buildTeamStrengthTable (ticket #235)', () => {
 // generateReportMarkdown — smoke test, not a full snapshot.
 // ============================================================================
 
+/** Ticket #238's three PASSING gates, spread into every generateReportMarkdown call below that isn't itself testing one of them failing — keeps every existing (pre-#238) test's own "the other N pass" framing honest without repeating three fields in every call site. */
+const passingMarketOddsGates = {
+  marketOddsLivenessGate: { count: 1, passed: true },
+  marketOddsVsTeamStrengthGate: { maxAbsoluteDifference: 0.05, passed: true },
+  overroundPlausibilityGate: { outOfRangeRows: [], fixturesWithOverround: 1, passed: true },
+}
+
 describe('generateReportMarkdown', () => {
-  it('includes the gameweek, all four gate verdicts, one table row per fixture row, and the strength table', () => {
+  it('includes the gameweek, all seven gate verdicts, one table row per fixture row, and the strength table', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
@@ -532,6 +695,7 @@ describe('generateReportMarkdown', () => {
       manUtdGate: { status: 'pass', manUtdPointInTimeExpectedScore: 0.3 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
+      ...passingMarketOddsGates,
       strengthTable: [
         { teamId: 1, teamName: 'Man Utd', teamShortName: 'MUN', matches: 4, goalsScored: 3, goalsConceded: 5, rate: -0.5, meetsMinimum: true },
         { teamId: 2, teamName: 'Chelsea', teamShortName: 'CHE', matches: 4, goalsScored: 8, goalsConceded: 2, rate: 1.5, meetsMinimum: true },
@@ -547,9 +711,10 @@ describe('generateReportMarkdown', () => {
     expect(markdown).toMatch(/Point-in-time team strength/)
     expect(markdown).toMatch(/Chelsea/)
     expect(markdown).toMatch(/teamStrengthRate/)
+    expect(markdown).toMatch(/market-odds/)
   })
 
-  it('reports "Overall: STOP" when any of the four gates fails', () => {
+  it('reports "Overall: STOP" when any of the original four (team-strength) gates fails', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
@@ -558,12 +723,13 @@ describe('generateReportMarkdown', () => {
       manUtdGate: { status: 'fail', manUtdPointInTimeExpectedScore: 0.6 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
+      ...passingMarketOddsGates,
       strengthTable: [],
     })
     expect(markdown).toMatch(/Overall: STOP/)
   })
 
-  it('reports "Overall: STOP" when the team-strength-source gate (the PRIMARY gate) fails, even if the other three pass', () => {
+  it('reports "Overall: STOP" when the team-strength-source gate (the PRIMARY gate) fails, even if every other gate passes', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
@@ -572,13 +738,14 @@ describe('generateReportMarkdown', () => {
       manUtdGate: { status: 'pass', manUtdPointInTimeExpectedScore: 0.3 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.05, allRowsIdentical: true, passed: false },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
+      ...passingMarketOddsGates,
       strengthTable: [],
     })
     expect(markdown).toMatch(/Overall: STOP/)
     expect(markdown).toMatch(/FAIL/)
   })
 
-  it('ticket #242: reports "Overall: STOP" and names the offending fixture when ONLY the expectedScore-bound gate (gate 4) fails, even if the other three pass', () => {
+  it('ticket #242: reports "Overall: STOP" and names the offending fixture when ONLY the expectedScore-bound gate (gate 4) fails, even if every other gate passes', () => {
     const outOfBoundRow = diagnosticRow({ teamName: "Nott'm Forest", opponentName: 'Coventry City', pointInTimeExpectedScore: 1.0 })
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
@@ -588,10 +755,48 @@ describe('generateReportMarkdown', () => {
       manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [outOfBoundRow], passed: false },
+      ...passingMarketOddsGates,
       strengthTable: [],
     })
     expect(markdown).toMatch(/Overall: STOP/)
     expect(markdown).toMatch(/Nott'm Forest v Coventry City/)
+  })
+
+  it('ticket #238: reports "Overall: STOP" when ONLY the market-odds liveness gate (gate 5) fails, even if every team-strength gate passes', () => {
+    const markdown = generateReportMarkdown({
+      generatedAt: new Date('2026-09-12T00:00:00Z'),
+      gameweekId: 4,
+      rows: [diagnosticRow()],
+      teamStrengthSourceGate: { count: 1, passed: true },
+      manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
+      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
+      marketOddsLivenessGate: { count: 0, passed: false },
+      marketOddsVsTeamStrengthGate: { maxAbsoluteDifference: null, passed: false },
+      overroundPlausibilityGate: { outOfRangeRows: [], fixturesWithOverround: 0, passed: false },
+      strengthTable: [],
+    })
+    expect(markdown).toMatch(/Overall: STOP/)
+    expect(markdown).toMatch(/Liveness/)
+  })
+
+  it('ticket #238: reports "Overall: STOP" and names the offending fixture when ONLY the overround plausibility gate (gate 7) fails', () => {
+    const badOverroundRow = diagnosticRow({ teamName: 'Fulham', opponentName: 'Everton', marketOddsExpectedScore: 0.5, marketOddsOverround: 1.4 })
+    const markdown = generateReportMarkdown({
+      generatedAt: new Date('2026-09-12T00:00:00Z'),
+      gameweekId: 4,
+      rows: [badOverroundRow],
+      teamStrengthSourceGate: { count: 1, passed: true },
+      manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
+      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
+      marketOddsLivenessGate: { count: 1, passed: true },
+      marketOddsVsTeamStrengthGate: { maxAbsoluteDifference: 0.05, passed: true },
+      overroundPlausibilityGate: { outOfRangeRows: [badOverroundRow], fixturesWithOverround: 1, passed: false },
+      strengthTable: [],
+    })
+    expect(markdown).toMatch(/Overall: STOP/)
+    expect(markdown).toMatch(/Fulham v Everton/)
   })
 
   it('renders an empty strength table without error', () => {
@@ -603,6 +808,7 @@ describe('generateReportMarkdown', () => {
       manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
+      ...passingMarketOddsGates,
       strengthTable: [],
     })
     expect(markdown).toMatch(/Point-in-time team strength/)
@@ -724,7 +930,16 @@ describe('ticket #242 source invariants', () => {
 
   it('checkExpectedScoreBoundGate is called and its result feeds the report AND job_runs.details', () => {
     expect(source).toMatch(/const expectedScoreBoundGate = checkExpectedScoreBoundGate\(rows\)/)
-    expect(source).toMatch(/expectedScoreBoundGate,?\s*\n?\s*strengthTable/) // ReportData construction
+    // ReportData construction -- ticket #238 inserts the three new market-odds
+    // gate fields between expectedScoreBoundGate and strengthTable, so this no
+    // longer asserts direct adjacency, only that both are present in the same
+    // object literal (the ReportData: { ... } block starting at this match).
+    expect(source).toMatch(/expectedScoreBoundGate,?\s*\n/)
+    const reportDataStart = source.indexOf('const reportData: ReportData = {')
+    const reportDataEnd = source.indexOf('}', reportDataStart)
+    const reportDataBlock = source.slice(reportDataStart, reportDataEnd)
+    expect(reportDataBlock).toMatch(/expectedScoreBoundGate/)
+    expect(reportDataBlock).toMatch(/strengthTable/)
   })
 
   it('the variance gate band constants are exactly [0.14, 0.20], and the bound gate constants are exactly [0.10, 0.90]', () => {
@@ -732,5 +947,58 @@ describe('ticket #242 source invariants', () => {
     expect(source).toMatch(/TEAM_STRENGTH_STDDEV_MAX\s*=\s*0\.2\b/)
     expect(source).toMatch(/EXPECTED_SCORE_BOUND_MIN\s*=\s*0\.1\b/)
     expect(source).toMatch(/EXPECTED_SCORE_BOUND_MAX\s*=\s*0\.9\b/)
+  })
+})
+
+// ============================================================================
+// Ticket #238 — source invariants. Same technique as #235/#242 above: main()
+// itself can't be exercised without a live Supabase project, so the
+// exit-non-zero wiring for the three NEW gates is proven by grepping the
+// real, shipped source.
+// ============================================================================
+
+describe('ticket #238 source invariants', () => {
+  it('main() exits non-zero when the market-odds liveness gate (gate 5, the new PRIMARY-shaped condition for this ticket) fails', () => {
+    expect(source).toMatch(/!marketOddsLivenessGate\.passed/)
+    const ifStart = source.indexOf('if (\n      !teamStrengthSourceGate.passed')
+    expect(ifStart).toBeGreaterThan(-1)
+    const failureBlockEnd = source.indexOf('process.exit(1)', ifStart)
+    const failureBlock = source.slice(ifStart, failureBlockEnd)
+    expect(failureBlock).toMatch(/!marketOddsLivenessGate\.passed/)
+    expect(failureBlock).toMatch(/status:\s*'failure'/)
+  })
+
+  it('main() exits non-zero when the market-odds-vs-team-strength divergence gate (gate 6) fails', () => {
+    const ifStart = source.indexOf('if (\n      !teamStrengthSourceGate.passed')
+    const failureBlockEnd = source.indexOf('process.exit(1)', ifStart)
+    const failureBlock = source.slice(ifStart, failureBlockEnd)
+    expect(failureBlock).toMatch(/!marketOddsVsTeamStrengthGate\.passed/)
+  })
+
+  it('main() exits non-zero when the overround plausibility gate (gate 7) fails', () => {
+    const ifStart = source.indexOf('if (\n      !teamStrengthSourceGate.passed')
+    const failureBlockEnd = source.indexOf('process.exit(1)', ifStart)
+    const failureBlock = source.slice(ifStart, failureBlockEnd)
+    expect(failureBlock).toMatch(/!overroundPlausibilityGate\.passed/)
+  })
+
+  it('checkMarketOddsLivenessGate/checkMarketOddsVsTeamStrengthGate/checkOverroundPlausibilityGate are all called and their results feed the report AND job_runs.details', () => {
+    expect(source).toMatch(/const marketOddsLivenessGate = checkMarketOddsLivenessGate\(rows\)/)
+    expect(source).toMatch(/const marketOddsVsTeamStrengthGate = checkMarketOddsVsTeamStrengthGate\(rows\)/)
+    expect(source).toMatch(/const overroundPlausibilityGate = checkOverroundPlausibilityGate\(rows\)/)
+    const reportDataStart = source.indexOf('const reportData: ReportData = {')
+    const reportDataEnd = source.indexOf('}', reportDataStart)
+    const reportDataBlock = source.slice(reportDataStart, reportDataEnd)
+    expect(reportDataBlock).toMatch(/marketOddsLivenessGate/)
+    expect(reportDataBlock).toMatch(/marketOddsVsTeamStrengthGate/)
+    expect(reportDataBlock).toMatch(/overroundPlausibilityGate/)
+  })
+
+  it('the divergence threshold constant matches the ticket text exactly: 0.02', () => {
+    expect(source).toMatch(/maxAbsoluteDifference\s*>\s*0\.02/)
+  })
+
+  it('buildDiagnosticRows threads oddsRow/nowMs through to buildFixtureContext -- the SAME market-odds wiring the live job (project-points.ts) uses, never reimplemented here', () => {
+    expect(source).toMatch(/oddsRow,\s*\n\s*nowMs,?\s*\n\s*\}\)/)
   })
 })
