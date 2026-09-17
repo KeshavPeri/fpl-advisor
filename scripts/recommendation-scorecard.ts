@@ -1409,6 +1409,12 @@ interface PredictionLogRow {
   actual_minutes: number | null
   settled_at: string | null
   captured_at: string
+  /** Ticket #249. Present on every row (NOT NULL in the migration) — read
+   *  here for the naive highest-projected-captain baseline. See file header,
+   *  "PROJECTED, AS IT STOOD AT THAT SNAPSHOT": settle-predictions.ts writes
+   *  this value back unchanged at settlement, so a settled row's
+   *  projected_points is exactly the frozen pre-deadline projection. */
+  projected_points: number
 }
 
 /**
@@ -1451,6 +1457,32 @@ function buildActualsByGameweek(rows: readonly PredictionLogRow[]): {
   return { byGameweek, conflictingPlayerCount }
 }
 
+/**
+ * Ticket #249. Builds one (player -> projected_points) map per gameweek from
+ * the same settled prediction_log rows buildActualsByGameweek already reads
+ * — no second query. Same "keep whichever row was captured most recently"
+ * tie-break across model_version as buildActualsByGameweek, for the same
+ * reason (this is a fact frozen at capture time, and a duplicate model
+ * version is the only way more than one row can exist per player/gameweek).
+ */
+function buildProjectedByGameweek(rows: readonly PredictionLogRow[]): Map<number, Map<number, { points: number; capturedAtMs: number }>> {
+  const byGameweek = new Map<number, Map<number, { points: number; capturedAtMs: number }>>()
+  for (const row of rows) {
+    if (row.settled_at === null) continue
+    let forGameweek = byGameweek.get(row.gameweek_id)
+    if (!forGameweek) {
+      forGameweek = new Map()
+      byGameweek.set(row.gameweek_id, forGameweek)
+    }
+    const capturedAtMs = new Date(row.captured_at).getTime()
+    const existing = forGameweek.get(row.player_id)
+    if (!existing || capturedAtMs > existing.capturedAtMs) {
+      forGameweek.set(row.player_id, { points: row.projected_points, capturedAtMs })
+    }
+  }
+  return byGameweek
+}
+
 // ----------------------------------------------------------------------------
 // Report rendering — plain text formatting, no I/O. Kept as pure functions so
 // the "sample size beside every figure" and "standing line" requirements are
@@ -1477,11 +1509,121 @@ function fmtEntity(entity: ScoredEntity | null): string {
   return `gross ${fmtNum(entity.grossPoints)}, ${net}${armband}`
 }
 
+/**
+ * Renders ticket #249's captaincy-regret section. A standalone function
+ * (rather than inlined in renderScorecard) so it is directly testable
+ * without constructing an unrelated RenderScorecardInput. See this file's
+ * "CAPTAINCY REGRET AND RANK" header for what every figure means.
+ */
+export function renderCaptaincyRegretSection(results: readonly CaptaincyRegretResult[]): string[] {
+  const scored = results.filter((r): r is CaptaincyRegretScored => r.ok)
+  const excluded = results.filter((r): r is CaptaincyRegretExcluded => !r.ok)
+
+  const lines: string[] = []
+  lines.push('## Captaincy — regret and rank against a naive baseline')
+  lines.push('')
+  lines.push(
+    `**${scored.length} gameweek(s) measured here.** ` +
+      'This section only ever scores a gameweek that has BOTH a frozen `notifications.plan_snapshot` AND settled ' +
+      'actuals — unlike every other section above, it never falls back to the mutable `recommendations` table (the ' +
+      'point is scoring what was actually sent to Keshav). At most four gameweeks of snapshots exist at all (the ' +
+      'plan_snapshot column shipped 13 Sep 2026), so a mean over this few gameweeks is weak evidence — this ' +
+      "instrument's value is that it accumulates over the season, not that any single run of it is conclusive " +
+      '(same convention as scripts/bonus-validation-report.ts\'s own three-gameweek limitation). Read every figure ' +
+      'below alongside its own sample size, printed beside it.',
+  )
+  lines.push('')
+  lines.push(
+    '**"Best available" is a hindsight ceiling** — the highest actual score among the starting eleven that ' +
+      'gameweek, self included. It is not a target anyone could have known to hit before kickoff; it exists only ' +
+      'to measure regret, the points left on the table relative to the best outcome that was possible in ' +
+      'hindsight.',
+  )
+  lines.push('')
+
+  if (scored.length === 0) {
+    lines.push(
+      '**No gameweek both has a plan_snapshot and settled actuals yet — no captaincy regret figure can be ' +
+        "computed.** See the excluded-gameweeks table below for why each gameweek this script knows about didn't " +
+        'qualify.',
+    )
+    lines.push('')
+  } else {
+    lines.push(
+      '| Gameweek | Chosen captain (actual) | Best available (hindsight) | Regret | Rank | ' +
+        'Naive — highest projected (actual) | Naive regret | Naive rank |',
+    )
+    lines.push('|---|---|---|---|---|---|---|---|')
+    for (const gw of scored) {
+      lines.push(
+        `| ${gw.gameweekId} | player ${gw.chosen.playerId}: ${fmtNum(gw.chosen.actualPoints)} | ` +
+          `${fmtNum(gw.chosen.bestAvailableActualPoints)} | ${fmtNum(gw.chosen.regret)} | ${gw.chosen.rank} | ` +
+          `player ${gw.naive.playerId}: ${fmtNum(gw.naive.actualPoints)} | ${fmtNum(gw.naive.regret)} | ${gw.naive.rank} |`,
+      )
+    }
+    lines.push('')
+
+    const chosenRegretPool = poolCaptaincyFigure(scored.map((gw) => gw.chosen.regret))
+    const chosenRankPool = poolCaptaincyFigure(scored.map((gw) => gw.chosen.rank))
+    const naiveRegretPool = poolCaptaincyFigure(scored.map((gw) => gw.naive.regret))
+    const naiveRankPool = poolCaptaincyFigure(scored.map((gw) => gw.naive.rank))
+
+    lines.push('**Pooled (from underlying gameweek rows, never an average of per-gameweek means):**')
+    lines.push('')
+    lines.push(
+      `- App's actual pick — mean regret ${fmtNum(chosenRegretPool.mean)} (n=${chosenRegretPool.n}), ` +
+        `mean rank ${fmtNum(chosenRankPool.mean)} (n=${chosenRankPool.n})`,
+    )
+    lines.push(
+      `- Naive highest-projected pick — mean regret ${fmtNum(naiveRegretPool.mean)} (n=${naiveRegretPool.n}), ` +
+        `mean rank ${fmtNum(naiveRankPool.mean)} (n=${naiveRankPool.n})`,
+    )
+    lines.push('')
+    lines.push(
+      "Naive regret below the app's own regret means the app's actual captaincy pick diverged from the naive " +
+        'highest-projected pick and that divergence HURT; naive regret above the app\'s own means the divergence ' +
+        "HELPED. Per the ticket text, the naive pick is usually what the app's actual pick is anyway.",
+    )
+    lines.push('')
+
+    const viceSummary = summarizeViceEffect(scored)
+    const viceComparisonText =
+      viceSummary.triggeredCount === 0
+        ? 'n/a — the rule never triggered in any measured gameweek, so there is nothing to compare.'
+        : `the vice-captain outscored the blanking named captain in ${viceSummary.viceScoredBetterCount}/${viceSummary.triggeredCount} of them.`
+    lines.push(
+      '**Vice-captain:** the named captain played zero minutes — the real FPL rule that promotes the armband to ' +
+        `the vice-captain — in ${viceSummary.triggeredCount}/${scored.length} scored gameweek(s). Scored only for ` +
+        "those (the ticket's own rule: \"don't score it every week\"): " +
+        viceComparisonText,
+    )
+    lines.push('')
+  }
+
+  if (excluded.length > 0) {
+    lines.push('### Excluded from captaincy regret')
+    lines.push('')
+    lines.push('| Gameweek | Reason | Detail |')
+    lines.push('|---|---|---|')
+    for (const e of excluded) {
+      lines.push(`| ${e.gameweekId} | ${e.reason} | ${e.detail} |`)
+    }
+    lines.push('')
+  }
+
+  return lines
+}
+
 export interface RenderScorecardInput {
   generatedAtIso: string
   results: readonly GameweekResult[]
   counters: ReconciliationCounters
   conflictingPlayerCount: number
+  /** Ticket #249. Optional (defaults to no rows / all excluded upstream)
+   *  purely so every RenderScorecardInput literal written before this
+   *  ticket — including this file's own pre-existing tests — keeps
+   *  compiling untouched. */
+  captaincyRegret?: readonly CaptaincyRegretResult[]
 }
 
 export function renderScorecard(input: RenderScorecardInput): string {
@@ -1620,6 +1762,8 @@ export function renderScorecard(input: RenderScorecardInput): string {
     }
   }
   lines.push('')
+
+  lines.push(...renderCaptaincyRegretSection(input.captaincyRegret ?? []))
 
   return lines.join('\n')
 }
@@ -1813,7 +1957,7 @@ async function main(): Promise<void> {
     } = await fetchAllPages<PredictionLogRow>((from, to) =>
       supabase
         .from('prediction_log')
-        .select('gameweek_id, player_id, actual_points, actual_minutes, settled_at, captured_at, model_version')
+        .select('gameweek_id, player_id, actual_points, actual_minutes, settled_at, captured_at, model_version, projected_points')
         .not('settled_at', 'is', null)
         .order('gameweek_id', { ascending: true })
         .order('player_id', { ascending: true })
@@ -1837,6 +1981,7 @@ async function main(): Promise<void> {
     assertRowCountMatches('prediction_log (settled)', predictionLogRows.length, predictionLogExpectedCount ?? 0)
 
     const { byGameweek: actualsByGameweek, conflictingPlayerCount } = buildActualsByGameweek(predictionLogRows)
+    const projectedByGameweek = buildProjectedByGameweek(predictionLogRows)
 
     // ------------------------------------------------------------------
     // 4. Score every gameweek that has a Plan A. Ticket #231: Plan A comes
@@ -1866,25 +2011,75 @@ async function main(): Promise<void> {
     })
 
     const counters = reconcile(results)
+
+    // ------------------------------------------------------------------
+    // 5. Ticket #249 — captaincy regret and rank. A SEPARATE population from
+    //    `results` above: this section never falls back to `recommendations`
+    //    (see this file's own "CAPTAINCY REGRET AND RANK" header), so a
+    //    gameweek that `results` scored via the mutable-table fallback is
+    //    still explicitly excluded here (reason 'noSnapshot') rather than
+    //    silently reused. Iterates the same `gameweekIds` universe as every
+    //    other section (every gameweek with a stored Plan A) purely so a
+    //    gameweek this script has never heard of at all cannot appear.
+    // ------------------------------------------------------------------
+    const captaincyRegretResults: CaptaincyRegretResult[] = gameweekIds.map((gameweekId) => {
+      const rawSnapshot = latestSnapshotByGameweek.get(gameweekId)
+      if (!rawSnapshot) {
+        return {
+          gameweekId,
+          ok: false,
+          reason: 'noSnapshot',
+          detail: 'no notifications.plan_snapshot was recorded for this gameweek — predates the plan_snapshot column, or writing it failed. Excluded from every pooled captaincy-regret figure.',
+        }
+      }
+
+      const resolved = snapshotToPlanRecord(gameweekId, rawSnapshot, codeToPlayerId)
+      if (!resolved.ok) {
+        return { gameweekId, ok: false, reason: 'reconstructionFailed', detail: resolved.detail }
+      }
+
+      const actuals = actualsByGameweek.get(gameweekId)
+      if (!actuals || actuals.size === 0) {
+        return { gameweekId, ok: false, reason: 'unsettled', detail: 'no settled prediction_log rows exist yet for this gameweek.' }
+      }
+
+      const projected = projectedByGameweek.get(gameweekId) ?? new Map<number, { points: number; capturedAtMs: number }>()
+      const projectedPoints = new Map<number, number>()
+      for (const [playerId, entry] of projected) projectedPoints.set(playerId, entry.points)
+
+      return evaluateCaptaincyRegret(
+        gameweekId,
+        resolved.plan.startingXi,
+        resolved.plan.captainPlayerId,
+        resolved.plan.viceCaptainPlayerId,
+        actuals,
+        projectedPoints,
+      )
+    })
+
     const report = renderScorecard({
       generatedAtIso: startedAt.toISOString(),
       results,
       counters,
       conflictingPlayerCount,
+      captaincyRegret: captaincyRegretResults,
     })
 
     await mkdir(dirname(reportPath), { recursive: true })
     await writeFile(reportPath, report, 'utf8')
 
+    const captaincyRegretScoredCount = captaincyRegretResults.filter((r) => r.ok).length
     const message =
       `${JOB_NAME}: ${counters.gameweeksRead} gameweek(s) read, ${counters.gameweeksScored} scored ` +
       `(excluded: ${counters.excludedUnsettled} unsettled, ${counters.excludedMissingActuals} missing actuals, ` +
-      `${counters.excludedReconstructionFailed} reconstruction failed). Report written to ${reportPath}.`
+      `${counters.excludedReconstructionFailed} reconstruction failed). Captaincy regret (ticket #249): ` +
+      `${captaincyRegretScoredCount}/${captaincyRegretResults.length} gameweek(s) had both a plan_snapshot and ` +
+      `settled actuals. Report written to ${reportPath}.`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
       message,
-      details: { ...counters, conflictingPlayerCount, reportPath },
+      details: { ...counters, conflictingPlayerCount, reportPath, captaincyRegretScoredCount, captaincyRegretAttempted: captaincyRegretResults.length },
       startedAt,
     })
   } catch (err) {
