@@ -18,12 +18,19 @@ import {
   MODEL_IMPLIED_CONCEDED_SLOPE,
   PUBLISHED_SCORED_BUCKET_MEANS,
   SCORED_REPRODUCTION_TOLERANCE,
+  actualCleanSheetRate,
+  bucketCleanSheetStats,
   bucketIndexForExpectedScore,
   bucketRows,
   buildMeasuredRows,
+  checkCleanSheetGate,
   checkFalsificationGate,
+  cleanSheetLambdaNew,
+  cleanSheetLambdaOld,
   endpointSlope,
   isMateriallyFlatterThanModel,
+  meanAbsoluteError,
+  meanPredictedCleanSheetRate,
   weightedLinearFit,
   type MeasuredRow,
 } from './fixture-slope-report.ts'
@@ -359,5 +366,180 @@ describe('buildMeasuredRows', () => {
     const { rows } = buildMeasuredRows(records)
     expect(rows).toHaveLength(2)
     for (const row of rows) expect(row.expectedScoreValue).toBe(0.5)
+  })
+})
+
+// ============================================================================
+// Gate 3 (replaced) -- clean-sheet probability check computed from the SAME
+// measured rows, no Supabase. See scripts/fixture-slope-report.ts's own
+// comment above checkCleanSheetGate for the full "why" (LEARNINGS
+// -second-build-wave.md §20; the original gate needed a live before/after
+// calibration-report.ts run this Builder session cannot do).
+// ============================================================================
+
+describe('cleanSheetLambdaOld / cleanSheetLambdaNew', () => {
+  it('reproduce the two formulas by hand: b x 2 x (1-es), and b x (1.5-es)', () => {
+    expect(cleanSheetLambdaOld(1.45, 0.3)).toBeCloseTo(1.45 * 2 * 0.7, 12)
+    expect(cleanSheetLambdaNew(1.45, 0.3)).toBeCloseTo(1.45 * 1.2, 12)
+  })
+  it('both equal leagueBaselineGoals exactly at es = 0.5 -- an even fixture is unadjusted under both formulas', () => {
+    expect(cleanSheetLambdaOld(1.45, 0.5)).toBeCloseTo(1.45, 12)
+    expect(cleanSheetLambdaNew(1.45, 0.5)).toBeCloseTo(1.45, 12)
+  })
+})
+
+describe('meanPredictedCleanSheetRate -- the exp(-lambda) bucket-mean helper, against a known synthetic input (named test per the spec)', () => {
+  const rows: MeasuredRow[] = [
+    { matchId: 'a', gameweek: 1, teamCode: 1, expectedScoreValue: 0.3, actualGoalsScored: 0, actualGoalsConceded: 2 },
+    { matchId: 'b', gameweek: 1, teamCode: 2, expectedScoreValue: 0.6, actualGoalsScored: 0, actualGoalsConceded: 1 },
+    { matchId: 'c', gameweek: 1, teamCode: 3, expectedScoreValue: 0.9, actualGoalsScored: 0, actualGoalsConceded: 0 },
+  ]
+  const leagueBaselineGoals = 1.45
+
+  it('OLD lambda (b x 2 x (1-es)): pooled mean of exp(-lambda) over the three rows matches the hand-computed value', () => {
+    // Hand-computed (leagueBaselineGoals=1.45, lambdaOld = 1.45*2*(1-es)):
+    //   es=0.3 -> lambda=2.03 -> exp(-2.03) = 0.131335521148...
+    //   es=0.6 -> lambda=1.16 -> exp(-1.16) = 0.313486180882...
+    //   es=0.9 -> lambda=0.29 -> exp(-0.29) = 0.748263567578...
+    // mean = 0.397695089869...
+    const rate = meanPredictedCleanSheetRate(rows, leagueBaselineGoals, cleanSheetLambdaOld)
+    expect(rate).toBeCloseTo(0.397695089869, 9)
+  })
+
+  it('NEW lambda (b x (1.5-es)): pooled mean of exp(-lambda) over the SAME three rows matches the hand-computed value', () => {
+    // Hand-computed (lambdaNew = 1.45*(1.5-es)):
+    //   es=0.3 -> lambda=1.74  -> exp(-1.74) = 0.175520400616...
+    //   es=0.6 -> lambda=1.305 -> exp(-1.305) = 0.271172535045...
+    //   es=0.9 -> lambda=0.87  -> exp(-0.87) = 0.418951549247...
+    // mean = 0.288548161636...
+    const rate = meanPredictedCleanSheetRate(rows, leagueBaselineGoals, cleanSheetLambdaNew)
+    expect(rate).toBeCloseTo(0.288548161636, 9)
+  })
+
+  it('an empty row set returns 0, not NaN', () => {
+    expect(meanPredictedCleanSheetRate([], leagueBaselineGoals, cleanSheetLambdaOld)).toBe(0)
+  })
+
+  it('pools directly, never a two-level mean-of-means: matches a hand-summed/divided average, not an average of two sub-group averages', () => {
+    // Splitting the same 3 rows into a group of 1 and a group of 2 and
+    // averaging THOSE two group-means would give a different (wrong) number
+    // from the single pooled mean over all 3 rows -- this test proves the
+    // function does the latter.
+    const group1 = rows.slice(0, 1) // just the es=0.3 row
+    const group2 = rows.slice(1) // the es=0.6 and es=0.9 rows
+    const rate1 = meanPredictedCleanSheetRate(group1, leagueBaselineGoals, cleanSheetLambdaOld)
+    const rate2 = meanPredictedCleanSheetRate(group2, leagueBaselineGoals, cleanSheetLambdaOld)
+    const wrongMeanOfMeans = (rate1 + rate2) / 2
+    const pooled = meanPredictedCleanSheetRate(rows, leagueBaselineGoals, cleanSheetLambdaOld)
+    expect(pooled).not.toBeCloseTo(wrongMeanOfMeans, 6)
+    expect(pooled).toBeCloseTo(0.397695089869, 9)
+  })
+})
+
+describe('actualCleanSheetRate', () => {
+  it('is the share of rows with actualGoalsConceded === 0', () => {
+    const rows: MeasuredRow[] = [
+      { matchId: 'a', gameweek: 1, teamCode: 1, expectedScoreValue: 0.5, actualGoalsScored: 1, actualGoalsConceded: 0 },
+      { matchId: 'b', gameweek: 1, teamCode: 2, expectedScoreValue: 0.5, actualGoalsScored: 1, actualGoalsConceded: 1 },
+      { matchId: 'c', gameweek: 1, teamCode: 3, expectedScoreValue: 0.5, actualGoalsScored: 1, actualGoalsConceded: 0 },
+      { matchId: 'd', gameweek: 1, teamCode: 4, expectedScoreValue: 0.5, actualGoalsScored: 1, actualGoalsConceded: 3 },
+    ]
+    expect(actualCleanSheetRate(rows)).toBeCloseTo(0.5, 12)
+  })
+  it('an empty row set returns 0, not NaN', () => {
+    expect(actualCleanSheetRate([])).toBe(0)
+  })
+})
+
+describe('bucketCleanSheetStats', () => {
+  it('groups rows into the SAME 5 buckets bucketRows uses, and reports n plus all three pooled rates per bucket', () => {
+    const rows: MeasuredRow[] = [
+      { matchId: 'a', gameweek: 1, teamCode: 1, expectedScoreValue: 0.1, actualGoalsScored: 0, actualGoalsConceded: 0 },
+      { matchId: 'b', gameweek: 1, teamCode: 2, expectedScoreValue: 0.2, actualGoalsScored: 0, actualGoalsConceded: 2 },
+      { matchId: 'c', gameweek: 1, teamCode: 3, expectedScoreValue: 0.9, actualGoalsScored: 0, actualGoalsConceded: 1 },
+    ]
+    const buckets = bucketCleanSheetStats(rows, 1.45)
+    expect(buckets).toHaveLength(5)
+    expect(buckets[0].n).toBe(2)
+    expect(buckets[0].actualCleanSheetRate).toBeCloseTo(0.5, 12) // one of the two conceded 0
+    expect(buckets[4].n).toBe(1)
+    expect(buckets[4].actualCleanSheetRate).toBe(0)
+    expect(buckets[1].n).toBe(0)
+    expect(buckets[1].actualCleanSheetRate).toBe(0)
+  })
+})
+
+describe('meanAbsoluteError', () => {
+  it('is the unweighted mean of |predicted - actual| across all buckets, regardless of bucket n', () => {
+    const buckets = [
+      { label: 'a', n: 1000, actualCleanSheetRate: 0.2, oldPredictedCleanSheetRate: 0.3, newPredictedCleanSheetRate: 0.25 },
+      { label: 'b', n: 1, actualCleanSheetRate: 0.5, oldPredictedCleanSheetRate: 0.5, newPredictedCleanSheetRate: 0.9 },
+    ]
+    // OLD errors: |0.3-0.2|=0.1, |0.5-0.5|=0 -> mean 0.05.
+    // NEW errors: |0.25-0.2|=0.05, |0.9-0.5|=0.4 -> mean 0.225.
+    expect(meanAbsoluteError(buckets, (b) => b.oldPredictedCleanSheetRate)).toBeCloseTo(0.05, 12)
+    expect(meanAbsoluteError(buckets, (b) => b.newPredictedCleanSheetRate)).toBeCloseTo(0.225, 12)
+  })
+})
+
+describe('checkCleanSheetGate', () => {
+  it('PASSES when NEW MAE is strictly lower than OLD MAE', () => {
+    // Construct rows where the NEW (damped) formula's clean-sheet prediction
+    // is obviously closer to the observed rate than the OLD formula's, at
+    // both extremes. Hand-computed (leagueBaselineGoals=1.45):
+    //   es=0.2: predOld=exp(-2.32)=0.09827, predNew=exp(-1.885)=0.15183
+    //   es=0.8: predOld=exp(-0.58)=0.55990, predNew=exp(-1.015)=0.36240
+    // Setting the observed rate to 0.15 (low bucket, 3/20) and 0.35 (high
+    // bucket, 7/20) -- close to predNew at both ends, far from predOld --
+    // gives oldMae=0.05232, newMae=0.00285 (verified independently, see the
+    // gate's own oldMae/newMae assertions below).
+    const rows: MeasuredRow[] = []
+    for (let i = 0; i < 20; i++) {
+      rows.push({ matchId: `low-${i}`, gameweek: 1, teamCode: 1, expectedScoreValue: 0.2, actualGoalsScored: 0, actualGoalsConceded: i < 3 ? 0 : 2 })
+    }
+    for (let i = 0; i < 20; i++) {
+      rows.push({ matchId: `high-${i}`, gameweek: 1, teamCode: 2, expectedScoreValue: 0.8, actualGoalsScored: 0, actualGoalsConceded: i < 7 ? 0 : 2 })
+    }
+    const gate = checkCleanSheetGate(rows, 1.45)
+    expect(gate.oldMae).toBeCloseTo(0.05232, 4)
+    expect(gate.newMae).toBeCloseTo(0.00285, 4)
+    expect(gate.passed).toBe(true)
+    expect(gate.newMae).toBeLessThan(gate.oldMae)
+  })
+
+  it('STOPS (passed=false) when NEW MAE is >= OLD MAE -- constructed so the OLD formula is actually the better predictor', () => {
+    // Mirror-image of the PASS case: an actual clean-sheet rate that tracks
+    // the STEEPER (OLD) curve, not the damped one.
+    const rows: MeasuredRow[] = []
+    for (let i = 0; i < 50; i++) {
+      // es=0.2 (hard fixture): OLD lambda = 1.45*2*0.8=2.32 -> predicted CS rate ~0.098.
+      // Set actual close to that, far from NEW's prediction (lambda=1.45*1.3=1.885 -> ~0.152).
+      rows.push({ matchId: `low-${i}`, gameweek: 1, teamCode: 1, expectedScoreValue: 0.2, actualGoalsScored: 0, actualGoalsConceded: i < 5 ? 0 : 3 })
+    }
+    for (let i = 0; i < 50; i++) {
+      // es=0.8 (easy fixture): OLD lambda=1.45*2*0.2=0.58 -> predicted CS rate ~0.560.
+      rows.push({ matchId: `high-${i}`, gameweek: 1, teamCode: 2, expectedScoreValue: 0.8, actualGoalsScored: 0, actualGoalsConceded: i < 28 ? 0 : 3 })
+    }
+    // Hand-computed: actualLow=5/50=0.10 (close to predOld=0.0983, far from
+    // predNew=0.1518); actualHigh=28/50=0.56 (close to predOld=0.5599, far
+    // from predNew=0.3624) -- oldMae=0.000366, newMae=0.04989.
+    const gate = checkCleanSheetGate(rows, 1.45)
+    expect(gate.oldMae).toBeCloseTo(0.000366, 5)
+    expect(gate.newMae).toBeCloseTo(0.04989, 4)
+    expect(gate.passed).toBe(false)
+    expect(gate.newMae).toBeGreaterThanOrEqual(gate.oldMae)
+  })
+
+  it('equal MAE is a STOP, not a PASS (strict inequality only)', () => {
+    // Degenerate construction: force OLD and NEW to predict identically by
+    // using es=0.5, where cleanSheetLambdaOld and cleanSheetLambdaNew both
+    // equal leagueBaselineGoals exactly -- MAE is then necessarily equal.
+    const rows: MeasuredRow[] = [
+      { matchId: 'a', gameweek: 1, teamCode: 1, expectedScoreValue: 0.5, actualGoalsScored: 0, actualGoalsConceded: 0 },
+      { matchId: 'b', gameweek: 1, teamCode: 2, expectedScoreValue: 0.5, actualGoalsScored: 0, actualGoalsConceded: 1 },
+    ]
+    const gate = checkCleanSheetGate(rows, 1.45)
+    expect(gate.oldMae).toBeCloseTo(gate.newMae, 12)
+    expect(gate.passed).toBe(false)
   })
 })

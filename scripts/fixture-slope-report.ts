@@ -103,7 +103,7 @@ import {
   type MatchStatsForTeamStrength,
   type TeamMatchRecord,
 } from '../src/lib/projection/teamStrength.ts'
-import { expectedGoalsConceded, LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
+import { LEAGUE_BASELINE_GOALS_PER_TEAM } from '../src/lib/projection/fixture.ts'
 
 const JOB_NAME = 'fixture-slope-report'
 const DEFAULT_REPORT_PATH = './out/fixture-slope-report.md'
@@ -360,6 +360,104 @@ export function checkFalsificationGate(totalN: number, scoredBuckets: readonly B
 }
 
 // ============================================================================
+// Falsification gate 3 (REPLACED after the Builder's first report -- the
+// original spec needed a live Supabase read of scripts/calibration-report.ts
+// before/after, which a Builder session cannot do at all (no credentials)
+// and should not attempt even with them, per
+// LEARNINGS-second-build-wave.md §20: only write gates the Builder can
+// actually evaluate. This is Keshav's replacement: a gate computable
+// entirely from the SAME rows already measured above, no Supabase, no
+// re-running project-points -- does the DAMPED clean-sheet-probability curve
+// (`pCleanSheet = exp(-lambda)`, `lambda = leagueBaselineGoals *
+// defensiveMultiplier(es)`) actually track the real, observed clean-sheet
+// rate better than the pre-#244 curve did, or does the linear slope fit on
+// goals conceded (which the endpoint/weighted fit above confirms) come at
+// the cost of a WORSE clean-sheet probability -- the exact non-linearity
+// risk `pCleanSheet = exp(-lambda)` being non-linear in lambda raises, and
+// that this backlog's own G12 entry flagged before this measurement existed.
+//
+// POOLING, NOT A TWO-LEVEL MEAN-OF-MEANS. Every rate below (actual, old
+// predicted, new predicted) is a single pooled mean over the bucket's own
+// MeasuredRow's -- exactly how BucketStats above already pools
+// meanActualGoalsScored/Conceded per bucket, never an average of per-match
+// rates re-averaged a second time.
+// ============================================================================
+
+/** The pre-#244 formula's implied Poisson rate, lambda = leagueBaselineGoals x 2 x (1 - es) -- exactly what expectedGoalsConceded computed before this ticket (see fixture.test.ts's own "pre-#244" hand-computed values). */
+export function cleanSheetLambdaOld(leagueBaselineGoals: number, expectedScoreValue: number): number {
+  return leagueBaselineGoals * 2 * (1 - expectedScoreValue)
+}
+
+/** This ticket's damped formula's implied Poisson rate, lambda = leagueBaselineGoals x (1.5 - es) -- exactly DEFENSIVE_MULTIPLIER_OFFSET's own shape (src/lib/projection/fixture.ts), reproduced here as a plain number rather than importing defensiveMultiplier, so this gate reads as an independent check against the SAME formula, not a call into the code being checked. */
+export function cleanSheetLambdaNew(leagueBaselineGoals: number, expectedScoreValue: number): number {
+  return leagueBaselineGoals * (1.5 - expectedScoreValue)
+}
+
+/**
+ * Mean of `exp(-lambdaFn(leagueBaselineGoals, row.expectedScoreValue))` over
+ * `rows`, pooled directly (one number per row, then a single mean) -- the
+ * named "exp(-lambda) bucket-mean helper" per the gate spec. n=0 returns 0,
+ * never NaN, matching meanOf's own guard.
+ */
+export function meanPredictedCleanSheetRate(
+  rows: readonly MeasuredRow[],
+  leagueBaselineGoals: number,
+  lambdaFn: (leagueBaselineGoals: number, expectedScoreValue: number) => number,
+): number {
+  return meanOf(rows.map((r) => Math.exp(-lambdaFn(leagueBaselineGoals, r.expectedScoreValue))))
+}
+
+/** Share of `rows` whose actualGoalsConceded is exactly 0 -- the observed clean-sheet rate, pooled directly over the bucket's own rows. n=0 returns 0, never NaN. */
+export function actualCleanSheetRate(rows: readonly MeasuredRow[]): number {
+  if (rows.length === 0) return 0
+  const cleanSheets = rows.filter((r) => r.actualGoalsConceded === 0).length
+  return cleanSheets / rows.length
+}
+
+export interface CleanSheetBucketStats {
+  label: string
+  n: number
+  actualCleanSheetRate: number
+  oldPredictedCleanSheetRate: number
+  newPredictedCleanSheetRate: number
+}
+
+/** Groups `rows` into the SAME 5 buckets bucketRows uses (bucketIndexForExpectedScore, unmodified), and computes the three pooled clean-sheet rates per bucket. */
+export function bucketCleanSheetStats(rows: readonly MeasuredRow[], leagueBaselineGoals: number): CleanSheetBucketStats[] {
+  const buckets: MeasuredRow[][] = BUCKET_LABELS.map(() => [])
+  for (const row of rows) {
+    buckets[bucketIndexForExpectedScore(row.expectedScoreValue)].push(row)
+  }
+  return buckets.map((bucketRowsForLabel, i) => ({
+    label: BUCKET_LABELS[i],
+    n: bucketRowsForLabel.length,
+    actualCleanSheetRate: actualCleanSheetRate(bucketRowsForLabel),
+    oldPredictedCleanSheetRate: meanPredictedCleanSheetRate(bucketRowsForLabel, leagueBaselineGoals, cleanSheetLambdaOld),
+    newPredictedCleanSheetRate: meanPredictedCleanSheetRate(bucketRowsForLabel, leagueBaselineGoals, cleanSheetLambdaNew),
+  }))
+}
+
+/** Unweighted mean of the 5 per-bucket |predicted - actual| values -- 5 buckets = 5 rows being compared, the same shape as the endpoint/weighted-slope comparison elsewhere in this file. Never weighted by bucket n: an under-populated bucket's probability error counts exactly as much as a well-populated one's, matching the ticket text ("unweighted mean of the 5 per-bucket... values"). */
+export function meanAbsoluteError(buckets: readonly CleanSheetBucketStats[], predicted: (b: CleanSheetBucketStats) => number): number {
+  return meanOf(buckets.map((b) => Math.abs(predicted(b) - b.actualCleanSheetRate)))
+}
+
+export interface CleanSheetGateResult {
+  buckets: CleanSheetBucketStats[]
+  oldMae: number
+  newMae: number
+  /** true when NEW's MAE is strictly lower than OLD's -- ticket text: "STOP AND REPORT if NEW's MAE is higher than or equal to OLD's". Equality is a STOP, not a PASS -- a damping that does not measurably improve the clean-sheet probability has not earned replacing the old formula. */
+  passed: boolean
+}
+
+export function checkCleanSheetGate(rows: readonly MeasuredRow[], leagueBaselineGoals: number): CleanSheetGateResult {
+  const buckets = bucketCleanSheetStats(rows, leagueBaselineGoals)
+  const oldMae = meanAbsoluteError(buckets, (b) => b.oldPredictedCleanSheetRate)
+  const newMae = meanAbsoluteError(buckets, (b) => b.newPredictedCleanSheetRate)
+  return { buckets, oldMae, newMae, passed: newMae < oldMae }
+}
+
+// ============================================================================
 // Fetching and CSV parsing -- FPL-Core-Insights, no Supabase. See file header.
 // ============================================================================
 
@@ -496,8 +594,13 @@ interface ReportData {
   concededEndpointSlope: number
   concededWeightedFit: { slope: number; intercept: number }
   gate: FalsificationGateResult
+  cleanSheetGate: CleanSheetGateResult
   materiallyFlatter: boolean
   skippedNoOpponentRecord: number
+}
+
+function fmt4(n: number): string {
+  return n.toFixed(4)
 }
 
 function generateReportMarkdown(data: ReportData): string {
@@ -533,15 +636,24 @@ function generateReportMarkdown(data: ReportData): string {
 
   lines.push('## Goals CONCEDED — the new measurement')
   lines.push('')
-  lines.push('Model column is the CURRENT, unchanged `expectedGoalsConceded` (`leagueBaselineGoals × 2 × (1 − es)`):')
+  // Deliberately NOT calling fixture.ts's own expectedGoalsConceded() here.
+  // On a branch where this ticket's own fixture.ts change has already
+  // landed (true for every run after the first commit on this branch),
+  // that function returns the NEW, damped prediction -- which would make
+  // this "what the model being evaluated predicted" column silently track
+  // itself rather than the PRE-#244 baseline the whole report exists to
+  // compare against. cleanSheetLambdaOld's own literal reproduction of
+  // `leagueBaselineGoals * 2 * (1 - es)` below is the same pattern, for the
+  // same reason -- see its own comment.
+  lines.push('Model column is the PRE-#244 baseline formula (`leagueBaselineGoals × 2 × (1 − es)`) -- reproduced literally here, never called from fixture.ts, so this table is stable regardless of whether the damped formula has already landed on this branch:')
   lines.push('')
-  lines.push(bucketTableMarkdown(data.concededBuckets, (b) => expectedGoalsConceded(LEAGUE_BASELINE_GOALS_PER_TEAM, b.meanExpectedScore), 'model (1.45×2×(1−es))', 'conceded'))
+  lines.push(bucketTableMarkdown(data.concededBuckets, (b) => cleanSheetLambdaOld(LEAGUE_BASELINE_GOALS_PER_TEAM, b.meanExpectedScore), 'model (1.45×2×(1−es))', 'conceded'))
   lines.push('')
   lines.push(`Endpoint slope: ${fmt3(data.concededEndpointSlope)}. Weighted least-squares slope: ${fmt3(data.concededWeightedFit.slope)} (intercept ${fmt3(data.concededWeightedFit.intercept)}).`)
   lines.push(`Model-implied slope: ${MODEL_IMPLIED_CONCEDED_SLOPE} (= −leagueBaselineGoals × 2). Materiality band: ±${MATERIALITY_BAND_FRACTION * 100}% = [${(MODEL_IMPLIED_CONCEDED_SLOPE * (1 + MATERIALITY_BAND_FRACTION)).toFixed(3)}, ${(MODEL_IMPLIED_CONCEDED_SLOPE * (1 - MATERIALITY_BAND_FRACTION)).toFixed(3)}].`)
   lines.push('')
 
-  lines.push('## Verdict')
+  lines.push('## Slope verdict')
   lines.push('')
   lines.push(
     data.materiallyFlatter
@@ -549,6 +661,27 @@ function generateReportMarkdown(data: ReportData): string {
       : `The measured conceded slope (endpoint ${fmt3(data.concededEndpointSlope)}) is **within ±15%** of the model-implied ${MODEL_IMPLIED_CONCEDED_SLOPE}. No change to \`fixture.ts\` — the asymmetry between attack and defence is real, not a modelling error.`,
   )
   lines.push(`Total n across both tables (from the same run): ${totalN}.`)
+  lines.push('')
+
+  lines.push('## Clean-sheet probability check (gate 3)')
+  lines.push('')
+  lines.push(
+    'Replaces the original gate 3 (a live Supabase calibration-report.ts before/after, which a Builder session cannot run — see `LEARNINGS-second-build-wave.md` §20). Computed entirely from the SAME measured rows above: per bucket, the ACTUAL observed clean-sheet rate against the OLD formula\'s implied `exp(-lambda_old)` and this ticket\'s NEW damped formula\'s `exp(-lambda_new)` — both pooled directly over the bucket\'s own team-matches, never a mean-of-means.',
+  )
+  lines.push('')
+  lines.push('| es bucket | n | ACTUAL CS rate | OLD predicted (exp(−λ), λ=b×2×(1−es)) | NEW predicted (exp(−λ), λ=b×(1.5−es)) |')
+  lines.push('|---|---|---|---|---|')
+  for (const b of data.cleanSheetGate.buckets) {
+    lines.push(`| ${b.label} | ${b.n} | ${fmt4(b.actualCleanSheetRate)} | ${fmt4(b.oldPredictedCleanSheetRate)} | ${fmt4(b.newPredictedCleanSheetRate)} |`)
+  }
+  lines.push('')
+  lines.push(`Mean absolute error vs ACTUAL, unweighted mean of the 5 per-bucket \`|predicted - actual|\` values: OLD = ${fmt4(data.cleanSheetGate.oldMae)}, NEW = ${fmt4(data.cleanSheetGate.newMae)}.`)
+  lines.push('')
+  lines.push(
+    data.cleanSheetGate.passed
+      ? `**PASS** — NEW's MAE (${fmt4(data.cleanSheetGate.newMae)}) is lower than OLD's (${fmt4(data.cleanSheetGate.oldMae)}). The damped formula tracks the real clean-sheet rate better than the pre-#244 formula did; the non-linearity risk \`pCleanSheet = exp(-lambda)\` raised did not materialize.`
+      : `**STOP** — NEW's MAE (${fmt4(data.cleanSheetGate.newMae)}) is NOT lower than OLD's (${fmt4(data.cleanSheetGate.oldMae)}). The linear slope fit on goals conceded improved that figure while making the clean-sheet probability worse — the damping should NOT ship as-is.`,
+  )
 
   return lines.join('\n')
 }
@@ -584,6 +717,7 @@ async function main(): Promise<void> {
   const totalN = rows.length
   const gate = checkFalsificationGate(totalN, buckets)
   const materiallyFlatter = isMateriallyFlatterThanModel(concededEndpointSlope)
+  const cleanSheetGate = checkCleanSheetGate(rows, LEAGUE_BASELINE_GOALS_PER_TEAM)
 
   const reportData: ReportData = {
     generatedAt: new Date(),
@@ -595,6 +729,7 @@ async function main(): Promise<void> {
     concededEndpointSlope,
     concededWeightedFit,
     gate,
+    cleanSheetGate,
     materiallyFlatter,
     skippedNoOpponentRecord,
   }
@@ -608,6 +743,12 @@ async function main(): Promise<void> {
 
   if (!gate.populationGate.passed || !gate.reproductionGate.passed) {
     console.error(`${JOB_NAME}: falsification gate FAILED. See report above.`)
+    process.exit(1)
+  }
+  if (!cleanSheetGate.passed) {
+    console.error(
+      `${JOB_NAME}: clean-sheet gate 3 FAILED -- NEW MAE (${cleanSheetGate.newMae.toFixed(4)}) is not lower than OLD MAE (${cleanSheetGate.oldMae.toFixed(4)}). The damping should NOT ship as-is. See report above.`,
+    )
     process.exit(1)
   }
 }

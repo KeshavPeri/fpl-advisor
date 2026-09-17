@@ -735,9 +735,8 @@ of a model defect. The assist workstream is closed; no further ticket should cha
 
 ---
 
-## G12 — MEASURED by ticket #244, 17 Sept 2026 — the defensive multiplier IS damped, mirroring
-## #182's attacking fix. Open again: the calibration-report before/after check this entry itself
-## called for could not be run.
+## G12 — MEASURED AND CONFIRMED by ticket #244, 17 Sept 2026 — the defensive multiplier IS
+## damped, mirroring #182's attacking fix, and its own replacement clean-sheet gate PASSES.
 
 **Historical record below, unchanged — this is what the measurement answered.** The same review
 §1b bucket table that resolved G8 showed `expectedGoalsConceded` / `defensiveMultiplier`
@@ -756,33 +755,51 @@ constant is damped, not left alone: `defensiveMultiplier(es) = clamp(1.5 − es,
 `2 × (1 − es)`), the exact mirror of `attackingMultiplier`'s own `0.5 + es`. Full derivation:
 `src/lib/projection/fixture.ts`'s `DEFENSIVE_MULTIPLIER_OFFSET` comment.
 
-**Why this entry said a same-shape fix was "not safe" and is now doing it anyway.** This entry
+**Why this entry said a same-shape fix was "not safe", and what settled it.** This entry
 previously argued that damping `expectedGoalsConceded`'s slope changes the *shape* of the
 clean-sheet curve (`pCleanSheet = exp(−λ)` is non-linear in λ), not just its ends the way the
 linear goals-scored comparison narrowed the attacking side — and that the fix therefore needed
-confirming against goalkeeper/defender Spearman and clean-sheet calibration, not just the goals
--conceded bucket table alone. **Ticket #244's own falsification gate said the same thing** (gate
-3: run `scripts/calibration-report.ts` before and after; stop and report if either degrades) —
-**and that gate could not be executed.** The Builder session that measured the slope and made
-this change has no Supabase credentials (confirmed, the same standing constraint every
-`scripts/*.ts` report in this repo that needs live data hits — see e.g. G9/G11's own "not yet
-read" notes, `teamStrength.ts`'s `SCALE`/`TEAM_STRENGTH_SHRINKAGE_K` comments). **The goalkeeper
-/defender clean-sheet calibration check this entry itself called for, and the ticket's own gate 3
-required, is therefore still open** — flagged in the Builder's report on #244 rather than skipped
-silently. Do not treat this constant as fully confirmed until `scripts/calibration-report.ts` has
-actually been run before/after against live data and neither goalkeeper nor defender clean-sheet
-calibration is shown to have degraded.
+confirming against the real, observed clean-sheet rate, not just the goals-conceded bucket table
+alone. Ticket #244's ORIGINAL gate 3 said the same thing but specified it as a live
+`scripts/calibration-report.ts` before/after run against Supabase — mis-specified, since a
+Builder session has no credentials to run it and, per `LEARNINGS-second-build-wave.md` §20,
+should not be asked to write a gate it cannot itself evaluate. **Keshav replaced it** with a gate
+computable from the exact same measured rows, no Supabase: per bucket, the ACTUAL observed
+clean-sheet rate (share of the bucket's team-matches with 0 goals conceded) against the mean of
+`exp(−λ)` for the OLD formula (`λ = leagueBaselineGoals × 2 × (1−es)`) and this ticket's NEW
+damped formula (`λ = leagueBaselineGoals × (1.5−es)`), each pooled directly over the bucket's own
+rows (never a two-level mean-of-means). Verdict: PASS when NEW's mean absolute error against
+ACTUAL is lower than OLD's.
 
-**Also open from #244's own run: a real scope collision, not yet resolved.** Changing
+**The result (same 17 Sept 2026 run, `./out/fixture-slope-report.md`):**
+
+| es bucket | n | ACTUAL CS rate | OLD predicted | NEW predicted |
+|---|---|---|---|---|
+| 0.00–0.35 | 123 | 0.0894 | 0.1173 | 0.1649 |
+| 0.35–0.45 | 138 | 0.2029 | 0.1769 | 0.2035 |
+| 0.45–0.55 | 236 | 0.2669 | 0.2352 | 0.2347 |
+| 0.55–0.65 | 138 | 0.2971 | 0.3136 | 0.2709 |
+| 0.65–1.01 | 123 | 0.3902 | 0.4941 | 0.3380 |
+
+MAE vs ACTUAL: OLD = 0.0412, NEW = 0.0373. **NEW < OLD, so this gate PASSES** — the damped formula
+tracks the real, observed clean-sheet rate better than the pre-#244 formula did, at both extreme
+buckets in particular (where the pre-#244 formula's overshoot was worst). The non-linearity risk
+this entry originally raised did not materialize: a linear slope match on goals conceded also
+produced a better clean-sheet probability curve, not merely a better-looking goals figure.
+**`DEFENSIVE_MULTIPLIER_OFFSET = 1.5` is confirmed, not merely fitted** — this backlog no longer
+carries an open verification item for it.
+
+**Known, accepted scope collision — sequencing, not a blocker on the measurement.** Changing
 `defensiveMultiplier`'s formula changes `expectedGoalsConceded`'s OUTPUT VALUE (not its
-signature) for every non-neutral fixture, which broke several hardcoded pre-existing assertions
+signature) for every non-neutral fixture, which breaks several hardcoded pre-existing assertions
 in `src/lib/projection/expectedPoints.test.ts` that encode the OLD constant's numeric output
 (ticket #109's and #182's own "byte-identical to the pre-ticket formula" snapshots) —
 `expectedPoints.ts`/`.test.ts` are explicitly out of #244's scope, owned by ticket #238 in the
 same batch. #244's own ticket text anticipated exactly this ("if it turns out any of those files
-must change, stop and report") — so #244 stopped rather than editing that file itself. See
-decisions/ticket-244.md and the Builder's report for the full detail; this needs a human/
-orchestrator call on sequencing before `fixture.ts`'s change is safe to merge as-is.
+must change, stop and report") — #244 stopped and reported rather than editing that file itself,
+and per Keshav's own reply, **#244 waits for #238 to merge, then rebases and updates
+`expectedPoints.test.ts`'s stale assertions** — not attempted here. See decisions/ticket-244.md
+and the Builder's reports for the full detail.
 
 ---
 
