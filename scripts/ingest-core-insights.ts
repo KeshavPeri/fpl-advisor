@@ -1,7 +1,10 @@
 // FPL-Core-Insights ingest job — ticket #12, team-write matching fixed by
 // ticket #32, stale-elo-on-unmatched-club fixed by ticket #63, #63's own
 // nulling rule narrowed (never applied to a source gap) and opponent
-// resolution given a slug fallback by ticket #176.
+// resolution given a slug fallback by ticket #176. Per-gameweek price/bonus/
+// BPS history (public.player_gameweek_history, from a different source file,
+// playerstats.csv) added by ticket #248 — see that section, below
+// buildTeamCodeMap, for its own full header.
 //
 // TICKET #63 FINDING (verified 18 Aug 2026, live data) — WHAT IT GOT RIGHT.
 // A club whose `code` has no row in the ingested season's teams.csv — i.e.
@@ -222,6 +225,11 @@ const DEFAULT_SEASON = '2025-2026'
 const SOURCE_BASE_URL = 'https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data'
 const MAX_GAMEWEEKS = 38 // a Premier League season is 38 gameweeks; the walk stops at the first 404 well before this in practice
 const PLAYER_MATCH_STATS_MIGRATION = 'supabase/migrations/20260811170000_player_match_stats.sql'
+// Ticket #248.
+const PLAYER_GAMEWEEK_HISTORY_MIGRATION = 'supabase/migrations/20260917100000_player_gameweek_history.sql'
+// Batched the same way ingest-gameweek-live-stats.ts batches its own upsert — a full season is up
+// to ~30,000 rows (verified: 29,978 for 2025-2026 on 17 Sept 2026), too many for one PostgREST call.
+const PLAYER_GAMEWEEK_HISTORY_UPSERT_BATCH_SIZE = 500
 
 function seasonRootUrl(season: string, file: string): string {
   return `${SOURCE_BASE_URL}/${encodeURIComponent(season)}/${file}`
@@ -231,6 +239,12 @@ function gameweekUrl(season: string, gameweek: number): string {
   // "By Gameweek" is a fixed path segment (not derived from configuration),
   // so its %20 encoding is written once, here, rather than computed.
   return `${SOURCE_BASE_URL}/${encodeURIComponent(season)}/By%20Gameweek/GW${gameweek}/playermatchstats.csv`
+}
+
+// Ticket #248: playerstats.csv lives at the season ROOT (one file covering every gameweek), unlike
+// playermatchstats.csv above which is walked per-gameweek under "By Gameweek/GW{n}/".
+function playerStatsUrl(season: string): string {
+  return seasonRootUrl(season, 'playerstats.csv')
 }
 
 // ============================================================================
@@ -384,6 +398,10 @@ const MATCH_STATS_REQUIRED_COLUMNS = [
   'goals_prevented',
   'team_goals_conceded',
 ]
+// Ticket #248. playerstats.csv is a DIFFERENT file from playermatchstats.csv above — one row per
+// player per GAMEWEEK (a season-cumulative snapshot at that point in time), not per match. See
+// this file's "player_gameweek_history" section, below buildTeamCodeMap, for the full "because".
+const PLAYERSTATS_REQUIRED_COLUMNS = ['id', 'now_cost', 'bonus', 'bps', 'ep_next', 'gw', 'starts']
 
 function toInt(value: string | undefined): number | null {
   if (value === undefined) return null
@@ -1225,6 +1243,157 @@ export function buildTeamCodeMap(playerRecords: Array<Record<string, string>>): 
 }
 
 // ============================================================================
+// player_gameweek_history — ticket #248. Per-gameweek price/bonus/BPS history, from a DIFFERENT
+// source file than player_match_stats above: playerstats.csv, one row per player per GAMEWEEK,
+// covering full past seasons (this is what unblocks a future season replay — G19 — and full-scale
+// bonus/BPS validation — G3 — neither of which gameweek_live_stats/ticket #224 can do, since that
+// table's source endpoint serves the CURRENT season only).
+//
+// ID RESOLUTION — same mechanism as player_match_stats.player_code, one section up.
+// playerstats.csv's own "id" column is that season's own FPL element id (NOT a stable cross-season
+// key — see the #12/#22 migration headers). It is resolved to player_code through the SAME
+// playerCodeByPlayerId map already built from that season's players.csv (buildPlayerCodeMap) —
+// no second map, no separate fetch. An id that does not resolve is skipped and counted by reason,
+// never guessed (this ticket's own DoD): 'invalid_or_missing_id' (the cell itself did not parse as
+// a number) or 'player_code_not_found' (it parsed, but that season's players.csv has no matching
+// player_code — the identical "small, expected gap" shape as player_match_stats.player_code).
+//
+// now_cost — VERIFIED 17 Sept 2026, and NOT what the ticket text assumed. playerstats.csv's own
+// now_cost column is already expressed in decimal million-pounds (e.g. "5.8" = £5.8m), NOT FPL's
+// raw integer-tenths-of-a-million format that public.players.now_cost carries — cross-checked
+// directly against a live bootstrap-static/ fetch the same day (the same player class of price
+// reads as a plain integer there, e.g. 60 for £6.0m, never 6.0). This is a Tier 2 finding, not a
+// guess: fetched both https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data/
+// 2025-2026/playerstats.csv and .../2026-2027/playerstats.csv directly (29,978 and 2,583 data
+// rows respectively) and confirmed now_cost's full observed range (3.7-15.1 and 3.9-15.5) is only
+// sane as decimal millions, never as tenths. Stored here EXACTLY as the source provides it — no
+// multiplication, no division, in either direction — see the column comment in the migration file
+// for the consequence this has for a consumer joining against public.players.now_cost.
+//
+// bonus / bps / starts are CUMULATIVE SEASON-TO-DATE TOTALS as of this gameweek, not this
+// gameweek's own award — verified directly by tracing one player's rows across consecutive
+// gameweeks (17 Sept 2026): starts rises exactly 1 per gameweek for a nailed starter, bonus and bps
+// rise monotonically (bps can occasionally move by ±1 between gameweeks, a small post-hoc BPS
+// correction FPL itself sometimes applies). This is the same season-cumulative semantics FPL's own
+// bootstrap-static top-level element.bonus/element.bps/element.starts fields have — playerstats.csv
+// is a per-gameweek SNAPSHOT of those cumulative figures, not a per-gameweek delta. A future
+// consumer wanting a single gameweek's own bonus/bps must difference consecutive rows for the same
+// player_code — not attempted by this ticket (substrate only, no validation-report change).
+//
+// STORE-VERBATIM, NEVER GUESS, EXTENDED TO THE OTHER NUMERIC COLUMNS TOO. gw/now_cost/bonus/bps/
+// starts were all observed fully populated across both ingested seasons (0 blanks in 29,978 +
+// 2,583 rows) — but a row whose cell fails to parse anyway (a genuine, unobserved source anomaly)
+// is skipped and counted under 'invalid_numeric_field' rather than writing a guessed value into a
+// NOT NULL column. ep_next is the one column genuinely observed blank in real data (1 of 29,978
+// rows) and is nullable here for exactly that reason — never a fabricated 0.
+// ============================================================================
+
+export interface PlayerGameweekHistoryRow {
+  season: string
+  gameweek: number
+  player_code: number
+  now_cost: number
+  bonus: number
+  bps: number
+  starts: number
+  ep_next: number | null
+  updated_at: string
+}
+
+export interface PlayerStatsRowResult {
+  row: PlayerGameweekHistoryRow | null
+  // Set exactly when row is null — one of a small, fixed set of named strings (never a formatted
+  // message), matching resolveOpponentTeamCode's own "counted and reported, never guessed" shape.
+  skipReason: string | null
+}
+
+/**
+ * Maps one playerstats.csv record to a player_gameweek_history row, or an explicit named skip
+ * reason. PURE — no I/O, unit-testable on constructed records (see this file's header and the
+ * section comment above for the full "because" behind every branch here).
+ */
+export function toPlayerGameweekHistoryRow(
+  record: Record<string, string>,
+  season: string,
+  playerCodeByPlayerId: ReadonlyMap<number, number>
+): PlayerStatsRowResult {
+  const playerId = toInt(record.id)
+  if (playerId === null) {
+    return { row: null, skipReason: 'invalid_or_missing_id' }
+  }
+  const playerCode = playerCodeByPlayerId.get(playerId)
+  if (playerCode === undefined) {
+    return { row: null, skipReason: 'player_code_not_found' }
+  }
+  const gameweek = toInt(record.gw)
+  const nowCost = toNumeric(record.now_cost) // verbatim — see section header, do not scale
+  const bonus = toInt(record.bonus)
+  const bps = toInt(record.bps)
+  const starts = toInt(record.starts)
+  if (gameweek === null || nowCost === null || bonus === null || bps === null || starts === null) {
+    return { row: null, skipReason: 'invalid_numeric_field' }
+  }
+  return {
+    row: {
+      season,
+      gameweek,
+      player_code: playerCode,
+      now_cost: nowCost,
+      bonus,
+      bps,
+      starts,
+      ep_next: toNumeric(record.ep_next), // nullable — see section header
+      updated_at: new Date().toISOString(),
+    },
+    skipReason: null,
+  }
+}
+
+export interface BuildPlayerGameweekHistoryRowsResult {
+  rows: PlayerGameweekHistoryRow[]
+  // Named reason -> count, summing to records.length - rows.length. Reported verbatim as
+  // job_runs.details.playerStatsRowsUnresolvedByReason; the total is playerStatsRowsUnresolved.
+  unresolvedByReason: Record<string, number>
+}
+
+export function buildPlayerGameweekHistoryRows(
+  records: Array<Record<string, string>>,
+  season: string,
+  playerCodeByPlayerId: ReadonlyMap<number, number>
+): BuildPlayerGameweekHistoryRowsResult {
+  const rows: PlayerGameweekHistoryRow[] = []
+  const unresolvedByReason: Record<string, number> = {}
+  for (const record of records) {
+    const { row, skipReason } = toPlayerGameweekHistoryRow(record, season, playerCodeByPlayerId)
+    if (row) {
+      rows.push(row)
+    } else if (skipReason) {
+      unresolvedByReason[skipReason] = (unresolvedByReason[skipReason] ?? 0) + 1
+    }
+  }
+  return { rows, unresolvedByReason }
+}
+
+// Batched upsert, keyed on the table's own primary key (season, gameweek, player_code) — the same
+// key makes a re-run idempotent: an identical re-ingest recomputes byte-identical rows (see
+// buildPlayerGameweekHistoryRows' determinism, proven in the test file) and overwrites the same
+// primary-key rows in place rather than inserting duplicates, exactly like every other upsert in
+// this file.
+async function upsertPlayerGameweekHistory(supabase: SupabaseClient, rows: readonly PlayerGameweekHistoryRow[]): Promise<number> {
+  for (let i = 0; i < rows.length; i += PLAYER_GAMEWEEK_HISTORY_UPSERT_BATCH_SIZE) {
+    const batch = rows.slice(i, i + PLAYER_GAMEWEEK_HISTORY_UPSERT_BATCH_SIZE)
+    const { error } = await supabase.from('player_gameweek_history').upsert(batch, { onConflict: 'season,gameweek,player_code' })
+    if (error) {
+      if (isMissingTable(error, 'player_gameweek_history')) {
+        throw new IngestError(`table "player_gameweek_history" does not exist — apply ${PLAYER_GAMEWEEK_HISTORY_MIGRATION} first`)
+      }
+      throw new IngestError(`upsert into player_gameweek_history failed: ${error.message}`)
+    }
+  }
+  return rows.length
+}
+
+// ============================================================================
 // player_id alignment — informational only, per the ticket. Logged so it is
 // visible in every run's output; never used to filter or drop rows. See the
 // migration file's header comment and the ticket #12 Builder report for what
@@ -1286,6 +1455,11 @@ async function main(): Promise<void> {
           matchRowsWithOpponentTeamCode: 0,
           matchRowsWithOpponentTeamCodeViaFallback: 0,
           matchRowsOpponentUnresolvedByReason: {},
+          // Ticket #248.
+          playerStatsRowsRead: 0,
+          playerStatsRowsWritten: 0,
+          playerStatsRowsUnresolved: 0,
+          playerStatsRowsUnresolvedByReason: {},
         },
         startedAt,
       })
@@ -1305,6 +1479,34 @@ async function main(): Promise<void> {
     const elementTypeByPlayerId = buildElementTypeMap(playerRecords)
     // Ticket #167: the player's own club — see buildTeamCodeMap.
     const teamCodeByPlayerId = buildTeamCodeMap(playerRecords)
+
+    // Ticket #248: per-gameweek price/bonus/BPS history, from playerstats.csv — a DIFFERENT
+    // season-root file from players.csv/teams.csv above. Reuses playerCodeByPlayerId (just built
+    // from this same season's players.csv) rather than a second id-resolution map. Non-200
+    // (including 404) fails the run loudly, same treatment as teams.csv below — this file living
+    // inside an already-published season directory (players.csv already succeeded, above) is a
+    // different case from "season not published at all", which players.csv's own 404 branch
+    // already handles.
+    const playerStatsUrlStr = playerStatsUrl(season)
+    const playerStatsResp = await fetchCsv(playerStatsUrlStr)
+    if (playerStatsResp.status !== 200) {
+      throw new IngestError(`unexpected HTTP ${playerStatsResp.status} fetching ${playerStatsUrlStr}`)
+    }
+    const playerStatsRecords = parseCsvRecords(playerStatsResp.text, playerStatsUrlStr, PLAYERSTATS_REQUIRED_COLUMNS)
+    const playerStatsRowsRead = playerStatsRecords.length
+    const playerGameweekHistoryResult = buildPlayerGameweekHistoryRows(playerStatsRecords, season, playerCodeByPlayerId)
+    const playerStatsRowsUnresolvedByReason = playerGameweekHistoryResult.unresolvedByReason
+    const playerStatsRowsUnresolved = Object.values(playerStatsRowsUnresolvedByReason).reduce((a, b) => a + b, 0)
+    const playerStatsRowsWritten = await upsertPlayerGameweekHistory(supabase, playerGameweekHistoryResult.rows)
+    // Reconciliation, checked, not just reported — same discipline #224's ingest job uses: every
+    // row read must land in exactly one bucket, written or unresolved (by reason), never neither.
+    if (playerStatsRowsWritten + playerStatsRowsUnresolved !== playerStatsRowsRead) {
+      throw new IngestError(
+        `playerstats.csv reconciliation failed for season ${season} — ${playerStatsRowsRead} row(s) read but ` +
+          `${playerStatsRowsWritten} written + ${playerStatsRowsUnresolved} unresolved = ` +
+          `${playerStatsRowsWritten + playerStatsRowsUnresolved}. This should be impossible.`
+      )
+    }
 
     const teamsUrl = seasonRootUrl(season, 'teams.csv')
     const teamsResp = await fetchCsv(teamsUrl)
@@ -1417,7 +1619,9 @@ async function main(): Promise<void> {
       `${matchRowsWithElementType} carrying a non-null element_type, ` +
       `${matchRowsWithTeamCode} carrying a non-null team_code, ` +
       `${matchRowsWithOpponentTeamCode} carrying a non-null opponent_team_code, ` +
-      `${matchRowsWithOpponentTeamCodeViaFallback} of those resolved via the name/short_name fallback)`
+      `${matchRowsWithOpponentTeamCodeViaFallback} of those resolved via the name/short_name fallback), ` +
+      `${playerStatsRowsRead} playerstats.csv row(s) read, ${playerStatsRowsWritten} player_gameweek_history row(s) upserted, ` +
+      `${playerStatsRowsUnresolved} unresolved (ticket #248)`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
@@ -1446,6 +1650,11 @@ async function main(): Promise<void> {
         matchRowsWithOpponentTeamCode,
         matchRowsWithOpponentTeamCodeViaFallback,
         matchRowsOpponentUnresolvedByReason,
+        // Ticket #248.
+        playerStatsRowsRead,
+        playerStatsRowsWritten,
+        playerStatsRowsUnresolved,
+        playerStatsRowsUnresolvedByReason,
       },
       startedAt,
     })
