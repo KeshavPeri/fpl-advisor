@@ -889,6 +889,15 @@ export const REQUIRED_ENV_VAR_SPECS: readonly EnvVarSpec[] = [
   { name: 'TELEGRAM_BOT_TOKEN', ifMissing: 'fail' },
   { name: 'TELEGRAM_CHAT_ID', ifMissing: 'fail' },
   { name: 'FPL_ENTRY_ID', ifMissing: 'warn' },
+  // Ticket #238. scripts/ingest-match-odds.ts exits non-zero and makes no
+  // network call at all when this is unset -- same "an unset credential
+  // guarantees the notification carries the wrong fixture term" reasoning
+  // TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID already get above, not the "degrades
+  // gracefully" reasoning FPL_ENTRY_ID gets: without market odds the chain
+  // still runs (team strength is the next tier down), so this is a WARN, not
+  // a FAIL -- a missing key means one fixture-term instrument is unavailable,
+  // not that the notification is absent or wrong outright.
+  { name: 'ODDS_API_KEY', ifMissing: 'warn' },
 ]
 
 export function checkConfiguration(
@@ -1383,6 +1392,11 @@ interface JobFreshnessTargetSpec {
 const JOB_FRESHNESS_TARGETS: readonly JobFreshnessTargetSpec[] = [
   { id: 'ingest-fpl', jobName: 'ingest-fpl' },
   { id: 'ingest-core-insights', jobName: 'ingest-core-insights' },
+  // Ticket #238. Runs daily, before project-points (.github/workflows/scheduled-jobs.yml) --
+  // tracked here the same way every other daily ingest job already is, so a job that silently
+  // stops running (a dead ODDS_API_KEY, a changed Odds-API response shape) shows up as a
+  // job-freshness failure rather than as a quietly-thinner fixture term nobody notices.
+  { id: 'ingest-match-odds', jobName: 'ingest-match-odds' },
   { id: 'sync-squad', jobName: 'sync-squad' },
   { id: 'project-points', jobName: 'project-points' },
   { id: 'emit-projections-csv', jobName: 'emit-projections-csv' },

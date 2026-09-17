@@ -289,6 +289,20 @@ describe('classifySeasonCoverage — ticket #113 job_runs.details counters', () 
   })
 })
 
+describe('scheduled-jobs.yml — ticket #238', () => {
+  it('runs ingest-match-odds daily, before project-points, with ODDS_API_KEY wired from repository secrets', () => {
+    const workflowPath = fileURLToPath(new URL('../.github/workflows/scheduled-jobs.yml', import.meta.url))
+    const workflowSource = readFileSync(workflowPath, 'utf8')
+    expect(workflowSource).toMatch(/ingest-match-odds\.ts/)
+    expect(workflowSource).toMatch(/ODDS_API_KEY:\s*\$\{\{\s*secrets\.ODDS_API_KEY\s*\}\}/)
+    const oddsStepIndex = workflowSource.indexOf('scripts/ingest-match-odds.ts')
+    const projectPointsStepIndex = workflowSource.indexOf('scripts/project-points.ts')
+    expect(oddsStepIndex).toBeGreaterThan(-1)
+    expect(projectPointsStepIndex).toBeGreaterThan(-1)
+    expect(oddsStepIndex).toBeLessThan(projectPointsStepIndex)
+  })
+})
+
 describe('project-points.ts — season-split source invariants (ticket #113)', () => {
   it('the workflow file runs core-insights ingest with CORE_INSIGHTS_SEASON set to both seasons', () => {
     const workflowPath = fileURLToPath(new URL('../.github/workflows/scheduled-jobs.yml', import.meta.url))
