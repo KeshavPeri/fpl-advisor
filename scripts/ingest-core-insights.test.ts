@@ -29,6 +29,7 @@ import {
   buildClubCodeBySlug,
   buildElementTypeMap,
   buildEloByCode,
+  buildPlayerGameweekHistoryRows,
   buildTeamCodeMap,
   countOpponentsResolvedViaFallback,
   planTeamEloUpdates,
@@ -37,9 +38,11 @@ import {
   tallyOpponentResolution,
   TEAMS_REQUIRED_COLUMNS,
   toMatchStatRow,
+  toPlayerGameweekHistoryRow,
   UnknownPositionError,
   type ClubSlugSource,
   type MatchStatRow,
+  type PlayerGameweekHistoryRow,
   type TeamIdentityRow,
 } from './ingest-core-insights.js'
 
@@ -1445,5 +1448,219 @@ describe('supabase/README.md (ticket #167)', () => {
     const rowMatch = readmeSource.match(/\| `20260831090000_team_and_opponent\.sql` \|.*\|\s*$/m)
     expect(rowMatch).not.toBeNull()
     expect(rowMatch![0]).toMatch(/not yet applied/i)
+  })
+})
+
+// ============================================================================
+// player_gameweek_history — ticket #248. toPlayerGameweekHistoryRow /
+// buildPlayerGameweekHistoryRows are PURE (no I/O, no live Supabase project
+// involved, matching this file's own existing rule) — they prove the id ->
+// player_code resolution, the "skipped and counted, never guessed" DoD item,
+// that two seasons never collide on the table's own primary key, and that a
+// re-run is deterministic (the property that makes upsertPlayerGameweekHistory's
+// `.upsert(rows, { onConflict: 'season,gameweek,player_code' })` call
+// idempotent — see that function's own doc comment). It cannot prove what the
+// *live* table holds after a real upsert; that's the hand-run step, out of
+// scope for a unit test, same caveat this file's header already states for
+// the team-elo join tests above.
+// ============================================================================
+
+function playerStatsRecord(overrides: Partial<Record<string, string>> = {}): Record<string, string> {
+  return {
+    id: '7',
+    now_cost: '5.8',
+    bonus: '3',
+    bps: '213',
+    ep_next: '4.0',
+    gw: '11',
+    starts: '11',
+    ...overrides,
+  }
+}
+
+describe('toPlayerGameweekHistoryRow', () => {
+  it('resolves an id that IS present in the season players.csv map to its player_code', () => {
+    const playerCodeByPlayerId = new Map([[7, 54321]])
+    const result = toPlayerGameweekHistoryRow(playerStatsRecord(), '2025-2026', playerCodeByPlayerId)
+    expect(result.skipReason).toBeNull()
+    expect(result.row).toEqual<PlayerGameweekHistoryRow>({
+      season: '2025-2026',
+      gameweek: 11,
+      player_code: 54321,
+      now_cost: 5.8,
+      bonus: 3,
+      bps: 213,
+      starts: 11,
+      ep_next: 4.0,
+      updated_at: expect.any(String),
+    })
+  })
+
+  it('stores now_cost VERBATIM as given by the source — no ×10, no ÷10 (verified 17 Sept 2026 the source is already decimal millions)', () => {
+    const playerCodeByPlayerId = new Map([[7, 54321]])
+    const result = toPlayerGameweekHistoryRow(playerStatsRecord({ now_cost: '5.8' }), '2025-2026', playerCodeByPlayerId)
+    expect(result.row?.now_cost).toBe(5.8) // NOT 58, NOT 0.58
+  })
+
+  it('skips and COUNTS (never guesses) an id that does not resolve to a player_code, distinctly from an unparseable id', () => {
+    const playerCodeByPlayerId = new Map([[999, 12345]]) // 7 is not in this map
+    const result = toPlayerGameweekHistoryRow(playerStatsRecord({ id: '7' }), '2025-2026', playerCodeByPlayerId)
+    expect(result.row).toBeNull()
+    expect(result.skipReason).toBe('player_code_not_found')
+  })
+
+  it('counts an unparseable id under its own distinct reason, never guessed as player_code_not_found', () => {
+    const playerCodeByPlayerId = new Map([[7, 54321]])
+    const result = toPlayerGameweekHistoryRow(playerStatsRecord({ id: '' }), '2025-2026', playerCodeByPlayerId)
+    expect(result.row).toBeNull()
+    expect(result.skipReason).toBe('invalid_or_missing_id')
+  })
+
+  it('skips and counts a row with a malformed required numeric field rather than writing a guessed value', () => {
+    const playerCodeByPlayerId = new Map([[7, 54321]])
+    const result = toPlayerGameweekHistoryRow(playerStatsRecord({ bps: 'N/A' }), '2025-2026', playerCodeByPlayerId)
+    expect(result.row).toBeNull()
+    expect(result.skipReason).toBe('invalid_numeric_field')
+  })
+
+  it('leaves ep_next null (never a fabricated 0) when the source cell is blank — the one column genuinely observed blank', () => {
+    const playerCodeByPlayerId = new Map([[7, 54321]])
+    const result = toPlayerGameweekHistoryRow(playerStatsRecord({ ep_next: '' }), '2025-2026', playerCodeByPlayerId)
+    expect(result.row?.ep_next).toBeNull()
+  })
+})
+
+describe('buildPlayerGameweekHistoryRows', () => {
+  it('reconciles: every record lands in exactly one bucket, written or unresolved by reason', () => {
+    const playerCodeByPlayerId = new Map([[7, 54321]])
+    const records = [
+      playerStatsRecord({ id: '7', gw: '1' }),
+      playerStatsRecord({ id: '999', gw: '1' }), // unresolved: player_code_not_found
+      playerStatsRecord({ id: '', gw: '1' }), // unresolved: invalid_or_missing_id
+    ]
+    const result = buildPlayerGameweekHistoryRows(records, '2025-2026', playerCodeByPlayerId)
+    expect(result.rows).toHaveLength(1)
+    expect(result.unresolvedByReason).toEqual({
+      player_code_not_found: 1,
+      invalid_or_missing_id: 1,
+    })
+    const totalUnresolved = Object.values(result.unresolvedByReason).reduce((a, b) => a + b, 0)
+    expect(result.rows.length + totalUnresolved).toBe(records.length)
+  })
+
+  it('two seasons for the same player_code and gameweek produce DISTINCT season values — no collision on the table primary key (season, gameweek, player_code)', () => {
+    const playerCodeByPlayerId = new Map([[7, 54321]])
+    const record = playerStatsRecord({ id: '7', gw: '1' })
+    const result2025 = buildPlayerGameweekHistoryRows([record], '2025-2026', playerCodeByPlayerId)
+    const result2026 = buildPlayerGameweekHistoryRows([record], '2026-2027', playerCodeByPlayerId)
+    expect(result2025.rows).toHaveLength(1)
+    expect(result2026.rows).toHaveLength(1)
+    expect(result2025.rows[0].season).toBe('2025-2026')
+    expect(result2026.rows[0].season).toBe('2026-2027')
+    // Same gameweek and player_code, different season — both rows are real and neither
+    // overwrites the other's primary key.
+    expect(result2025.rows[0].gameweek).toBe(result2026.rows[0].gameweek)
+    expect(result2025.rows[0].player_code).toBe(result2026.rows[0].player_code)
+    expect(result2025.rows[0].season).not.toBe(result2026.rows[0].season)
+  })
+
+  it('is deterministic across an identical re-run — the property that makes the upsert idempotent rather than duplicating rows', () => {
+    const playerCodeByPlayerId = new Map([
+      [7, 54321],
+      [8, 99999],
+    ])
+    const records = [playerStatsRecord({ id: '7', gw: '1' }), playerStatsRecord({ id: '8', gw: '1', now_cost: '6.2', bonus: '7', bps: '257' })]
+    const first = buildPlayerGameweekHistoryRows(records, '2025-2026', playerCodeByPlayerId)
+    const second = buildPlayerGameweekHistoryRows(records, '2025-2026', playerCodeByPlayerId)
+    // Compare everything except updated_at (a fresh timestamp each call by design) — the primary
+    // key and every stored value are byte-identical, so `.upsert(rows, { onConflict:
+    // 'season,gameweek,player_code' })` overwrites the SAME two rows on a re-run rather than
+    // inserting two more.
+    const strip = (rows: PlayerGameweekHistoryRow[]) => rows.map(({ updated_at: _updated_at, ...rest }) => rest)
+    expect(strip(first.rows)).toEqual(strip(second.rows))
+    expect(first.rows).toHaveLength(2)
+    expect(second.rows).toHaveLength(2)
+    expect(first.unresolvedByReason).toEqual(second.unresolvedByReason)
+  })
+})
+
+// ============================================================================
+// supabase/migrations/20260917100000_player_gameweek_history.sql — ticket #248.
+// Grep-checkable DoD items, same style as the #167/#176 migration tests above.
+// ============================================================================
+
+describe('supabase/migrations/20260917100000_player_gameweek_history.sql', () => {
+  const migrationPath = fileURLToPath(new URL('../supabase/migrations/20260917100000_player_gameweek_history.sql', import.meta.url))
+  const migrationSource = readFileSync(migrationPath, 'utf8')
+
+  it('creates the table keyed on (season, gameweek, player_code)', () => {
+    expect(migrationSource).toMatch(/CREATE TABLE IF NOT EXISTS public\.player_gameweek_history/)
+    expect(migrationSource).toMatch(/PRIMARY KEY \(season, gameweek, player_code\)/)
+  })
+
+  it('carries a COMMENT ON COLUMN for now_cost stating it is stored verbatim, not scaled', () => {
+    const match = migrationSource.match(/COMMENT ON COLUMN public\.player_gameweek_history\.now_cost IS([\s\S]*?);/)
+    expect(match).not.toBeNull()
+    expect(match![1]).toMatch(/verbatim/i)
+  })
+
+  it('grants read-only SELECT to anon and SELECT, INSERT, UPDATE (never DELETE) to service_role', () => {
+    expect(migrationSource).toMatch(/GRANT SELECT ON public\.player_gameweek_history TO anon;/)
+    expect(migrationSource).toMatch(/GRANT SELECT, INSERT, UPDATE ON public\.player_gameweek_history TO service_role;/)
+    const codeOnly = migrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).not.toMatch(/DELETE ON public\.player_gameweek_history/)
+  })
+
+  it('enables RLS with exactly one anon SELECT policy', () => {
+    expect(migrationSource).toMatch(/ALTER TABLE public\.player_gameweek_history ENABLE ROW LEVEL SECURITY;/)
+    expect(migrationSource).toMatch(
+      /CREATE POLICY "player_gameweek_history_select_anon" ON public\.player_gameweek_history FOR SELECT TO anon USING \(true\);/
+    )
+  })
+
+  it('is idempotent by construction: CREATE TABLE / CREATE INDEX are IF NOT EXISTS, wrapped in BEGIN/COMMIT', () => {
+    const codeOnly = migrationSource
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+    expect(codeOnly).toMatch(/CREATE TABLE IF NOT EXISTS/)
+    const createIndexStatements = codeOnly.match(/CREATE INDEX[^;]*;/g) ?? []
+    expect(createIndexStatements.length).toBeGreaterThanOrEqual(2)
+    for (const statement of createIndexStatements) {
+      expect(statement).toMatch(/CREATE INDEX IF NOT EXISTS/)
+    }
+    expect(migrationSource).toMatch(/^BEGIN;/m)
+    expect(migrationSource).toMatch(/^COMMIT;/m)
+  })
+})
+
+describe('supabase/README.md (ticket #248)', () => {
+  const readmePath = fileURLToPath(new URL('../supabase/README.md', import.meta.url))
+  const readmeSource = readFileSync(readmePath, 'utf8')
+
+  it('lists the new migration, marked not yet applied', () => {
+    expect(readmeSource).toMatch(/20260917100000_player_gameweek_history\.sql/)
+    const rowMatch = readmeSource.match(/\| `20260917100000_player_gameweek_history\.sql` \|.*\|\s*$/m)
+    expect(rowMatch).not.toBeNull()
+    expect(rowMatch![0]).toMatch(/not yet applied/i)
+  })
+})
+
+describe('docs/projection-model-backlog.md G3 (ticket #248)', () => {
+  const backlogPath = fileURLToPath(new URL('../docs/projection-model-backlog.md', import.meta.url))
+  const backlogSource = readFileSync(backlogPath, 'utf8')
+
+  it('marks the "no equivalent for a past season, and never will be" claim as superseded, naming #224 and #248', () => {
+    const match = backlogSource.match(/SUPERSEDED for the full-past-season case — ticket #248[\s\S]*?(?=\n\n)/)
+    expect(match).not.toBeNull()
+    expect(match![0]).toMatch(/#224/)
+    expect(match![0]).toMatch(/#248/)
+  })
+
+  it('leaves the original "never will be" sentence in place (marked superseded, not deleted)', () => {
+    expect(backlogSource).toMatch(/there is no equivalent for a past\nseason, and never will be\./)
   })
 })
