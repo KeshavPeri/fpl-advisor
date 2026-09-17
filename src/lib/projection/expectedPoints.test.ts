@@ -225,14 +225,14 @@ describe('expectedSaves scales with fixture difficulty (ticket #109)', () => {
       rateHistory: { minutesPlayed: 900, totalXg: 0, totalXa: 0, totalSaves: 27, totalCbi: 0, totalRecoveries: 0 }, // 3 saves/90 observed
       ratePositionPrior: { xgPer90: 0, xaPer90: 0, savesPer90: 3, cbiPer90: 0, recoveriesPer90: 0 },
     })
-    const hardFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 5 }) // expectedScore 0.25 -> savesMultiplier 1.5
-    const easyFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 1 }) // expectedScore 0.75 -> savesMultiplier 0.5
+    const hardFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 5 }) // expectedScore 0.25 -> savesMultiplier 1.25 (ticket #244)
+    const easyFixture = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 1 }) // expectedScore 0.75 -> savesMultiplier 0.75 (ticket #244)
 
     const hard = projectPlayerFixture(gk, hardFixture)
     const easy = projectPlayerFixture(gk, easyFixture)
 
-    expect(hard.modelInputs.savesMultiplier).toBeCloseTo(1.5, 10)
-    expect(easy.modelInputs.savesMultiplier).toBeCloseTo(0.5, 10)
+    expect(hard.modelInputs.savesMultiplier).toBeCloseTo(1.25, 10)
+    expect(easy.modelInputs.savesMultiplier).toBeCloseTo(0.75, 10)
     expect(hard.expectedEvents.expectedSaves).toBeGreaterThan(easy.expectedEvents.expectedSaves)
     expect(hard.components.savePoints).toBeGreaterThan(easy.components.savePoints)
   })
@@ -297,16 +297,16 @@ describe('outfield players (defender, midfielder, forward) are byte-for-byte unc
   // none of which this ticket touches.
   const rateHistory = { minutesPlayed: 0, totalXg: 0, totalXa: 0, totalSaves: 0, totalCbi: 0, totalRecoveries: 0 }
   const ratePositionPrior = { xgPer90: 0, xaPer90: 0, savesPer90: 9, cbiPer90: 0, recoveriesPer90: 0 }
-  const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 5, leagueBaselineGoals: 1 }) // expectedScore 0.25 -> savesMultiplier 1.5, attackMultiplier 0.5
+  const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 5, leagueBaselineGoals: 1 }) // expectedScore 0.25 -> savesMultiplier 1.25 (ticket #244), attackMultiplier 0.5
 
   // Hand-computed pre-ticket values for this fixture (leagueBaselineGoals=1, expectedScore=0.25):
-  //   teamLambdaConceded = expectedGoalsConceded(1, 0.25) = 1 x 2 x 0.75 = 1.5
-  //   pCleanSheet = exp(-1.5); pSixtyPlus = 1 (recentMinutes all 90, status 'a')
+  //   teamLambdaConceded = expectedGoalsConceded(1, 0.25) = 1 x defensiveMultiplier(0.25) = 1 x 1.25 = 1.25 (ticket #244)
+  //   pCleanSheet = exp(-1.25); pSixtyPlus = 1 (recentMinutes all 90, status 'a')
   //   expectedGoals = expectedAssists = 0 (xgPer90 = xaPer90 = 0)
   //   defensiveContributionPoints = 0 (defconPositionPrior = 0, no matches)
   //   appearancePoints = 1 x 1 + 1 x 1 = 2 (pAppears = pSixtyPlus = 1)
   // None of these depend on savesPer90 or the new savesMultiplier -- unaffected by this ticket.
-  const teamLambdaConceded = 1.5
+  const teamLambdaConceded = 1.25
   const pCleanSheet = cleanSheetProbability(teamLambdaConceded)
 
   it.each([
@@ -328,7 +328,7 @@ describe('outfield players (defender, midfielder, forward) are byte-for-byte unc
     expect(projection.components.bonusPoints).toBe(0)
 
     // The multiplied expectedSaves is real (surfaced in expectedEvents) but never reaches components.
-    expect(projection.expectedEvents.expectedSaves).toBeCloseTo(9 * 1 * 1.5, 10)
+    expect(projection.expectedEvents.expectedSaves).toBeCloseTo(9 * 1 * 1.25, 10)
   })
 })
 
@@ -938,10 +938,11 @@ describe('ticket #182: every component other than goalPoints/assistPoints (and e
   // xgPer90=0.3, xaPer90=0.36, savesPer90=2 observed with matching priors so shrinkage
   // lands exactly there -- the SAME rate shape as the #148/#162 byte-identical tests,
   // reused deliberately so all three tickets' effects can be cross-checked):
-  //   defensiveMultiplier(0.25) = 2 x (1 - 0.25) = 1.5 -- UNTOUCHED by this ticket
-  //   teamLambdaConceded = expectedGoalsConceded(1.4, 0.25) = 1.4 x 2 x 0.75 = 2.1
-  //   pCleanSheet = exp(-2.1)
-  //   expectedSaves = 2 x 1 x defensiveMultiplier(0.25) = 2 x 1 x 1.5 = 3
+  //   defensiveMultiplier(0.25) = 1.5 - 0.25 = 1.25 -- UNTOUCHED by ticket #182; damped by
+  //     ticket #244, whose measured value this now reflects
+  //   teamLambdaConceded = expectedGoalsConceded(1.4, 0.25) = 1.4 x 1.25 = 1.75
+  //   pCleanSheet = exp(-1.75)
+  //   expectedSaves = 2 x 1 x defensiveMultiplier(0.25) = 2 x 1 x 1.25 = 2.5
   //   attackingMultiplier(0.25) = 0.5 + 0.25 = 0.75 -- THIS is what #182 changed (pre-ticket
   //     value would have been 2 x 0.25 = 0.5)
   //   expectedGoals (raw) = 0.3 x 1 x 0.75 = 0.225 x this position's goalConversionFactor
@@ -953,9 +954,9 @@ describe('ticket #182: every component other than goalPoints/assistPoints (and e
   const rateHistory = { minutesPlayed: 900, totalXg: 3.0, totalXa: 3.6, totalSaves: 20, totalCbi: 0, totalRecoveries: 0 }
   const ratePositionPrior = { xgPer90: 0.3, xaPer90: 0.36, savesPer90: 2, cbiPer90: 0, recoveriesPer90: 0 }
   const f = fixture({ teamElo: null, opponentElo: null, fplDifficulty: 5, leagueBaselineGoals: 1.4 })
-  const teamLambdaConceded = 2.1
+  const teamLambdaConceded = 1.75
   const pCleanSheet = cleanSheetProbability(teamLambdaConceded)
-  const expectedSavesHand = 3
+  const expectedSavesHand = 2.5
   const preTicketAttackMultiplier = 0.5 // 2 x 0.25
   const postTicketAttackMultiplier = 0.75 // 0.5 + 0.25
 
