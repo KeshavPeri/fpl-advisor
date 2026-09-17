@@ -122,6 +122,83 @@ export const SCALE = 5.6225
  */
 export const HOME_EXPECTED_SCORE_BONUS = 1 / (1 + 10 ** (-65 / 400)) - 0.5
 
+// ============================================================================
+// Ticket #242 — shrink the point-in-time delta toward the league mean before
+// SCALE divides it. See this file's own header "WHAT IT IS" and the ticket's
+// own "Problem": four-match-old raw rates are far wider than the full-season
+// population SCALE was calibrated against (stdDev 0.9564 over 698 rows), so
+// dividing by SCALE over-dispersed the output — 0.2957 population stdDev
+// against the 0.1701 target, with two fixtures clamped to exact certainties
+// (1.0000 / 0.0000). Shrinking `(goalsScored - goalsConceded)` toward the
+// league mean (exactly 0 by construction — every goal scored by one club is
+// conceded by another, so the rates sum to zero across the league) narrows
+// the input distribution back down before SCALE ever sees it.
+// ============================================================================
+
+/**
+ * Ticket #242. `computeFixtureExpectedScore`'s output clamp — no football
+ * fixture is a certainty. This is a GUARD, not a substitute for
+ * TEAM_STRENGTH_SHRINKAGE_K's shrinkage above it: with a correctly fitted K,
+ * nothing should come near this boundary — `scripts/team-strength-diagnostic.ts`'s
+ * gate 4 checks exactly that on live data. Tier 3 (ticket text): 0.05/0.95
+ * are round, defensible bounds, not independently fitted the way SCALE or
+ * TEAM_STRENGTH_SHRINKAGE_K are.
+ */
+export const MIN_EXPECTED_SCORE = 0.05
+export const MAX_EXPECTED_SCORE = 0.95
+
+/**
+ * Ticket #242. The shrinkage strength for `shrunkTeamStrengthRate` below —
+ * "phantom prior matches" of a 0 (average) rate the raw
+ * `goalsScored - goalsConceded` figure is weighed against, exactly the
+ * "phantom prior nineties" idea `src/lib/projection/rates.ts`'s own
+ * `SHRINKAGE_K` documents for a different quantity (per-90 attacking rates).
+ *
+ * CALIBRATED, NOT CHOSEN (ticket text), same convention as SCALE above: fit
+ * so the point-in-time expectedScore's population stdDev over one
+ * gameweek's fixtures lands as close as possible to this file's own
+ * SCALE-calibration target, 0.1701 (see SCALE's own comment for where that
+ * number comes from), while also falling inside
+ * `scripts/team-strength-diagnostic.ts`'s own gate-2 band, [0.14, 0.20].
+ *
+ * FITTED ON: gameweek 5, 16 Sept 2026 — the same live diagnostic run this
+ * ticket's own "Problem" section reports: 20 rows (10 fixtures × 2
+ * perspectives), unshrunk (K=0) population stdDev 0.2957, min 0.0000, max
+ * 1.0000 (Nott'm Forest v Coventry City) — 74% over-dispersed against the
+ * 0.1701 target.
+ *
+ * ORIENTATION TABLE (ticket text, supplied ahead of time — flagged, not
+ * independently re-derived: this Builder invocation had no Supabase
+ * credentials in its environment, so it could not re-run
+ * scripts/team-strength-diagnostic.ts against live data to fit K from
+ * scratch itself; see the Builder's report on this ticket rather than a
+ * fabricated re-derivation):
+ *   K=0 (today): stdDev 0.2957, 2 rows clamped, range 0.000-1.000
+ *   K=3:         stdDev 0.2021, 0 rows clamped, range 0.153-0.847  (OUTSIDE the [0.14,0.20] band)
+ *   K=5:         stdDev 0.1739, 0 rows clamped, range 0.210-0.790  (inside the band; |0.1739-0.1701| = 0.0038)
+ *   K=8:         stdDev 0.1502, 0 rows clamped, range 0.259-0.741  (inside the band; |0.1502-0.1701| = 0.0199)
+ * K=5 is the closest of the table's in-band values to the 0.1701 target, so
+ * it is the value chosen here.
+ *
+ * TIER 2 — logged HIGH-IMPACT in decisions/ticket-242.md (this Builder does
+ * not write that file; flagged in its report for the orchestrator). Because:
+ * this single number sets how aggressively every current-season fixture's
+ * team-strength-sourced expectedScore is pulled toward a coin flip, and it
+ * is expensive to reverse once ten more tickets have built projections on
+ * top of it.
+ *
+ * MUST BE RE-DERIVED once ten gameweeks are on record. This value is fitted
+ * on a SINGLE early-season gameweek's small sample — as the season
+ * lengthens, every club's raw (unshrunk) rate naturally tightens toward the
+ * full-season spread SCALE's own comment measured (population stdDev
+ * 0.9564 over 698 rows), and the K needed to reach the SAME 0.1701 target
+ * falls as that raw spread narrows. Re-run this file's calibration
+ * procedure (fit K so the diagnostic's point-in-time stdDev lands nearest
+ * 0.1701, inside its [0.14, 0.20] band) against a ten-gameweek population
+ * before trusting this figure past early October 2026.
+ */
+export const TEAM_STRENGTH_SHRINKAGE_K = 5
+
 /**
  * One `player_match_stats` row's fields needed to build the point-in-time
  * team-strength table — team_code (which club these particular stats
@@ -240,44 +317,121 @@ export function fixtureHasSufficientHistory(own: TeamStrengthRecord, opponent: T
   return own.matches >= MIN_TEAM_PRIOR_MATCHES && opponent.matches >= MIN_TEAM_PRIOR_MATCHES
 }
 
-function clampUnit(value: number): number {
-  if (value < 0) return 0
-  if (value > 1) return 1
+function clamp(value: number, min: number, max: number): number {
+  if (value < min) return min
+  if (value > max) return max
   return value
 }
 
 /**
- * Ticket #175, extended by #229. The point-in-time analogue of fixture.ts's
- * elo-derived expectedScore, built from each team's (goalsScored -
- * goalsConceded) per prior match (see file header, "WHAT IT IS"). Falls
- * back to NEUTRAL_EXPECTED_SCORE_VALUE when either team has fewer than
+ * Ticket #242. The shrunk analogue of `teamStrengthRate` above:
+ * `(goalsScored - goalsConceded) / (matches + k)` — `k` "phantom prior
+ * matches" worth of the league-mean rate (exactly 0, see
+ * TEAM_STRENGTH_SHRINKAGE_K's own comment) pulling the raw figure toward
+ * the average fixture the fewer real matches a club has played.
+ * `teamStrengthRate` itself is UNCHANGED, keeps its current name, and is
+ * still the figure `scripts/team-strength-diagnostic.ts`'s club table
+ * reports (this ticket's DoD: "the club table's raw teamStrengthRate is
+ * unchanged"). `computeFixtureExpectedScore` below consumes THIS shrunk
+ * variant instead.
+ *
+ * TICKET TEXT VS. `shrunkRate` (src/lib/projection/rates.ts) — FLAGGED, NOT
+ * SILENTLY RESOLVED (see this ticket's own text, verbatim: "flagging it in
+ * your report back to the orchestrator if the ticket text and the actual
+ * function signature are in tension"). The ticket instructs "Import and
+ * reuse shrunkRate unmodified. Do not write a second shrinkage formula." —
+ * but `shrunkRate`'s actual signature is `shrunkRate(total, observedCount,
+ * prior)`, and its shrinkage strength (`SHRINKAGE_K = 3`) is a MODULE-LEVEL
+ * CONSTANT baked into its own body, not a parameter the caller can supply.
+ * Team strength needs an INDEPENDENTLY CALIBRATED k
+ * (TEAM_STRENGTH_SHRINKAGE_K = 5, see its own comment) — the ticket text is
+ * explicit that this must NOT be 3. That constant changes the formula's
+ * DENOMINATOR, and no choice of `shrunkRate`'s own `prior` argument (which
+ * only ever adds `SHRINKAGE_K * prior` to the numerator) can substitute a
+ * different denominator constant — `shrunkRate(total, observedCount, 0)`
+ * always computes `total / (observedCount + 3)`, silently the WRONG number
+ * for this file's own calibration, not merely an inexact one. This function
+ * is therefore a separate, two-line implementation of `shrunkRate`'s exact
+ * arithmetic PATTERN (`(total + k * prior) / (observedCount + k)` with
+ * `prior = 0`, hence the simplified form below), parameterized on `k` the
+ * way `shrunkRate` itself is not — this is deliberately option (a) from the
+ * ticket text's own tension-resolution list, not option (b): no way was
+ * found to call `shrunkRate` itself and get a k other than 3 out of it.
+ */
+export function shrunkTeamStrengthRate(record: TeamStrengthRecord, k: number): number {
+  return (record.goalsScored - record.goalsConceded) / (record.matches + k)
+}
+
+/**
+ * Ticket #175, extended by #229 and #242. The point-in-time analogue of
+ * fixture.ts's elo-derived expectedScore, built from each team's SHRUNK
+ * (goalsScored - goalsConceded) per prior match (see file header, "WHAT IT
+ * IS", and `shrunkTeamStrengthRate` above). Falls back to
+ * NEUTRAL_EXPECTED_SCORE_VALUE when either team has fewer than
  * MIN_TEAM_PRIOR_MATCHES resolvable prior matches — never a guessed
  * adjustment from thin evidence.
  *
- * `homeAdjustment` (ticket #229) — OPTIONAL, defaults to 0 so
- * scripts/run-backtest.ts's own calls (which pass no fourth argument: its
- * legs carry no venue, and must not start guessing one) are an EXACT no-op,
- * byte-identical to this function's behaviour before #229. The live
- * pipeline (expectedPoints.ts) passes `isHome ? HOME_EXPECTED_SCORE_BONUS :
- * -HOME_EXPECTED_SCORE_BONUS`. Applied to the delta BEFORE the [0, 1] clamp,
- * so a home-advantage push can still be clamped away at an extreme delta,
- * exactly like the base delta term is.
+ * `homeAdjustment` (ticket #229) — OPTIONAL, defaults to 0 so a caller that
+ * carries no venue is an exact no-op. The live pipeline (expectedPoints.ts)
+ * passes `isHome ? HOME_EXPECTED_SCORE_BONUS : -HOME_EXPECTED_SCORE_BONUS`.
+ * Applied to the delta BEFORE the clamp, so a home-advantage push can still
+ * be clamped away at an extreme delta, exactly like the base delta term is.
+ *
+ * `shrinkageK` (ticket #242) — OPTIONAL, defaults to
+ * TEAM_STRENGTH_SHRINKAGE_K, NOT to 0. This is a deliberate, FLAGGED design
+ * choice, not an oversight: `src/lib/projection/expectedPoints.ts` (out of
+ * this ticket's scope — "do not touch it") calls this function with the
+ * SAME 4 positional arguments it always has
+ * (`computeFixtureExpectedScore(fixture.teamStrength,
+ * fixture.opponentTeamStrength, SCALE, homeAdjustment)`), never a 5th. A
+ * new parameter's default is the ONLY way that unmodified call site can
+ * pick up this ticket's shrinkage at all — there is no other seam into that
+ * file. That default is what makes the live path (and, transitively,
+ * `scripts/team-strength-diagnostic.ts`'s falsification gate, since it
+ * calls `resolveFixtureExpectedScore` — the exact live wiring) actually
+ * shrink, which is the entire point of this ticket.
+ *
+ * KNOWN, UNRESOLVED SIDE EFFECT — FLAGGED IN THE BUILDER'S REPORT, NOT
+ * FIXED HERE. `scripts/run-backtest.ts` (also out of this ticket's scope —
+ * listed under "Out of scope") calls this function with only 3 positional
+ * arguments (`computeFixtureExpectedScore(ownStrength, opponentStrength,
+ * SCALE)`, no `homeAdjustment`, no `shrinkageK`) in every one of its own
+ * call sites. Because BOTH out-of-scope callers omit the new 5th argument,
+ * and both therefore receive the SAME default, there is no default value
+ * that fixes the live path (needs shrinkage) while leaving
+ * `run-backtest.ts` byte-identical (needs none, per the ticket's own "Out
+ * of scope" note: "rates are already season-length and need no
+ * shrinkage") — the two requirements are mutually exclusive without
+ * editing at least one of those two files, and both are explicitly out of
+ * this ticket's file scope. This implementation prioritizes the live path
+ * and the falsification gate (the ticket's own hard "stop and report"
+ * requirement), which means `run-backtest.ts`'s own unmodified calls will
+ * now ALSO shrink slightly (full-season match counts are large enough — on
+ * the order of 30+ — that K=5's effect is small, but it is not exactly
+ * zero). A caller that genuinely needs the old, unshrunk behaviour can
+ * still get it explicitly: `computeFixtureExpectedScore(own, opponent,
+ * scale, homeAdjustment, 0)` reproduces today's figures exactly (see the
+ * "K = 0 reproduces today's unshrunk rate exactly" named test).
  *
  * Named tests: exactly 0.5 for two teams with identical prior records (the
- * delta cancels to 0 regardless of SCALE); clamped to [0, 1] for a lopsided
- * delta; the neutral fallback below the minimum; `homeAdjustment` defaults
- * to 0; a nonzero `homeAdjustment` shifts the result by exactly that amount
- * (pre-clamp).
+ * delta cancels to 0 regardless of SCALE or shrinkageK); clamped to
+ * [MIN_EXPECTED_SCORE, MAX_EXPECTED_SCORE] for a lopsided delta; the
+ * neutral fallback below the minimum; `homeAdjustment` defaults to 0; a
+ * nonzero `homeAdjustment` shifts the result by exactly that amount
+ * (pre-clamp); `shrinkageK` defaults to TEAM_STRENGTH_SHRINKAGE_K;
+ * `shrinkageK = 0` reproduces the pre-#242 unshrunk figure exactly; a club
+ * with more matches is shrunk proportionally less.
  */
 export function computeFixtureExpectedScore(
   own: TeamStrengthRecord,
   opponent: TeamStrengthRecord,
   scale: number,
   homeAdjustment = 0,
+  shrinkageK: number = TEAM_STRENGTH_SHRINKAGE_K,
 ): number {
   if (!fixtureHasSufficientHistory(own, opponent)) return NEUTRAL_EXPECTED_SCORE_VALUE
-  const delta = teamStrengthRate(own) - teamStrengthRate(opponent)
-  return clampUnit(0.5 + delta / scale + homeAdjustment)
+  const delta = shrunkTeamStrengthRate(own, shrinkageK) - shrunkTeamStrengthRate(opponent, shrinkageK)
+  return clamp(0.5 + delta / scale + homeAdjustment, MIN_EXPECTED_SCORE, MAX_EXPECTED_SCORE)
 }
 
 // ============================================================================

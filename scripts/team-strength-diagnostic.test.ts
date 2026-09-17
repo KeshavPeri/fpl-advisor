@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildDiagnosticRows,
   buildTeamStrengthTable,
+  checkExpectedScoreBoundGate,
   checkManUtdVsManCityGate,
   checkTeamStrengthSourceGate,
   checkVarianceGate,
@@ -77,64 +78,82 @@ describe('populationStandardDeviation', () => {
 
 // ============================================================================
 // checkVarianceGate — falsification gate #2, extended by ticket #235 to be
-// non-vacuous.
+// non-vacuous, and by ticket #242 to be a BAND ([0.14, 0.20]) rather than a
+// floor against frozen-elo.
 // ============================================================================
 
-describe('checkVarianceGate (falsification gate #2)', () => {
-  it('PASSES when the point-in-time spread is wider than the frozen-elo spread and the columns are not identical', () => {
-    const rows = [
-      { frozenEloExpectedScore: 0.48, pointInTimeExpectedScore: 0.3 },
-      { frozenEloExpectedScore: 0.52, pointInTimeExpectedScore: 0.7 },
-    ]
-    const result = checkVarianceGate(rows)
-    expect(result.pointInTimeStdDev).toBeGreaterThan(result.frozenStdDev)
+describe('checkVarianceGate (falsification gate #2, ticket #242: band [0.14, 0.20], not a floor)', () => {
+  // Two rows whose point-in-time population stdDev is exactly 0.15 (inside
+  // the [0.14, 0.20] band): values 0.35 and 0.65, mean 0.5, stdDev = 0.15.
+  const inBandRows = [
+    { frozenEloExpectedScore: 0.48, pointInTimeExpectedScore: 0.35 },
+    { frozenEloExpectedScore: 0.52, pointInTimeExpectedScore: 0.65 },
+  ]
+
+  it('PASSES when the point-in-time stdDev falls inside [0.14, 0.20], regardless of how it compares to the frozen-elo stdDev', () => {
+    const result = checkVarianceGate(inBandRows)
+    expect(result.pointInTimeStdDev).toBeCloseTo(0.15, 10)
+    expect(result.pointInTimeStdDev).toBeGreaterThanOrEqual(0.14)
+    expect(result.pointInTimeStdDev).toBeLessThanOrEqual(0.2)
     expect(result.allRowsIdentical).toBe(false)
     expect(result.passed).toBe(true)
   })
 
-  it('PASSES when the two spreads are exactly equal (>= is inclusive) and the underlying per-row values still differ', () => {
-    // The SAME two values (0.4, 0.6), swapped between the columns per row --
-    // so the population stdDev matches exactly (same multiset), but no row
-    // is individually identical between its own frozen-elo and point-in-time
-    // value: row 1 is 0.4 vs 0.6, row 2 is 0.6 vs 0.4.
+  it('ticket #242: FAILS when the point-in-time stdDev is TOO WIDE (> 0.20), even though it is wider than the frozen-elo stdDev -- the exact defect this ticket fixes: the old floor (">= frozen-elo spread") would have PASSED this, since a wider-than-frozen spread used to be the only thing checked', () => {
+    // Values 0.0 and 1.0 -> stdDev 0.5, far outside the band, and far wider
+    // than a narrow frozen-elo column -- reproduces the ticket's own
+    // "Problem": Nott'm Forest v Coventry City resolving to 1.0000 / 0.0000.
     const rows = [
-      { frozenEloExpectedScore: 0.4, pointInTimeExpectedScore: 0.6 },
-      { frozenEloExpectedScore: 0.6, pointInTimeExpectedScore: 0.4 },
+      { frozenEloExpectedScore: 0.48, pointInTimeExpectedScore: 0.0 },
+      { frozenEloExpectedScore: 0.52, pointInTimeExpectedScore: 1.0 },
     ]
     const result = checkVarianceGate(rows)
-    expect(result.frozenStdDev).toBe(result.pointInTimeStdDev)
-    expect(result.allRowsIdentical).toBe(false)
-    expect(result.passed).toBe(true)
+    expect(result.pointInTimeStdDev).toBeGreaterThan(result.frozenStdDev) // old floor alone would have PASSED
+    expect(result.pointInTimeStdDev).toBeGreaterThan(0.2)
+    expect(result.passed).toBe(false)
   })
 
-  it('FAILS when the point-in-time spread is narrower -- the exact case the ticket calls a worse signal', () => {
+  it('FAILS when the point-in-time spread is narrower than the band (< 0.14) -- still a worse signal, now caught by the band\'s own lower edge instead of a frozen-elo comparison', () => {
     const rows = [
       { frozenEloExpectedScore: 0.3, pointInTimeExpectedScore: 0.48 },
       { frozenEloExpectedScore: 0.7, pointInTimeExpectedScore: 0.52 },
     ]
     const result = checkVarianceGate(rows)
-    expect(result.pointInTimeStdDev).toBeLessThan(result.frozenStdDev)
+    expect(result.pointInTimeStdDev).toBeLessThan(0.14)
     expect(result.passed).toBe(false)
+  })
+
+  it('the band boundaries are inclusive: stdDev exactly 0.14 or exactly 0.20 PASSES', () => {
+    // Two values symmetric around 0.5 with stdDev exactly 0.14: 0.5 +/- 0.14.
+    const atMin = [
+      { frozenEloExpectedScore: 0.5, pointInTimeExpectedScore: 0.36 },
+      { frozenEloExpectedScore: 0.5, pointInTimeExpectedScore: 0.64 },
+    ]
+    expect(checkVarianceGate(atMin).pointInTimeStdDev).toBeCloseTo(0.14, 10)
+    expect(checkVarianceGate(atMin).passed).toBe(true)
+
+    const atMax = [
+      { frozenEloExpectedScore: 0.5, pointInTimeExpectedScore: 0.3 },
+      { frozenEloExpectedScore: 0.5, pointInTimeExpectedScore: 0.7 },
+    ]
+    expect(checkVarianceGate(atMax).pointInTimeStdDev).toBeCloseTo(0.2, 10)
+    expect(checkVarianceGate(atMax).passed).toBe(true)
   })
 
   // ==========================================================================
   // Ticket #235 -- the gate defect that let #229's own diagnostic pass. When
   // the new path never runs, point-in-time and frozen-elo are the SAME
-  // numbers, so their stdDevs match exactly and the pre-#235 gate passed
-  // vacuously. This is reproduced here EXACTLY as it happened on live data
-  // (20 rows, all `stale-elo`, frozen == point-in-time on every row).
+  // numbers. Retained by ticket #242 as an independent defect signal
+  // alongside the new band check.
   // ==========================================================================
-  it('FAILS when every row is numerically identical between the two columns, even though the stdDev comparison alone would pass -- the exact #229 vacuous-pass scenario', () => {
+  it('FAILS when every row is numerically identical between the two columns, even when the (identical) stdDev happens to fall inside the band', () => {
     const rows = [
-      { frozenEloExpectedScore: 0.849, pointInTimeExpectedScore: 0.849 },
-      { frozenEloExpectedScore: 0.3992, pointInTimeExpectedScore: 0.3992 },
-      { frozenEloExpectedScore: 0.553, pointInTimeExpectedScore: 0.553 },
+      { frozenEloExpectedScore: 0.35, pointInTimeExpectedScore: 0.35 },
+      { frozenEloExpectedScore: 0.65, pointInTimeExpectedScore: 0.65 },
     ]
     const result = checkVarianceGate(rows)
-    // The stdDev comparison ALONE would pass (equal populations -> equal
-    // stdDev, `>=` is inclusive) -- proving the failure comes specifically
-    // from allRowsIdentical, not from a coincidentally narrower spread.
-    expect(result.frozenStdDev).toBe(result.pointInTimeStdDev)
+    expect(result.pointInTimeStdDev).toBeGreaterThanOrEqual(0.14)
+    expect(result.pointInTimeStdDev).toBeLessThanOrEqual(0.2)
     expect(result.allRowsIdentical).toBe(true)
     expect(result.passed).toBe(false)
   })
@@ -147,10 +166,51 @@ describe('checkVarianceGate (falsification gate #2)', () => {
     expect(checkVarianceGate(rows).allRowsIdentical).toBe(false)
   })
 
-  it('allRowsIdentical is false (never vacuously true) on an empty row set', () => {
+  it('allRowsIdentical is false (never vacuously true) on an empty row set, and FAILS on an empty row set (stdDev 0 falls outside the [0.14, 0.20] band)', () => {
     const result = checkVarianceGate([])
     expect(result.allRowsIdentical).toBe(false)
-    expect(result.passed).toBe(true) // stdDev(0) >= stdDev(0), and allRowsIdentical is false -- unchanged from pre-#235 behaviour on no data
+    expect(result.pointInTimeStdDev).toBe(0)
+    expect(result.passed).toBe(false) // ticket #242: unlike the old floor, 0 is now correctly a FAIL, not a vacuous pass
+  })
+})
+
+// ============================================================================
+// checkExpectedScoreBoundGate — falsification gate #4, ticket #242, new.
+// ============================================================================
+
+describe('checkExpectedScoreBoundGate (falsification gate #4, ticket #242)', () => {
+  it('PASSES when every row\'s point-in-time expectedScore is within [0.10, 0.90]', () => {
+    const rows = [diagnosticRow({ pointInTimeExpectedScore: 0.1 }), diagnosticRow({ pointInTimeExpectedScore: 0.9 }), diagnosticRow({ pointInTimeExpectedScore: 0.5 })]
+    const result = checkExpectedScoreBoundGate(rows)
+    expect(result.outOfBoundRows).toEqual([])
+    expect(result.passed).toBe(true)
+  })
+
+  it('named test: FAILS and names the row when a fixture\'s expectedScore falls outside [0.10, 0.90] -- the exact Nott\'m Forest v Coventry City defect (1.0000 / 0.0000) this gate exists to catch', () => {
+    const certainRow = diagnosticRow({ teamName: "Nott'm Forest", opponentName: 'Coventry City', pointInTimeExpectedScore: 1.0 })
+    const zeroRow = diagnosticRow({ teamName: 'Coventry City', opponentName: "Nott'm Forest", pointInTimeExpectedScore: 0.0 })
+    const result = checkExpectedScoreBoundGate([certainRow, zeroRow])
+    expect(result.outOfBoundRows).toHaveLength(2)
+    expect(result.outOfBoundRows).toContain(certainRow)
+    expect(result.outOfBoundRows).toContain(zeroRow)
+    expect(result.passed).toBe(false)
+  })
+
+  it('the bounds are exclusive at the edges named in the ticket -- exactly 0.10 and exactly 0.90 are IN bound (the ticket\'s own gate text uses "outside", not "at or outside")', () => {
+    const result = checkExpectedScoreBoundGate([diagnosticRow({ pointInTimeExpectedScore: 0.1 }), diagnosticRow({ pointInTimeExpectedScore: 0.9 })])
+    expect(result.outOfBoundRows).toEqual([])
+    expect(result.passed).toBe(true)
+  })
+
+  it('just outside either edge FAILS: 0.0999... below, 0.9001... above', () => {
+    expect(checkExpectedScoreBoundGate([diagnosticRow({ pointInTimeExpectedScore: 0.0999 })]).passed).toBe(false)
+    expect(checkExpectedScoreBoundGate([diagnosticRow({ pointInTimeExpectedScore: 0.9001 })]).passed).toBe(false)
+  })
+
+  it('PASSES (vacuously true, matching the other gates\' own "empty is not itself a defect" convention) on an empty row set', () => {
+    const result = checkExpectedScoreBoundGate([])
+    expect(result.outOfBoundRows).toEqual([])
+    expect(result.passed).toBe(true)
   })
 })
 
@@ -463,7 +523,7 @@ describe('buildTeamStrengthTable (ticket #235)', () => {
 // ============================================================================
 
 describe('generateReportMarkdown', () => {
-  it('includes the gameweek, all three gate verdicts, one table row per fixture row, and the strength table', () => {
+  it('includes the gameweek, all four gate verdicts, one table row per fixture row, and the strength table', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
@@ -471,6 +531,7 @@ describe('generateReportMarkdown', () => {
       teamStrengthSourceGate: { count: 1, passed: true },
       manUtdGate: { status: 'pass', manUtdPointInTimeExpectedScore: 0.3 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
       strengthTable: [
         { teamId: 1, teamName: 'Man Utd', teamShortName: 'MUN', matches: 4, goalsScored: 3, goalsConceded: 5, rate: -0.5, meetsMinimum: true },
         { teamId: 2, teamName: 'Chelsea', teamShortName: 'CHE', matches: 4, goalsScored: 8, goalsConceded: 2, rate: 1.5, meetsMinimum: true },
@@ -488,7 +549,7 @@ describe('generateReportMarkdown', () => {
     expect(markdown).toMatch(/teamStrengthRate/)
   })
 
-  it('reports "Overall: STOP" when any of the three gates fails', () => {
+  it('reports "Overall: STOP" when any of the four gates fails', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
@@ -496,12 +557,13 @@ describe('generateReportMarkdown', () => {
       teamStrengthSourceGate: { count: 1, passed: true },
       manUtdGate: { status: 'fail', manUtdPointInTimeExpectedScore: 0.6 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
       strengthTable: [],
     })
     expect(markdown).toMatch(/Overall: STOP/)
   })
 
-  it('reports "Overall: STOP" when the team-strength-source gate (the PRIMARY gate) fails, even if the other two pass', () => {
+  it('reports "Overall: STOP" when the team-strength-source gate (the PRIMARY gate) fails, even if the other three pass', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
@@ -509,10 +571,27 @@ describe('generateReportMarkdown', () => {
       teamStrengthSourceGate: { count: 0, passed: false },
       manUtdGate: { status: 'pass', manUtdPointInTimeExpectedScore: 0.3 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.05, allRowsIdentical: true, passed: false },
+      expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
       strengthTable: [],
     })
     expect(markdown).toMatch(/Overall: STOP/)
     expect(markdown).toMatch(/FAIL/)
+  })
+
+  it('ticket #242: reports "Overall: STOP" and names the offending fixture when ONLY the expectedScore-bound gate (gate 4) fails, even if the other three pass', () => {
+    const outOfBoundRow = diagnosticRow({ teamName: "Nott'm Forest", opponentName: 'Coventry City', pointInTimeExpectedScore: 1.0 })
+    const markdown = generateReportMarkdown({
+      generatedAt: new Date('2026-09-12T00:00:00Z'),
+      gameweekId: 5,
+      rows: [outOfBoundRow],
+      teamStrengthSourceGate: { count: 1, passed: true },
+      manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
+      varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      expectedScoreBoundGate: { outOfBoundRows: [outOfBoundRow], passed: false },
+      strengthTable: [],
+    })
+    expect(markdown).toMatch(/Overall: STOP/)
+    expect(markdown).toMatch(/Nott'm Forest v Coventry City/)
   })
 
   it('renders an empty strength table without error', () => {
@@ -523,6 +602,7 @@ describe('generateReportMarkdown', () => {
       teamStrengthSourceGate: { count: 1, passed: true },
       manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
+      expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
       strengthTable: [],
     })
     expect(markdown).toMatch(/Point-in-time team strength/)
@@ -608,5 +688,49 @@ describe('ticket #235 source invariants', () => {
 
   it('the fixtures read is unfiltered (no `.eq(\'event_id\', gameweekId)` on the DATA select) -- team strength needs the whole season, not just the next gameweek', () => {
     expect(source).not.toMatch(/\.eq\('event_id',\s*gameweekId\)/)
+  })
+})
+
+// ============================================================================
+// Ticket #242 — source invariants. main() itself can't be exercised without a
+// live Supabase project (see file header); the exit-non-zero wiring for the
+// two NEW conditions (the variance gate's band, and the new bound gate) is
+// proven by grepping the real, shipped source, matching the technique
+// ticket #235's own section above already uses.
+// ============================================================================
+
+describe('ticket #242 source invariants', () => {
+  it('named test: main() exits non-zero when any fixture\'s expectedScore falls outside [0.10, 0.90] (gate 4) -- checkExpectedScoreBoundGate\'s own unit tests above prove `passed` is false in that case; this proves main() ACTS on it', () => {
+    const failureCheckMatch = source.match(/if\s*\(([^)]*expectedScoreBoundGate\.passed[^)]*)\)\s*\{/)
+    expect(failureCheckMatch).not.toBeNull()
+    expect(failureCheckMatch![1]).toMatch(/!expectedScoreBoundGate\.passed/)
+    const failureBlockStart = source.indexOf(failureCheckMatch![0])
+    const failureBlockEnd = source.indexOf('process.exit(1)', failureBlockStart)
+    expect(failureBlockEnd).toBeGreaterThan(failureBlockStart)
+    const failureBlock = source.slice(failureBlockStart, failureBlockEnd)
+    expect(failureBlock).toMatch(/status:\s*'failure'/)
+  })
+
+  it('named test: main() exits non-zero when the point-in-time stdDev falls outside [0.14, 0.20] (gate 2\'s new band) -- checkVarianceGate\'s own unit tests above prove `passed` is false in that case; this proves main() ACTS on it via the SAME `!varianceGate.passed` condition ticket #235 already wired up', () => {
+    const failureCheckMatch = source.match(/if\s*\(([^)]*varianceGate\.passed[^)]*)\)\s*\{/)
+    expect(failureCheckMatch).not.toBeNull()
+    expect(failureCheckMatch![1]).toMatch(/!varianceGate\.passed/)
+    const failureBlockStart = source.indexOf(failureCheckMatch![0])
+    const failureBlockEnd = source.indexOf('process.exit(1)', failureBlockStart)
+    expect(failureBlockEnd).toBeGreaterThan(failureBlockStart)
+    const failureBlock = source.slice(failureBlockStart, failureBlockEnd)
+    expect(failureBlock).toMatch(/status:\s*'failure'/)
+  })
+
+  it('checkExpectedScoreBoundGate is called and its result feeds the report AND job_runs.details', () => {
+    expect(source).toMatch(/const expectedScoreBoundGate = checkExpectedScoreBoundGate\(rows\)/)
+    expect(source).toMatch(/expectedScoreBoundGate,?\s*\n?\s*strengthTable/) // ReportData construction
+  })
+
+  it('the variance gate band constants are exactly [0.14, 0.20], and the bound gate constants are exactly [0.10, 0.90]', () => {
+    expect(source).toMatch(/TEAM_STRENGTH_STDDEV_MIN\s*=\s*0\.14/)
+    expect(source).toMatch(/TEAM_STRENGTH_STDDEV_MAX\s*=\s*0\.2\b/)
+    expect(source).toMatch(/EXPECTED_SCORE_BOUND_MIN\s*=\s*0\.1\b/)
+    expect(source).toMatch(/EXPECTED_SCORE_BOUND_MAX\s*=\s*0\.9\b/)
   })
 })
