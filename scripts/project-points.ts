@@ -114,6 +114,8 @@ import {
   buildTeamMatchRecordsFromFixtures,
   computeTeamStrengthAsOf,
   MIN_TEAM_PRIOR_MATCHES,
+  marketExpectedScore,
+  isMarketOddsFresh,
   type PlayerRates,
   type PlayerRateHistory,
   type RateHistoryMatch,
@@ -123,6 +125,7 @@ import {
   type FixtureProjectionComponents,
   type FixtureBonusEntry,
   type FixtureSource,
+  type MarketOddsContext,
   type TeamMatchRecord,
   type FixtureResultRow,
 } from '../src/lib/projection/index.ts'
@@ -310,6 +313,36 @@ export interface FixtureRow {
   team_a_score: number | null
   /** Ticket #235. True only once FPL has posted a real result -- a postponed or in-flight fixture must contribute nothing to team strength, never a guessed 0. */
   finished: boolean
+}
+
+/**
+ * Ticket #238. One `public.fixture_odds` row's fields needed to build a fixture's
+ * `MarketOddsContext` — already the MOST RECENT row for its `fixture_id` (see `latestOddsByFixtureId`
+ * below), still raw/un-oriented (home vs away is resolved by `buildFixtureContext`, which is the
+ * only place that knows a given player's own `isHome`).
+ */
+export interface FixtureOddsRow {
+  fixture_id: number
+  fetched_at: string
+  book_count: number
+  p_home: number
+  p_draw: number
+  p_away: number
+  overround: number
+}
+
+/**
+ * Ticket #238. `public.fixture_odds` is append-only — over a fixture's lifetime in the horizon
+ * this can be many rows. Keeps only the MOST RECENT row per `fixture_id`, given rows already
+ * ordered most-recent-first (see main()'s own `.order('fetched_at', { ascending: false })`) — a
+ * plain "first one wins" reduction, never a second sort inside this function.
+ */
+export function latestOddsByFixtureId(rowsMostRecentFirst: readonly FixtureOddsRow[]): Map<number, FixtureOddsRow> {
+  const result = new Map<number, FixtureOddsRow>()
+  for (const row of rowsMostRecentFirst) {
+    if (!result.has(row.fixture_id)) result.set(row.fixture_id, row)
+  }
+  return result
 }
 
 export interface MatchStatsRow {
@@ -539,6 +572,23 @@ export function teamCodeByIdFrom(teamMetadataById: ReadonlyMap<number, TeamMetad
  * already treats exactly like insufficient history (falls through to the
  * next precedence tier).
  */
+/**
+ * Ticket #238. Builds one fixture's `MarketOddsContext` from its `public.fixture_odds` latest row
+ * (already resolved to the correct `fixture_id` and already the most recent fetch — see
+ * `latestOddsByFixtureId`) and this side's own `isHome` — the only orientation step this pure
+ * function performs, since `src/lib/projection/marketOdds.ts` itself never knows which side of a
+ * fixture it is reading. `nowMs` is supplied by the caller (never read from the clock here) so
+ * this stays provable on constructed inputs, matching every other pure helper in this file.
+ */
+export function buildMarketOddsContext(oddsRow: FixtureOddsRow, isHome: boolean, nowMs: number): MarketOddsContext {
+  return {
+    expectedScoreValue: marketExpectedScore({ pHome: oddsRow.p_home, pDraw: oddsRow.p_draw, pAway: oddsRow.p_away }, isHome ? 'home' : 'away'),
+    bookCount: oddsRow.book_count,
+    overround: oddsRow.overround,
+    isFresh: isMarketOddsFresh(new Date(oddsRow.fetched_at).getTime(), nowMs),
+  }
+}
+
 export function buildFixtureContext(params: {
   fixtureId: number
   isHome: boolean
@@ -550,8 +600,12 @@ export function buildFixtureContext(params: {
   teamMetadataById: ReadonlyMap<number, TeamMetadata>
   teamMatchRecords: readonly TeamMatchRecord[]
   gameweekId: number
+  /** Ticket #238. This fixture's most recent `public.fixture_odds` row, if any — `undefined` when no odds row exists for it (never guessed). */
+  oddsRow?: FixtureOddsRow
+  /** Ticket #238. Required whenever `oddsRow` is supplied — the "now" `buildMarketOddsContext`'s freshness check is evaluated against. Every existing (pre-#238) caller that passes no `oddsRow` may pass any value here; it is simply unused. */
+  nowMs?: number
 }): FixtureContext {
-  const { fixtureId, isHome, fplDifficulty, leagueBaselineGoals, ownTeamId, opponentTeamId, eloByTeamId, teamMetadataById, teamMatchRecords, gameweekId } =
+  const { fixtureId, isHome, fplDifficulty, leagueBaselineGoals, ownTeamId, opponentTeamId, eloByTeamId, teamMetadataById, teamMatchRecords, gameweekId, oddsRow, nowMs } =
     params
   const ownMeta = teamMetadataById.get(ownTeamId)
   const opponentMeta = teamMetadataById.get(opponentTeamId)
@@ -568,6 +622,7 @@ export function buildFixtureContext(params: {
     leagueBaselineGoals,
     teamStrength: ownCode !== null ? computeTeamStrengthAsOf(teamMatchRecords, ownCode, gameweekId) : undefined,
     opponentTeamStrength: opponentCode !== null ? computeTeamStrengthAsOf(teamMatchRecords, opponentCode, gameweekId) : undefined,
+    marketOdds: oddsRow !== undefined && nowMs !== undefined ? buildMarketOddsContext(oddsRow, isHome, nowMs) : undefined,
   }
 }
 
@@ -903,6 +958,66 @@ async function main(): Promise<void> {
       list.push(fixture)
       fixturesByGw.set(fixture.event_id, list)
     }
+
+    // --------------------------------------------------------------------
+    // 2b. Ticket #238 — market odds, the new top fixture-term tier. Reads
+    //    ONLY the horizon's own fixture ids (a bounded, small set — ~50
+    //    fixtures across 5 gameweeks), but public.fixture_odds is
+    //    append-only, so a long-lived fixture can accumulate many rows over
+    //    its time in the horizon. Paginated + count-verified like every
+    //    other multi-row read in this file (decisions/ticket-43.md), not
+    //    left unpaginated the way the small, bounded `teams`/`fixtures`
+    //    reads above are. Ordered most-recent-fetch-first so
+    //    latestOddsByFixtureId's own "first one wins" reduction is correct.
+    // --------------------------------------------------------------------
+    const horizonFixtureIds = Array.from(
+      new Set(horizonGameweeks.flatMap((gw) => (fixturesByGw.get(gw.id) ?? []).map((f) => f.id))),
+    )
+
+    let latestOdds = new Map<number, FixtureOddsRow>()
+    let oddsRowsFetched = 0
+    let oddsRowsExpectedByCount = 0
+    let oddsPagesFetched = 0
+    if (horizonFixtureIds.length > 0) {
+      const {
+        rows: oddsRows,
+        error: oddsError,
+        pages: oddsPages,
+      } = await fetchAllPages<FixtureOddsRow>((from, to) =>
+        supabase
+          .from('fixture_odds')
+          .select('fixture_id, fetched_at, book_count, p_home, p_draw, p_away, overround')
+          .in('fixture_id', horizonFixtureIds)
+          .order('fetched_at', { ascending: false })
+          .order('fixture_id', { ascending: true })
+          .range(from, to)
+          .returns<FixtureOddsRow[]>(),
+      )
+      if (oddsError) {
+        // Not fatal — market odds is a bonus tier, not a required table. A
+        // genuinely missing table (migration not yet applied) degrades
+        // gracefully to "no fixture uses the market-odds tier this run",
+        // exactly like an absent teamStrength record already does for tier 2.
+        if (!isMissingTable(oddsError, 'fixture_odds')) {
+          throw new ProjectionError(`fixture_odds lookup failed: ${oddsError.message}`, 'fixture_odds')
+        }
+        console.error(`${JOB_NAME}: the "fixture_odds" table does not exist yet — proceeding with no market-odds tier this run.`)
+      } else {
+        const { count: oddsExpectedCount, error: oddsCountError } = await supabase
+          .from('fixture_odds')
+          .select('*', { count: 'exact', head: true })
+          .in('fixture_id', horizonFixtureIds)
+        if (oddsCountError) {
+          throw new ProjectionError(`fixture_odds count check failed: ${oddsCountError.message}`, 'fixture_odds')
+        }
+        assertRowCountMatches('fixture_odds', oddsRows.length, oddsExpectedCount ?? 0)
+        latestOdds = latestOddsByFixtureId(oddsRows)
+        oddsRowsFetched = oddsRows.length
+        oddsRowsExpectedByCount = oddsExpectedCount ?? 0
+        oddsPagesFetched = oddsPages
+      }
+    }
+    const nowMs = Date.now()
 
     // --------------------------------------------------------------------
     // 3. League baseline goals: computed from finished fixtures at runtime
@@ -1267,6 +1382,8 @@ async function main(): Promise<void> {
             teamMetadataById,
             teamMatchRecords,
             gameweekId: gw.id,
+            oddsRow: latestOdds.get(f.id),
+            nowMs,
           })
         })
 
@@ -1390,7 +1507,7 @@ async function main(): Promise<void> {
     // entries because fixtureEloFallbackCount is the pre-existing name this
     // job's consumers already read; fixtureSourceCounts is the new,
     // complete breakdown across all four tiers.
-    const fixtureSourceCounts: Record<FixtureSource, number> = { elo: 0, 'team-strength': 0, 'stale-elo': 0, fdr: 0 }
+    const fixtureSourceCounts: Record<FixtureSource, number> = { 'market-odds': 0, 'team-strength': 0, 'stale-elo': 0, fdr: 0 }
     const rowsToUpsert: JsonRecord[] = []
 
     for (const key of playerGwKeys) {
@@ -1492,8 +1609,17 @@ async function main(): Promise<void> {
       playersPriceAdjustedScaledDown,
       fixtureEloFallbackCount,
       // Ticket #229 -- see the counter's own comment above for how this
-      // relates to fixtureEloFallbackCount.
+      // relates to fixtureEloFallbackCount. Ticket #238: fixtureSourceCounts.elo
+      // is gone -- 'market-odds' is the new top tier and fresh ClubElo has
+      // been removed from the precedence entirely (see FixtureSource's own
+      // comment in src/lib/projection/expectedPoints.ts).
       fixtureSourceCounts,
+      // Ticket #238 -- market odds, the new top fixture-term tier.
+      oddsRowsFetched,
+      oddsRowsExpectedByCount,
+      oddsPagesFetched,
+      horizonFixtureCount: horizonFixtureIds.length,
+      fixturesWithLatestOddsRow: latestOdds.size,
       // Ticket #235 -- "Report what happened": the fixtures-sourced
       // team-strength construction itself, printed here AND in the console
       // message below so a failure like #229's (the tier never firing) is
@@ -1559,8 +1685,10 @@ async function main(): Promise<void> {
       `skipped (no player_code). Team strength (ticket #235, sourced from public.fixtures): ` +
       `${teamMatchRecords.length} team-match record(s) built, ${teamStrengthUnresolvableTeamCodeCount} side(s) ` +
       `dropped for an unresolvable teams.code, ${clubsMeetingMinTeamPriorMatches}/${distinctTeamCodesForStrength.size} ` +
-      `club(s) meeting MIN_TEAM_PRIOR_MATCHES as of gameweek ${horizonGameweeks[0].id}. Fixture source breakdown: ` +
-      `elo ${fixtureSourceCounts.elo}, team-strength ${fixtureSourceCounts['team-strength']}, ` +
+      `club(s) meeting MIN_TEAM_PRIOR_MATCHES as of gameweek ${horizonGameweeks[0].id}. Market odds (ticket #238): ` +
+      `${oddsRowsFetched} fixture_odds row(s) read for ${horizonFixtureIds.length} horizon fixture(s), ` +
+      `${latestOdds.size} with a latest row. Fixture source breakdown: ` +
+      `market-odds ${fixtureSourceCounts['market-odds']}, team-strength ${fixtureSourceCounts['team-strength']}, ` +
       `stale-elo ${fixtureSourceCounts['stale-elo']}, fdr ${fixtureSourceCounts.fdr}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })

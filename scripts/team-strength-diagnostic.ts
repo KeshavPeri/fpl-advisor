@@ -108,16 +108,29 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { buildFixtureContext, teamCodeByIdFrom, toFixtureResultRows, type FixtureRow, type TeamMetadata } from './project-points.ts'
+import {
+  buildFixtureContext,
+  latestOddsByFixtureId,
+  teamCodeByIdFrom,
+  toFixtureResultRows,
+  type FixtureOddsRow,
+  type FixtureRow,
+  type TeamMetadata,
+} from './project-points.ts'
 import {
   buildTeamMatchRecordsFromFixtures,
+  computeFixtureExpectedScore,
   computeTeamStrengthAsOf,
+  HOME_EXPECTED_SCORE_BONUS,
   MIN_TEAM_PRIOR_MATCHES,
+  NEUTRAL_EXPECTED_SCORE_VALUE,
+  SCALE,
   teamStrengthRate,
   type TeamMatchRecord,
 } from '../src/lib/projection/teamStrength.ts'
 import { resolveFixtureExpectedScore, type FixtureContext, type FixtureSource } from '../src/lib/projection/expectedPoints.ts'
 import { expectedScore, expectedScoreFromDifficulty } from '../src/lib/projection/fixture.ts'
+import { OVERROUND_MAX_PLAUSIBLE, OVERROUND_MIN_PLAUSIBLE } from '../src/lib/projection/marketOdds.ts'
 
 const JOB_NAME = 'team-strength-diagnostic'
 const REFERENCE_SCHEMA_MIGRATION = 'supabase/migrations/20260811100000_reference_schema.sql'
@@ -300,7 +313,22 @@ export function frozenEloExpectedScore(teamElo: number | null, opponentElo: numb
   return expectedScore(teamElo, opponentElo, isHome)
 }
 
-/** One team's own perspective on one fixture — the report's own row shape. */
+/**
+ * One team's own perspective on one fixture — the report's own row shape.
+ *
+ * Ticket #238 adds THREE columns so the report shows frozen-elo, team-strength and market-odds
+ * side by side (ticket text, verbatim), independent of which tier the LIVE precedence actually
+ * picked (`pointInTimeExpectedScore`/`fixtureSource`, unchanged in meaning — now potentially
+ * `'market-odds'`):
+ *   - `teamStrengthExpectedScore` is ALWAYS computed directly (via `computeFixtureExpectedScore`,
+ *     which already falls back to `NEUTRAL_EXPECTED_SCORE_VALUE` for insufficient history) —
+ *     regardless of whether team-strength is the tier the live precedence actually chose.
+ *   - `marketOddsExpectedScore`/`marketOddsBookCount`/`marketOddsOverround` are the RAW reading
+ *     from this fixture's most recent `fixture_odds` row, `null` when none exists — also
+ *     independent of the freshness/book-count gate `resolveFixtureExpectedScore` applies for
+ *     production use, since the falsification gate needs to see what the instrument WOULD say
+ *     even when it isn't (yet) trusted for the live projection.
+ */
 export interface DiagnosticRow {
   fixtureId: number
   gameweekId: number
@@ -312,6 +340,10 @@ export interface DiagnosticRow {
   opponentShortName: string
   isHome: boolean
   frozenEloExpectedScore: number
+  teamStrengthExpectedScore: number
+  marketOddsExpectedScore: number | null
+  marketOddsBookCount: number | null
+  marketOddsOverround: number | null
   pointInTimeExpectedScore: number
   fixtureSource: FixtureSource
 }
@@ -321,7 +353,9 @@ export interface DiagnosticRow {
  * project-points.ts's own `buildFixtureContext` (the exact live wiring) and
  * expectedPoints.ts's own `resolveFixtureExpectedScore` (the exact live
  * precedence) — nothing about how a fixture's expectedScore is decided is
- * reimplemented here.
+ * reimplemented here. Ticket #238: `oddsRow`/`nowMs` thread through the SAME
+ * `buildFixtureContext` params the live job now takes — no second market-odds
+ * wiring invented for the diagnostic.
  */
 export function buildDiagnosticRows(params: {
   fixture: Pick<FixtureRow, 'id' | 'team_h' | 'team_a' | 'team_h_difficulty' | 'team_a_difficulty'>
@@ -330,8 +364,12 @@ export function buildDiagnosticRows(params: {
   eloByTeamId: ReadonlyMap<number, number | null>
   teamMetadataById: ReadonlyMap<number, TeamMetadata>
   teamMatchRecords: readonly TeamMatchRecord[]
+  /** Ticket #238. This fixture's most recent `fixture_odds` row, if any. */
+  oddsRow?: FixtureOddsRow
+  /** Ticket #238. Required whenever `oddsRow` is supplied — see buildFixtureContext's own doc. */
+  nowMs?: number
 }): DiagnosticRow[] {
-  const { fixture, gameweekId, teamsById, eloByTeamId, teamMetadataById, teamMatchRecords } = params
+  const { fixture, gameweekId, teamsById, eloByTeamId, teamMetadataById, teamMatchRecords, oddsRow, nowMs } = params
   const homeTeam = teamsById.get(fixture.team_h)
   const awayTeam = teamsById.get(fixture.team_a)
   if (homeTeam === undefined || awayTeam === undefined) return []
@@ -353,8 +391,14 @@ export function buildDiagnosticRows(params: {
       teamMetadataById,
       teamMatchRecords,
       gameweekId,
+      oddsRow,
+      nowMs,
     })
     const { expectedScoreValue, fixtureSource } = resolveFixtureExpectedScore(ctx)
+    const teamStrengthExpectedScore =
+      ctx.teamStrength !== undefined && ctx.opponentTeamStrength !== undefined
+        ? computeFixtureExpectedScore(ctx.teamStrength, ctx.opponentTeamStrength, SCALE, isHome ? HOME_EXPECTED_SCORE_BONUS : -HOME_EXPECTED_SCORE_BONUS)
+        : NEUTRAL_EXPECTED_SCORE_VALUE
     return {
       fixtureId: fixture.id,
       gameweekId,
@@ -366,6 +410,10 @@ export function buildDiagnosticRows(params: {
       opponentShortName: opponent.short_name,
       isHome,
       frozenEloExpectedScore: frozenEloExpectedScore(ctx.teamElo, ctx.opponentElo, isHome, fplDifficulty),
+      teamStrengthExpectedScore,
+      marketOddsExpectedScore: ctx.marketOdds?.expectedScoreValue ?? null,
+      marketOddsBookCount: ctx.marketOdds?.bookCount ?? null,
+      marketOddsOverround: ctx.marketOdds?.overround ?? null,
       pointInTimeExpectedScore: expectedScoreValue,
       fixtureSource,
     }
@@ -493,6 +541,76 @@ export function checkManUtdVsManCityGate(rows: readonly DiagnosticRow[]): ManUtd
   return { status: row.pointInTimeExpectedScore < 0.5 ? 'pass' : 'fail', manUtdPointInTimeExpectedScore: row.pointInTimeExpectedScore }
 }
 
+// ============================================================================
+// Ticket #238's OWN falsification gate — three NEW conditions, additive to the
+// four #229/#235/#242 gates above (which keep answering a different question:
+// whether the TEAM-STRENGTH wiring itself still works). All three below must
+// hold before this ticket may be merged (ticket text, verbatim: "Stop and
+// report — do not merge — unless all three hold").
+// ============================================================================
+
+export interface MarketOddsLivenessGateResult {
+  /** How many of the examined rows resolved to fixtureSource === 'market-odds'. */
+  count: number
+  /** True (PASS) when count > 0. */
+  passed: boolean
+}
+
+/**
+ * Falsification-gate item 1 (ticket text, verbatim): "At least one fixture in the next gameweek
+ * resolves to source 'market-odds'... assert the new path ran before comparing anything" (the
+ * liveness condition, per LEARNINGS-second-build-wave.md §21 — same discipline
+ * checkTeamStrengthSourceGate above already applies to the team-strength tier).
+ */
+export function checkMarketOddsLivenessGate(rows: readonly Pick<DiagnosticRow, 'fixtureSource'>[]): MarketOddsLivenessGateResult {
+  const count = rows.filter((r) => r.fixtureSource === 'market-odds').length
+  return { count, passed: count > 0 }
+}
+
+export interface MarketOddsVsTeamStrengthGateResult {
+  /** The largest observed |marketOddsExpectedScore - teamStrengthExpectedScore| across every row with an odds reading. Null when no row carries a market-odds reading at all. */
+  maxAbsoluteDifference: number | null
+  /** True (PASS) when maxAbsoluteDifference exceeds 0.02. */
+  passed: boolean
+}
+
+/**
+ * Falsification-gate item 2 (ticket text, verbatim): "At least one fixture's odds-derived
+ * expectedScore differs from its team-strength expectedScore by more than 0.02. Identical columns
+ * mean the new path did nothing." Compares the RAW `marketOddsExpectedScore` (ungated by
+ * freshness/book-count — see DiagnosticRow's own doc) against `teamStrengthExpectedScore`, over
+ * every row that has an odds reading at all.
+ */
+export function checkMarketOddsVsTeamStrengthGate(rows: readonly Pick<DiagnosticRow, 'marketOddsExpectedScore' | 'teamStrengthExpectedScore'>[]): MarketOddsVsTeamStrengthGateResult {
+  const differences = rows
+    .filter((r): r is typeof r & { marketOddsExpectedScore: number } => r.marketOddsExpectedScore !== null)
+    .map((r) => Math.abs(r.marketOddsExpectedScore - r.teamStrengthExpectedScore))
+  if (differences.length === 0) return { maxAbsoluteDifference: null, passed: false }
+  const maxAbsoluteDifference = Math.max(...differences)
+  return { maxAbsoluteDifference, passed: maxAbsoluteDifference > 0.02 }
+}
+
+export interface OverroundPlausibilityGateResult {
+  /** Every examined row's own overround, paired with its fixture/team names, that fell outside [OVERROUND_MIN_PLAUSIBLE, OVERROUND_MAX_PLAUSIBLE]. */
+  outOfRangeRows: DiagnosticRow[]
+  /** How many DISTINCT fixtures carried an overround reading at all (a fixture contributes the SAME overround from both team perspectives, so this is rows.length / 2 among odds-bearing rows, reported for readability). */
+  fixturesWithOverround: number
+  /** True (PASS) when outOfRangeRows is empty AND at least one row carried an overround reading — an overround gate with nothing to check is not evidence the prices are sane. */
+  passed: boolean
+}
+
+/**
+ * Falsification-gate item 3 (ticket text, verbatim): "Every fetched fixture's overround is
+ * between 1.00 and 1.15. Outside that range the prices were misparsed." Scoped to the fixtures
+ * this diagnostic itself examined (the next gameweek) — the same "examined gameweek" boundary
+ * every other gate in this file already uses.
+ */
+export function checkOverroundPlausibilityGate(rows: readonly DiagnosticRow[]): OverroundPlausibilityGateResult {
+  const withOverround = rows.filter((r) => r.marketOddsOverround !== null)
+  const outOfRangeRows = withOverround.filter((r) => (r.marketOddsOverround as number) < OVERROUND_MIN_PLAUSIBLE || (r.marketOddsOverround as number) > OVERROUND_MAX_PLAUSIBLE)
+  return { outOfRangeRows, fixturesWithOverround: withOverround.length, passed: outOfRangeRows.length === 0 && withOverround.length > 0 }
+}
+
 function fmtEs(value: number): string {
   return value.toFixed(4)
 }
@@ -555,16 +673,19 @@ export interface ReportData {
   manUtdGate: ManUtdGateResult
   varianceGate: VarianceGateResult
   expectedScoreBoundGate: ExpectedScoreBoundGateResult
+  marketOddsLivenessGate: MarketOddsLivenessGateResult
+  marketOddsVsTeamStrengthGate: MarketOddsVsTeamStrengthGateResult
+  overroundPlausibilityGate: OverroundPlausibilityGateResult
   strengthTable: TeamStrengthTableRow[]
 }
 
 export function generateReportMarkdown(data: ReportData): string {
   const lines: string[] = []
-  lines.push('# Team-strength diagnostic — tickets #229 / #235')
+  lines.push('# Team-strength diagnostic — tickets #229 / #235 / #238')
   lines.push('')
   lines.push(`Generated: ${data.generatedAt.toISOString()} · Job: \`${JOB_NAME}\` · Gameweek examined: ${data.gameweekId}`)
   lines.push('')
-  lines.push('## Falsification gate')
+  lines.push('## Falsification gate — tickets #229/#235/#242 (team-strength wiring)')
   lines.push('')
   // Ticket #235: the team-strength-source gate is listed FIRST and labelled
   // the PRIMARY gate ("Fix the gate", point 1) -- it is the condition whose
@@ -596,31 +717,58 @@ export function generateReportMarkdown(data: ReportData): string {
         : ` (value: ${fmtEs(data.manUtdGate.manUtdPointInTimeExpectedScore)})`),
   )
   lines.push('')
-  const overallVerdict =
+  lines.push('## Falsification gate — ticket #238 (market odds). All three must hold before this ticket may be merged.')
+  lines.push('')
+  lines.push(
+    `5. **Liveness — at least one fixture in the next gameweek resolves to source \`market-odds\`:** ` +
+      `${data.marketOddsLivenessGate.passed ? 'PASS' : 'FAIL'} (${data.marketOddsLivenessGate.count} of ${data.rows.length} row(s))`,
+  )
+  lines.push(
+    `6. **Divergence — at least one fixture's odds-derived expectedScore differs from its team-strength expectedScore by more than 0.02:** ` +
+      `${data.marketOddsVsTeamStrengthGate.passed ? 'PASS' : 'FAIL'} (largest observed |difference|: ` +
+      `${data.marketOddsVsTeamStrengthGate.maxAbsoluteDifference === null ? 'n/a — no row carries a market-odds reading' : fmtEs(data.marketOddsVsTeamStrengthGate.maxAbsoluteDifference)})`,
+  )
+  lines.push(
+    `7. **Plausibility — every fetched fixture's overround is between ${OVERROUND_MIN_PLAUSIBLE.toFixed(2)} and ${OVERROUND_MAX_PLAUSIBLE.toFixed(2)}:** ` +
+      `${data.overroundPlausibilityGate.passed ? 'PASS' : 'FAIL'} (${data.overroundPlausibilityGate.fixturesWithOverround} row(s) with an overround reading` +
+      (data.overroundPlausibilityGate.outOfRangeRows.length > 0
+        ? `, ${data.overroundPlausibilityGate.outOfRangeRows.length} out of range: ${data.overroundPlausibilityGate.outOfRangeRows.map((r) => `${r.teamName} v ${r.opponentName} (${r.marketOddsOverround?.toFixed(4)})`).join('; ')}`
+        : '') +
+      ')',
+  )
+  lines.push('')
+  const teamStrengthVerdict =
     data.teamStrengthSourceGate.passed && data.varianceGate.passed && data.expectedScoreBoundGate.passed && data.manUtdGate.status !== 'fail'
+  const marketOddsVerdict = data.marketOddsLivenessGate.passed && data.marketOddsVsTeamStrengthGate.passed && data.overroundPlausibilityGate.passed
+  const overallVerdict = teamStrengthVerdict && marketOddsVerdict
   lines.push(
     overallVerdict
-      ? '**Overall: PASS.** Every condition of the falsification gate is satisfied (or not applicable). Proceed.'
+      ? '**Overall: PASS.** Every condition of both falsification gates is satisfied (or not applicable). Proceed.'
       : '**Overall: STOP.** At least one falsification condition failed — the diagnosis needs revisiting before this fix is merged.',
   )
   lines.push('')
   lines.push('## Fixture-by-fixture comparison')
   lines.push('')
-  lines.push('| Team | Opponent | H/A | Frozen-elo expectedScore | Point-in-time expectedScore | Source |')
-  lines.push('|---|---|---|---|---|---|')
+  lines.push('| Team | Opponent | H/A | Frozen-elo | Team-strength | Market-odds | Books | Overround | Live (resolved) | Source |')
+  lines.push('|---|---|---|---|---|---|---|---|---|---|')
   for (const row of data.rows) {
     lines.push(
       `| ${row.teamName} | ${row.opponentName} | ${row.isHome ? 'H' : 'A'} | ${fmtEs(row.frozenEloExpectedScore)} | ` +
+        `${fmtEs(row.teamStrengthExpectedScore)} | ${row.marketOddsExpectedScore === null ? '—' : fmtEs(row.marketOddsExpectedScore)} | ` +
+        `${row.marketOddsBookCount ?? '—'} | ${row.marketOddsOverround === null ? '—' : row.marketOddsOverround.toFixed(4)} | ` +
         `${fmtEs(row.pointInTimeExpectedScore)} | ${row.fixtureSource} |`,
     )
   }
   lines.push('')
   lines.push(
-    '**Reading this table.** "Frozen-elo expectedScore" is exactly what shipped before ticket #229 — a non-null `teams.elo` on both ' +
-      'sides was always trusted, staleness never consulted. "Point-in-time expectedScore" is the live four-tier precedence ' +
-      '(`src/lib/projection/expectedPoints.ts`\'s `resolveFixtureExpectedScore`); "Source" names which tier supplied it — `elo` (fresh, ' +
-      'unchanged behaviour), `team-strength` (built from `public.fixtures`\' real results — ticket #235), `stale-elo` (better than ' +
-      'nothing early season), or `fdr` (the pre-existing coarse fallback, unchanged).',
+    '**Reading this table.** "Frozen-elo" is exactly what shipped before ticket #229 — a non-null `teams.elo` on both sides was ' +
+      'always trusted, staleness never consulted. "Team-strength" is `computeFixtureExpectedScore` evaluated DIRECTLY (ticket #238), ' +
+      'regardless of whether team-strength is the tier the live precedence actually picked. "Market-odds" is the RAW reading from ' +
+      'this fixture\'s most recent `fixture_odds` row (ticket #238) — also independent of the freshness/book-count gate the live ' +
+      'precedence applies; "—" means no odds row exists for this fixture. "Live (resolved)"/"Source" is the actual four-tier ' +
+      'precedence output (`src/lib/projection/expectedPoints.ts`\'s `resolveFixtureExpectedScore`) — `market-odds` (new top tier), ' +
+      '`team-strength` (built from `public.fixtures`\' real results), `stale-elo` (any usable, non-null elo — fresh ClubElo has ' +
+      'been removed from the precedence entirely), or `fdr` (the pre-existing coarse fallback).',
   )
   lines.push('')
   lines.push('## Point-in-time team strength — every club, sorted by rate')
@@ -742,11 +890,50 @@ async function main(): Promise<void> {
     const { records: teamMatchRecords } = buildTeamMatchRecordsFromFixtures(toFixtureResultRows(allFixtureRows), teamCodeById)
 
     // --------------------------------------------------------------------
+    // 4b. Ticket #238 — market odds for the next gameweek's own fixtures
+    //    only (a small, bounded set, ~10 fixtures — unlike
+    //    project-points.ts's 5-gameweek horizon this stays comfortably under
+    //    the 1,000-row db-max-rows ceiling even as fixture_odds accumulates
+    //    daily rows over a fixture's lifetime, so this read is left
+    //    unpaginated, same "small and bounded" precedent as the teams/
+    //    fixtures reads above). A missing fixture_odds table (migration not
+    //    yet applied) degrades gracefully — gate 5 below will simply FAIL,
+    //    correctly reporting "the new path did not run", rather than this
+    //    script throwing.
+    // --------------------------------------------------------------------
+    const gameweekFixtureIds = gameweekFixtureRows.map((f) => f.id)
+    const { data: oddsRowsData, error: oddsError } = await supabase
+      .from('fixture_odds')
+      .select('fixture_id, fetched_at, book_count, p_home, p_draw, p_away, overround')
+      .in('fixture_id', gameweekFixtureIds)
+      .order('fetched_at', { ascending: false })
+      .returns<FixtureOddsRow[]>()
+    if (oddsError && !isMissingTable(oddsError, 'fixture_odds')) {
+      throw new TeamStrengthDiagnosticError(`fixture_odds lookup failed: ${oddsError.message}`, 'fixture_odds')
+    }
+    if (oddsError) {
+      console.error(`${JOB_NAME}: the "fixture_odds" table does not exist yet — gate 5 (liveness) will report FAIL.`)
+    }
+    const latestOdds = latestOddsByFixtureId(oddsRowsData ?? [])
+    const nowMs = Date.now()
+
+    // --------------------------------------------------------------------
     // 5. Build the comparison rows, both team perspectives per fixture in
-    //    the next gameweek only.
+    //    the next gameweek only. Ticket #238: threads each fixture's latest
+    //    odds row (if any) and `nowMs` through — the SAME buildFixtureContext
+    //    params the live job (project-points.ts) now takes.
     // --------------------------------------------------------------------
     const rows: DiagnosticRow[] = gameweekFixtureRows.flatMap((fixture) =>
-      buildDiagnosticRows({ fixture, gameweekId, teamsById, eloByTeamId, teamMetadataById, teamMatchRecords }),
+      buildDiagnosticRows({
+        fixture,
+        gameweekId,
+        teamsById,
+        eloByTeamId,
+        teamMetadataById,
+        teamMatchRecords,
+        oddsRow: latestOdds.get(fixture.id),
+        nowMs,
+      }),
     )
 
     // --------------------------------------------------------------------
@@ -755,13 +942,17 @@ async function main(): Promise<void> {
     //    when every row is identical); the Man Utd v Man City gate is a
     //    bonus check. Ticket #242: the variance gate is now a BAND (not a
     //    floor against frozen-elo), and a new gate 4 checks every row's own
-    //    bound directly, not just the aggregate. ANY of the four failing
-    //    stops the job.
+    //    bound directly, not just the aggregate. Ticket #238 adds three MORE
+    //    gates (5-7), its own falsification requirement, additive to these
+    //    four. ANY of the seven failing stops the job.
     // --------------------------------------------------------------------
     const teamStrengthSourceGate = checkTeamStrengthSourceGate(rows)
     const manUtdGate = checkManUtdVsManCityGate(rows)
     const varianceGate = checkVarianceGate(rows)
     const expectedScoreBoundGate = checkExpectedScoreBoundGate(rows)
+    const marketOddsLivenessGate = checkMarketOddsLivenessGate(rows)
+    const marketOddsVsTeamStrengthGate = checkMarketOddsVsTeamStrengthGate(rows)
+    const overroundPlausibilityGate = checkOverroundPlausibilityGate(rows)
 
     // --------------------------------------------------------------------
     // 7. The full point-in-time strength table (ticket #235, point 4 of "Fix
@@ -782,6 +973,9 @@ async function main(): Promise<void> {
       manUtdGate,
       varianceGate,
       expectedScoreBoundGate,
+      marketOddsLivenessGate,
+      marketOddsVsTeamStrengthGate,
+      overroundPlausibilityGate,
       strengthTable,
     }
     const reportMarkdown = generateReportMarkdown(reportData)
@@ -797,14 +991,27 @@ async function main(): Promise<void> {
       manUtdGate,
       varianceGate,
       expectedScoreBoundGate,
+      marketOddsLivenessGate,
+      marketOddsVsTeamStrengthGate,
+      overroundPlausibilityGate,
       reportPath,
     }
 
     // Ticket #235: the team-strength-source gate is the PRIMARY condition —
     // "if none does, the fix is not running and the job must exit non-zero"
-    // (ticket text, verbatim). Ticket #242 adds the per-row bound gate. ANY
-    // of the four failing stops the job.
-    if (!teamStrengthSourceGate.passed || manUtdGate.status === 'fail' || !varianceGate.passed || !expectedScoreBoundGate.passed) {
+    // (ticket text, verbatim). Ticket #242 adds the per-row bound gate.
+    // Ticket #238 adds its own three-condition falsification gate, additive
+    // to these four — "Stop and report — do not merge — unless all three
+    // hold" (ticket text, verbatim). ANY of the seven failing stops the job.
+    if (
+      !teamStrengthSourceGate.passed ||
+      manUtdGate.status === 'fail' ||
+      !varianceGate.passed ||
+      !expectedScoreBoundGate.passed ||
+      !marketOddsLivenessGate.passed ||
+      !marketOddsVsTeamStrengthGate.passed ||
+      !overroundPlausibilityGate.passed
+    ) {
       const message =
         `${JOB_NAME}: falsification gate FAILED for gameweek ${gameweekId} — ` +
         `team-strength-source gate: ${teamStrengthSourceGate.passed ? 'pass' : 'fail'} (${teamStrengthSourceGate.count} row(s)); ` +
@@ -812,7 +1019,12 @@ async function main(): Promise<void> {
         `(point-in-time stdDev ${fmtEs(varianceGate.pointInTimeStdDev)}, band [${TEAM_STRENGTH_STDDEV_MIN}, ${TEAM_STRENGTH_STDDEV_MAX}], ` +
         `frozen stdDev for reference ${fmtEs(varianceGate.frozenStdDev)}, all rows identical: ${varianceGate.allRowsIdentical}); ` +
         `expectedScore-bound gate: ${expectedScoreBoundGate.passed ? 'pass' : 'fail'} (${expectedScoreBoundGate.outOfBoundRows.length} row(s) outside ` +
-        `[${EXPECTED_SCORE_BOUND_MIN}, ${EXPECTED_SCORE_BOUND_MAX}]). Report written to ${reportPath} for diagnosis.`
+        `[${EXPECTED_SCORE_BOUND_MIN}, ${EXPECTED_SCORE_BOUND_MAX}]); market-odds liveness gate: ` +
+        `${marketOddsLivenessGate.passed ? 'pass' : 'fail'} (${marketOddsLivenessGate.count} row(s)); market-odds-vs-team-strength ` +
+        `divergence gate: ${marketOddsVsTeamStrengthGate.passed ? 'pass' : 'fail'} (max |difference| ` +
+        `${marketOddsVsTeamStrengthGate.maxAbsoluteDifference === null ? 'n/a' : fmtEs(marketOddsVsTeamStrengthGate.maxAbsoluteDifference)}); ` +
+        `overround plausibility gate: ${overroundPlausibilityGate.passed ? 'pass' : 'fail'} (${overroundPlausibilityGate.outOfRangeRows.length} of ` +
+        `${overroundPlausibilityGate.fixturesWithOverround} row(s) with an overround reading out of range). Report written to ${reportPath} for diagnosis.`
       console.error(message)
       await recordJobRun(supabase, { status: 'failure', message, details, startedAt })
       process.exit(1)
@@ -822,7 +1034,8 @@ async function main(): Promise<void> {
     const message =
       `${JOB_NAME}: gameweek ${gameweekId} — ${rows.length} row(s) compared across ${gameweekFixtureRows.length} fixture(s), ` +
       `${teamMatchRecords.length} team-match record(s) built from public.fixtures. Falsification gate PASSED ` +
-      `(${teamStrengthSourceGate.count} row(s) resolved to team-strength). Report written to ${reportPath}.`
+      `(${teamStrengthSourceGate.count} row(s) resolved to team-strength, ${marketOddsLivenessGate.count} to market-odds). ` +
+      `Report written to ${reportPath}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {

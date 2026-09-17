@@ -43,6 +43,9 @@ import { resolvePriorRowPosition, buildPositionPriorMatches, type MatchStatsRow 
 // the resolveFixtureExpectedScore wiring is provable on constructed rows,
 // not only grepped.
 import { buildFixtureContext, type TeamMetadata } from './project-points.ts'
+// Ticket #238: same reasoning -- buildMarketOddsContext and latestOddsByFixtureId are plain pure
+// functions (no Supabase call of their own), imported and exercised directly.
+import { buildMarketOddsContext, latestOddsByFixtureId, type FixtureOddsRow } from './project-points.ts'
 // Ticket #235: same reasoning -- toFixtureResultRows and teamCodeByIdFrom
 // are plain pure functions (no Supabase call of their own), imported and
 // exercised directly so the fixtures -> team-strength wiring is provable on
@@ -283,6 +286,20 @@ describe('classifySeasonCoverage — ticket #113 job_runs.details counters', () 
     expect(current).toBe(3)
     expect(historicalOnly).toBe(2)
     expect(neither).toBe(3)
+  })
+})
+
+describe('scheduled-jobs.yml — ticket #238', () => {
+  it('runs ingest-match-odds daily, before project-points, with ODDS_API_KEY wired from repository secrets', () => {
+    const workflowPath = fileURLToPath(new URL('../.github/workflows/scheduled-jobs.yml', import.meta.url))
+    const workflowSource = readFileSync(workflowPath, 'utf8')
+    expect(workflowSource).toMatch(/ingest-match-odds\.ts/)
+    expect(workflowSource).toMatch(/ODDS_API_KEY:\s*\$\{\{\s*secrets\.ODDS_API_KEY\s*\}\}/)
+    const oddsStepIndex = workflowSource.indexOf('scripts/ingest-match-odds.ts')
+    const projectPointsStepIndex = workflowSource.indexOf('scripts/project-points.ts')
+    expect(oddsStepIndex).toBeGreaterThan(-1)
+    expect(projectPointsStepIndex).toBeGreaterThan(-1)
+    expect(oddsStepIndex).toBeLessThan(projectPointsStepIndex)
   })
 })
 
@@ -946,6 +963,119 @@ describe('buildFixtureContext (ticket #229)', () => {
     })
     expect(ctx.teamStrength).toEqual({ matches: MIN_TEAM_PRIOR_MATCHES, goalsScored: MIN_TEAM_PRIOR_MATCHES * 2, goalsConceded: 0 })
     expect(ctx.opponentTeamStrength).toEqual({ matches: 1, goalsScored: 1, goalsConceded: 1 })
+  })
+
+  // ==========================================================================
+  // Ticket #238 -- market odds wiring.
+  // ==========================================================================
+
+  const oddsRow: FixtureOddsRow = { fixture_id: 1, fetched_at: new Date(1000).toISOString(), book_count: 21, p_home: 0.5, p_draw: 0.3, p_away: 0.2, overround: 1.05 }
+
+  it('marketOdds is undefined when no oddsRow is supplied -- an exact no-op for every pre-#238 caller', () => {
+    const teamMetadataById = new Map([
+      [OWN_TEAM_ID, freshMetadata],
+      [OPPONENT_TEAM_ID, opponentMetadata],
+    ])
+    const ctx = buildFixtureContext({
+      fixtureId: 1,
+      isHome: true,
+      fplDifficulty: 3,
+      leagueBaselineGoals: 1.45,
+      ownTeamId: OWN_TEAM_ID,
+      opponentTeamId: OPPONENT_TEAM_ID,
+      eloByTeamId,
+      teamMetadataById,
+      teamMatchRecords: [],
+      gameweekId: 5,
+    })
+    expect(ctx.marketOdds).toBeUndefined()
+  })
+
+  it('marketOdds is undefined when oddsRow is supplied but nowMs is not (freshness cannot be judged without a clock)', () => {
+    const teamMetadataById = new Map([
+      [OWN_TEAM_ID, freshMetadata],
+      [OPPONENT_TEAM_ID, opponentMetadata],
+    ])
+    const ctx = buildFixtureContext({
+      fixtureId: 1,
+      isHome: true,
+      fplDifficulty: 3,
+      leagueBaselineGoals: 1.45,
+      ownTeamId: OWN_TEAM_ID,
+      opponentTeamId: OPPONENT_TEAM_ID,
+      eloByTeamId,
+      teamMetadataById,
+      teamMatchRecords: [],
+      gameweekId: 5,
+      oddsRow,
+    })
+    expect(ctx.marketOdds).toBeUndefined()
+  })
+
+  it('marketOdds is built via buildMarketOddsContext when both oddsRow and nowMs are supplied', () => {
+    const teamMetadataById = new Map([
+      [OWN_TEAM_ID, freshMetadata],
+      [OPPONENT_TEAM_ID, opponentMetadata],
+    ])
+    const ctx = buildFixtureContext({
+      fixtureId: 1,
+      isHome: true,
+      fplDifficulty: 3,
+      leagueBaselineGoals: 1.45,
+      ownTeamId: OWN_TEAM_ID,
+      opponentTeamId: OPPONENT_TEAM_ID,
+      eloByTeamId,
+      teamMetadataById,
+      teamMatchRecords: [],
+      gameweekId: 5,
+      oddsRow,
+      nowMs: 2000,
+    })
+    expect(ctx.marketOdds).toEqual(buildMarketOddsContext(oddsRow, true, 2000))
+  })
+})
+
+describe('buildMarketOddsContext (ticket #238)', () => {
+  const row: FixtureOddsRow = { fixture_id: 1, fetched_at: new Date(0).toISOString(), book_count: 21, p_home: 0.5, p_draw: 0.3, p_away: 0.2, overround: 1.05 }
+
+  it('orients expectedScoreValue as pHome + 0.5*pDraw for the home side', () => {
+    const ctx = buildMarketOddsContext(row, true, 0)
+    expect(ctx.expectedScoreValue).toBeCloseTo(0.5 + 0.5 * 0.3, 10)
+  })
+
+  it('orients expectedScoreValue as pAway + 0.5*pDraw for the away side', () => {
+    const ctx = buildMarketOddsContext(row, false, 0)
+    expect(ctx.expectedScoreValue).toBeCloseTo(0.2 + 0.5 * 0.3, 10)
+  })
+
+  it('carries bookCount and overround through unchanged', () => {
+    const ctx = buildMarketOddsContext(row, true, 0)
+    expect(ctx.bookCount).toBe(21)
+    expect(ctx.overround).toBe(1.05)
+  })
+
+  it('isFresh reflects the 48h window between fetched_at and nowMs', () => {
+    const fortyEightHoursMs = 48 * 60 * 60 * 1000
+    expect(buildMarketOddsContext(row, true, fortyEightHoursMs).isFresh).toBe(true)
+    expect(buildMarketOddsContext(row, true, fortyEightHoursMs + 1).isFresh).toBe(false)
+  })
+})
+
+describe('latestOddsByFixtureId (ticket #238)', () => {
+  it('keeps the FIRST row seen per fixture_id -- callers must supply rows most-recent-first', () => {
+    const rows: FixtureOddsRow[] = [
+      { fixture_id: 1, fetched_at: new Date(2000).toISOString(), book_count: 5, p_home: 0.5, p_draw: 0.3, p_away: 0.2, overround: 1.0 },
+      { fixture_id: 1, fetched_at: new Date(1000).toISOString(), book_count: 5, p_home: 0.4, p_draw: 0.3, p_away: 0.3, overround: 1.0 },
+      { fixture_id: 2, fetched_at: new Date(1500).toISOString(), book_count: 5, p_home: 0.6, p_draw: 0.2, p_away: 0.2, overround: 1.0 },
+    ]
+    const result = latestOddsByFixtureId(rows)
+    expect(result.size).toBe(2)
+    expect(result.get(1)?.fetched_at).toBe(new Date(2000).toISOString())
+    expect(result.get(2)?.fetched_at).toBe(new Date(1500).toISOString())
+  })
+
+  it('an empty input produces an empty map', () => {
+    expect(latestOddsByFixtureId([])).toEqual(new Map())
   })
 })
 

@@ -70,6 +70,19 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: npx tsx scripts/ingest-fpl.ts
 
+      - name: Ingest match odds
+        # Ticket #238. Runs after the FPL ingest step above, which populates
+        # the teams/fixtures tables this job resolves fixture_ids against --
+        # and before "Project points", which is the job that actually reads
+        # fixture_odds. ODDS_API_KEY is already live in the repository
+        # secrets (owner-provisioned, 15 Sept 2026); reading it here is not a
+        # new-credential action.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: npx tsx scripts/ingest-match-odds.ts
+
       - name: Project points
         # Ticket #33. Runs after the FPL ingest step above (needs fresh
         # players/teams/fixtures/gameweeks) and after the FPL-Core-Insights
