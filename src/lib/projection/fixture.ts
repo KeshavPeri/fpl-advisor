@@ -138,14 +138,15 @@ export const ATTACKING_MULTIPLIER_MAX = 2
  * the most important one this ticket adds.
  *
  * `expectedGoalsConceded` / `defensiveMultiplier` (the mirror
- * `2 × (1 − expectedScore)` form) are explicitly UNTOUCHED by this
- * measurement. The same source bucket table's "actual conceded" / "actual
- * CS%" columns (not reproduced above — see the review doc) show the
- * defensive side also overshoots, but damping it is deliberately deferred:
- * goalkeeper/defender ranking is the model's clearest win and depends on
- * that spread, and confirming the fix needs a live database read the review
- * flags as out of scope here. Do not extend this reasoning to
- * `defensiveMultiplier` without its own separate measurement and ticket.
+ * `2 × (1 − expectedScore)` form) were explicitly UNTOUCHED by this
+ * measurement — ticket #182 deliberately deferred damping the defensive
+ * side without its own separate in-harness measurement (goalkeeper/defender
+ * ranking is the model's clearest win and depends on that spread). **Ticket
+ * #244 is that separate measurement** and damped `defensiveMultiplier` /
+ * `expectedGoalsConceded` to a mirrored slope — see
+ * `DEFENSIVE_MULTIPLIER_OFFSET`'s own comment below for the full derivation.
+ * This paragraph is left as the historical record of #182's own deferral,
+ * not restated as still-current.
  */
 export const ATTACKING_MULTIPLIER_OFFSET = 0.5
 
@@ -166,36 +167,114 @@ export function attackingMultiplier(expectedScoreValue: number): number {
 
 /**
  * Expected goals conceded by the "for" team in this fixture:
- * `leagueBaselineGoals × 2 × (1 - expectedScore)`, clamped at zero from
- * below. At `expectedScore = 0.5` this is exactly `leagueBaselineGoals`
- * (the league-average defensive expectation, unadjusted); a heavily
- * favoured fixture pushes it toward 0.
+ * `leagueBaselineGoals × defensiveMultiplier(expectedScore)` — ticket #244
+ * rewrote this to call {@link defensiveMultiplier} directly (previously a
+ * separately-stated `leagueBaselineGoals × 2 × (1 - expectedScore)`, mirrored
+ * by hand rather than shared) so the "never allowed to drift apart"
+ * invariant {@link defensiveMultiplier}'s own comment documents is enforced
+ * by construction, not just by a test. `Math.max(0, ...)` is defensive
+ * belt-and-suspenders only — `defensiveMultiplier` already clamps to `[0,
+ * 2]`, so this can only bind for a negative `leagueBaselineGoals`, which
+ * should never occur. At `expectedScore = 0.5` this is exactly
+ * `leagueBaselineGoals` (the league-average defensive expectation,
+ * unadjusted); a heavily favoured fixture pushes it toward
+ * `0.5 × leagueBaselineGoals` (not all the way to 0 — see
+ * `DEFENSIVE_MULTIPLIER_OFFSET`'s own comment for why the damped range is
+ * `[0.5, 1.5]`, mirroring `attackingMultiplier`).
  */
 export function expectedGoalsConceded(leagueBaselineGoals: number, expectedScoreValue: number): number {
-  return Math.max(0, leagueBaselineGoals * 2 * (1 - expectedScoreValue))
+  return Math.max(0, leagueBaselineGoals * defensiveMultiplier(expectedScoreValue))
 }
 
 /**
+ * Ticket #244 — damps {@link defensiveMultiplier} / {@link
+ * expectedGoalsConceded}'s slope to its measured value, the mirror of what
+ * ticket #182 did for {@link attackingMultiplier} (see
+ * `ATTACKING_MULTIPLIER_OFFSET`'s own comment above). G12 in
+ * `docs/projection-model-backlog.md` recorded this as deliberately
+ * UNMEASURED after #182 — "do not extend this reasoning to
+ * `defensiveMultiplier` without its own separate measurement and ticket."
+ * This is that measurement.
+ *
+ * MEASUREMENT (`scripts/fixture-slope-report.ts`, `./out/fixture-slope-report.md`,
+ * 17 Sept 2026): actual team goals CONCEDED, bucketed by point-in-time
+ * `expectedScore`, over every resolvable 2025-2026 Premier League team-match,
+ * SAME method, buckets and (data-availability-driven) population #182 used
+ * for goals scored (n=758 here vs #182's published n=698 — the difference is
+ * 60 early-season team-match perspectives that fall to the neutral es=0.5
+ * fallback rather than being excluded; see the report's own note. The
+ * goals-SCORED table this same run reproduces matches #182's published
+ * bucket means within 0.002 in every bucket, well inside the ticket's ±0.05
+ * falsification tolerance, so the harness is trusted):
+ *
+ *   es bucket    | n   | mean es | actual conceded | current model (1.45×2×(1−es))
+ *   0.00–0.35    | 123 | 0.253   | 1.75             | 2.17
+ *   0.35–0.45    | 138 | 0.401   | 1.61             | 1.74
+ *   0.45–0.55    | 236 | 0.500   | 1.35             | 1.45
+ *   0.55–0.65    | 138 | 0.599   | 1.23             | 1.16
+ *   0.65–1.01    | 123 | 0.747   | 1.04             | 0.73
+ *
+ * Fitted slope: extreme-bucket endpoint
+ * `(1.04 − 1.75) / (0.747 − 0.253) = −0.71 / 0.494 = −1.4372 ≈ −1.43` goals
+ * conceded per unit of `expectedScore` (a weighted least-squares fit over the
+ * five bucket means gives ≈−1.50, the same conclusion within reconstruction
+ * noise) — essentially the exact mirror of the goals-SCORED slope (+1.43 /
+ * +1.50) measured in the same run, and about half the current model's −2.9.
+ * `MODEL_IMPLIED_CONCEDED_SLOPE` (−2.9) is outside the ticket's ±15% band
+ * around the measured value ([−3.335, −2.465] vs measured ≈−1.43), so per the
+ * ticket's own decision rule this constant is damped, not left alone.
+ *
+ * A damped multiplier of slope magnitude 1 instead of 2 — exactly mirroring
+ * `attackingMultiplier`'s own `OFFSET + expectedScore` — implies a raw-goals
+ * slope of `LEAGUE_BASELINE_GOALS_PER_TEAM × 1 = 1.45`, matching the measured
+ * ~1.43–1.50 closely (predicted `1.45 × (1.5 − 0.253) = 1.808` vs actual 1.75
+ * at the low bucket; `1.45 × (1.5 − 0.747) = 1.092` vs actual 1.04 at the
+ * high bucket — residuals from −0.10 to +0.06 across all five buckets,
+ * comparable in size to #182's own −0.10 to +0.02). `DEFENSIVE_MULTIPLIER_OFFSET`
+ * = 1.5 is exactly the value that leaves an even fixture (`expectedScore =
+ * 0.5`) unadjusted at `1.0`, matching the pre-#244 formula at that one point
+ * — see `defensiveMultiplier`'s "equals 1.0 exactly" test. Note the elegant
+ * consequence, not independently chosen: `attackingMultiplier(es) +
+ * defensiveMultiplier(es) = (0.5 + es) + (1.5 − es) = 2.0` for every
+ * `expectedScore`, i.e. the damped attacking and defensive responses are
+ * exact mirrors of one another, same as the measured slopes are.
+ *
+ * Tier 2, logged HIGH-IMPACT (ticket text) — changes every live defender and
+ * goalkeeper clean-sheet projection. `scripts/calibration-report.ts` run
+ * before/after (see the Builder's report on ticket #244 for the before/after
+ * figures — this Builder session has no Supabase credentials and could not
+ * run it against live data; flagged rather than guessed at).
+ */
+export const DEFENSIVE_MULTIPLIER_OFFSET = 1.5
+
+/**
  * Multiplier applied to a goalkeeper's baseline saves rate for this fixture:
- * `2 × (1 - expectedScore)`, clamped to `[0, 2]` — the exact defensive
- * mirror of {@link attackingMultiplier} (`2 × expectedScore`), and the ratio
- * form of {@link expectedGoalsConceded} (`leagueBaselineGoals × 2 × (1 -
- * expectedScore)` — divide out `leagueBaselineGoals` and this is what is
- * left). Saves and goals conceded share one cause, being under pressure from
- * the same fixture, so they share one multiplier derived the same way: a
- * team twice as likely to concede faces roughly twice the shot volume. At
- * `expectedScore = 0.5` (an even fixture) this is exactly `1.0` — no
- * adjustment. A heavily unfavoured fixture pushes toward `2.0` (double the
- * expected saves workload); a heavily favoured one pushes toward `0.0`.
+ * `DEFENSIVE_MULTIPLIER_OFFSET − expectedScore`, clamped to `[0, 2]` — see
+ * `DEFENSIVE_MULTIPLIER_OFFSET`'s own comment for the measurement this
+ * damped slope is fitted to (ticket #244; pre-#244 this was `2 × (1 -
+ * expectedScore)`, slope magnitude 2 instead of 1). Still the ratio form of
+ * {@link expectedGoalsConceded} (`leagueBaselineGoals ×
+ * (DEFENSIVE_MULTIPLIER_OFFSET − expectedScore)` — divide out
+ * `leagueBaselineGoals` and this is what is left) and still applied to a
+ * goalkeeper's saves rate for the same reason as before: saves and goals
+ * conceded share one cause, being under pressure from the same fixture, so
+ * they share one multiplier derived the same way. At `expectedScore = 0.5`
+ * (an even fixture) this is exactly `1.0` — no adjustment, identical to the
+ * pre-#244 formula at that one point. A heavily unfavoured fixture pushes
+ * toward `1.5` (at `expectedScore = 0`); a heavily favoured one pushes toward
+ * `0.5` (at `expectedScore = 1`) — half the pre-#244 formula's slope, the
+ * exact mirror of {@link attackingMultiplier}'s own `[0.5, 1.5]` range.
  *
  * `expectedGoalsConceded(b, s) === b * defensiveMultiplier(s)` by
- * construction (see fixture.test.ts) -- the two are never allowed to drift
- * apart. See docs/projection-model-backlog.md G1 for the caveat this does
- * NOT resolve: shot volume and shot quality are correlated, not identical,
- * so this slightly double-counts the fixture against expectedGoalsConceded.
+ * construction (see fixture.test.ts, and `expectedGoalsConceded`'s own
+ * implementation above, which calls this function directly rather than
+ * reimplementing the formula) -- the two are never allowed to drift apart.
+ * See docs/projection-model-backlog.md G1 for the caveat this does NOT
+ * resolve: shot volume and shot quality are correlated, not identical, so
+ * this slightly double-counts the fixture against expectedGoalsConceded.
  */
 export function defensiveMultiplier(expectedScoreValue: number): number {
-  return clamp(2 * (1 - expectedScoreValue), 0, 2)
+  return clamp(DEFENSIVE_MULTIPLIER_OFFSET - expectedScoreValue, 0, 2)
 }
 
 /**

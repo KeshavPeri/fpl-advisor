@@ -735,41 +735,71 @@ of a model defect. The assist workstream is closed; no further ticket should cha
 
 ---
 
-## G12 — The defensive multiplier overshoots symmetrically to G8's attacking side, and must not be
-## damped without its own in-harness measurement
+## G12 — MEASURED AND CONFIRMED by ticket #244, 17 Sept 2026 — the defensive multiplier IS
+## damped, mirroring #182's attacking fix, and its own replacement clean-sheet gate PASSES.
 
-The same review §1b bucket table that resolved G8 shows `expectedGoalsConceded` /
-`defensiveMultiplier` overshooting real outcomes in the same direction and by a similar shape as
-the attacking side did — **deliberately left alone**, unlike the attacking multiplier (#184).
+**Historical record below, unchanged — this is what the measurement answered.** The same review
+§1b bucket table that resolved G8 showed `expectedGoalsConceded` / `defensiveMultiplier`
+overshooting real outcomes in the same direction and by a similar shape as the attacking side did
+— **deliberately left alone**, unlike the attacking multiplier (#182/#184), until its own
+in-harness measurement existed. Ticket #244 is that measurement.
 
-**Why it must stay alone.** Goalkeeper and defender ranking is this model's clearest measured
-win, and it depends on that spread: the review's neutral-fixture variant (multiplier forced to
-1.0 for every fixture) collapses goalkeeper Spearman from 0.168 to **−0.017**. Whatever the
-defensive multiplier's exact shape error is, removing or naively damping the spread it produces
-would cost the one part of the model that is unambiguously working, not just correct a level
-error.
+**The measurement (`scripts/fixture-slope-report.ts`, `./out/fixture-slope-report.md`, 17 Sept
+2026).** Actual team goals CONCEDED, bucketed by point-in-time `expectedScore`, SAME method and
+buckets #182 used for goals scored, n=758 (the goals-SCORED table this same run reproduces
+matches #182's published bucket means within 0.002 in every bucket — the harness is trusted).
+Fitted slope: endpoint ≈−1.43, weighted least-squares ≈−1.50 — essentially the exact mirror of
+the goals-SCORED slope (+1.43 / +1.50) measured in the same run, and roughly half the model's
+implied −2.9. That is outside the ticket's ±15% materiality band, so per its decision rule this
+constant is damped, not left alone: `defensiveMultiplier(es) = clamp(1.5 − es, 0, 2)` (was
+`2 × (1 − es)`), the exact mirror of `attackingMultiplier`'s own `0.5 + es`. Full derivation:
+`src/lib/projection/fixture.ts`'s `DEFENSIVE_MULTIPLIER_OFFSET` comment.
 
-**Why a same-shape fix (mirroring #184) is not safe here.** The empirical clean-sheet curve is
-steeper than a Poisson model with a damped λ produces — damping `expectedGoalsConceded`'s slope
-(and therefore λ, since `pCleanSheet = exp(−λ)`) would change the *shape* of the clean-sheet
-curve, not just narrow its ends the way `0.5 + es` narrowed the attacking side. The attacking fix
-was a slope change that reproduced the bucket means almost exactly; the same move is not shown to
-do that here.
+**Why this entry said a same-shape fix was "not safe", and what settled it.** This entry
+previously argued that damping `expectedGoalsConceded`'s slope changes the *shape* of the
+clean-sheet curve (`pCleanSheet = exp(−λ)` is non-linear in λ), not just its ends the way the
+linear goals-scored comparison narrowed the attacking side — and that the fix therefore needed
+confirming against the real, observed clean-sheet rate, not just the goals-conceded bucket table
+alone. Ticket #244's ORIGINAL gate 3 said the same thing but specified it as a live
+`scripts/calibration-report.ts` before/after run against Supabase — mis-specified, since a
+Builder session has no credentials to run it and, per `LEARNINGS-second-build-wave.md` §20,
+should not be asked to write a gate it cannot itself evaluate. **Keshav replaced it** with a gate
+computable from the exact same measured rows, no Supabase: per bucket, the ACTUAL observed
+clean-sheet rate (share of the bucket's team-matches with 0 goals conceded) against the mean of
+`exp(−λ)` for the OLD formula (`λ = leagueBaselineGoals × 2 × (1−es)`) and this ticket's NEW
+damped formula (`λ = leagueBaselineGoals × (1.5−es)`), each pooled directly over the bucket's own
+rows (never a two-level mean-of-means). Verdict: PASS when NEW's mean absolute error against
+ACTUAL is lower than OLD's.
 
-**The findable pointer already exists in code.** `src/lib/projection/fixture.ts`'s own comment on
-`ATTACKING_MULTIPLIER_OFFSET` already warns: "Do not extend this reasoning to `defensiveMultiplier`
-without its own separate measurement and ticket." This backlog entry is that warning's matching,
-findable entry — the measurement it calls for has still not been done.
+**The result (same 17 Sept 2026 run, `./out/fixture-slope-report.md`):**
 
-**Next step, recorded as this entry's own.** An in-harness variant sweep over the defensive slope
-in `scripts/run-backtest.ts`, read on goalkeeper and defender Spearman **and** clean-sheet
-calibration together — not MAE alone, since MAE would not by itself catch a ranking collapse like
-the neutral-fixture variant's.
+| es bucket | n | ACTUAL CS rate | OLD predicted | NEW predicted |
+|---|---|---|---|---|
+| 0.00–0.35 | 123 | 0.0894 | 0.1173 | 0.1649 |
+| 0.35–0.45 | 138 | 0.2029 | 0.1769 | 0.2035 |
+| 0.45–0.55 | 236 | 0.2669 | 0.2352 | 0.2347 |
+| 0.55–0.65 | 138 | 0.2971 | 0.3136 | 0.2709 |
+| 0.65–1.01 | 123 | 0.3902 | 0.4941 | 0.3380 |
 
-**Batching conflict — note this before scheduling that work.** That sweep touches
-`scripts/run-backtest.ts`. Ticket #187 is editing that same file in this very batch (2 Sep 2026).
-G12's proposed work must not be batched alongside a ticket already editing `run-backtest.ts` — it
-waits for a future batch.
+MAE vs ACTUAL: OLD = 0.0412, NEW = 0.0373. **NEW < OLD, so this gate PASSES** — the damped formula
+tracks the real, observed clean-sheet rate better than the pre-#244 formula did, at both extreme
+buckets in particular (where the pre-#244 formula's overshoot was worst). The non-linearity risk
+this entry originally raised did not materialize: a linear slope match on goals conceded also
+produced a better clean-sheet probability curve, not merely a better-looking goals figure.
+**`DEFENSIVE_MULTIPLIER_OFFSET = 1.5` is confirmed, not merely fitted** — this backlog no longer
+carries an open verification item for it.
+
+**Known, accepted scope collision — sequencing, not a blocker on the measurement.** Changing
+`defensiveMultiplier`'s formula changes `expectedGoalsConceded`'s OUTPUT VALUE (not its
+signature) for every non-neutral fixture, which breaks several hardcoded pre-existing assertions
+in `src/lib/projection/expectedPoints.test.ts` that encode the OLD constant's numeric output
+(ticket #109's and #182's own "byte-identical to the pre-ticket formula" snapshots) —
+`expectedPoints.ts`/`.test.ts` are explicitly out of #244's scope, owned by ticket #238 in the
+same batch. #244's own ticket text anticipated exactly this ("if it turns out any of those files
+must change, stop and report") — #244 stopped and reported rather than editing that file itself,
+and per Keshav's own reply, **#244 waits for #238 to merge, then rebases and updates
+`expectedPoints.test.ts`'s stale assertions** — not attempted here. See decisions/ticket-244.md
+and the Builder's reports for the full detail.
 
 ---
 
