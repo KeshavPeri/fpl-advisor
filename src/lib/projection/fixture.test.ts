@@ -3,7 +3,9 @@ import {
   ATTACKING_MULTIPLIER_MAX,
   ATTACKING_MULTIPLIER_MIN,
   ATTACKING_MULTIPLIER_OFFSET,
+  DEFENSIVE_MULTIPLIER_OFFSET,
   HOME_ADVANTAGE_ELO,
+  LEAGUE_BASELINE_GOALS_PER_TEAM,
   attackingMultiplier,
   defensiveMultiplier,
   expectedGoalsConceded,
@@ -112,38 +114,55 @@ describe('attackingMultiplier', () => {
   })
 })
 
+// ============================================================================
+// Ticket #244 -- defensiveMultiplier / expectedGoalsConceded damped to their
+// measured slope, the mirror of what ticket #182 did for attackingMultiplier.
+// See DEFENSIVE_MULTIPLIER_OFFSET's own comment in fixture.ts for the full
+// derivation and the measured bucket table (scripts/fixture-slope-report.ts).
+// ============================================================================
+
 describe('expectedGoalsConceded', () => {
-  it('equals leagueBaselineGoals exactly at expectedScore = 0.5 (an even fixture)', () => {
+  it('equals leagueBaselineGoals exactly at expectedScore = 0.5 -- the most important test in this ticket: an even fixture must stay unadjusted after the damping', () => {
     expect(expectedGoalsConceded(1.45, 0.5)).toBeCloseTo(1.45, 10)
+    expect(expectedGoalsConceded(LEAGUE_BASELINE_GOALS_PER_TEAM, 0.5)).toBeCloseTo(LEAGUE_BASELINE_GOALS_PER_TEAM, 10)
   })
-  it('is leagueBaselineGoals x 2 x (1 - expectedScore)', () => {
-    expect(expectedGoalsConceded(1.5, 0.7)).toBeCloseTo(1.5 * 2 * 0.3, 10)
+  it('is leagueBaselineGoals x defensiveMultiplier(expectedScore) -- ticket #244: this is now defined in terms of defensiveMultiplier directly, not a separately-stated formula', () => {
+    expect(expectedGoalsConceded(1.5, 0.7)).toBeCloseTo(1.5 * defensiveMultiplier(0.7), 10)
+    expect(expectedGoalsConceded(1.5, 0.7)).toBeCloseTo(1.5 * (DEFENSIVE_MULTIPLIER_OFFSET - 0.7), 10)
   })
-  it('is clamped at zero from below for an expectedScore above 1', () => {
-    expect(expectedGoalsConceded(1.5, 1.5)).toBe(0)
+  it('is clamped at zero from below for an expectedScore far above 1 (defensiveMultiplier itself clamps to 0 there)', () => {
+    expect(expectedGoalsConceded(1.5, 3)).toBe(0)
   })
   it('never returns a negative value', () => {
     expect(expectedGoalsConceded(1.5, 1.0)).toBeGreaterThanOrEqual(0)
+    expect(expectedGoalsConceded(1.5, 5)).toBeGreaterThanOrEqual(0)
   })
 })
 
-describe('defensiveMultiplier -- ticket #109, the exact mirror of attackingMultiplier', () => {
-  it('equals 1.0 exactly at expectedScore = 0.5 (an even fixture must leave the term unadjusted)', () => {
+describe('defensiveMultiplier -- ticket #244: damped from slope 2 to slope 1, the exact mirror of attackingMultiplier', () => {
+  it('equals 1.0 exactly at expectedScore = 0.5 -- the most important test in this ticket: an even fixture must stay unadjusted after the damping', () => {
     expect(defensiveMultiplier(0.5)).toBe(1.0)
   })
-  it('is 2 x (1 - expectedScore)', () => {
-    expect(defensiveMultiplier(0.3)).toBeCloseTo(2 * 0.7, 10)
-    expect(defensiveMultiplier(0.9)).toBeCloseTo(2 * 0.1, 10)
+  it('is DEFENSIVE_MULTIPLIER_OFFSET - expectedScore (slope magnitude 1, half the pre-#244 slope of 2)', () => {
+    // Hand-computed: 1.5 - 0.3 = 1.2; 1.5 - 0.9 = 0.6. (Pre-#244 these were 1.4 and 0.2 --
+    // deliberately different values, since this ticket's whole point is to change the slope.)
+    expect(defensiveMultiplier(0.3)).toBeCloseTo(1.5 - 0.3, 10)
+    expect(defensiveMultiplier(0.9)).toBeCloseTo(1.5 - 0.9, 10)
+    expect(DEFENSIVE_MULTIPLIER_OFFSET).toBe(1.5)
   })
-  it('returns 2.0 at expectedScore = 0 (certain loss -- maximum shot pressure)', () => {
-    expect(defensiveMultiplier(0)).toBe(2.0)
+  it('returns 1.5 at expectedScore = 0 (certain loss -- maximum shot pressure) -- half the pre-#244 value of 2.0', () => {
+    expect(defensiveMultiplier(0)).toBeCloseTo(1.5, 10)
   })
-  it('returns 0.0 at expectedScore = 1 (certain win -- no shot pressure)', () => {
-    expect(defensiveMultiplier(1)).toBe(0.0)
+  it('returns 0.5 at expectedScore = 1 (certain win -- minimum shot pressure) -- half the pre-#244 value of 0.0, never all the way to zero any more', () => {
+    expect(defensiveMultiplier(1)).toBeCloseTo(0.5, 10)
   })
-  it('is clamped to [0, 2] even for an out-of-range expectedScore', () => {
-    expect(defensiveMultiplier(-1)).toBe(2)
-    expect(defensiveMultiplier(2)).toBe(0)
+  it('the clamps hold at both ends -- named test per the DoD: a wildly out-of-range expectedScore is still clamped to [0, 2]', () => {
+    expect(defensiveMultiplier(-10)).toBe(2)
+    expect(defensiveMultiplier(10)).toBe(0)
+  })
+  it('within the valid [0, 1] expectedScore domain the clamp never binds -- output ranges exactly [0.5, 1.5], the exact mirror of attackingMultiplier\'s [0.5, 1.5]', () => {
+    expect(defensiveMultiplier(0)).toBeCloseTo(1.5, 10)
+    expect(defensiveMultiplier(1)).toBeCloseTo(0.5, 10)
   })
   it('agrees with expectedGoalsConceded by construction: expectedGoalsConceded(b, s) === b x defensiveMultiplier(s), across five values of s', () => {
     const leagueBaselineGoals = 1.45
@@ -151,22 +170,27 @@ describe('defensiveMultiplier -- ticket #109, the exact mirror of attackingMulti
       expect(expectedGoalsConceded(leagueBaselineGoals, s)).toBeCloseTo(leagueBaselineGoals * defensiveMultiplier(s), 12)
     }
   })
+  it('attackingMultiplier(es) + defensiveMultiplier(es) === 2.0 for every expectedScore in [0, 1] -- the elegant mirror-symmetry consequence documented in DEFENSIVE_MULTIPLIER_OFFSET\'s own comment, not independently chosen', () => {
+    for (const s of [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1]) {
+      expect(attackingMultiplier(s) + defensiveMultiplier(s)).toBeCloseTo(2.0, 10)
+    }
+  })
 })
 
-describe('ticket #182: defensiveMultiplier and expectedGoalsConceded (which the clean-sheet, goals-conceded and saves components all derive from) are byte-identical to their pre-ticket values, for a fixed expectedScore -- named test, per the DoD', () => {
+describe('ticket #244: defensiveMultiplier and expectedGoalsConceded (which the clean-sheet, goals-conceded and saves components all derive from) match their NEW, damped formula for a fixed expectedScore -- named test, per the DoD (the pre-#244 version of this same test proved the OLD formula; see git history / decisions/ticket-182.md for that snapshot)', () => {
   it.each([0, 0.25, 0.5, 0.75, 1] as const)('expectedScore = %s', (s) => {
-    // Hand-computed pre-ticket values (defensiveMultiplier and expectedGoalsConceded's own
-    // formulas are untouched by this ticket -- 2 x (1 - s), and leagueBaselineGoals x that):
-    const expectedDefensiveMultiplier = 2 * (1 - s)
+    // Hand-computed post-#244 values -- DEFENSIVE_MULTIPLIER_OFFSET - s, and leagueBaselineGoals x that:
+    const expectedDefensiveMultiplier = 1.5 - s
     const leagueBaselineGoals = 1.45
-    const expectedGoalsConcededHand = Math.max(0, leagueBaselineGoals * 2 * (1 - s))
+    const expectedGoalsConcededHand = Math.max(0, leagueBaselineGoals * (1.5 - s))
 
-    expect(defensiveMultiplier(s)).toBe(expectedDefensiveMultiplier)
+    expect(defensiveMultiplier(s)).toBeCloseTo(expectedDefensiveMultiplier, 12)
     expect(expectedGoalsConceded(leagueBaselineGoals, s)).toBeCloseTo(expectedGoalsConcededHand, 12)
 
-    // And attackingMultiplier at the SAME expectedScore is deliberately different from what
-    // defensiveMultiplier gives (except at s = 0.5, where both are exactly 1.0) -- confirming
-    // the two multipliers really are independent, not accidentally sharing one code path.
+    // attackingMultiplier and defensiveMultiplier at the SAME expectedScore are deliberately
+    // different (except at s = 0.5, where both are exactly 1.0) -- confirming the two
+    // multipliers really are independent, not accidentally sharing one code path, even though
+    // (post-#244) they are exact mirrors of one another (see the "+ === 2.0" test above).
     if (s !== 0.5) {
       expect(attackingMultiplier(s)).not.toBeCloseTo(defensiveMultiplier(s), 5)
     } else {
