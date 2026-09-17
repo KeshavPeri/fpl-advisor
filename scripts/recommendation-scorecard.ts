@@ -737,6 +737,341 @@ export function summarizeCaptaincy(outcomes: readonly (CaptaincyOutcome | null)[
 }
 
 // ============================================================================
+// CAPTAINCY REGRET AND RANK — ticket #249.
+// ============================================================================
+// The captaincy diagnostic above (evaluateCaptaincy/summarizeCaptaincy,
+// ticket #223) answers "did the effective captain outscore the best of the
+// OTHER ten starters" — a same-or-better hit rate. This section answers a
+// related but different question, in the ticket's own vocabulary: REGRET
+// (how many points were left on the table versus the hindsight-best pick in
+// the same XI, self included) and RANK (where the chosen captain actually
+// placed among all eleven by raw actual points), each ALSO computed for a
+// naive highest-projected baseline so the app's real divergence from "just
+// captain whoever the model rates highest" is visible and its direction
+// (helped or hurt) is readable.
+//
+// SOURCE DISCIPLINE — stricter than every other section in this file. The
+// rest of this file falls back to the mutable `recommendations` table when no
+// usable `notifications.plan_snapshot` exists for a gameweek (see
+// resolvePlanA above). This section never does: the ticket text is explicit
+// ("Never fall back to the mutable recommendations table for this section —
+// the entire point is scoring what was actually sent to Keshav"), because a
+// captaincy call scored against a plan that was silently re-solved after the
+// real deadline would not be scoring what actually happened. A gameweek with
+// no recorded plan_snapshot is excluded from this section by name (reason
+// 'noSnapshot') even when `recommendations` still holds a Plan A for it.
+//
+// "CHOSEN CAPTAIN" IS THE EFFECTIVE ARMBAND HOLDER, not always the literally
+// named captain. Real FPL auto-promotes the armband to the vice-captain when
+// the named captain plays zero minutes — this is a rule of the game, not a
+// modelling choice (the same rule scoreSquad already applies elsewhere in
+// this file). "Did the app captain the best one" is answered against the
+// player who actually got doubled on Keshav's real scoreboard, which is the
+// effective captain, not a hypothetical literal-captain score that was never
+// actually paid out. When NEITHER the named captain nor the named
+// vice-captain played (armband void that week — both zero minutes), there is
+// no effective captain to score and the gameweek is excluded from this
+// section (reason 'armbandVoid').
+//
+// THE VICE-CAPTAIN COMPARISON is reported separately and ONLY for gameweeks
+// where it actually triggered (the named captain played zero minutes — the
+// exact condition scoreSquad already uses to promote the armband). It is
+// never scored on a gameweek where the named captain played, because on
+// those gameweeks the vice-captain is not a real alternative that was ever in
+// play (per the ticket text: "don't score it every week").
+//
+// "PROJECTED, AS IT STOOD AT THAT SNAPSHOT" — this app's stored plan_snapshot
+// (supabase/migrations/20260913090000_notifications_plan_snapshot.sql) does
+// NOT carry a per-player projected-points figure (only the whole plan's own
+// net_points, at expectedPoints) — see RawPlanSnapshot above; only
+// prediction_log.projected_points does, one row per (gameweek, player,
+// model_version), written pre-deadline by scripts/snapshot-predictions.ts and
+// left untouched by scripts/settle-predictions.ts's later settlement update
+// (verified directly against that file's buildSettlementRows — it re-writes
+// projected_points back unchanged in the same upsert that fills in
+// actual_points, never recomputing it). A settled prediction_log row's
+// projected_points is therefore exactly the frozen pre-deadline projection,
+// and is what this section reads for the naive baseline. This is a
+// deliberate, reported convention (see this ticket's own decisions-log
+// entry), not an exact reconstruction of "the projection precisely at the
+// moment the plan_snapshot was written" — no such per-player, per-timestamp
+// record exists anywhere in this database.
+//
+// TIE-BREAKS — both invented here, both reported as Tier 3 conventions
+// (nothing in the ticket or the brief specifies either):
+//   - Rank uses standard competition ranking (ties share the better rank; the
+//     next distinct score after a tie skips accordingly — e.g. two starters
+//     tied for the top actual score are both rank 1, and the third-highest
+//     scorer is rank 3, not rank 2). "1 = best", per the ticket text.
+//   - Where two or more starters are tied for the best actual score (the
+//     hindsight ceiling) or tied for the highest projection (the naive
+//     pick), the lower player id wins, purely for a deterministic single
+//     answer — it carries no football meaning.
+//
+// POOLING — the pooled mean over every scored gameweek's regret (and,
+// separately, its rank) is computed by summing the raw per-gameweek regret
+// (or rank) values and dividing by how many gameweeks actually contributed —
+// never by averaging a shorter list of already-computed per-gameweek means
+// padded to a longer one, and never including an excluded gameweek as an
+// implicit zero. Same discipline as sumNet/pairedNetGap above.
+//
+// SAMPLE SIZE — at most four gameweeks of snapshots exist at all (the
+// snapshot column shipped 13 Sep 2026). Every figure below is printed beside
+// its own `n`, and the report states plainly, in the same style
+// scripts/bonus-validation-report.ts already uses for its own three-gameweek
+// limitation, that a mean over so few gameweeks is weak evidence.
+// ============================================================================
+
+/** One captaincy pick (the app's real effective captain, or the naive
+ *  highest-projected one) scored against the same starting eleven's actual
+ *  points. */
+export interface CaptainPick {
+  playerId: number
+  actualPoints: number
+  /** The hindsight ceiling — the highest actual score among all eleven
+   *  starters, self included. Identical for `chosen` and `naive` within one
+   *  gameweek (same starting XI, same actuals) — kept on both so each is a
+   *  self-contained, independently readable figure. */
+  bestAvailableActualPoints: number
+  /** bestAvailableActualPoints − actualPoints. Zero exactly when this pick
+   *  was itself the best available; never negative. */
+  regret: number
+  /** 1 = best, standard competition ranking (ties share a rank) — see file
+   *  header, "TIE-BREAKS". */
+  rank: number
+}
+
+export interface ViceEffectTriggered {
+  triggered: true
+  namedCaptainActualPoints: number
+  viceCaptainActualPoints: number
+  scoredBetterThanNamedCaptain: boolean
+  /** viceCaptainActualPoints − namedCaptainActualPoints. Positive means the
+   *  vice outscored the blanking named captain. */
+  margin: number
+}
+
+export interface ViceEffectNotTriggered {
+  triggered: false
+}
+
+export type ViceEffect = ViceEffectTriggered | ViceEffectNotTriggered
+
+export interface CaptaincyRegretScored {
+  gameweekId: number
+  ok: true
+  /** The app's real pick, scored via the effective (post-promotion) armband
+   *  holder — see file header. */
+  chosen: CaptainPick
+  /** The naive baseline: whichever starter carried the highest
+   *  prediction_log.projected_points for this gameweek at snapshot time. */
+  naive: CaptainPick
+  namedCaptainPlayerId: number
+  namedCaptainMinutes: number
+  viceEffect: ViceEffect
+}
+
+export type CaptaincyRegretExclusionReason =
+  | 'noSnapshot'
+  | 'reconstructionFailed'
+  | 'unsettled'
+  | 'missingActuals'
+  | 'missingProjections'
+  | 'armbandVoid'
+
+export interface CaptaincyRegretExcluded {
+  gameweekId: number
+  ok: false
+  reason: CaptaincyRegretExclusionReason
+  detail: string
+}
+
+export type CaptaincyRegretResult = CaptaincyRegretScored | CaptaincyRegretExcluded
+
+/** Standard competition ranking (1224): ties share the better rank. `1` is
+ *  best. Requires `playerId` to be present in `starterPoints` — every call
+ *  site here guarantees that before calling. */
+export function rankAmongStarters(starterPoints: ReadonlyMap<number, number>, playerId: number): number {
+  const target = starterPoints.get(playerId) as number
+  let rank = 1
+  for (const points of starterPoints.values()) {
+    if (points > target) rank++
+  }
+  return rank
+}
+
+/** The hindsight ceiling: the highest actual score among the given starters.
+ *  Tie-break: lowest player id — see file header, "TIE-BREAKS". */
+export function bestAvailableAmongStarters(starterPoints: ReadonlyMap<number, number>): { playerId: number; points: number } {
+  let best: { playerId: number; points: number } | null = null
+  for (const [playerId, points] of starterPoints) {
+    if (!best || points > best.points || (points === best.points && playerId < best.playerId)) {
+      best = { playerId, points }
+    }
+  }
+  return best as { playerId: number; points: number }
+}
+
+/** The naive baseline pick: the starter with the highest projected points at
+ *  snapshot time. Every id in `startingIds` must have an entry in
+ *  `projectedByPlayer` — every call site here guarantees that before calling.
+ *  Tie-break: lowest player id — see file header, "TIE-BREAKS". */
+export function pickNaiveCaptain(startingIds: readonly number[], projectedByPlayer: ReadonlyMap<number, number>): number {
+  let bestId = -1
+  let bestProjected = Number.NEGATIVE_INFINITY
+  for (const id of startingIds) {
+    const projected = projectedByPlayer.get(id) as number
+    if (projected > bestProjected || (projected === bestProjected && id < bestId)) {
+      bestProjected = projected
+      bestId = id
+    }
+  }
+  return bestId
+}
+
+/**
+ * Scores one gameweek's captaincy regret/rank for both the app's real
+ * (effective) captain and the naive highest-projected baseline, or excludes
+ * the gameweek by name. Pure — no I/O. Callers (main() below, and this
+ * file's own tests) are responsible for having already established that a
+ * plan_snapshot exists and the gameweek is settled; this function's own
+ * exclusion reasons cover what can still go wrong given those inputs
+ * (a squad that does not reconcile, a missing actual, a missing projection,
+ * or a void armband).
+ */
+export function evaluateCaptaincyRegret(
+  gameweekId: number,
+  startingXi: readonly SquadSlot[],
+  captainPlayerId: number,
+  viceCaptainPlayerId: number,
+  actuals: ActualsByPlayer,
+  projectedByPlayer: ReadonlyMap<number, number>,
+): CaptaincyRegretResult {
+  const startingIds = startingXi.map((slot) => slot.playerId)
+
+  if (!startingIds.includes(captainPlayerId) || !startingIds.includes(viceCaptainPlayerId)) {
+    return {
+      gameweekId,
+      ok: false,
+      reason: 'reconstructionFailed',
+      detail: 'the snapshot\'s named captain or vice-captain is not part of its own starting eleven.',
+    }
+  }
+
+  const starterPoints = new Map<number, number>()
+  const missingActuals: number[] = []
+  for (const id of startingIds) {
+    const actual = actuals.get(id)
+    if (!actual) missingActuals.push(id)
+    else starterPoints.set(id, actual.points)
+  }
+  if (missingActuals.length > 0) {
+    return {
+      gameweekId,
+      ok: false,
+      reason: 'missingActuals',
+      detail: `no settled actual for starting-eleven player id(s) ${missingActuals.join(', ')}.`,
+    }
+  }
+
+  const missingProjections = startingIds.filter((id) => !projectedByPlayer.has(id))
+  if (missingProjections.length > 0) {
+    return {
+      gameweekId,
+      ok: false,
+      reason: 'missingProjections',
+      detail:
+        `no prediction_log.projected_points for starting-eleven player id(s) ${missingProjections.join(', ')} — ` +
+        'the naive highest-projected baseline cannot be computed.',
+    }
+  }
+
+  const captainMinutes = actuals.get(captainPlayerId)?.minutes ?? 0
+  const viceMinutes = actuals.get(viceCaptainPlayerId)?.minutes ?? 0
+
+  const effectiveCaptainPlayerId = captainMinutes > 0 ? captainPlayerId : viceMinutes > 0 ? viceCaptainPlayerId : null
+  if (effectiveCaptainPlayerId === null) {
+    return {
+      gameweekId,
+      ok: false,
+      reason: 'armbandVoid',
+      detail: 'neither the named captain nor the named vice-captain played — the armband was void that week, nothing to score.',
+    }
+  }
+
+  const bestAvailable = bestAvailableAmongStarters(starterPoints)
+
+  const chosenActual = starterPoints.get(effectiveCaptainPlayerId) as number
+  const chosen: CaptainPick = {
+    playerId: effectiveCaptainPlayerId,
+    actualPoints: chosenActual,
+    bestAvailableActualPoints: bestAvailable.points,
+    regret: bestAvailable.points - chosenActual,
+    rank: rankAmongStarters(starterPoints, effectiveCaptainPlayerId),
+  }
+
+  const naiveCaptainPlayerId = pickNaiveCaptain(startingIds, projectedByPlayer)
+  const naiveActual = starterPoints.get(naiveCaptainPlayerId) as number
+  const naive: CaptainPick = {
+    playerId: naiveCaptainPlayerId,
+    actualPoints: naiveActual,
+    bestAvailableActualPoints: bestAvailable.points,
+    regret: bestAvailable.points - naiveActual,
+    rank: rankAmongStarters(starterPoints, naiveCaptainPlayerId),
+  }
+
+  let viceEffect: ViceEffect
+  if (captainMinutes === 0) {
+    const namedCaptainActualPoints = starterPoints.get(captainPlayerId) as number
+    const viceCaptainActualPoints = starterPoints.get(viceCaptainPlayerId) as number
+    viceEffect = {
+      triggered: true,
+      namedCaptainActualPoints,
+      viceCaptainActualPoints,
+      scoredBetterThanNamedCaptain: viceCaptainActualPoints > namedCaptainActualPoints,
+      margin: viceCaptainActualPoints - namedCaptainActualPoints,
+    }
+  } else {
+    viceEffect = { triggered: false }
+  }
+
+  return { gameweekId, ok: true, chosen, naive, namedCaptainPlayerId: captainPlayerId, namedCaptainMinutes: captainMinutes, viceEffect }
+}
+
+/** Pools a figure (regret or rank) from the underlying per-gameweek values
+ *  directly — sum then divide — never by averaging a set of already-computed
+ *  per-gameweek means. See file header, "POOLING". */
+export interface PooledFigure {
+  n: number
+  total: number
+  mean: number
+}
+
+export function poolCaptaincyFigure(values: readonly number[]): PooledFigure {
+  const n = values.length
+  const total = values.reduce((sum, value) => sum + value, 0)
+  return { n, total, mean: n === 0 ? 0 : total / n }
+}
+
+export interface ViceEffectSummary {
+  /** How many scored gameweeks had the named captain play zero minutes —
+   *  the count of gameweeks where the vice-captain rule actually came into
+   *  effect. */
+  triggeredCount: number
+  /** Of those, how many had the vice-captain score strictly better than the
+   *  named (blanking) captain. */
+  viceScoredBetterCount: number
+}
+
+export function summarizeViceEffect(results: readonly CaptaincyRegretScored[]): ViceEffectSummary {
+  const triggered = results.filter((r): r is CaptaincyRegretScored & { viceEffect: ViceEffectTriggered } => r.viceEffect.triggered)
+  return {
+    triggeredCount: triggered.length,
+    viceScoredBetterCount: triggered.filter((r) => r.viceEffect.scoredBetterThanNamedCaptain).length,
+  }
+}
+
+// ============================================================================
 // Everything below this line is I/O: Supabase reads, report rendering, and
 // job_runs bookkeeping. Nothing above this line touches a network or a
 // clock.
