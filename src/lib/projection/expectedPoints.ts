@@ -29,6 +29,7 @@ import {
   expectedScoreFromDifficulty,
 } from './fixture.ts'
 import { computeFixtureExpectedScore, fixtureHasSufficientHistory, HOME_EXPECTED_SCORE_BONUS, SCALE, type TeamStrengthRecord } from './teamStrength.ts'
+import { MIN_MARKET_ODDS_BOOK_COUNT } from './marketOdds.ts'
 import {
   ASSIST_POINTS,
   GOALS_CONCEDED_DIVISOR,
@@ -496,51 +497,79 @@ export interface FixtureContext {
   teamStrength?: TeamStrengthRecord
   /** The opponent's own point-in-time team-strength record — see teamStrength above. */
   opponentTeamStrength?: TeamStrengthRecord
+  /**
+   * Ticket #238. This fixture's market-odds reading, from this team's own perspective — already
+   * oriented (home vs away) and already overround-removed by the caller (project-points.ts /
+   * team-strength-diagnostic.ts), never computed inside this pure module. `undefined` means "no
+   * odds row available for this fixture" — falls straight through to the next precedence tier,
+   * exactly like an absent `teamStrength` does. Optional so every pre-#238 caller/test is an
+   * EXACT no-op.
+   */
+  marketOdds?: MarketOddsContext
 }
 
 /**
- * Ticket #229. Which of the four precedence tiers supplied a fixture's
- * expectedScore — see `resolveFixtureExpectedScore`'s own comment for the
- * exact order. Surfaced on `FixtureModelInputs` so the reasoning screen, the
- * calibration/backtest reports, and job_runs.details can all see WHICH
- * instrument produced a fixture's number, not only the number itself.
+ * Ticket #238. The market-odds reading for one team's own perspective on one fixture —
+ * `expectedScoreValue` is already the correctly-oriented (home/away) elo-space figure
+ * (`marketOdds.ts`'s `marketExpectedScore`), so this pure module never has to know which side of
+ * the market it is reading. `bookCount`/`isFresh` are what `resolveFixtureExpectedScore`'s
+ * precedence gate below actually tests — the ticket's own rule: "a fixture gets the market term
+ * when the API returned it with at least 3 books and the odds row is under 48 hours old."
+ * `overround` is carried through for diagnostics/reasoning only; it plays no part in the gate.
  */
-export type FixtureSource = 'elo' | 'team-strength' | 'stale-elo' | 'fdr'
+export interface MarketOddsContext {
+  expectedScoreValue: number
+  bookCount: number
+  overround: number
+  /** Whether the odds row is within `marketOdds.ts`'s `MARKET_ODDS_FRESHNESS_HOURS` window, computed by the caller (this module never reads the clock — see marketOdds.ts's own header). */
+  isFresh: boolean
+}
 
 /**
- * Ticket #229. The fixture's expectedScore, resolved through this exact
- * precedence — each tier tried in order, falling through only when the
- * tier's own data is missing or insufficient:
+ * Ticket #238, redefining the ticket #229 type. Which of the four precedence tiers supplied a
+ * fixture's expectedScore — see `resolveFixtureExpectedScore`'s own comment for the exact order.
+ * Surfaced on `FixtureModelInputs` so the reasoning screen, the calibration/backtest reports, and
+ * job_runs.details can all see WHICH instrument produced a fixture's number, not only the number
+ * itself.
  *
- *   1. FRESH ELO — both teamElo/opponentElo non-null AND neither team's own
- *      elo is marked stale (`teamEloStale`/`opponentEloStale` both false).
- *      Identical to the pre-#229 elo formula — this is what keeps current
- *      behaviour unchanged and makes the job self-heal automatically if
- *      ClubElo ever comes back.
- *   2. TEAM-STRENGTH — both `teamStrength`/`opponentTeamStrength` present
- *      AND meet `MIN_TEAM_PRIOR_MATCHES` (`fixtureHasSufficientHistory`,
- *      teamStrength.ts — the SAME gate the backtest itself uses, never a
- *      second, divergent rule). Only reached once tier 1 has already failed.
- *   3. STALE ELO — teamElo/opponentElo both non-null but tier 1 failed
- *      (stale, or tier 2 had insufficient history) — better than nothing
- *      early in a season, before enough current-season matches exist for
- *      tier 2.
- *   4. FDR — the pre-existing FPL-difficulty fallback, unchanged. Reached
- *      only when nothing above resolves.
+ * `'elo'` (fresh ClubElo) is REMOVED, not merely unused — ClubElo has been dead since January
+ * 2026 (`teamStrength.ts`'s own header: site data dated 22 Oct 2024, API 502, no sign of
+ * recovering) and a tier that can structurally never fire again is exactly the "dead code" #229
+ * shipped by mistake. `'stale-elo'` is unchanged in meaning and now the ONLY elo tier: any
+ * fixture with a usable (non-null) elo on both sides, regardless of `elo_stale_since` (which
+ * `resolveFixtureExpectedScore` no longer consults for this decision — every ClubElo value in
+ * this database is, by construction, no longer confirmed fresh).
+ */
+export type FixtureSource = 'market-odds' | 'team-strength' | 'stale-elo' | 'fdr'
+
+/**
+ * Ticket #238. The fixture's expectedScore, resolved through this exact precedence — each tier
+ * tried in order, falling through only when the tier's own data is missing or insufficient:
  *
- * Named tests cover all four tiers plus the fall-through order between them
- * (fresh elo beats sufficient history; stale elo loses to sufficient
- * history; stale elo beats insufficient history; nothing available falls to
- * FDR).
+ *   1. MARKET ODDS — `marketOdds` present, `bookCount >= MIN_MARKET_ODDS_BOOK_COUNT`, and
+ *      `isFresh`. The new top tier (ticket #238): a live, forward-looking instrument beats a
+ *      results-derived one whenever it is available and trustworthy.
+ *   2. TEAM-STRENGTH — both `teamStrength`/`opponentTeamStrength` present AND meet
+ *      `MIN_TEAM_PRIOR_MATCHES` (`fixtureHasSufficientHistory`, teamStrength.ts — the SAME gate
+ *      the backtest itself uses, never a second, divergent rule). Only reached once tier 1 has
+ *      already failed.
+ *   3. STALE ELO — teamElo/opponentElo both non-null. `'elo'` (freshness-gated) is REMOVED from
+ *      this precedence entirely — see `FixtureSource`'s own comment for why.
+ *   4. FDR — the pre-existing FPL-difficulty fallback, unchanged. Reached only when nothing above
+ *      resolves.
+ *
+ * Named tests cover all four tiers plus the fall-through order between them (fresh market odds
+ * beats sufficient team-strength history; fewer than 3 books falls through; stale (>48h) odds
+ * fall through even with enough books; stale elo beats insufficient team-strength history;
+ * nothing available falls to FDR).
  */
 export function resolveFixtureExpectedScore(fixture: FixtureContext): { expectedScoreValue: number; fixtureSource: FixtureSource } {
-  const hasElo = fixture.teamElo !== null && fixture.opponentElo !== null
-  const eloIsFresh = hasElo && !fixture.teamEloStale && !fixture.opponentEloStale
-  if (eloIsFresh) {
-    return {
-      expectedScoreValue: expectedScore(fixture.teamElo as number, fixture.opponentElo as number, fixture.isHome),
-      fixtureSource: 'elo',
-    }
+  if (
+    fixture.marketOdds !== undefined &&
+    fixture.marketOdds.bookCount >= MIN_MARKET_ODDS_BOOK_COUNT &&
+    fixture.marketOdds.isFresh
+  ) {
+    return { expectedScoreValue: fixture.marketOdds.expectedScoreValue, fixtureSource: 'market-odds' }
   }
 
   if (
@@ -555,6 +584,7 @@ export function resolveFixtureExpectedScore(fixture: FixtureContext): { expected
     }
   }
 
+  const hasElo = fixture.teamElo !== null && fixture.opponentElo !== null
   if (hasElo) {
     return {
       expectedScoreValue: expectedScore(fixture.teamElo as number, fixture.opponentElo as number, fixture.isHome),
