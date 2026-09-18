@@ -85,9 +85,9 @@ CREATE TABLE IF NOT EXISTS public.player_gameweek_history (
   gameweek    integer NOT NULL,            -- 1-38, playerstats.csv's own "gw" column
   player_code integer NOT NULL,            -- stable cross-season identifier — never the per-season element id, see header
   now_cost    numeric NOT NULL,            -- see column comment — NOT the same units as public.players.now_cost
-  bonus       integer NOT NULL,            -- cumulative season-to-date as of this gameweek — see header and column comment
-  bps         integer NOT NULL,            -- cumulative season-to-date as of this gameweek — see header and column comment
-  starts      integer NOT NULL,            -- cumulative season-to-date as of this gameweek — see header and column comment
+  bonus       integer NOT NULL,            -- NOT a per-gameweek delta — cumulative season-to-date TOTAL as of this gameweek; see column comment
+  bps         integer NOT NULL,            -- NOT a per-gameweek delta — cumulative season-to-date TOTAL as of this gameweek; see column comment
+  starts      integer NOT NULL,            -- NOT a per-gameweek flag — cumulative season-to-date TOTAL as of this gameweek; see column comment
   ep_next     numeric,                     -- FPL's own next-gameweek points estimate; nullable, the one column genuinely observed blank in the source
   updated_at  timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (season, gameweek, player_code)
@@ -119,25 +119,30 @@ COMMENT ON COLUMN public.player_gameweek_history.player_code IS
   'public.player_match_stats.player_code / public.player_projections.player_code before it.';
 
 COMMENT ON COLUMN public.player_gameweek_history.bonus IS
-  'CUMULATIVE bonus points awarded season-to-date AS OF this gameweek, verbatim from '
-  'playerstats.csv''s own "bonus" column — the same season-cumulative semantics FPL''s own '
-  'bootstrap-static top-level element.bonus field has, NOT this single gameweek''s own award. '
-  'Verified by tracing one player''s rows across consecutive gameweeks: the value rises '
-  'monotonically. A consumer wanting a single gameweek''s own bonus must difference consecutive '
-  'rows for the same player_code — not computed by this ticket. Complements '
-  'public.gameweek_live_stats (ticket #224), whose "bonus" column IS the single-gameweek award '
-  'but only for the current season; see docs/projection-model-backlog.md G3.';
+  'NOT A PER-GAMEWEEK DELTA. This is the CUMULATIVE bonus total awarded season-to-date, AS OF '
+  'this gameweek, verbatim from playerstats.csv''s own "bonus" column — the same '
+  'season-cumulative semantics FPL''s own bootstrap-static top-level element.bonus field has. '
+  'It is NEVER this single gameweek''s own award. Verified by tracing one player''s rows across '
+  'consecutive gameweeks: the value rises monotonically. A consumer wanting a single gameweek''s '
+  'own bonus MUST DIFFERENCE CONSECUTIVE ROWS for the same player_code (this_row.bonus minus '
+  'previous_gameweek_row.bonus) — that differencing is not computed by this ticket. Complements '
+  'public.gameweek_live_stats (ticket #224), whose "bonus" column IS already the single-gameweek '
+  'award, but only for the current season; see docs/projection-model-backlog.md G3.';
 
 COMMENT ON COLUMN public.player_gameweek_history.bps IS
-  'CUMULATIVE Bonus Points System score season-to-date AS OF this gameweek, verbatim from '
-  'playerstats.csv''s own "bps" column — same cumulative semantics as bonus above, not this '
-  'gameweek''s own BPS. Can occasionally move by a small amount (observed ±1) between '
-  'consecutive gameweeks — FPL itself sometimes applies a small post-hoc BPS correction.';
+  'NOT A PER-GAMEWEEK DELTA. This is the CUMULATIVE Bonus Points System score season-to-date, AS '
+  'OF this gameweek, verbatim from playerstats.csv''s own "bps" column — same cumulative '
+  'semantics as bonus above, NEVER this gameweek''s own BPS. Can occasionally move by a small '
+  'amount (observed ±1) between consecutive gameweeks — FPL itself sometimes applies a small '
+  'post-hoc BPS correction. A consumer wanting a single gameweek''s own BPS MUST DIFFERENCE '
+  'CONSECUTIVE ROWS for the same player_code, exactly as for bonus above.';
 
 COMMENT ON COLUMN public.player_gameweek_history.starts IS
-  'CUMULATIVE number of starts season-to-date AS OF this gameweek, verbatim from '
-  'playerstats.csv''s own "starts" column — same cumulative semantics as bonus/bps above, not a '
-  'per-gameweek start/bench flag.';
+  'NOT A PER-GAMEWEEK START/BENCH FLAG. This is the CUMULATIVE number of starts season-to-date, '
+  'AS OF this gameweek, verbatim from playerstats.csv''s own "starts" column — same cumulative '
+  'semantics as bonus/bps above. A consumer wanting whether the player started THIS gameweek '
+  'specifically MUST DIFFERENCE CONSECUTIVE ROWS for the same player_code (a difference of 1 '
+  'means started this gameweek, 0 means did not).';
 
 COMMENT ON COLUMN public.player_gameweek_history.ep_next IS
   'FPL''s own published expected-points-next-gameweek estimate at the time this row was '

@@ -1270,15 +1270,17 @@ export function buildTeamCodeMap(playerRecords: Array<Record<string, string>>): 
 // multiplication, no division, in either direction — see the column comment in the migration file
 // for the consequence this has for a consumer joining against public.players.now_cost.
 //
-// bonus / bps / starts are CUMULATIVE SEASON-TO-DATE TOTALS as of this gameweek, not this
-// gameweek's own award — verified directly by tracing one player's rows across consecutive
-// gameweeks (17 Sept 2026): starts rises exactly 1 per gameweek for a nailed starter, bonus and bps
-// rise monotonically (bps can occasionally move by ±1 between gameweeks, a small post-hoc BPS
-// correction FPL itself sometimes applies). This is the same season-cumulative semantics FPL's own
-// bootstrap-static top-level element.bonus/element.bps/element.starts fields have — playerstats.csv
-// is a per-gameweek SNAPSHOT of those cumulative figures, not a per-gameweek delta. A future
-// consumer wanting a single gameweek's own bonus/bps must difference consecutive rows for the same
-// player_code — not attempted by this ticket (substrate only, no validation-report change).
+// NOT PER-GAMEWEEK DELTAS: bonus / bps / starts are CUMULATIVE SEASON-TO-DATE TOTALS as of this
+// gameweek, NEVER this gameweek's own award — verified directly by tracing one player's rows
+// across consecutive gameweeks (17 Sept 2026): starts rises exactly 1 per gameweek for a nailed
+// starter, bonus and bps rise monotonically (bps can occasionally move by ±1 between gameweeks, a
+// small post-hoc BPS correction FPL itself sometimes applies). This is the same season-cumulative
+// semantics FPL's own bootstrap-static top-level element.bonus/element.bps/element.starts fields
+// have — playerstats.csv is a per-gameweek SNAPSHOT of those cumulative figures, not a
+// per-gameweek delta. A future consumer wanting a single gameweek's own bonus/bps/start MUST
+// DIFFERENCE CONSECUTIVE ROWS for the same player_code — not attempted by this ticket (substrate
+// only, no validation-report change). See the migration's own column comments (same warning,
+// same wording) before writing that consumer.
 //
 // STORE-VERBATIM, NEVER GUESS, EXTENDED TO THE OTHER NUMERIC COLUMNS TOO. gw/now_cost/bonus/bps/
 // starts were all observed fully populated across both ingested seasons (0 blanks in 29,978 +

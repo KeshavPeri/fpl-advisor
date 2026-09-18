@@ -2403,6 +2403,26 @@ substantial ingest** — a Tier 2 decision (`escalation.md`) requiring its own v
 exactly the shape of work `product-brief.md` §6a/§6b's existing source decisions went through. Nothing
 about it is attempted here.
 
+**SUPERSEDED on the "does not exist in FPL-Core-Insights" claim — ticket #248, 17 Sep 2026. The
+paragraph above is wrong about the source; it is left in place because the surrounding replay
+analysis (budget-constrained solver, below) is still correct and still not attempted.** A
+per-gameweek price history DOES exist in FPL-Core-Insights, just not in the file this entry
+checked: `data/<season>/playerstats.csv` (a per-gameweek snapshot, distinct from the per-match
+`playermatchstats.csv` that #78/#127 checked and found lacking bonus/BPS — the identical
+over-generalisation G3's own SUPERSEDED entry names, made here about price instead of bonus)
+carries a `now_cost` column, verbatim, for every gameweek of both the 2025-2026 and 2026-2027
+seasons — verified directly against the live source on 17 Sep 2026 (29,978 and 2,583 rows
+respectively). Ticket #248 adds `public.player_gameweek_history`, populated by
+`scripts/ingest-core-insights.ts`, storing this column exactly as sourced (already decimal
+million-pounds, NOT the integer-tenths format `public.players.now_cost` carries — see the
+migration's own column comment before joining the two). This closes the specific gap named
+above — a per-gameweek price at each historical gameweek of a full past season now exists — but
+does **not** by itself unblock the season-length recommendation replay this entry is really
+about: that still needs the full budget-constrained solver run described below, which #248 is
+substrate for and does not attempt. The "new external source / Tier 2 ingest" framing in the
+paragraph above no longer applies to the price-history piece specifically; it may still apply to
+whatever the replay itself needs beyond price (see the next paragraph).
+
 **What was built instead, and why it is the better use of the same instinct.** Ticket #223 built
 `scripts/recommendation-scorecard.ts` — a scorecard that scores the recommendations THIS APP HAS
 ACTUALLY ISSUED, this season, against what actually happened, using only `recommendations`,
