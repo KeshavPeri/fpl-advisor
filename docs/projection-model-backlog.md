@@ -289,8 +289,9 @@ once real access exists (no code change needed to compute it). Until that hand-r
 and the constant is updated, `ALPHA = 1` means the sharpening described above ships as dormant,
 tested, unused machinery — the table's gap is not yet closed in production.
 
-**Ticket #253, 18 Sep 2026 — the full-season re-fit was ATTEMPTED and BLOCKED, `ALPHA` still ships
-as 1.** `public.player_gameweek_history` (ticket #248) now carries real per-gameweek bonus/BPS for
+**Ticket #253, 18 Sep 2026 — the full-season re-fit was ATTEMPTED, CLOSED as a valid negative
+result, `ALPHA` still ships as 1.** `public.player_gameweek_history` (ticket #248) now carries real
+per-gameweek bonus/BPS for
 the complete 2025-2026 season (~29,978 rows against the ~1,268 the one-gameweek fit above used), so
 this ticket built `scripts/fit-bonus-alpha.ts` — an entirely offline tool (no Supabase; fetches
 FPL-Core-Insights' CSVs directly, same route ticket #248 used) that reconstructs point-in-time
@@ -324,18 +325,33 @@ owned by a sibling ticket). The gap is a real, structural difference between "th
 run-backtest.ts already established" and "what the live pipeline actually did for an early-season
 gameweek," not a coding defect this ticket could find by further inspection.
 
-**Consequence: `ALPHA` is NOT changed by this ticket — it still ships as `1`.** The 1.69 figure
-above is a real measurement (2025-2026 is a complete, single season with no cross-season boundary
-inside the fit/holdout split, so the fit and Gate 1/2a numbers are trustworthy on their own terms),
-but ticket #253's own falsification gate requires the reproduction check to pass BEFORE a fitted
-value ships, and it did not. This is recorded here, not silently dropped, so the next session does
-not repeat the ~44-network-call fit from scratch: `scripts/fit-bonus-alpha.ts` is complete, tested
-and reusable; what remains is a Tier 2 decision on how to resolve the reproduction gap (accept the
-single-season pattern's known limitation and re-scope the reproduction check to a later,
-less-cross-season-dependent gameweek; or authorize building true two-stage cross-season shrinkage
-into the offline reconstruction, which is more scope than this ticket carries alone; or gate 2b's
-own near-miss (5.50 vs >5.70) may mean `ALPHA = 1.69` was never going to ship regardless). See the
-ticket #253 Builder report for the full run output.
+**Consequence: `ALPHA` is NOT changed by this ticket — it still ships as `1`. Closed out, not
+escalated.** This was evaluated against `escalation.md`'s tiers and ruled **Tier 2** — no live fork
+requiring Keshav's judgement, because the ticket's own falsification language already resolves it
+without a human: *"if it does not reproduce, the reconstruction is wrong and no fit from it can be
+trusted."* Reproduction failed, so `ALPHA = 1.69` cannot ship, full stop. Two independent reasons
+back that, either one sufficient on its own:
+
+1. The mandatory reproduction check failed outside tolerance (0.379/0.426 vs published 0.338/0.334,
+   both beyond ±0.02 — see above).
+2. Gate 2b failed independently, on its own separate criterion (5.50 vs required >5.70).
+
+**This ticket does not re-scope the reproduction check to a later, less-cross-season-dependent
+gameweek.** Doing so would launder around the real structural gap rather than surface it, and was
+explicitly considered and rejected rather than left open as an option. **This ticket also does not
+build two-stage cross-season shrinkage into the offline reconstruction** — that logic belongs to
+`scripts/project-points.ts`'s historical/current split (ticket #113), owned by other tickets, and
+duplicating it here risks exactly the "second copy to get wrong" problem `CLAUDE.md`'s "Sharing
+code between `scripts/` and `src/`" section warns about. If a valid full-season refit is wanted
+later, it needs its own ticket, scoped by whoever owns that split, to add cross-season shrinkage to
+the offline reconstruction first — not a re-run of this one.
+
+Recorded here, not silently dropped, so the next session does not repeat the ~44-network-call fit
+from scratch: `scripts/fit-bonus-alpha.ts` is complete, tested and reusable as-is for whichever
+future ticket adds the missing shrinkage stage. This ticket's outcome is a valid negative result,
+the same shape as the ticket's own contingency language for Gate 1 ("if it is not lower, ALPHA does
+not change, and that is a valid result — ship the report and say so"). See the ticket #253 Builder
+report for the full run output.
 
 **BPS is stored but not yet compared.** `gameweek_live_stats.bps` is ingested alongside `bonus` (the
 allocator models a *share of BPS*, so bps may turn out the more informative comparison — see that
