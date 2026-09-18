@@ -104,6 +104,28 @@
 //      every club, matches, goals scored/conceded, teamStrengthRate, sorted
 //      by rate — without which there is no way to see whether the ratings
 //      are sensible, only whether they changed.
+//
+// ============================================================================
+// TICKET #252 — gate 1 was written when `team-strength` was the top
+// precedence tier. #238 made `market-odds` the top tier, which means gate 1
+// (as ticket #235 left it) could only PASS when market odds were ABSENT --
+// i.e. it now fails exactly when everything is healthy (market odds present,
+// team-strength available as the tier beneath it). All other gates passed;
+// the run was healthy; the job still exited non-zero.
+//
+// The fix (checkTeamStrengthSourceGate, unchanged name, new logic):
+//   - LIVENESS (kept): at least one examined row must resolve to
+//     `market-odds` OR `team-strength` -- the property gate 1 always existed
+//     to protect, now stated correctly against the CURRENT two-tier top of
+//     the precedence rather than the pre-#238 single top tier.
+//   - HEALTH (new, stronger): NO examined row may resolve to `stale-elo` or
+//     `fdr` -- a frozen last-season rating or FPL's coarse 1-5 bucket
+//     appearing while the market is pricing fixtures is a real regression
+//     (the point-in-time/market-odds wiring failing to reach a fixture it
+//     should reach), and nothing before this ticket caught it.
+// The result's `reason` field always carries a per-source count breakdown
+// (e.g. "3 market-odds, 2 team-strength, 1 stale-elo, 0 fdr"), so a failure
+// names which tier(s) it fell to rather than just reporting that it fell.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -494,26 +516,45 @@ export function checkExpectedScoreBoundGate(rows: readonly DiagnosticRow[]): Exp
   return { outOfBoundRows, passed: outOfBoundRows.length === 0 }
 }
 
+/** Every possible `FixtureSource`, in the fixed order the reason string reports them. */
+const ALL_FIXTURE_SOURCES: readonly FixtureSource[] = ['market-odds', 'team-strength', 'stale-elo', 'fdr']
+
 export interface TeamStrengthSourceGateResult {
-  /** How many of the examined rows resolved to fixtureSource === 'team-strength'. */
-  count: number
-  /** True (PASS) when count > 0. */
+  /** How many of the examined rows resolved to each `FixtureSource` -- all four keys always present, 0 when a source did not appear at all. */
+  countsBySource: Record<FixtureSource, number>
+  /**
+   * True (PASS) when at least one row resolves to `market-odds` or `team-strength` (liveness -- the
+   * property this gate has always protected) AND no row resolves to `stale-elo` or `fdr` (ticket #252 --
+   * new and stronger: those two sources appearing while the market/team-strength wiring is live is a
+   * real regression, not a tolerable fallback).
+   */
   passed: boolean
+  /** Per-source count breakdown, e.g. "3 market-odds, 2 team-strength, 1 stale-elo, 0 fdr" -- always populated, not only on failure, so a failure names which tier(s) it fell to, not just that it fell. */
+  reason: string
 }
 
 /**
- * Ticket #235 — NEW gate, and the PRIMARY one (ticket text, verbatim): at
- * least one fixture in the examined gameweek must resolve to source
- * `team-strength`. This is the condition whose absence let #229's own
- * diagnostic pass: all twenty rows resolved to `stale-elo`, the
- * `team-strength` tier was never reached, and neither pre-existing gate
- * (Man Utd v Man City; the variance comparison) was actually checking for
- * that. If NO row resolves to `team-strength`, the fix is not running and
- * the job must exit non-zero, regardless of what the other two gates say.
+ * Ticket #235 introduced this gate as PRIMARY: at least one fixture must resolve to source
+ * `team-strength`, written when `team-strength` was the top precedence tier. Ticket #238 made
+ * `market-odds` the top tier, which left the original assertion able to PASS only when market odds
+ * were ABSENT -- i.e. it started failing on every healthy run (see this file's own TICKET #252 header
+ * section for the full account). Ticket #252 rewrites the assertion, keeping the function name (every
+ * caller below and in the report still reads `teamStrengthSourceGate`/`checkTeamStrengthSourceGate`):
+ *
+ *   - Liveness (unchanged in spirit): at least one row must resolve to `market-odds` OR
+ *     `team-strength` -- the fix (whichever of the two live tiers reached it) is actually running.
+ *   - Health (new): NO row may resolve to `stale-elo` or `fdr` -- a frozen rating or FPL's coarse
+ *     bucket appearing while the market is pricing fixtures means a fixture that should have resolved
+ *     to a live tier did not, and nothing before this ticket caught that on a run that was otherwise
+ *     healthy.
  */
 export function checkTeamStrengthSourceGate(rows: readonly Pick<DiagnosticRow, 'fixtureSource'>[]): TeamStrengthSourceGateResult {
-  const count = rows.filter((r) => r.fixtureSource === 'team-strength').length
-  return { count, passed: count > 0 }
+  const countsBySource = { 'market-odds': 0, 'team-strength': 0, 'stale-elo': 0, fdr: 0 } as Record<FixtureSource, number>
+  for (const row of rows) countsBySource[row.fixtureSource] += 1
+  const hasLiveSource = countsBySource['market-odds'] > 0 || countsBySource['team-strength'] > 0
+  const hasUnhealthySource = countsBySource['stale-elo'] > 0 || countsBySource.fdr > 0
+  const reason = ALL_FIXTURE_SOURCES.map((source) => `${countsBySource[source]} ${source}`).join(', ')
+  return { countsBySource, passed: hasLiveSource && !hasUnhealthySource, reason }
 }
 
 export type ManUtdGateStatus = 'pass' | 'fail' | 'not-applicable'
@@ -681,18 +722,22 @@ export interface ReportData {
 
 export function generateReportMarkdown(data: ReportData): string {
   const lines: string[] = []
-  lines.push('# Team-strength diagnostic — tickets #229 / #235 / #238')
+  lines.push('# Team-strength diagnostic — tickets #229 / #235 / #238 / #252')
   lines.push('')
   lines.push(`Generated: ${data.generatedAt.toISOString()} · Job: \`${JOB_NAME}\` · Gameweek examined: ${data.gameweekId}`)
   lines.push('')
-  lines.push('## Falsification gate — tickets #229/#235/#242 (team-strength wiring)')
+  lines.push('## Falsification gate — tickets #229/#235/#242/#252 (team-strength wiring)')
   lines.push('')
-  // Ticket #235: the team-strength-source gate is listed FIRST and labelled
-  // the PRIMARY gate ("Fix the gate", point 1) -- it is the condition whose
-  // absence let #229's own diagnostic pass vacuously.
+  // Ticket #235 listed this gate FIRST as the PRIMARY gate, asserting at
+  // least one row resolved to `team-strength` -- written when team-strength
+  // was the top precedence tier. Ticket #252: #238 made `market-odds` the
+  // top tier, which left that assertion able to pass only when market odds
+  // were ABSENT (failing on every healthy run). Retitled to describe what
+  // the gate actually checks now: liveness (>= 1 row on a live tier) AND
+  // health (0 rows fell back to a stale/coarse tier).
   lines.push(
-    `1. **PRIMARY — at least one fixture resolves to source \`team-strength\`:** ${data.teamStrengthSourceGate.passed ? 'PASS' : 'FAIL'} ` +
-      `(${data.teamStrengthSourceGate.count} of ${data.rows.length} row(s))`,
+    `1. **Healthy source — at least one fixture resolves to \`market-odds\` or \`team-strength\`, AND none falls back to ` +
+      `\`stale-elo\` or \`fdr\`:** ${data.teamStrengthSourceGate.passed ? 'PASS' : 'FAIL'} (${data.teamStrengthSourceGate.reason})`,
   )
   lines.push(
     `2. **Point-in-time expectedScore population stdDev falls within [${TEAM_STRENGTH_STDDEV_MIN}, ${TEAM_STRENGTH_STDDEV_MAX}] ` +
@@ -766,8 +811,9 @@ export function generateReportMarkdown(data: ReportData): string {
       'regardless of whether team-strength is the tier the live precedence actually picked. "Market-odds" is the RAW reading from ' +
       'this fixture\'s most recent `fixture_odds` row (ticket #238) — also independent of the freshness/book-count gate the live ' +
       'precedence applies; "—" means no odds row exists for this fixture. "Live (resolved)"/"Source" is the actual four-tier ' +
-      'precedence output (`src/lib/projection/expectedPoints.ts`\'s `resolveFixtureExpectedScore`) — `market-odds` (new top tier), ' +
-      '`team-strength` (built from `public.fixtures`\' real results), `stale-elo` (any usable, non-null elo — fresh ClubElo has ' +
+      'precedence output (`src/lib/projection/expectedPoints.ts`\'s `resolveFixtureExpectedScore`) — `market-odds` (the top tier, ' +
+      'since ticket #238; `team-strength` is NOT the top tier any more), `team-strength` (built from `public.fixtures`\' real ' +
+      'results, second tier), `stale-elo` (any usable, non-null elo — fresh ClubElo has ' +
       'been removed from the precedence entirely), or `fdr` (the pre-existing coarse fallback).',
   )
   lines.push('')
@@ -944,7 +990,11 @@ async function main(): Promise<void> {
     //    floor against frozen-elo), and a new gate 4 checks every row's own
     //    bound directly, not just the aggregate. Ticket #238 adds three MORE
     //    gates (5-7), its own falsification requirement, additive to these
-    //    four. ANY of the seven failing stops the job.
+    //    four. Ticket #252: the team-strength-source gate's own assertion is
+    //    rewritten (liveness on market-odds OR team-strength, AND no fixture
+    //    on stale-elo or fdr) -- see checkTeamStrengthSourceGate's own doc;
+    //    nothing else in this section changes. ANY of the seven failing
+    //    stops the job.
     // --------------------------------------------------------------------
     const teamStrengthSourceGate = checkTeamStrengthSourceGate(rows)
     const manUtdGate = checkManUtdVsManCityGate(rows)
@@ -999,10 +1049,12 @@ async function main(): Promise<void> {
 
     // Ticket #235: the team-strength-source gate is the PRIMARY condition —
     // "if none does, the fix is not running and the job must exit non-zero"
-    // (ticket text, verbatim). Ticket #242 adds the per-row bound gate.
-    // Ticket #238 adds its own three-condition falsification gate, additive
-    // to these four — "Stop and report — do not merge — unless all three
-    // hold" (ticket text, verbatim). ANY of the seven failing stops the job.
+    // (ticket text, verbatim). Ticket #252 rewrites what that gate asserts
+    // (see checkTeamStrengthSourceGate's own doc) without changing its place
+    // here. Ticket #242 adds the per-row bound gate. Ticket #238 adds its own
+    // three-condition falsification gate, additive to these four — "Stop and
+    // report — do not merge — unless all three hold" (ticket text, verbatim).
+    // ANY of the seven failing stops the job.
     if (
       !teamStrengthSourceGate.passed ||
       manUtdGate.status === 'fail' ||
@@ -1014,7 +1066,7 @@ async function main(): Promise<void> {
     ) {
       const message =
         `${JOB_NAME}: falsification gate FAILED for gameweek ${gameweekId} — ` +
-        `team-strength-source gate: ${teamStrengthSourceGate.passed ? 'pass' : 'fail'} (${teamStrengthSourceGate.count} row(s)); ` +
+        `team-strength-source gate: ${teamStrengthSourceGate.passed ? 'pass' : 'fail'} (${teamStrengthSourceGate.reason}); ` +
         `Man Utd/Man City gate: ${manUtdGate.status}; variance gate: ${varianceGate.passed ? 'pass' : 'fail'} ` +
         `(point-in-time stdDev ${fmtEs(varianceGate.pointInTimeStdDev)}, band [${TEAM_STRENGTH_STDDEV_MIN}, ${TEAM_STRENGTH_STDDEV_MAX}], ` +
         `frozen stdDev for reference ${fmtEs(varianceGate.frozenStdDev)}, all rows identical: ${varianceGate.allRowsIdentical}); ` +
@@ -1034,7 +1086,7 @@ async function main(): Promise<void> {
     const message =
       `${JOB_NAME}: gameweek ${gameweekId} — ${rows.length} row(s) compared across ${gameweekFixtureRows.length} fixture(s), ` +
       `${teamMatchRecords.length} team-match record(s) built from public.fixtures. Falsification gate PASSED ` +
-      `(${teamStrengthSourceGate.count} row(s) resolved to team-strength, ${marketOddsLivenessGate.count} to market-odds). ` +
+      `(team-strength-source gate: ${teamStrengthSourceGate.reason}). ` +
       `Report written to ${reportPath}.`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })

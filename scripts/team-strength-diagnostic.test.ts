@@ -218,38 +218,87 @@ describe('checkExpectedScoreBoundGate (falsification gate #4, ticket #242)', () 
 })
 
 // ============================================================================
-// checkTeamStrengthSourceGate — ticket #235's NEW, PRIMARY gate.
+// checkTeamStrengthSourceGate — ticket #235's PRIMARY gate; ticket #252
+// rewrites the assertion (gate 1 was failing on every healthy run once
+// ticket #238 made market-odds, not team-strength, the top precedence tier).
 // ============================================================================
 
-describe('checkTeamStrengthSourceGate (ticket #235 -- the PRIMARY falsification gate)', () => {
-  it('PASSES when at least one row resolves to source team-strength', () => {
-    const rows: { fixtureSource: FixtureSource }[] = [{ fixtureSource: 'stale-elo' }, { fixtureSource: 'team-strength' }]
+describe('checkTeamStrengthSourceGate (ticket #252 -- healthy-source gate, liveness + no stale-elo/fdr fallback)', () => {
+  it('ticket #252 falsification condition 1: PASSES when every fixture resolves to market-odds -- the live case that was broken before this ticket, and the whole point of it', () => {
+    const rows: { fixtureSource: FixtureSource }[] = Array.from({ length: 20 }, () => ({ fixtureSource: 'market-odds' as const }))
     const result = checkTeamStrengthSourceGate(rows)
-    expect(result.count).toBe(1)
+    expect(result.passed).toBe(true)
+    expect(result.countsBySource).toEqual({ 'market-odds': 20, 'team-strength': 0, 'stale-elo': 0, fdr: 0 })
+    expect(result.reason).toBe('20 market-odds, 0 team-strength, 0 stale-elo, 0 fdr')
+  })
+
+  it('a mixed market-odds/team-strength population PASSES (both are live tiers, neither stale-elo nor fdr appears)', () => {
+    const rows: { fixtureSource: FixtureSource }[] = [
+      { fixtureSource: 'market-odds' },
+      { fixtureSource: 'market-odds' },
+      { fixtureSource: 'team-strength' },
+      { fixtureSource: 'team-strength' },
+    ]
+    const result = checkTeamStrengthSourceGate(rows)
+    expect(result.passed).toBe(true)
+    expect(result.countsBySource).toEqual({ 'market-odds': 2, 'team-strength': 2, 'stale-elo': 0, fdr: 0 })
+    expect(result.reason).toBe('2 market-odds, 2 team-strength, 0 stale-elo, 0 fdr')
+  })
+
+  it('a population resolving entirely to team-strength (no market-odds at all) still PASSES -- liveness only requires ONE of the two live tiers', () => {
+    const rows: { fixtureSource: FixtureSource }[] = Array.from({ length: 5 }, () => ({ fixtureSource: 'team-strength' as const }))
+    const result = checkTeamStrengthSourceGate(rows)
     expect(result.passed).toBe(true)
   })
 
-  it('FAILS when NO row resolves to team-strength -- the exact #229 scenario (all twenty rows stale-elo)', () => {
+  it('ticket #252 falsification condition 2: FAILS and names stale-elo and its count when one row resolves to stale-elo, even though a live tier is also present', () => {
+    const rows: { fixtureSource: FixtureSource }[] = [{ fixtureSource: 'market-odds' }, { fixtureSource: 'stale-elo' }]
+    const result = checkTeamStrengthSourceGate(rows)
+    expect(result.passed).toBe(false)
+    expect(result.countsBySource['stale-elo']).toBe(1)
+    expect(result.reason).toMatch(/1 stale-elo/)
+  })
+
+  it('ticket #252 falsification condition 3: FAILS and names fdr and its count when one row resolves to fdr, even though a live tier is also present', () => {
+    const rows: { fixtureSource: FixtureSource }[] = [{ fixtureSource: 'team-strength' }, { fixtureSource: 'fdr' }]
+    const result = checkTeamStrengthSourceGate(rows)
+    expect(result.passed).toBe(false)
+    expect(result.countsBySource.fdr).toBe(1)
+    expect(result.reason).toMatch(/1 fdr/)
+  })
+
+  it('FAILS when NO row resolves to a live tier -- the exact #229 scenario (all twenty rows stale-elo)', () => {
     const rows: { fixtureSource: FixtureSource }[] = Array.from({ length: 20 }, () => ({ fixtureSource: 'stale-elo' as const }))
     const result = checkTeamStrengthSourceGate(rows)
-    expect(result.count).toBe(0)
+    expect(result.countsBySource['stale-elo']).toBe(20)
     expect(result.passed).toBe(false)
+    expect(result.reason).toBe('0 market-odds, 0 team-strength, 20 stale-elo, 0 fdr')
   })
 
   it('FAILS on an empty row set, never a vacuous pass', () => {
     const result = checkTeamStrengthSourceGate([])
-    expect(result.count).toBe(0)
+    expect(result.countsBySource).toEqual({ 'market-odds': 0, 'team-strength': 0, 'stale-elo': 0, fdr: 0 })
     expect(result.passed).toBe(false)
+    expect(result.reason).toBe('0 market-odds, 0 team-strength, 0 stale-elo, 0 fdr')
   })
 
-  it('counts every matching row, not just whether one exists', () => {
+  it('counts every matching row per source, not just whether one exists', () => {
     const rows: { fixtureSource: FixtureSource }[] = [
       { fixtureSource: 'team-strength' },
       { fixtureSource: 'team-strength' },
       { fixtureSource: 'market-odds' },
       { fixtureSource: 'fdr' },
     ]
-    expect(checkTeamStrengthSourceGate(rows).count).toBe(2)
+    const result = checkTeamStrengthSourceGate(rows)
+    expect(result.countsBySource).toEqual({ 'market-odds': 1, 'team-strength': 2, 'stale-elo': 0, fdr: 1 })
+    expect(result.passed).toBe(false) // the one fdr row fails condition 2, even with two live rows present
+  })
+
+  it('FAILS when both stale-elo and fdr are present alongside a live tier -- the reason string names both, with both counts', () => {
+    const rows: { fixtureSource: FixtureSource }[] = [{ fixtureSource: 'market-odds' }, { fixtureSource: 'stale-elo' }, { fixtureSource: 'fdr' }]
+    const result = checkTeamStrengthSourceGate(rows)
+    expect(result.passed).toBe(false)
+    expect(result.reason).toBe('1 market-odds, 0 team-strength, 1 stale-elo, 1 fdr')
   })
 })
 
@@ -685,13 +734,27 @@ const passingMarketOddsGates = {
   overroundPlausibilityGate: { outOfRangeRows: [], fixturesWithOverround: 1, passed: true },
 }
 
+/** Ticket #252's healthy-source gate, PASSING shape (one market-odds row, nothing on stale-elo/fdr) — spread into every generateReportMarkdown call below that isn't itself testing this gate failing. */
+const passingTeamStrengthSourceGate = {
+  countsBySource: { 'market-odds': 1, 'team-strength': 0, 'stale-elo': 0, fdr: 0 } as Record<FixtureSource, number>,
+  passed: true,
+  reason: '1 market-odds, 0 team-strength, 0 stale-elo, 0 fdr',
+}
+
+/** Ticket #252's healthy-source gate, FAILING shape (every row fell to stale-elo -- the exact #229 scenario). */
+const failingTeamStrengthSourceGate = {
+  countsBySource: { 'market-odds': 0, 'team-strength': 0, 'stale-elo': 1, fdr: 0 } as Record<FixtureSource, number>,
+  passed: false,
+  reason: '0 market-odds, 0 team-strength, 1 stale-elo, 0 fdr',
+}
+
 describe('generateReportMarkdown', () => {
   it('includes the gameweek, all seven gate verdicts, one table row per fixture row, and the strength table', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
       rows: [diagnosticRow()],
-      teamStrengthSourceGate: { count: 1, passed: true },
+      teamStrengthSourceGate: passingTeamStrengthSourceGate,
       manUtdGate: { status: 'pass', manUtdPointInTimeExpectedScore: 0.3 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
@@ -703,7 +766,7 @@ describe('generateReportMarkdown', () => {
     })
     expect(markdown).toMatch(/Gameweek examined: 4/)
     expect(markdown).toMatch(/PASS/)
-    expect(markdown).toMatch(/PRIMARY/)
+    expect(markdown).toMatch(/Healthy source/)
     expect(markdown).toMatch(/Man Utd/)
     expect(markdown).toMatch(/Man City/)
     expect(markdown).toMatch(/team-strength/)
@@ -719,7 +782,7 @@ describe('generateReportMarkdown', () => {
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
       rows: [diagnosticRow()],
-      teamStrengthSourceGate: { count: 1, passed: true },
+      teamStrengthSourceGate: passingTeamStrengthSourceGate,
       manUtdGate: { status: 'fail', manUtdPointInTimeExpectedScore: 0.6 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
@@ -729,12 +792,12 @@ describe('generateReportMarkdown', () => {
     expect(markdown).toMatch(/Overall: STOP/)
   })
 
-  it('reports "Overall: STOP" when the team-strength-source gate (the PRIMARY gate) fails, even if every other gate passes', () => {
+  it('reports "Overall: STOP" when the team-strength-source gate (ticket #252, gate 1) fails, even if every other gate passes', () => {
     const markdown = generateReportMarkdown({
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
       rows: [diagnosticRow({ fixtureSource: 'stale-elo' })],
-      teamStrengthSourceGate: { count: 0, passed: false },
+      teamStrengthSourceGate: failingTeamStrengthSourceGate,
       manUtdGate: { status: 'pass', manUtdPointInTimeExpectedScore: 0.3 },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.05, allRowsIdentical: true, passed: false },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
@@ -751,7 +814,7 @@ describe('generateReportMarkdown', () => {
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 5,
       rows: [outOfBoundRow],
-      teamStrengthSourceGate: { count: 1, passed: true },
+      teamStrengthSourceGate: passingTeamStrengthSourceGate,
       manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [outOfBoundRow], passed: false },
@@ -767,7 +830,7 @@ describe('generateReportMarkdown', () => {
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
       rows: [diagnosticRow()],
-      teamStrengthSourceGate: { count: 1, passed: true },
+      teamStrengthSourceGate: passingTeamStrengthSourceGate,
       manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
@@ -786,7 +849,7 @@ describe('generateReportMarkdown', () => {
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
       rows: [badOverroundRow],
-      teamStrengthSourceGate: { count: 1, passed: true },
+      teamStrengthSourceGate: passingTeamStrengthSourceGate,
       manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
@@ -804,7 +867,7 @@ describe('generateReportMarkdown', () => {
       generatedAt: new Date('2026-09-12T00:00:00Z'),
       gameweekId: 4,
       rows: [diagnosticRow()],
-      teamStrengthSourceGate: { count: 1, passed: true },
+      teamStrengthSourceGate: passingTeamStrengthSourceGate,
       manUtdGate: { status: 'not-applicable', manUtdPointInTimeExpectedScore: null },
       varianceGate: { frozenStdDev: 0.05, pointInTimeStdDev: 0.15, allRowsIdentical: false, passed: true },
       expectedScoreBoundGate: { outOfBoundRows: [], passed: true },
