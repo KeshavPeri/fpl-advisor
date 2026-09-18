@@ -289,6 +289,70 @@ once real access exists (no code change needed to compute it). Until that hand-r
 and the constant is updated, `ALPHA = 1` means the sharpening described above ships as dormant,
 tested, unused machinery — the table's gap is not yet closed in production.
 
+**Ticket #253, 18 Sep 2026 — the full-season re-fit was ATTEMPTED, CLOSED as a valid negative
+result, `ALPHA` still ships as 1.** `public.player_gameweek_history` (ticket #248) now carries real
+per-gameweek bonus/BPS for
+the complete 2025-2026 season (~29,978 rows against the ~1,268 the one-gameweek fit above used), so
+this ticket built `scripts/fit-bonus-alpha.ts` — an entirely offline tool (no Supabase; fetches
+FPL-Core-Insights' CSVs directly, same route ticket #248 used) that reconstructs point-in-time
+projected bonus for a full past season by feeding `scripts/build-feature-history.ts`'s
+`buildFeatureHistory` and `scripts/run-backtest.ts`'s `projectRow`/`computePositionPriors` (every
+one unmodified) from CSV-sourced match rows instead of a Supabase read, then fits `ALPHA` on
+2025-2026 gameweeks 1-28 and scores it on gameweeks 29-38, held out.
+
+**The fit itself ran cleanly and the falsification gate mostly passed**: fitted `ALPHA = 1.69`
+(grid search, step 0.01, over [0.05, 6.0]); on the held-out gameweeks, top-20 |mean signed error|
+fell from 0.2086 (shipped `ALPHA = 1`) to 0.1058 (fitted `ALPHA = 1.69`) — Gate 1 (must improve)
+PASSED. All-players mean signed error held at 0.0105 (within the ±0.020 guard) — Gate 2a PASSED.
+**Gate 2b did not pass**: mean per-fixture allocated total on the held-out range was 5.50, below the
+required >5.70 (99 fixtures measured, 0 clamped) — a sharper share than `ALPHA = 1` but not sharp
+enough to still be within #241's own "don't trade level for shape too far" guard.
+
+**The mandatory reproduction check FAILED, which is the actual blocker** (ticket #253's own
+instruction: stop rather than ship a fit built on an unreproduced reconstruction). The same offline
+reconstruction, run against 2026-2027 GW2/GW3 at `ALPHA = 1` — the exact model and data #241's own
+published top-20 mean PROJECTED bonus figures (0.338, 0.334) came from — produced 0.379 (GW2, |diff|
+0.041) and 0.426 (GW3, |diff| 0.092), both outside the required ±0.02 tolerance. **Diagnosed, not
+just observed**: `scripts/run-backtest.ts`'s own reconstruction pattern (which this tool follows,
+per the ticket's own instruction) is deliberately SINGLE-SEASON — it has no notion of ticket #113's
+two-stage cross-season shrinkage ("this season, shrunk toward (last season, shrunk toward the
+position average)"), because run-backtest.ts itself only ever backtests one season at a time and
+never faces an early-season gameweek with almost no current-season evidence. GW2/GW3 of 2026/27 are
+exactly that case — the live model's real projections there leaned heavily on 2025-2026's full
+season as the historical stage, which this reconstruction has no way to supply without importing
+`scripts/project-points.ts`'s own historical/current split (explicitly out of ticket #253's scope —
+owned by a sibling ticket). The gap is a real, structural difference between "the pattern
+run-backtest.ts already established" and "what the live pipeline actually did for an early-season
+gameweek," not a coding defect this ticket could find by further inspection.
+
+**Consequence: `ALPHA` is NOT changed by this ticket — it still ships as `1`. Closed out, not
+escalated.** This was evaluated against `escalation.md`'s tiers and ruled **Tier 2** — no live fork
+requiring Keshav's judgement, because the ticket's own falsification language already resolves it
+without a human: *"if it does not reproduce, the reconstruction is wrong and no fit from it can be
+trusted."* Reproduction failed, so `ALPHA = 1.69` cannot ship, full stop. Two independent reasons
+back that, either one sufficient on its own:
+
+1. The mandatory reproduction check failed outside tolerance (0.379/0.426 vs published 0.338/0.334,
+   both beyond ±0.02 — see above).
+2. Gate 2b failed independently, on its own separate criterion (5.50 vs required >5.70).
+
+**This ticket does not re-scope the reproduction check to a later, less-cross-season-dependent
+gameweek.** Doing so would launder around the real structural gap rather than surface it, and was
+explicitly considered and rejected rather than left open as an option. **This ticket also does not
+build two-stage cross-season shrinkage into the offline reconstruction** — that logic belongs to
+`scripts/project-points.ts`'s historical/current split (ticket #113), owned by other tickets, and
+duplicating it here risks exactly the "second copy to get wrong" problem `CLAUDE.md`'s "Sharing
+code between `scripts/` and `src/`" section warns about. If a valid full-season refit is wanted
+later, it needs its own ticket, scoped by whoever owns that split, to add cross-season shrinkage to
+the offline reconstruction first — not a re-run of this one.
+
+Recorded here, not silently dropped, so the next session does not repeat the ~44-network-call fit
+from scratch: `scripts/fit-bonus-alpha.ts` is complete, tested and reusable as-is for whichever
+future ticket adds the missing shrinkage stage. This ticket's outcome is a valid negative result,
+the same shape as the ticket's own contingency language for Gate 1 ("if it is not lower, ALPHA does
+not change, and that is a valid result — ship the report and say so"). See the ticket #253 Builder
+report for the full run output.
+
 **BPS is stored but not yet compared.** `gameweek_live_stats.bps` is ingested alongside `bonus` (the
 allocator models a *share of BPS*, so bps may turn out the more informative comparison — see that
 table's own migration header) but no persisted "projected BPS" figure exists anywhere in this repo

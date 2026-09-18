@@ -11,6 +11,7 @@ import {
   buildGameweekBonusReport,
   computeBonusComparisonStats,
   computeFixtureAllocationRaw,
+  differenceCumulativeGameweekRows,
   extractFixtureIds,
   extractProjectedBonus,
   extractProjectedRowsWithBonus,
@@ -18,10 +19,13 @@ import {
   matchRowsToActual,
   poolGameweekReports,
   renderGameweekSection,
+  renderReport,
   renderSeasonSection,
+  resolveActualBonusSource,
   summarizeFixtureAllocation,
   topByExpectedPoints,
   type ActualLiveStatRow,
+  type CumulativeGameweekBonusRow,
   type GameweekBonusReport,
   type ProjectedRowWithBonus,
   type RawProjectedRow,
@@ -407,5 +411,92 @@ describe('poolGameweekReports: fixture allocation pools fixtures across gameweek
     const pooledRaw = reportA.fixtureAllocationRaw
     const section = renderSeasonSection(season, pooledRaw)
     expect(section).toContain('Fixture allocation (ticket #237)')
+  })
+})
+
+// ============================================================================
+// differenceCumulativeGameweekRows — ticket #253. Named DoD tests: a player's first gameweek
+// produces no delta, a gap produces no delta across it (but differencing resumes correctly
+// afterward), and the ordinary consecutive case differences correctly.
+// ============================================================================
+
+function cumulativeRow(playerCode: number, gameweek: number, bonus: number, bps: number): CumulativeGameweekBonusRow {
+  return { playerCode, gameweek, bonus, bps }
+}
+
+describe('differenceCumulativeGameweekRows', () => {
+  it("a player's first gameweek on file produces no delta — it is his own baseline, never his whole cumulative total misread as one gameweek's award", () => {
+    const rows = [cumulativeRow(10, 1, 4, 30)]
+    expect(differenceCumulativeGameweekRows(rows)).toEqual([])
+  })
+
+  it('two ordinary consecutive gameweeks difference correctly: gw2 bonus/bps minus gw1 bonus/bps', () => {
+    const rows = [cumulativeRow(10, 1, 2, 20), cumulativeRow(10, 2, 5, 34)]
+    const result = differenceCumulativeGameweekRows(rows)
+    expect(result).toEqual([{ playerCode: 10, gameweek: 2, bonus: 3, bps: 14 }])
+  })
+
+  it('three consecutive gameweeks each difference against the immediately preceding one, not the first', () => {
+    const rows = [cumulativeRow(10, 1, 2, 20), cumulativeRow(10, 2, 5, 34), cumulativeRow(10, 3, 5, 50)]
+    const result = differenceCumulativeGameweekRows(rows)
+    expect(result).toEqual([
+      { playerCode: 10, gameweek: 2, bonus: 3, bps: 14 },
+      { playerCode: 10, gameweek: 3, bonus: 0, bps: 16 },
+    ])
+  })
+
+  it('a GAP (no row for gw3) produces no delta across it — gw2->gw4 is not differenced — but the row right after the gap becomes a fresh baseline and differencing resumes correctly from gw5 onward', () => {
+    const rows = [cumulativeRow(10, 1, 2, 20), cumulativeRow(10, 2, 5, 34), cumulativeRow(10, 4, 9, 60), cumulativeRow(10, 5, 11, 70)]
+    const result = differenceCumulativeGameweekRows(rows)
+    // gw1->gw2 differences normally; gw2->gw4 is a gap (skipped, no delta for gw4); gw4->gw5 differences normally again.
+    expect(result).toEqual([
+      { playerCode: 10, gameweek: 2, bonus: 3, bps: 14 },
+      { playerCode: 10, gameweek: 5, bonus: 2, bps: 10 },
+    ])
+  })
+
+  it('multiple players are differenced independently, unaffected by another player interleaved in the input', () => {
+    const rows = [cumulativeRow(10, 1, 2, 20), cumulativeRow(20, 1, 1, 8), cumulativeRow(10, 2, 6, 30), cumulativeRow(20, 2, 1, 12)]
+    const result = differenceCumulativeGameweekRows(rows)
+    expect(result).toHaveLength(2)
+    expect(result).toContainEqual({ playerCode: 10, gameweek: 2, bonus: 4, bps: 10 })
+    expect(result).toContainEqual({ playerCode: 20, gameweek: 2, bonus: 0, bps: 4 })
+  })
+
+  it('an empty input returns an empty array, no error', () => {
+    expect(differenceCumulativeGameweekRows([])).toEqual([])
+  })
+
+  it('input rows out of gameweek order are sorted before differencing', () => {
+    const rows = [cumulativeRow(10, 2, 5, 34), cumulativeRow(10, 1, 2, 20)]
+    expect(differenceCumulativeGameweekRows(rows)).toEqual([{ playerCode: 10, gameweek: 2, bonus: 3, bps: 14 }])
+  })
+})
+
+// ============================================================================
+// resolveActualBonusSource — ticket #253. Named DoD test: "a season with no player_gameweek_history
+// rows falls back to gameweek_live_stats and says so".
+// ============================================================================
+
+describe('resolveActualBonusSource', () => {
+  it('a season with 0 player_gameweek_history rows falls back to gameweek_live_stats', () => {
+    expect(resolveActualBonusSource(0)).toBe('gameweek_live_stats')
+  })
+
+  it('a season with at least one player_gameweek_history row prefers player_gameweek_history', () => {
+    expect(resolveActualBonusSource(1)).toBe('player_gameweek_history')
+    expect(resolveActualBonusSource(29_978)).toBe('player_gameweek_history')
+  })
+})
+
+describe('renderReport names the actual-bonus source', () => {
+  it('defaults to naming gameweek_live_stats when no source is passed', () => {
+    const report = renderReport([], new Date('2026-09-18T00:00:00Z'))
+    expect(report).toContain('gameweek_live_stats')
+  })
+
+  it('names player_gameweek_history when that is the resolved source', () => {
+    const report = renderReport([], new Date('2026-09-18T00:00:00Z'), 'player_gameweek_history')
+    expect(report).toContain('player_gameweek_history')
   })
 })

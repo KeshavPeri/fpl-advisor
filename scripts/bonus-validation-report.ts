@@ -71,6 +71,34 @@
 // Reads exactly SUPABASE_URL and SUPABASE_SECRET_KEY, same convention as every other scripts/*.ts
 // job. Every multi-row Supabase read goes through scripts/lib/paginate.ts's fetchAllPages +
 // assertRowCountMatches. This file writes nothing but its own job_runs row.
+//
+// ============================================================================
+// TICKET #253 — the actual-bonus SOURCE is now chosen, not hardcoded to gameweek_live_stats.
+// ============================================================================
+// public.player_gameweek_history (ticket #248) carries real per-gameweek bonus/bps for FULL PAST
+// SEASONS, sourced from FPL-Core-Insights' playerstats.csv — a different, complementary gap from
+// gameweek_live_stats' CURRENT-season-only event/{gw}/live/ source (see this file's "three-gameweek
+// limitation" section above, unchanged). This job now PREFERS player_gameweek_history for the
+// target season (CURRENT_SEASON below) whenever it has at least one row there, falling back to the
+// existing gameweek_live_stats path only when it does not (e.g. before Keshav's post-merge ingest —
+// see decisions/ticket-248.md) — resolveActualBonusSource is the pure selection rule, and the
+// report/job_runs.details both NAME which source actually supplied a given run's figures, never
+// silently. player_gameweek_history's bonus/bps are SEASON-CUMULATIVE-TO-DATE snapshots (verified by
+// #248 — tracing one player's rows across consecutive gameweeks found them monotonic), NOT a single
+// gameweek's own award — differenceCumulativeGameweekRows recovers the single-gameweek figure by
+// differencing consecutive rows for the same player_code, treating a player's first row (no prior
+// row to subtract) and any row immediately after a gap (the previous row on file is not exactly
+// gameweek − 1) as a fresh baseline rather than guessing across the missing gameweek(s) — see that
+// function's own doc comment.
+//
+// This does NOT give this file a full past-season PROJECTED side: `player_projections` holds
+// 2026/27 only (never a past season), so this job's projected-vs-actual comparison still only ever
+// runs for CURRENT_SEASON, exactly as before — player_gameweek_history only widens which ACTUAL
+// source that current season's comparison reads from. A full point-in-time reconstruction of the
+// PROJECTED side for a genuinely past season (2025-2026) is a different, deliberately OFFLINE
+// concern — see scripts/fit-bonus-alpha.ts, which reads FPL-Core-Insights' CSVs directly and never
+// touches Supabase — never attempted here, which stays Supabase-only like every other scripts/*.ts
+// job.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { MAX_BONUS_POINTS_PER_PLAYER_FIXTURE } from '../src/lib/projection/bonus.ts'
@@ -81,6 +109,9 @@ const JOB_NAME = 'bonus-validation-report'
 const MODEL_VERSION = 'baseline-v1'
 const GAMEWEEK_LIVE_STATS_MIGRATION = 'supabase/migrations/20260911090000_gameweek_live_stats.sql'
 const PLAYER_PROJECTIONS_MIGRATION = 'supabase/migrations/20260815120000_player_projections.sql'
+const PLAYER_GAMEWEEK_HISTORY_MIGRATION = 'supabase/migrations/20260917100000_player_gameweek_history.sql'
+/** Ticket #253. Matches scripts/project-points.ts's own CURRENT_SEASON — duplicated, not imported, same job-specific-constant convention CLAUDE.md documents (e.g. BACKTEST_SEASON vs FEATURE_HISTORY_SEASON). The only season this job's projected side (`player_projections`) can ever cover. */
+const CURRENT_SEASON = '2026-2027'
 
 /** How many of each gameweek's top projected players (by expected_points) get their own restricted figures — "the population the allocator actually moves" (this ticket's own scope text). */
 export const TOP_N_PROJECTED = 20
@@ -181,6 +212,85 @@ export function extractProjectedBonus(components: unknown): number | null {
   if (typeof points !== 'object' || points === null || Array.isArray(points)) return null
   const bonusPoints = (points as Record<string, unknown>).bonusPoints
   return typeof bonusPoints === 'number' && Number.isFinite(bonusPoints) ? bonusPoints : null
+}
+
+// ============================================================================
+// Cumulative bonus/bps differencing (ticket #253) — PURE. See the file header's "TICKET #253"
+// section for why this exists and what it must never do (guess across a gap).
+// ============================================================================
+
+/** One player_gameweek_history row's bonus/bps as read from Supabase — CUMULATIVE season-to-date, never a single gameweek's own award. See that table's own column comments. */
+export interface CumulativeGameweekBonusRow {
+  playerCode: number
+  gameweek: number
+  bonus: number
+  bps: number
+}
+
+/** One player's SINGLE-GAMEWEEK bonus/bps, recovered by differencing two consecutive CumulativeGameweekBonusRow rows. */
+export interface DifferencedGameweekBonusRow {
+  playerCode: number
+  gameweek: number
+  bonus: number
+  bps: number
+}
+
+/**
+ * Differences consecutive player_gameweek_history rows (same player_code) to recover each
+ * gameweek's own bonus/bps — see the file header for the full "because". Two cases deliberately
+ * produce NO delta for a row, rather than guessing:
+ *
+ *  - A player's FIRST row (lowest gameweek on file for him) — there is no prior row to subtract,
+ *    so it is his own baseline only, never emitted as if it were a single gameweek's award (that
+ *    would silently attribute his entire cumulative-to-date total, every earlier gameweek included,
+ *    to just this one).
+ *  - A GAP — the immediately preceding row on file is not exactly `gameweek - 1` (a gameweek this
+ *    player has no row for at all, e.g. not yet ingested, or a genuine absence from the source) —
+ *    differencing across it would fold two or more gameweeks' worth of award into one, which is not
+ *    "a single gameweek's own bonus". The row immediately after a gap becomes a fresh baseline for
+ *    whatever follows it, exactly like a first row.
+ *
+ * Pure — no I/O, no Supabase, no clock. Named tests: first gameweek (no delta), a gap (no delta
+ * across it, but differencing resumes correctly afterward), and the ordinary consecutive case.
+ */
+export function differenceCumulativeGameweekRows(rows: readonly CumulativeGameweekBonusRow[]): DifferencedGameweekBonusRow[] {
+  const byPlayer = new Map<number, CumulativeGameweekBonusRow[]>()
+  for (const row of rows) {
+    const list = byPlayer.get(row.playerCode) ?? []
+    list.push(row)
+    byPlayer.set(row.playerCode, list)
+  }
+
+  const out: DifferencedGameweekBonusRow[] = []
+  for (const list of byPlayer.values()) {
+    const sorted = [...list].sort((a, b) => a.gameweek - b.gameweek)
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1]
+      const curr = sorted[i]
+      if (curr.gameweek !== prev.gameweek + 1) continue // a gap -- curr becomes a fresh baseline, never differenced across the missing gameweek(s)
+      out.push({ playerCode: curr.playerCode, gameweek: curr.gameweek, bonus: curr.bonus - prev.bonus, bps: curr.bps - prev.bps })
+    }
+  }
+  return out
+}
+
+// ============================================================================
+// Actual-bonus source selection (ticket #253) — PURE.
+// ============================================================================
+
+export type ActualBonusSource = 'player_gameweek_history' | 'gameweek_live_stats'
+
+/**
+ * player_gameweek_history (full past-season coverage, ticket #248) is preferred for the target
+ * season whenever it has at least one row there; gameweek_live_stats (current-season-only, ticket
+ * #224) is the fallback for a season it has no rows for yet — e.g. before Keshav's post-merge
+ * ingest (decisions/ticket-248.md), or before the #248 migration has been applied at all. Pure
+ * selection only — the caller does the actual reading and reports which source it names. Named
+ * test (ticket #253 DoD): "a season with no player_gameweek_history rows falls back to
+ * gameweek_live_stats and says so".
+ */
+export function resolveActualBonusSource(playerGameweekHistoryRowCountForSeason: number): ActualBonusSource {
+  return playerGameweekHistoryRowCountForSeason > 0 ? 'player_gameweek_history' : 'gameweek_live_stats'
 }
 
 // ============================================================================
@@ -557,14 +667,20 @@ export function renderSeasonSection(season: SeasonBonusReport, pooledFixtureAllo
   )
 }
 
-export function renderReport(reports: readonly GameweekBonusReport[], generatedAt: Date): string {
+export function renderReport(reports: readonly GameweekBonusReport[], generatedAt: Date, actualBonusSource: ActualBonusSource = 'gameweek_live_stats'): string {
   const sections: string[] = []
+  const sourceLabel =
+    actualBonusSource === 'player_gameweek_history'
+      ? `\`player_gameweek_history\` (${CURRENT_SEASON}, ticket #248 — differenced from its cumulative bonus column, ticket #253)`
+      : '`gameweek_live_stats` (ticket #224)'
 
   sections.push(
     '# Bonus allocator validation report\n\n' +
       `Generated: ${generatedAt.toISOString()} · Job: \`${JOB_NAME}\` · Model version: \`${MODEL_VERSION}\`\n\n` +
       "Compares `player_projections.components.points.bonusPoints` (this model's projected bonus share, ticket #78) " +
-      'against the real, awarded bonus from `gameweek_live_stats` (ticket #224). **Read-only — changes nothing.**',
+      `against the real, awarded bonus. **Actual-bonus source this run: ${sourceLabel}** (ticket #253 — ` +
+      `\`player_gameweek_history\` is preferred whenever it has rows for ${CURRENT_SEASON}, falling back to ` +
+      '`gameweek_live_stats` when it does not, per `resolveActualBonusSource`). **Read-only — changes nothing.**',
   )
 
   sections.push(
@@ -574,14 +690,17 @@ export function renderReport(reports: readonly GameweekBonusReport[], generatedA
       'and never will be. This number can only grow by exactly one gameweek per week the season progresses; there is no way ' +
       `to add history faster. ${reports.length} gameweek(s) is not enough to trust a mean with real confidence — this ` +
       "instrument's value is that it accumulates over the season, not that any single run of it is conclusive. " +
-      'Read every figure below alongside its own sample size, printed beside it.',
+      `Read every figure below alongside its own sample size, printed beside it. (This limitation is about ` +
+      "gameweek_live_stats specifically; player_gameweek_history, when it is this run's source instead, is not bounded " +
+      'the same way — see the header above for which source this run actually used.)',
   )
 
   if (reports.length === 0) {
     sections.push(
       '## No measurable gameweeks yet\n\n' +
-        'No rows exist in `gameweek_live_stats` yet. Run `scripts/ingest-gameweek-live-stats.ts` first, once at least one ' +
-        '2026/27 gameweek has finished and passed lockdown.',
+        `No rows exist yet from either source for ${CURRENT_SEASON}. Run \`scripts/ingest-core-insights.ts\` (populates ` +
+        '`player_gameweek_history`) or `scripts/ingest-gameweek-live-stats.ts` (populates `gameweek_live_stats`, once at ' +
+        'least one gameweek has finished and passed lockdown) first.',
     )
     return sections.join('\n\n')
   }
@@ -622,6 +741,14 @@ interface GameweekLiveStatsRow {
   bps: number
 }
 
+/** Ticket #253. Only the columns this job differences — see differenceCumulativeGameweekRows. */
+interface PlayerGameweekHistoryRow {
+  gameweek: number
+  player_code: number
+  bonus: number
+  bps: number
+}
+
 interface PlayerProjectionRow {
   player_code: number | null
   expected_points: number
@@ -643,52 +770,115 @@ async function main(): Promise<void> {
 
   try {
     // --------------------------------------------------------------------
-    // 1. Every gameweek_live_stats row — this defines which gameweeks are measurable at all.
-    //    Ordered on its own primary key, so pagination is safe.
+    // 1. The actual-bonus source (ticket #253) — player_gameweek_history for CURRENT_SEASON when
+    //    it has rows, else the pre-#253 gameweek_live_stats path, unchanged. See resolveActualBonusSource
+    //    and the file header's "TICKET #253" section. This defines which gameweeks are measurable at all.
     // --------------------------------------------------------------------
+    let liveStatsPages = 0
+    let playerGameweekHistoryRowsFetched = 0
     const {
-      rows: liveStatsRows,
-      error: liveStatsError,
-      pages: liveStatsPages,
-    } = await fetchAllPages<GameweekLiveStatsRow>((from, to) =>
+      rows: playerGameweekHistoryRows,
+      error: playerGameweekHistoryError,
+      pages: playerGameweekHistoryPages,
+    } = await fetchAllPages<PlayerGameweekHistoryRow>((from, to) =>
       supabase
-        .from('gameweek_live_stats')
-        .select('gameweek_id, player_code, bonus, bps')
-        .order('gameweek_id', { ascending: true })
+        .from('player_gameweek_history')
+        .select('gameweek, player_code, bonus, bps')
+        .eq('season', CURRENT_SEASON)
         .order('player_code', { ascending: true })
+        .order('gameweek', { ascending: true })
         .range(from, to)
-        .returns<GameweekLiveStatsRow[]>(),
+        .returns<PlayerGameweekHistoryRow[]>(),
     )
-    if (liveStatsError) {
-      if (isMissingTable(liveStatsError, 'gameweek_live_stats')) {
-        throw new BonusValidationError(
-          `the "gameweek_live_stats" table does not exist. Apply ${GAMEWEEK_LIVE_STATS_MIGRATION} first.`,
-          'gameweek_live_stats',
-        )
-      }
-      throw new BonusValidationError(`gameweek_live_stats lookup failed: ${liveStatsError.message}`, 'gameweek_live_stats')
+    // A missing table is a graceful, EXPECTED-during-rollout case (the #248 migration/ingest may
+    // not have run yet on this database — see decisions/ticket-248.md) — never a hard failure here;
+    // it is treated exactly like "0 rows for this season", which resolveActualBonusSource already
+    // falls back on. Any OTHER error is a real failure and still propagates.
+    const playerGameweekHistoryMissingTable = playerGameweekHistoryError !== null && isMissingTable(playerGameweekHistoryError, 'player_gameweek_history')
+    if (playerGameweekHistoryError && !playerGameweekHistoryMissingTable) {
+      throw new BonusValidationError(`player_gameweek_history lookup failed: ${playerGameweekHistoryError.message}`, 'player_gameweek_history')
     }
-    const { count: liveStatsExpectedCount, error: liveStatsCountError } = await supabase
-      .from('gameweek_live_stats')
-      .select('*', { count: 'exact', head: true })
-    if (liveStatsCountError) {
-      throw new BonusValidationError(`gameweek_live_stats count check failed: ${liveStatsCountError.message}`, 'gameweek_live_stats')
+    if (!playerGameweekHistoryError) {
+      playerGameweekHistoryRowsFetched = playerGameweekHistoryRows.length
+      console.log(`${JOB_NAME}: player_gameweek_history (${CURRENT_SEASON}): ${playerGameweekHistoryRowsFetched} row(s) read (${playerGameweekHistoryPages} page(s)).`)
+    } else {
+      console.log(
+        `${JOB_NAME}: table "player_gameweek_history" does not exist yet — treating as 0 rows for ${CURRENT_SEASON} ` +
+          `(apply ${PLAYER_GAMEWEEK_HISTORY_MIGRATION} to enable it as this run's actual-bonus source).`,
+      )
     }
-    assertRowCountMatches('gameweek_live_stats', liveStatsRows.length, liveStatsExpectedCount ?? 0)
 
+    const actualBonusSource = resolveActualBonusSource(playerGameweekHistoryRowsFetched)
     const actualByGameweek = new Map<number, ActualLiveStatRow[]>()
-    for (const row of liveStatsRows) {
-      const list = actualByGameweek.get(row.gameweek_id) ?? []
-      list.push({ playerCode: row.player_code, bonus: row.bonus, bps: row.bps })
-      actualByGameweek.set(row.gameweek_id, list)
+    let liveStatsRowsFetched = 0
+
+    if (actualBonusSource === 'player_gameweek_history') {
+      const differenced = differenceCumulativeGameweekRows(
+        playerGameweekHistoryRows.map((row) => ({ playerCode: row.player_code, gameweek: row.gameweek, bonus: row.bonus, bps: row.bps })),
+      )
+      for (const row of differenced) {
+        const list = actualByGameweek.get(row.gameweek) ?? []
+        list.push({ playerCode: row.playerCode, bonus: row.bonus, bps: row.bps })
+        actualByGameweek.set(row.gameweek, list)
+      }
+      console.log(
+        `${JOB_NAME}: actual-bonus source is player_gameweek_history (${CURRENT_SEASON}) — ` +
+          `${playerGameweekHistoryRowsFetched} cumulative row(s) differenced into ${differenced.length} single-gameweek row(s).`,
+      )
+    } else {
+      const {
+        rows: liveStatsRows,
+        error: liveStatsError,
+        pages: fetchedLiveStatsPages,
+      } = await fetchAllPages<GameweekLiveStatsRow>((from, to) =>
+        supabase
+          .from('gameweek_live_stats')
+          .select('gameweek_id, player_code, bonus, bps')
+          .order('gameweek_id', { ascending: true })
+          .order('player_code', { ascending: true })
+          .range(from, to)
+          .returns<GameweekLiveStatsRow[]>(),
+      )
+      if (liveStatsError) {
+        if (isMissingTable(liveStatsError, 'gameweek_live_stats')) {
+          throw new BonusValidationError(
+            `the "gameweek_live_stats" table does not exist. Apply ${GAMEWEEK_LIVE_STATS_MIGRATION} first.`,
+            'gameweek_live_stats',
+          )
+        }
+        throw new BonusValidationError(`gameweek_live_stats lookup failed: ${liveStatsError.message}`, 'gameweek_live_stats')
+      }
+      const { count: liveStatsExpectedCount, error: liveStatsCountError } = await supabase
+        .from('gameweek_live_stats')
+        .select('*', { count: 'exact', head: true })
+      if (liveStatsCountError) {
+        throw new BonusValidationError(`gameweek_live_stats count check failed: ${liveStatsCountError.message}`, 'gameweek_live_stats')
+      }
+      assertRowCountMatches('gameweek_live_stats', liveStatsRows.length, liveStatsExpectedCount ?? 0)
+      liveStatsPages = fetchedLiveStatsPages
+      liveStatsRowsFetched = liveStatsRows.length
+
+      for (const row of liveStatsRows) {
+        const list = actualByGameweek.get(row.gameweek_id) ?? []
+        list.push({ playerCode: row.player_code, bonus: row.bonus, bps: row.bps })
+        actualByGameweek.set(row.gameweek_id, list)
+      }
+      console.log(
+        `${JOB_NAME}: actual-bonus source is gameweek_live_stats — player_gameweek_history had 0 row(s) for ${CURRENT_SEASON}, falling back ` +
+          `(this is the expected state before Keshav's post-merge ingest — see decisions/ticket-248.md).`,
+      )
     }
+
     const measurableGameweekIds = [...actualByGameweek.keys()].sort((a, b) => a - b)
 
     if (measurableGameweekIds.length === 0) {
-      const message = `${JOB_NAME}: no rows in gameweek_live_stats yet — run scripts/ingest-gameweek-live-stats.ts first.`
+      const message =
+        `${JOB_NAME}: no measurable rows yet from either source (player_gameweek_history: ` +
+        `${playerGameweekHistoryRowsFetched} row(s) for ${CURRENT_SEASON}; gameweek_live_stats: ${liveStatsRowsFetched} row(s)) — ` +
+        'run scripts/ingest-core-insights.ts or scripts/ingest-gameweek-live-stats.ts first.'
       console.log(message)
-      console.log(renderReport([], startedAt))
-      await recordJobRun(supabase, { status: 'skipped', message, details: { gameweeksMeasured: 0 }, startedAt })
+      console.log(renderReport([], startedAt, actualBonusSource))
+      await recordJobRun(supabase, { status: 'skipped', message, details: { gameweeksMeasured: 0, actualBonusSource }, startedAt })
       return
     }
 
@@ -747,15 +937,16 @@ async function main(): Promise<void> {
     }
 
     const generatedAt = new Date()
-    const reportMarkdown = renderReport(gameweekReports, generatedAt)
+    const reportMarkdown = renderReport(gameweekReports, generatedAt, actualBonusSource)
     console.log(reportMarkdown)
 
     const season = poolGameweekReports(gameweekReports)
     const details: JsonRecord = {
       gameweeksMeasured: gameweekReports.length,
       measurableGameweekIds,
-      liveStatsRowsFetched: liveStatsRows.length,
-      liveStatsExpectedByCount: liveStatsExpectedCount ?? 0,
+      actualBonusSource,
+      playerGameweekHistoryRowsFetched,
+      liveStatsRowsFetched,
       liveStatsPages,
       perGameweek: gameweekReports.map((r) => ({
         gameweekId: r.gameweekId,
@@ -778,7 +969,7 @@ async function main(): Promise<void> {
     }
 
     const message =
-      `${JOB_NAME}: measured ${gameweekReports.length} gameweek(s). ` +
+      `${JOB_NAME}: measured ${gameweekReports.length} gameweek(s). Actual-bonus source: ${actualBonusSource} (ticket #253). ` +
       `Season overall n=${season.overall.sampleSize}, mean projected bonus ${season.overall.meanProjectedBonus?.toFixed(3) ?? 'n/a'}, ` +
       `mean actual bonus ${season.overall.meanActualBonus?.toFixed(3) ?? 'n/a'}, signed error ${season.overall.meanSignedError?.toFixed(3) ?? 'n/a'}. ` +
       `Top ${TOP_N_PROJECTED} n=${season.top20.sampleSize}, mean projected bonus ${season.top20.meanProjectedBonus?.toFixed(3) ?? 'n/a'}, ` +
