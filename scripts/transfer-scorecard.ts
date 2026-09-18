@@ -619,10 +619,13 @@ export function renderScorecard(results: readonly TransferGameweekResult[], gene
   )
   lines.push('')
   lines.push(
-    `**${scored.length} gameweek(s) with an issued, measurable transfer.** At most a handful of gameweeks carry a ` +
-      "plan_snapshot at all right now (the column shipped 13 Sep 2026), so a mean over this few gameweeks is weak " +
-      "evidence — this instrument's value is that it accumulates over the season, not that any single run of it is " +
-      "conclusive (same convention as scripts/bonus-validation-report.ts's own three-gameweek limitation, and " +
+    '## The four-gameweek limitation\n\n' +
+      `This run measured **${scored.length} gameweek(s) with an issued, measurable transfer**. At most four ` +
+      'gameweeks carry a `notifications.plan_snapshot` at all right now (the column shipped 13 Sep 2026) — this ' +
+      'number can only grow by exactly one gameweek per week the season progresses; there is no way to add history ' +
+      `faster. ${scored.length} gameweek(s) is not enough to trust a mean with real confidence — this instrument's ` +
+      "value is that it accumulates over the season, not that any single run of it is conclusive (same convention " +
+      "as scripts/bonus-validation-report.ts's own three-gameweek limitation, and " +
       "scripts/recommendation-scorecard.ts's own captaincy-regret section). Read every figure below alongside its " +
       'own sample size, printed beside it.',
   )

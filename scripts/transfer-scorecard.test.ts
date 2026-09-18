@@ -459,6 +459,12 @@ describe('renderScorecard', () => {
     expect(report).toMatch(/No measurable transfer gameweeks yet/i)
   })
 
+  it('states the four-gameweek ceiling by name, in its own heading, matching scripts/bonus-validation-report.ts\'s shape', () => {
+    const report = renderScorecard([], '2026-09-18T00:00:00.000Z')
+    expect(report).toContain('## The four-gameweek limitation')
+    expect(report).toMatch(/at most four\s+gameweeks/i)
+  })
+
   it('prints the pooled headline figure — how many gameweeks gained less than rolling — for a scored population', () => {
     const actuals: ActualsByGameweek = new Map([[10, new Map([[200, 8], [201, 3]])]]) // incoming underperforms outgoing
     const result = evaluateTransferGameweek({
