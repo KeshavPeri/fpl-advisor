@@ -783,19 +783,24 @@ export function summarizeCaptaincy(outcomes: readonly (CaptaincyOutcome | null)[
 // "PROJECTED, AS IT STOOD AT THAT SNAPSHOT" — this app's stored plan_snapshot
 // (supabase/migrations/20260913090000_notifications_plan_snapshot.sql) does
 // NOT carry a per-player projected-points figure (only the whole plan's own
-// net_points, at expectedPoints) — see RawPlanSnapshot above; only
-// prediction_log.projected_points does, one row per (gameweek, player,
+// net_points, at expectedPoints) — see RawPlanSnapshot above; no per-player,
+// per-timestamp record of "what the projection said at the moment the
+// snapshot was frozen" exists anywhere in this database. prediction_log.
+// projected_points is therefore used as a PROXY for that missing figure, not
+// as the frozen snapshot figure itself — it is the closest thing on record,
+// not a reconstruction of it. It is one row per (gameweek, player,
 // model_version), written pre-deadline by scripts/snapshot-predictions.ts and
 // left untouched by scripts/settle-predictions.ts's later settlement update
 // (verified directly against that file's buildSettlementRows — it re-writes
 // projected_points back unchanged in the same upsert that fills in
-// actual_points, never recomputing it). A settled prediction_log row's
-// projected_points is therefore exactly the frozen pre-deadline projection,
-// and is what this section reads for the naive baseline. This is a
-// deliberate, reported convention (see this ticket's own decisions-log
-// entry), not an exact reconstruction of "the projection precisely at the
-// moment the plan_snapshot was written" — no such per-player, per-timestamp
-// record exists anywhere in this database.
+// actual_points, never recomputing it). That "written pre-deadline, never
+// rewritten" property is what makes it a reasonable proxy: a settled
+// prediction_log row's projected_points still reads back as whatever was
+// projected before the deadline, even though it was never tied to the
+// plan_snapshot row it is being compared against. This is a deliberate,
+// reported convention (see this ticket's own decisions-log entry, accepted
+// by Keshav as the right proxy) — not the actual frozen plan_snapshot figure,
+// because no such per-player figure is stored anywhere on plan_snapshot.
 //
 // TIE-BREAKS — both invented here, both reported as Tier 3 conventions
 // (nothing in the ticket or the brief specifies either):
@@ -1411,9 +1416,13 @@ interface PredictionLogRow {
   captured_at: string
   /** Ticket #249. Present on every row (NOT NULL in the migration) — read
    *  here for the naive highest-projected-captain baseline. See file header,
-   *  "PROJECTED, AS IT STOOD AT THAT SNAPSHOT": settle-predictions.ts writes
-   *  this value back unchanged at settlement, so a settled row's
-   *  projected_points is exactly the frozen pre-deadline projection. */
+   *  "PROJECTED, AS IT STOOD AT THAT SNAPSHOT": this is a PROXY for the
+   *  frozen pre-deadline per-player projection, not that frozen snapshot
+   *  figure itself — plan_snapshot never stored a per-player figure to begin
+   *  with, only the plan's aggregate expectedPoints. settle-predictions.ts
+   *  writes projected_points back unchanged at settlement (never
+   *  recomputing it), which is what makes it a reasonable — but not
+   *  exact — stand-in for that missing figure. */
   projected_points: number
 }
 
