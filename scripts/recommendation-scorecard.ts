@@ -737,6 +737,346 @@ export function summarizeCaptaincy(outcomes: readonly (CaptaincyOutcome | null)[
 }
 
 // ============================================================================
+// CAPTAINCY REGRET AND RANK — ticket #249.
+// ============================================================================
+// The captaincy diagnostic above (evaluateCaptaincy/summarizeCaptaincy,
+// ticket #223) answers "did the effective captain outscore the best of the
+// OTHER ten starters" — a same-or-better hit rate. This section answers a
+// related but different question, in the ticket's own vocabulary: REGRET
+// (how many points were left on the table versus the hindsight-best pick in
+// the same XI, self included) and RANK (where the chosen captain actually
+// placed among all eleven by raw actual points), each ALSO computed for a
+// naive highest-projected baseline so the app's real divergence from "just
+// captain whoever the model rates highest" is visible and its direction
+// (helped or hurt) is readable.
+//
+// SOURCE DISCIPLINE — stricter than every other section in this file. The
+// rest of this file falls back to the mutable `recommendations` table when no
+// usable `notifications.plan_snapshot` exists for a gameweek (see
+// resolvePlanA above). This section never does: the ticket text is explicit
+// ("Never fall back to the mutable recommendations table for this section —
+// the entire point is scoring what was actually sent to Keshav"), because a
+// captaincy call scored against a plan that was silently re-solved after the
+// real deadline would not be scoring what actually happened. A gameweek with
+// no recorded plan_snapshot is excluded from this section by name (reason
+// 'noSnapshot') even when `recommendations` still holds a Plan A for it.
+//
+// "CHOSEN CAPTAIN" IS THE EFFECTIVE ARMBAND HOLDER, not always the literally
+// named captain. Real FPL auto-promotes the armband to the vice-captain when
+// the named captain plays zero minutes — this is a rule of the game, not a
+// modelling choice (the same rule scoreSquad already applies elsewhere in
+// this file). "Did the app captain the best one" is answered against the
+// player who actually got doubled on Keshav's real scoreboard, which is the
+// effective captain, not a hypothetical literal-captain score that was never
+// actually paid out. When NEITHER the named captain nor the named
+// vice-captain played (armband void that week — both zero minutes), there is
+// no effective captain to score and the gameweek is excluded from this
+// section (reason 'armbandVoid').
+//
+// THE VICE-CAPTAIN COMPARISON is reported separately and ONLY for gameweeks
+// where it actually triggered (the named captain played zero minutes — the
+// exact condition scoreSquad already uses to promote the armband). It is
+// never scored on a gameweek where the named captain played, because on
+// those gameweeks the vice-captain is not a real alternative that was ever in
+// play (per the ticket text: "don't score it every week").
+//
+// "PROJECTED, AS IT STOOD AT THAT SNAPSHOT" — this app's stored plan_snapshot
+// (supabase/migrations/20260913090000_notifications_plan_snapshot.sql) does
+// NOT carry a per-player projected-points figure (only the whole plan's own
+// net_points, at expectedPoints) — see RawPlanSnapshot above; no per-player,
+// per-timestamp record of "what the projection said at the moment the
+// snapshot was frozen" exists anywhere in this database. prediction_log.
+// projected_points is therefore used as a PROXY for that missing figure, not
+// as the frozen snapshot figure itself — it is the closest thing on record,
+// not a reconstruction of it. It is one row per (gameweek, player,
+// model_version), written pre-deadline by scripts/snapshot-predictions.ts and
+// left untouched by scripts/settle-predictions.ts's later settlement update
+// (verified directly against that file's buildSettlementRows — it re-writes
+// projected_points back unchanged in the same upsert that fills in
+// actual_points, never recomputing it). That "written pre-deadline, never
+// rewritten" property is what makes it a reasonable proxy: a settled
+// prediction_log row's projected_points still reads back as whatever was
+// projected before the deadline, even though it was never tied to the
+// plan_snapshot row it is being compared against. This is a deliberate,
+// reported convention (see this ticket's own decisions-log entry, accepted
+// by Keshav as the right proxy) — not the actual frozen plan_snapshot figure,
+// because no such per-player figure is stored anywhere on plan_snapshot.
+//
+// TIE-BREAKS — both invented here, both reported as Tier 3 conventions
+// (nothing in the ticket or the brief specifies either):
+//   - Rank uses standard competition ranking (ties share the better rank; the
+//     next distinct score after a tie skips accordingly — e.g. two starters
+//     tied for the top actual score are both rank 1, and the third-highest
+//     scorer is rank 3, not rank 2). "1 = best", per the ticket text.
+//   - Where two or more starters are tied for the best actual score (the
+//     hindsight ceiling) or tied for the highest projection (the naive
+//     pick), the lower player id wins, purely for a deterministic single
+//     answer — it carries no football meaning.
+//
+// POOLING — the pooled mean over every scored gameweek's regret (and,
+// separately, its rank) is computed by summing the raw per-gameweek regret
+// (or rank) values and dividing by how many gameweeks actually contributed —
+// never by averaging a shorter list of already-computed per-gameweek means
+// padded to a longer one, and never including an excluded gameweek as an
+// implicit zero. Same discipline as sumNet/pairedNetGap above.
+//
+// SAMPLE SIZE — at most four gameweeks of snapshots exist at all (the
+// snapshot column shipped 13 Sep 2026). Every figure below is printed beside
+// its own `n`, and the report states plainly, in the same style
+// scripts/bonus-validation-report.ts already uses for its own three-gameweek
+// limitation, that a mean over so few gameweeks is weak evidence.
+// ============================================================================
+
+/** One captaincy pick (the app's real effective captain, or the naive
+ *  highest-projected one) scored against the same starting eleven's actual
+ *  points. */
+export interface CaptainPick {
+  playerId: number
+  actualPoints: number
+  /** The hindsight ceiling — the highest actual score among all eleven
+   *  starters, self included. Identical for `chosen` and `naive` within one
+   *  gameweek (same starting XI, same actuals) — kept on both so each is a
+   *  self-contained, independently readable figure. */
+  bestAvailableActualPoints: number
+  /** bestAvailableActualPoints − actualPoints. Zero exactly when this pick
+   *  was itself the best available; never negative. */
+  regret: number
+  /** 1 = best, standard competition ranking (ties share a rank) — see file
+   *  header, "TIE-BREAKS". */
+  rank: number
+}
+
+export interface ViceEffectTriggered {
+  triggered: true
+  namedCaptainActualPoints: number
+  viceCaptainActualPoints: number
+  scoredBetterThanNamedCaptain: boolean
+  /** viceCaptainActualPoints − namedCaptainActualPoints. Positive means the
+   *  vice outscored the blanking named captain. */
+  margin: number
+}
+
+export interface ViceEffectNotTriggered {
+  triggered: false
+}
+
+export type ViceEffect = ViceEffectTriggered | ViceEffectNotTriggered
+
+export interface CaptaincyRegretScored {
+  gameweekId: number
+  ok: true
+  /** The app's real pick, scored via the effective (post-promotion) armband
+   *  holder — see file header. */
+  chosen: CaptainPick
+  /** The naive baseline: whichever starter carried the highest
+   *  prediction_log.projected_points for this gameweek at snapshot time. */
+  naive: CaptainPick
+  namedCaptainPlayerId: number
+  namedCaptainMinutes: number
+  viceEffect: ViceEffect
+}
+
+export type CaptaincyRegretExclusionReason =
+  | 'noSnapshot'
+  | 'reconstructionFailed'
+  | 'unsettled'
+  | 'missingActuals'
+  | 'missingProjections'
+  | 'armbandVoid'
+
+export interface CaptaincyRegretExcluded {
+  gameweekId: number
+  ok: false
+  reason: CaptaincyRegretExclusionReason
+  detail: string
+}
+
+export type CaptaincyRegretResult = CaptaincyRegretScored | CaptaincyRegretExcluded
+
+/** Standard competition ranking (1224): ties share the better rank. `1` is
+ *  best. Requires `playerId` to be present in `starterPoints` — every call
+ *  site here guarantees that before calling. */
+export function rankAmongStarters(starterPoints: ReadonlyMap<number, number>, playerId: number): number {
+  const target = starterPoints.get(playerId) as number
+  let rank = 1
+  for (const points of starterPoints.values()) {
+    if (points > target) rank++
+  }
+  return rank
+}
+
+/** The hindsight ceiling: the highest actual score among the given starters.
+ *  Tie-break: lowest player id — see file header, "TIE-BREAKS". */
+export function bestAvailableAmongStarters(starterPoints: ReadonlyMap<number, number>): { playerId: number; points: number } {
+  let best: { playerId: number; points: number } | null = null
+  for (const [playerId, points] of starterPoints) {
+    if (!best || points > best.points || (points === best.points && playerId < best.playerId)) {
+      best = { playerId, points }
+    }
+  }
+  return best as { playerId: number; points: number }
+}
+
+/** The naive baseline pick: the starter with the highest projected points at
+ *  snapshot time. Every id in `startingIds` must have an entry in
+ *  `projectedByPlayer` — every call site here guarantees that before calling.
+ *  Tie-break: lowest player id — see file header, "TIE-BREAKS". */
+export function pickNaiveCaptain(startingIds: readonly number[], projectedByPlayer: ReadonlyMap<number, number>): number {
+  let bestId = -1
+  let bestProjected = Number.NEGATIVE_INFINITY
+  for (const id of startingIds) {
+    const projected = projectedByPlayer.get(id) as number
+    if (projected > bestProjected || (projected === bestProjected && id < bestId)) {
+      bestProjected = projected
+      bestId = id
+    }
+  }
+  return bestId
+}
+
+/**
+ * Scores one gameweek's captaincy regret/rank for both the app's real
+ * (effective) captain and the naive highest-projected baseline, or excludes
+ * the gameweek by name. Pure — no I/O. Callers (main() below, and this
+ * file's own tests) are responsible for having already established that a
+ * plan_snapshot exists and the gameweek is settled; this function's own
+ * exclusion reasons cover what can still go wrong given those inputs
+ * (a squad that does not reconcile, a missing actual, a missing projection,
+ * or a void armband).
+ */
+export function evaluateCaptaincyRegret(
+  gameweekId: number,
+  startingXi: readonly SquadSlot[],
+  captainPlayerId: number,
+  viceCaptainPlayerId: number,
+  actuals: ActualsByPlayer,
+  projectedByPlayer: ReadonlyMap<number, number>,
+): CaptaincyRegretResult {
+  const startingIds = startingXi.map((slot) => slot.playerId)
+
+  if (!startingIds.includes(captainPlayerId) || !startingIds.includes(viceCaptainPlayerId)) {
+    return {
+      gameweekId,
+      ok: false,
+      reason: 'reconstructionFailed',
+      detail: 'the snapshot\'s named captain or vice-captain is not part of its own starting eleven.',
+    }
+  }
+
+  const starterPoints = new Map<number, number>()
+  const missingActuals: number[] = []
+  for (const id of startingIds) {
+    const actual = actuals.get(id)
+    if (!actual) missingActuals.push(id)
+    else starterPoints.set(id, actual.points)
+  }
+  if (missingActuals.length > 0) {
+    return {
+      gameweekId,
+      ok: false,
+      reason: 'missingActuals',
+      detail: `no settled actual for starting-eleven player id(s) ${missingActuals.join(', ')}.`,
+    }
+  }
+
+  const missingProjections = startingIds.filter((id) => !projectedByPlayer.has(id))
+  if (missingProjections.length > 0) {
+    return {
+      gameweekId,
+      ok: false,
+      reason: 'missingProjections',
+      detail:
+        `no prediction_log.projected_points for starting-eleven player id(s) ${missingProjections.join(', ')} — ` +
+        'the naive highest-projected baseline cannot be computed.',
+    }
+  }
+
+  const captainMinutes = actuals.get(captainPlayerId)?.minutes ?? 0
+  const viceMinutes = actuals.get(viceCaptainPlayerId)?.minutes ?? 0
+
+  const effectiveCaptainPlayerId = captainMinutes > 0 ? captainPlayerId : viceMinutes > 0 ? viceCaptainPlayerId : null
+  if (effectiveCaptainPlayerId === null) {
+    return {
+      gameweekId,
+      ok: false,
+      reason: 'armbandVoid',
+      detail: 'neither the named captain nor the named vice-captain played — the armband was void that week, nothing to score.',
+    }
+  }
+
+  const bestAvailable = bestAvailableAmongStarters(starterPoints)
+
+  const chosenActual = starterPoints.get(effectiveCaptainPlayerId) as number
+  const chosen: CaptainPick = {
+    playerId: effectiveCaptainPlayerId,
+    actualPoints: chosenActual,
+    bestAvailableActualPoints: bestAvailable.points,
+    regret: bestAvailable.points - chosenActual,
+    rank: rankAmongStarters(starterPoints, effectiveCaptainPlayerId),
+  }
+
+  const naiveCaptainPlayerId = pickNaiveCaptain(startingIds, projectedByPlayer)
+  const naiveActual = starterPoints.get(naiveCaptainPlayerId) as number
+  const naive: CaptainPick = {
+    playerId: naiveCaptainPlayerId,
+    actualPoints: naiveActual,
+    bestAvailableActualPoints: bestAvailable.points,
+    regret: bestAvailable.points - naiveActual,
+    rank: rankAmongStarters(starterPoints, naiveCaptainPlayerId),
+  }
+
+  let viceEffect: ViceEffect
+  if (captainMinutes === 0) {
+    const namedCaptainActualPoints = starterPoints.get(captainPlayerId) as number
+    const viceCaptainActualPoints = starterPoints.get(viceCaptainPlayerId) as number
+    viceEffect = {
+      triggered: true,
+      namedCaptainActualPoints,
+      viceCaptainActualPoints,
+      scoredBetterThanNamedCaptain: viceCaptainActualPoints > namedCaptainActualPoints,
+      margin: viceCaptainActualPoints - namedCaptainActualPoints,
+    }
+  } else {
+    viceEffect = { triggered: false }
+  }
+
+  return { gameweekId, ok: true, chosen, naive, namedCaptainPlayerId: captainPlayerId, namedCaptainMinutes: captainMinutes, viceEffect }
+}
+
+/** Pools a figure (regret or rank) from the underlying per-gameweek values
+ *  directly — sum then divide — never by averaging a set of already-computed
+ *  per-gameweek means. See file header, "POOLING". */
+export interface PooledFigure {
+  n: number
+  total: number
+  mean: number
+}
+
+export function poolCaptaincyFigure(values: readonly number[]): PooledFigure {
+  const n = values.length
+  const total = values.reduce((sum, value) => sum + value, 0)
+  return { n, total, mean: n === 0 ? 0 : total / n }
+}
+
+export interface ViceEffectSummary {
+  /** How many scored gameweeks had the named captain play zero minutes —
+   *  the count of gameweeks where the vice-captain rule actually came into
+   *  effect. */
+  triggeredCount: number
+  /** Of those, how many had the vice-captain score strictly better than the
+   *  named (blanking) captain. */
+  viceScoredBetterCount: number
+}
+
+export function summarizeViceEffect(results: readonly CaptaincyRegretScored[]): ViceEffectSummary {
+  const triggered = results.filter((r): r is CaptaincyRegretScored & { viceEffect: ViceEffectTriggered } => r.viceEffect.triggered)
+  return {
+    triggeredCount: triggered.length,
+    viceScoredBetterCount: triggered.filter((r) => r.viceEffect.scoredBetterThanNamedCaptain).length,
+  }
+}
+
+// ============================================================================
 // Everything below this line is I/O: Supabase reads, report rendering, and
 // job_runs bookkeeping. Nothing above this line touches a network or a
 // clock.
@@ -1074,6 +1414,16 @@ interface PredictionLogRow {
   actual_minutes: number | null
   settled_at: string | null
   captured_at: string
+  /** Ticket #249. Present on every row (NOT NULL in the migration) — read
+   *  here for the naive highest-projected-captain baseline. See file header,
+   *  "PROJECTED, AS IT STOOD AT THAT SNAPSHOT": this is a PROXY for the
+   *  frozen pre-deadline per-player projection, not that frozen snapshot
+   *  figure itself — plan_snapshot never stored a per-player figure to begin
+   *  with, only the plan's aggregate expectedPoints. settle-predictions.ts
+   *  writes projected_points back unchanged at settlement (never
+   *  recomputing it), which is what makes it a reasonable — but not
+   *  exact — stand-in for that missing figure. */
+  projected_points: number
 }
 
 /**
@@ -1116,6 +1466,32 @@ function buildActualsByGameweek(rows: readonly PredictionLogRow[]): {
   return { byGameweek, conflictingPlayerCount }
 }
 
+/**
+ * Ticket #249. Builds one (player -> projected_points) map per gameweek from
+ * the same settled prediction_log rows buildActualsByGameweek already reads
+ * — no second query. Same "keep whichever row was captured most recently"
+ * tie-break across model_version as buildActualsByGameweek, for the same
+ * reason (this is a fact frozen at capture time, and a duplicate model
+ * version is the only way more than one row can exist per player/gameweek).
+ */
+function buildProjectedByGameweek(rows: readonly PredictionLogRow[]): Map<number, Map<number, { points: number; capturedAtMs: number }>> {
+  const byGameweek = new Map<number, Map<number, { points: number; capturedAtMs: number }>>()
+  for (const row of rows) {
+    if (row.settled_at === null) continue
+    let forGameweek = byGameweek.get(row.gameweek_id)
+    if (!forGameweek) {
+      forGameweek = new Map()
+      byGameweek.set(row.gameweek_id, forGameweek)
+    }
+    const capturedAtMs = new Date(row.captured_at).getTime()
+    const existing = forGameweek.get(row.player_id)
+    if (!existing || capturedAtMs > existing.capturedAtMs) {
+      forGameweek.set(row.player_id, { points: row.projected_points, capturedAtMs })
+    }
+  }
+  return byGameweek
+}
+
 // ----------------------------------------------------------------------------
 // Report rendering — plain text formatting, no I/O. Kept as pure functions so
 // the "sample size beside every figure" and "standing line" requirements are
@@ -1142,11 +1518,121 @@ function fmtEntity(entity: ScoredEntity | null): string {
   return `gross ${fmtNum(entity.grossPoints)}, ${net}${armband}`
 }
 
+/**
+ * Renders ticket #249's captaincy-regret section. A standalone function
+ * (rather than inlined in renderScorecard) so it is directly testable
+ * without constructing an unrelated RenderScorecardInput. See this file's
+ * "CAPTAINCY REGRET AND RANK" header for what every figure means.
+ */
+export function renderCaptaincyRegretSection(results: readonly CaptaincyRegretResult[]): string[] {
+  const scored = results.filter((r): r is CaptaincyRegretScored => r.ok)
+  const excluded = results.filter((r): r is CaptaincyRegretExcluded => !r.ok)
+
+  const lines: string[] = []
+  lines.push('## Captaincy — regret and rank against a naive baseline')
+  lines.push('')
+  lines.push(
+    `**${scored.length} gameweek(s) measured here.** ` +
+      'This section only ever scores a gameweek that has BOTH a frozen `notifications.plan_snapshot` AND settled ' +
+      'actuals — unlike every other section above, it never falls back to the mutable `recommendations` table (the ' +
+      'point is scoring what was actually sent to Keshav). At most four gameweeks of snapshots exist at all (the ' +
+      'plan_snapshot column shipped 13 Sep 2026), so a mean over this few gameweeks is weak evidence — this ' +
+      "instrument's value is that it accumulates over the season, not that any single run of it is conclusive " +
+      '(same convention as scripts/bonus-validation-report.ts\'s own three-gameweek limitation). Read every figure ' +
+      'below alongside its own sample size, printed beside it.',
+  )
+  lines.push('')
+  lines.push(
+    '**"Best available" is a hindsight ceiling** — the highest actual score among the starting eleven that ' +
+      'gameweek, self included. It is not a target anyone could have known to hit before kickoff; it exists only ' +
+      'to measure regret, the points left on the table relative to the best outcome that was possible in ' +
+      'hindsight.',
+  )
+  lines.push('')
+
+  if (scored.length === 0) {
+    lines.push(
+      '**No gameweek both has a plan_snapshot and settled actuals yet — no captaincy regret figure can be ' +
+        "computed.** See the excluded-gameweeks table below for why each gameweek this script knows about didn't " +
+        'qualify.',
+    )
+    lines.push('')
+  } else {
+    lines.push(
+      '| Gameweek | Chosen captain (actual) | Best available (hindsight) | Regret | Rank | ' +
+        'Naive — highest projected (actual) | Naive regret | Naive rank |',
+    )
+    lines.push('|---|---|---|---|---|---|---|---|')
+    for (const gw of scored) {
+      lines.push(
+        `| ${gw.gameweekId} | player ${gw.chosen.playerId}: ${fmtNum(gw.chosen.actualPoints)} | ` +
+          `${fmtNum(gw.chosen.bestAvailableActualPoints)} | ${fmtNum(gw.chosen.regret)} | ${gw.chosen.rank} | ` +
+          `player ${gw.naive.playerId}: ${fmtNum(gw.naive.actualPoints)} | ${fmtNum(gw.naive.regret)} | ${gw.naive.rank} |`,
+      )
+    }
+    lines.push('')
+
+    const chosenRegretPool = poolCaptaincyFigure(scored.map((gw) => gw.chosen.regret))
+    const chosenRankPool = poolCaptaincyFigure(scored.map((gw) => gw.chosen.rank))
+    const naiveRegretPool = poolCaptaincyFigure(scored.map((gw) => gw.naive.regret))
+    const naiveRankPool = poolCaptaincyFigure(scored.map((gw) => gw.naive.rank))
+
+    lines.push('**Pooled (from underlying gameweek rows, never an average of per-gameweek means):**')
+    lines.push('')
+    lines.push(
+      `- App's actual pick — mean regret ${fmtNum(chosenRegretPool.mean)} (n=${chosenRegretPool.n}), ` +
+        `mean rank ${fmtNum(chosenRankPool.mean)} (n=${chosenRankPool.n})`,
+    )
+    lines.push(
+      `- Naive highest-projected pick — mean regret ${fmtNum(naiveRegretPool.mean)} (n=${naiveRegretPool.n}), ` +
+        `mean rank ${fmtNum(naiveRankPool.mean)} (n=${naiveRankPool.n})`,
+    )
+    lines.push('')
+    lines.push(
+      "Naive regret below the app's own regret means the app's actual captaincy pick diverged from the naive " +
+        'highest-projected pick and that divergence HURT; naive regret above the app\'s own means the divergence ' +
+        "HELPED. Per the ticket text, the naive pick is usually what the app's actual pick is anyway.",
+    )
+    lines.push('')
+
+    const viceSummary = summarizeViceEffect(scored)
+    const viceComparisonText =
+      viceSummary.triggeredCount === 0
+        ? 'n/a — the rule never triggered in any measured gameweek, so there is nothing to compare.'
+        : `the vice-captain outscored the blanking named captain in ${viceSummary.viceScoredBetterCount}/${viceSummary.triggeredCount} of them.`
+    lines.push(
+      '**Vice-captain:** the named captain played zero minutes — the real FPL rule that promotes the armband to ' +
+        `the vice-captain — in ${viceSummary.triggeredCount}/${scored.length} scored gameweek(s). Scored only for ` +
+        "those (the ticket's own rule: \"don't score it every week\"): " +
+        viceComparisonText,
+    )
+    lines.push('')
+  }
+
+  if (excluded.length > 0) {
+    lines.push('### Excluded from captaincy regret')
+    lines.push('')
+    lines.push('| Gameweek | Reason | Detail |')
+    lines.push('|---|---|---|')
+    for (const e of excluded) {
+      lines.push(`| ${e.gameweekId} | ${e.reason} | ${e.detail} |`)
+    }
+    lines.push('')
+  }
+
+  return lines
+}
+
 export interface RenderScorecardInput {
   generatedAtIso: string
   results: readonly GameweekResult[]
   counters: ReconciliationCounters
   conflictingPlayerCount: number
+  /** Ticket #249. Optional (defaults to no rows / all excluded upstream)
+   *  purely so every RenderScorecardInput literal written before this
+   *  ticket — including this file's own pre-existing tests — keeps
+   *  compiling untouched. */
+  captaincyRegret?: readonly CaptaincyRegretResult[]
 }
 
 export function renderScorecard(input: RenderScorecardInput): string {
@@ -1285,6 +1771,8 @@ export function renderScorecard(input: RenderScorecardInput): string {
     }
   }
   lines.push('')
+
+  lines.push(...renderCaptaincyRegretSection(input.captaincyRegret ?? []))
 
   return lines.join('\n')
 }
@@ -1478,7 +1966,7 @@ async function main(): Promise<void> {
     } = await fetchAllPages<PredictionLogRow>((from, to) =>
       supabase
         .from('prediction_log')
-        .select('gameweek_id, player_id, actual_points, actual_minutes, settled_at, captured_at, model_version')
+        .select('gameweek_id, player_id, actual_points, actual_minutes, settled_at, captured_at, model_version, projected_points')
         .not('settled_at', 'is', null)
         .order('gameweek_id', { ascending: true })
         .order('player_id', { ascending: true })
@@ -1502,6 +1990,7 @@ async function main(): Promise<void> {
     assertRowCountMatches('prediction_log (settled)', predictionLogRows.length, predictionLogExpectedCount ?? 0)
 
     const { byGameweek: actualsByGameweek, conflictingPlayerCount } = buildActualsByGameweek(predictionLogRows)
+    const projectedByGameweek = buildProjectedByGameweek(predictionLogRows)
 
     // ------------------------------------------------------------------
     // 4. Score every gameweek that has a Plan A. Ticket #231: Plan A comes
@@ -1531,25 +2020,75 @@ async function main(): Promise<void> {
     })
 
     const counters = reconcile(results)
+
+    // ------------------------------------------------------------------
+    // 5. Ticket #249 — captaincy regret and rank. A SEPARATE population from
+    //    `results` above: this section never falls back to `recommendations`
+    //    (see this file's own "CAPTAINCY REGRET AND RANK" header), so a
+    //    gameweek that `results` scored via the mutable-table fallback is
+    //    still explicitly excluded here (reason 'noSnapshot') rather than
+    //    silently reused. Iterates the same `gameweekIds` universe as every
+    //    other section (every gameweek with a stored Plan A) purely so a
+    //    gameweek this script has never heard of at all cannot appear.
+    // ------------------------------------------------------------------
+    const captaincyRegretResults: CaptaincyRegretResult[] = gameweekIds.map((gameweekId) => {
+      const rawSnapshot = latestSnapshotByGameweek.get(gameweekId)
+      if (!rawSnapshot) {
+        return {
+          gameweekId,
+          ok: false,
+          reason: 'noSnapshot',
+          detail: 'no notifications.plan_snapshot was recorded for this gameweek — predates the plan_snapshot column, or writing it failed. Excluded from every pooled captaincy-regret figure.',
+        }
+      }
+
+      const resolved = snapshotToPlanRecord(gameweekId, rawSnapshot, codeToPlayerId)
+      if (!resolved.ok) {
+        return { gameweekId, ok: false, reason: 'reconstructionFailed', detail: resolved.detail }
+      }
+
+      const actuals = actualsByGameweek.get(gameweekId)
+      if (!actuals || actuals.size === 0) {
+        return { gameweekId, ok: false, reason: 'unsettled', detail: 'no settled prediction_log rows exist yet for this gameweek.' }
+      }
+
+      const projected = projectedByGameweek.get(gameweekId) ?? new Map<number, { points: number; capturedAtMs: number }>()
+      const projectedPoints = new Map<number, number>()
+      for (const [playerId, entry] of projected) projectedPoints.set(playerId, entry.points)
+
+      return evaluateCaptaincyRegret(
+        gameweekId,
+        resolved.plan.startingXi,
+        resolved.plan.captainPlayerId,
+        resolved.plan.viceCaptainPlayerId,
+        actuals,
+        projectedPoints,
+      )
+    })
+
     const report = renderScorecard({
       generatedAtIso: startedAt.toISOString(),
       results,
       counters,
       conflictingPlayerCount,
+      captaincyRegret: captaincyRegretResults,
     })
 
     await mkdir(dirname(reportPath), { recursive: true })
     await writeFile(reportPath, report, 'utf8')
 
+    const captaincyRegretScoredCount = captaincyRegretResults.filter((r) => r.ok).length
     const message =
       `${JOB_NAME}: ${counters.gameweeksRead} gameweek(s) read, ${counters.gameweeksScored} scored ` +
       `(excluded: ${counters.excludedUnsettled} unsettled, ${counters.excludedMissingActuals} missing actuals, ` +
-      `${counters.excludedReconstructionFailed} reconstruction failed). Report written to ${reportPath}.`
+      `${counters.excludedReconstructionFailed} reconstruction failed). Captaincy regret (ticket #249): ` +
+      `${captaincyRegretScoredCount}/${captaincyRegretResults.length} gameweek(s) had both a plan_snapshot and ` +
+      `settled actuals. Report written to ${reportPath}.`
     console.log(message)
     await recordJobRun(supabase, {
       status: 'success',
       message,
-      details: { ...counters, conflictingPlayerCount, reportPath },
+      details: { ...counters, conflictingPlayerCount, reportPath, captaincyRegretScoredCount, captaincyRegretAttempted: captaincyRegretResults.length },
       startedAt,
     })
   } catch (err) {

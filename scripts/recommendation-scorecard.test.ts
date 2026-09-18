@@ -1,14 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyTransferToShape,
+  bestAvailableAmongStarters,
   buildRollShape,
   compareNetPoints,
   computeNetPoints,
   evaluateCaptaincy,
+  evaluateCaptaincyRegret,
   pairedNetGap,
   pickDecisionForGameweek,
   pickLatestSnapshotByGameweek,
+  pickNaiveCaptain,
+  poolCaptaincyFigure,
+  rankAmongStarters,
   reconcile,
+  renderCaptaincyRegretSection,
   renderScorecard,
   resolvePlanA,
   resolveRollCaptaincy,
@@ -17,15 +23,20 @@ import {
   shapeContainsPlayer,
   snapshotToPlanRecord,
   summarizeCaptaincy,
+  summarizeViceEffect,
   sumGross,
   sumNet,
   type ActualsByPlayer,
+  type CaptainPick,
+  type CaptaincyRegretResult,
+  type CaptaincyRegretScored,
   type DecisionRecord,
   type GameweekPlans,
   type PlanRecord,
   type RawPlanSnapshot,
   type ScoredEntity,
   type SquadSlot,
+  type ViceEffect,
 } from './recommendation-scorecard.ts'
 
 function slots(ids: readonly number[]): SquadSlot[] {
@@ -632,5 +643,288 @@ describe('renderScorecard', () => {
     expect(gw1Row).toContain('snapshot')
     expect(gw2Row).toContain('recommendations')
     expect(report).toContain('1/2 scored gameweek(s) use the frozen')
+  })
+
+  it('appends the captaincy-regret section (ticket #249), defaulting to empty when not provided', () => {
+    const minimalInput = {
+      generatedAtIso: '2026-09-17T00:00:00Z',
+      results: [],
+      counters: { gameweeksRead: 0, gameweeksScored: 0, excludedUnsettled: 0, excludedMissingActuals: 0, excludedReconstructionFailed: 0 },
+      conflictingPlayerCount: 0,
+    }
+    expect(() => renderScorecard(minimalInput)).not.toThrow()
+    const withSection = renderScorecard({ ...minimalInput, captaincyRegret: [scoredRow(1, { triggered: false })] })
+    expect(withSection).toContain('Captaincy — regret and rank against a naive baseline')
+  })
+})
+
+// ============================================================================
+// Ticket #249 — captaincy regret and rank against a naive baseline.
+// ============================================================================
+
+/** Every starter carries the same projected points by default — overridden
+ *  per test for the player(s) under test, same convention as flatActuals. */
+function projectedPoints(overrides: Record<number, number> = {}): Map<number, number> {
+  const map = new Map<number, number>()
+  for (const id of STANDARD_XI_IDS) {
+    map.set(id, overrides[id] ?? 3)
+  }
+  return map
+}
+
+function dummyPick(overrides: Partial<CaptainPick> = {}): CaptainPick {
+  return { playerId: 1, actualPoints: 5, bestAvailableActualPoints: 5, regret: 0, rank: 1, ...overrides }
+}
+
+function scoredRow(gameweekId: number, viceEffect: ViceEffect): CaptaincyRegretScored {
+  return {
+    gameweekId,
+    ok: true,
+    chosen: dummyPick(),
+    naive: dummyPick(),
+    namedCaptainPlayerId: 1,
+    namedCaptainMinutes: 90,
+    viceEffect,
+  }
+}
+
+describe('rankAmongStarters', () => {
+  it('standard competition ranking: ties share the better rank and the next distinct score skips accordingly', () => {
+    const starterPoints = new Map([
+      [1, 10],
+      [2, 10],
+      [3, 5],
+      [4, 2],
+    ])
+    expect(rankAmongStarters(starterPoints, 1)).toBe(1)
+    expect(rankAmongStarters(starterPoints, 2)).toBe(1)
+    expect(rankAmongStarters(starterPoints, 3)).toBe(3)
+    expect(rankAmongStarters(starterPoints, 4)).toBe(4)
+  })
+
+  it('the sole top scorer is rank 1', () => {
+    const starterPoints = new Map([
+      [1, 10],
+      [2, 4],
+    ])
+    expect(rankAmongStarters(starterPoints, 1)).toBe(1)
+    expect(rankAmongStarters(starterPoints, 2)).toBe(2)
+  })
+})
+
+describe('bestAvailableAmongStarters', () => {
+  it('picks the highest actual score', () => {
+    const starterPoints = new Map([
+      [1, 4],
+      [2, 9],
+      [3, 2],
+    ])
+    expect(bestAvailableAmongStarters(starterPoints)).toEqual({ playerId: 2, points: 9 })
+  })
+
+  it('breaks a tie for the best score to the lowest player id', () => {
+    const starterPoints = new Map([
+      [5, 10],
+      [2, 10],
+      [9, 3],
+    ])
+    expect(bestAvailableAmongStarters(starterPoints)).toEqual({ playerId: 2, points: 10 })
+  })
+})
+
+describe('pickNaiveCaptain', () => {
+  it('picks the starter with the highest projected points', () => {
+    const projected = new Map([
+      [1, 5],
+      [2, 5],
+      [3, 9],
+    ])
+    expect(pickNaiveCaptain([1, 2, 3], projected)).toBe(3)
+  })
+
+  it('breaks a tie for the highest projection to the lowest player id', () => {
+    const projected = new Map([
+      [1, 5],
+      [2, 5],
+    ])
+    expect(pickNaiveCaptain([1, 2], projected)).toBe(1)
+  })
+})
+
+describe('evaluateCaptaincyRegret', () => {
+  // Named DoD test.
+  it('regret is 0 when the chosen captain was in fact the best', () => {
+    const gwActuals = flatActuals({ 9: { points: 10, minutes: 90 } })
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, gwActuals, projectedPoints())
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.chosen.playerId).toBe(9)
+    expect(result.chosen.bestAvailableActualPoints).toBe(10)
+    expect(result.chosen.regret).toBe(0)
+    expect(result.chosen.rank).toBe(1)
+  })
+
+  // Named DoD test.
+  it('rank is computed correctly when there are tied actual scores', () => {
+    // Captain (9) and player 1 are tied for the best actual score.
+    const gwActuals = flatActuals({ 9: { points: 8, minutes: 90 }, 1: { points: 8, minutes: 90 } })
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, gwActuals, projectedPoints())
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.chosen.rank).toBe(1) // tied for best -> still rank 1
+    expect(result.chosen.regret).toBe(0) // tied for best -> no regret
+  })
+
+  it('regret is positive, and rank worse than 1, when a non-captained starter actually scored best', () => {
+    const gwActuals = flatActuals({ 9: { points: 4, minutes: 90 }, 3: { points: 12, minutes: 90 } })
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, gwActuals, projectedPoints())
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.chosen.bestAvailableActualPoints).toBe(12)
+    expect(result.chosen.regret).toBe(8)
+    expect(result.chosen.rank).toBeGreaterThan(1)
+  })
+
+  it('excludes as reconstructionFailed when the named captain or vice-captain is not part of the starting eleven', () => {
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 99, 10, flatActuals(), projectedPoints())
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('reconstructionFailed')
+  })
+
+  it('excludes as missingActuals, naming the player, when a starter has no settled actual', () => {
+    const missing = new Map(flatActuals())
+    missing.delete(7)
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, missing, projectedPoints())
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('missingActuals')
+    expect(result.detail).toContain('7')
+  })
+
+  it('excludes as missingProjections, naming the player, when a starter has no projected_points', () => {
+    const projected = projectedPoints()
+    projected.delete(4)
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, flatActuals(), projected)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('missingProjections')
+    expect(result.detail).toContain('4')
+  })
+
+  it('excludes as armbandVoid when neither the named captain nor vice-captain played', () => {
+    const gwActuals = flatActuals({ 9: { points: 0, minutes: 0 }, 10: { points: 0, minutes: 0 } })
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, gwActuals, projectedPoints())
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('armbandVoid')
+  })
+
+  // Named DoD test.
+  it('a captain who played 0 minutes correctly triggers the vice-captain comparison path', () => {
+    const gwActuals = flatActuals({ 9: { points: 0, minutes: 0 }, 10: { points: 6, minutes: 90 } })
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, gwActuals, projectedPoints())
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.viceEffect.triggered).toBe(true)
+    if (!result.viceEffect.triggered) return
+    expect(result.viceEffect.namedCaptainActualPoints).toBe(0)
+    expect(result.viceEffect.viceCaptainActualPoints).toBe(6)
+    expect(result.viceEffect.scoredBetterThanNamedCaptain).toBe(true)
+    expect(result.viceEffect.margin).toBe(6)
+    // The real, effective armband holder is the promoted vice, not the blanking named captain.
+    expect(result.chosen.playerId).toBe(10)
+  })
+
+  it('does not evaluate the vice-captain comparison when the named captain played', () => {
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, flatActuals(), projectedPoints())
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.viceEffect).toEqual({ triggered: false })
+  })
+
+  it('scores the naive baseline against the highest-PROJECTED starter, independent of who the app actually captained', () => {
+    const gwActuals = flatActuals({ 9: { points: 2, minutes: 90 }, 3: { points: 9, minutes: 90 } })
+    const projected = projectedPoints({ 3: 20 }) // player 3 projected highest; the app still captained 9.
+    const result = evaluateCaptaincyRegret(5, slots(STANDARD_XI_IDS), 9, 10, gwActuals, projected)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.naive.playerId).toBe(3)
+    expect(result.naive.actualPoints).toBe(9)
+    expect(result.naive.regret).toBe(0) // player 3 is also the best available here
+    expect(result.chosen.playerId).toBe(9)
+    expect(result.chosen.regret).toBe(7) // 9 (best available) - 2 (chosen actual)
+  })
+})
+
+describe('poolCaptaincyFigure', () => {
+  // Named DoD test.
+  it('pools from underlying gameweek rows, not an average of per-gameweek means', () => {
+    // Three scored gameweeks contributed raw regret values 0, 0 and 9. The
+    // correct pooled mean sums those three raw values and divides by 3 — it
+    // is NOT computed by first reducing to some other grouping of
+    // "per-gameweek means" and averaging those (there is no such grouping
+    // here to begin with: each gameweek contributes exactly one row, so any
+    // implementation that silently zero-pads an excluded gameweek into the
+    // list, rather than omitting it entirely, would also be caught by this
+    // shape of test).
+    const pooled = poolCaptaincyFigure([0, 0, 9])
+    expect(pooled).toEqual({ n: 3, total: 9, mean: 3 })
+  })
+
+  it('is 0/0/0, never NaN, when nothing scored', () => {
+    expect(poolCaptaincyFigure([])).toEqual({ n: 0, total: 0, mean: 0 })
+  })
+})
+
+describe('summarizeViceEffect', () => {
+  it('counts only triggered gameweeks, and within those, how many the vice outscored the blanking named captain', () => {
+    const rows: CaptaincyRegretScored[] = [
+      scoredRow(1, { triggered: false }),
+      scoredRow(2, { triggered: true, namedCaptainActualPoints: 0, viceCaptainActualPoints: 6, scoredBetterThanNamedCaptain: true, margin: 6 }),
+      scoredRow(3, { triggered: true, namedCaptainActualPoints: 0, viceCaptainActualPoints: 0, scoredBetterThanNamedCaptain: false, margin: 0 }),
+    ]
+    expect(summarizeViceEffect(rows)).toEqual({ triggeredCount: 2, viceScoredBetterCount: 1 })
+  })
+
+  it('is 0/0 when no gameweek is scored at all', () => {
+    expect(summarizeViceEffect([])).toEqual({ triggeredCount: 0, viceScoredBetterCount: 0 })
+  })
+})
+
+describe('renderCaptaincyRegretSection', () => {
+  // Named DoD test.
+  it('a gameweek with no snapshot is excluded and explicitly named as excluded, and left out of every pooled figure', () => {
+    const results: CaptaincyRegretResult[] = [
+      { gameweekId: 3, ok: false, reason: 'noSnapshot', detail: 'no notifications.plan_snapshot was recorded for this gameweek.' },
+      scoredRow(4, { triggered: false }),
+    ]
+    const text = renderCaptaincyRegretSection(results).join('\n')
+    expect(text).toContain('noSnapshot')
+    expect(text).toContain('| 3 |')
+    // Only the one scored gameweek is measured/pooled — the excluded one does not inflate the count.
+    expect(text).toContain('1 gameweek(s) measured here')
+  })
+
+  it("states plainly that the sample is weak evidence, matching bonus-validation-report.ts's own convention, and labels the hindsight ceiling", () => {
+    const text = renderCaptaincyRegretSection([scoredRow(1, { triggered: false })]).join('\n')
+    expect(text).toContain('weak evidence')
+    expect(text).toContain('hindsight ceiling')
+  })
+
+  it('says plainly that nothing qualifies yet when every attempted gameweek is excluded', () => {
+    const results: CaptaincyRegretResult[] = [{ gameweekId: 1, ok: false, reason: 'unsettled', detail: 'x' }]
+    const text = renderCaptaincyRegretSection(results).join('\n')
+    expect(text).toContain('No gameweek both has a plan_snapshot and settled actuals yet')
+  })
+
+  it('reports the vice-captain trigger count and, only among triggered gameweeks, the comparison outcome', () => {
+    const results: CaptaincyRegretResult[] = [
+      scoredRow(1, { triggered: true, namedCaptainActualPoints: 0, viceCaptainActualPoints: 5, scoredBetterThanNamedCaptain: true, margin: 5 }),
+      scoredRow(2, { triggered: false }),
+    ]
+    const text = renderCaptaincyRegretSection(results).join('\n')
+    expect(text).toContain('1/2 scored gameweek(s)')
+    expect(text).toContain('1/1')
   })
 })
