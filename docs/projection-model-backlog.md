@@ -228,6 +228,26 @@ of this ticket) and can never look further back than that. It is not a substitut
 backtest (item 32) — it is a slow, always-current accumulator: exactly one more gameweek of evidence
 every week the app runs, forever bounded to "this season and no earlier."
 
+**SUPERSEDED for the full-past-season case — ticket #248, 17 Sep 2026. The paragraph above is
+correct about `event/{gw}/live/` itself and is left in place; it is wrong as a statement about
+what can be validated at all.** `event/{gw}/live/` is not the only source of real bonus/BPS — a
+different FPL-Core-Insights file, `data/<season>/playerstats.csv` (a per-gameweek snapshot,
+distinct from the per-match `playermatchstats.csv` that ticket #127 checked and found lacking),
+carries `bonus` and `bps` verbatim for **every gameweek of a full past season**, verified directly
+against the live source on 17 Sep 2026 (29,978 rows for 2025-2026 alone). Ticket #224's
+"never" was true of its own instrument and false as a claim about the source as a whole — #127
+had already established the identical narrower fact for `playermatchstats.csv` specifically;
+#224 over-generalised it to bonus/BPS from FPL-Core-Insights entirely. Ticket #248 adds
+`public.player_gameweek_history`, populated by `scripts/ingest-core-insights.ts`, as the
+full-past-season complement to `gameweek_live_stats`'s current-season one. **One caveat carries
+over unchanged, not newly discovered:** `playerstats.csv`'s `bonus`/`bps`/`starts` columns are
+season-cumulative-to-date snapshots, not single-gameweek deltas (see the migration's own column
+comments) — a future validation ticket must difference consecutive gameweek rows before comparing
+against a per-gameweek projected figure; #248 is substrate only and does not build that
+comparison. (G19, below, makes the identical over-generalised "does not exist in
+FPL-Core-Insights" claim about per-gameweek price history specifically — out of this ticket's
+scope, which is G3 only, and left untouched here; noted for whichever ticket corrects it.)
+
 **"Not yet run against live data" — SUPERSEDED, first read 15 Sep 2026, ticket #237.** The
 paragraph immediately below this one is kept for its own sake (it correctly recorded that no run
 had happened yet, as of 11 Sep 2026) but is no longer current — it has now been run, and it found
@@ -2382,6 +2402,26 @@ if those retain season-long price series. Either path is a **new external data s
 substantial ingest** — a Tier 2 decision (`escalation.md`) requiring its own verification ticket,
 exactly the shape of work `product-brief.md` §6a/§6b's existing source decisions went through. Nothing
 about it is attempted here.
+
+**SUPERSEDED on the "does not exist in FPL-Core-Insights" claim — ticket #248, 17 Sep 2026. The
+paragraph above is wrong about the source; it is left in place because the surrounding replay
+analysis (budget-constrained solver, below) is still correct and still not attempted.** A
+per-gameweek price history DOES exist in FPL-Core-Insights, just not in the file this entry
+checked: `data/<season>/playerstats.csv` (a per-gameweek snapshot, distinct from the per-match
+`playermatchstats.csv` that #78/#127 checked and found lacking bonus/BPS — the identical
+over-generalisation G3's own SUPERSEDED entry names, made here about price instead of bonus)
+carries a `now_cost` column, verbatim, for every gameweek of both the 2025-2026 and 2026-2027
+seasons — verified directly against the live source on 17 Sep 2026 (29,978 and 2,583 rows
+respectively). Ticket #248 adds `public.player_gameweek_history`, populated by
+`scripts/ingest-core-insights.ts`, storing this column exactly as sourced (already decimal
+million-pounds, NOT the integer-tenths format `public.players.now_cost` carries — see the
+migration's own column comment before joining the two). This closes the specific gap named
+above — a per-gameweek price at each historical gameweek of a full past season now exists — but
+does **not** by itself unblock the season-length recommendation replay this entry is really
+about: that still needs the full budget-constrained solver run described below, which #248 is
+substrate for and does not attempt. The "new external source / Tier 2 ingest" framing in the
+paragraph above no longer applies to the price-history piece specifically; it may still apply to
+whatever the replay itself needs beyond price (see the next paragraph).
 
 **What was built instead, and why it is the better use of the same instinct.** Ticket #223 built
 `scripts/recommendation-scorecard.ts` — a scorecard that scores the recommendations THIS APP HAS
