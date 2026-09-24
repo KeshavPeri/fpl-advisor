@@ -66,8 +66,9 @@ def _row_1x2_odds(row: pd.Series) -> dict:
 
 def load_odds_history() -> pd.DataFrame:
     """Read every `model/data/odds/E0_*.csv`, convert 1X2 prices to expected goals, and return
-    the contract-columns DataFrame. `gw` is left null here — R2-T1 joins on kickoff date (+/- 1
-    day) and team codes rather than gameweek number."""
+    the contract-columns DataFrame. `gw` is left null here — ticket #264 (`fpl_model.features`)
+    joins on `(season, home_code, away_code)` instead: each ordered pairing happens once a
+    season, so neither `gw` nor `kickoff_date` is needed for the join."""
     paths = sorted(glob.glob(os.path.join(_ODDS_DIR, "E0_*.csv")))
     records = []
     unmapped_count = 0
