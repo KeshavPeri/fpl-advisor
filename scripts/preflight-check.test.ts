@@ -10,6 +10,7 @@ import {
   REQUIRED_ENV_VAR_SPECS,
   UNRESOLVED_GAMEWEEK_REASON,
   buildCannotEvaluateResult,
+  checkActiveModelHasProjections,
   checkConfiguration,
   checkCurrentSeasonMatchData,
   checkJobFreshness,
@@ -370,6 +371,36 @@ describe('checkProjections', () => {
     const result = checkProjections({ ...base, projectionRowCount: 560, playersCount: 600, zeroProjectionPlayers: [] })
     expect(result.verdict).toBe('warn')
     expect(result.reason).toContain('below the 95% target')
+  })
+})
+
+// ============================================================================
+// checkActiveModelHasProjections — ticket #260, DoD item 5.
+// ============================================================================
+
+describe('checkActiveModelHasProjections', () => {
+  it('DoD item 5: active missing, fallback present — not failed, and the message names both models', () => {
+    const result = checkActiveModelHasProjections({
+      gameweekId: 5,
+      activeModel: 'gbm-v1',
+      fallbackModel: 'baseline-v1',
+      fallbackProjectionRowCount: 600,
+    })
+    expect(result.verdict).not.toBe('fail')
+    expect(result.reason).toContain('gbm-v1')
+    expect(result.reason).toContain('baseline-v1')
+  })
+
+  it('fails when neither the active nor the fallback model has any rows', () => {
+    const result = checkActiveModelHasProjections({
+      gameweekId: 5,
+      activeModel: 'gbm-v1',
+      fallbackModel: 'baseline-v1',
+      fallbackProjectionRowCount: 0,
+    })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('gbm-v1')
+    expect(result.reason).toContain('baseline-v1')
   })
 })
 

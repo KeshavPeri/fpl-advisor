@@ -8,6 +8,9 @@
 // it will compare against provisional bonus and defcon numbers." scripts/lib/lockdown.ts is the
 // one place that rule is computed (imported here, not re-derived) — see that file's own header.
 //
+// Ticket #260: settles every model_version with unsettled rows, not one fixed constant — the
+// prediction_log PK already includes model_version, so this needed no schema change.
+//
 // ============================================================================
 // The freeze rule and the "no fake zero" rule — this ticket's two hard constraints.
 // ============================================================================
@@ -56,9 +59,6 @@ import { computeLockdownInstant } from './lib/lockdown.ts'
 const JOB_NAME = 'settle-predictions'
 const PREDICTION_LOG_MIGRATION = 'supabase/migrations/20260821090000_prediction_log.sql'
 const REFERENCE_SCHEMA_MIGRATION = 'supabase/migrations/20260811100000_reference_schema.sql'
-
-/** Must match scripts/project-points.ts's own MODEL_VERSION — duplicated, not imported; see scripts/snapshot-predictions.ts's identical precedent for why every scripts/*.ts job is a standalone entry point. */
-export const MODEL_VERSION = 'baseline-v1'
 
 /** The only remote host this script ever talks to, same escape hatch scripts/ingest-fpl.ts defines — exists so this script's own network-failure tests can override it. */
 const DEFAULT_API_BASE_URL = 'https://fantasy.premierleague.com/api'
@@ -441,10 +441,12 @@ async function main(): Promise<void> {
 
   try {
     // --------------------------------------------------------------------
-    // 1. Which gameweeks have unsettled prediction_log rows at MODEL_VERSION at all — the
-    //    candidate set this run considers. Paginated + count-verified (a gameweek's worth of
-    //    rows is ~600, close to the 1,000-row db-max-rows ceiling; several unsettled gameweeks
-    //    stacked up is a real, if unusual, catch-up scenario).
+    // 1. Which gameweeks have unsettled prediction_log rows at all, across EVERY model_version
+    //    (ticket #260 — settle every model_version that has unsettled rows, not one fixed
+    //    constant) — the candidate set this run considers. Paginated + count-verified (a
+    //    gameweek's worth of rows is ~600 per model_version, close to the 1,000-row
+    //    db-max-rows ceiling; several unsettled gameweeks stacked up is a real, if unusual,
+    //    catch-up scenario).
     // --------------------------------------------------------------------
     const {
       rows: unsettledGwIdRows,
@@ -454,7 +456,6 @@ async function main(): Promise<void> {
       supabase
         .from('prediction_log')
         .select('gameweek_id')
-        .eq('model_version', MODEL_VERSION)
         .is('settled_at', null)
         .order('gameweek_id', { ascending: true })
         .order('player_id', { ascending: true })
@@ -471,7 +472,6 @@ async function main(): Promise<void> {
     const { count: unsettledGwIdsExpectedByCount, error: unsettledGwIdsCountError } = await supabase
       .from('prediction_log')
       .select('*', { count: 'exact', head: true })
-      .eq('model_version', MODEL_VERSION)
       .is('settled_at', null)
     if (unsettledGwIdsCountError) {
       throw new SettleError(`prediction_log count check failed: ${unsettledGwIdsCountError.message}`, 'prediction_log')
@@ -481,7 +481,7 @@ async function main(): Promise<void> {
     const candidateGwIds = [...new Set(unsettledGwIdRows.map((r) => r.gameweek_id))].sort((a, b) => a - b)
 
     if (candidateGwIds.length === 0) {
-      const message = `${JOB_NAME}: no unsettled prediction_log rows at model_version='${MODEL_VERSION}' — nothing to settle.`
+      const message = `${JOB_NAME}: no unsettled prediction_log rows (any model_version) — nothing to settle.`
       console.log(message)
       await recordJobRun(supabase, { status: 'skipped', message, details: { candidateGameweekIds: [] }, startedAt })
       return
@@ -582,7 +582,6 @@ async function main(): Promise<void> {
           .from('prediction_log')
           .select('gameweek_id, player_id, model_version, player_code, projected_points, projected_minutes, components, captured_at, settled_at')
           .eq('gameweek_id', gwId)
-          .eq('model_version', MODEL_VERSION)
           .is('settled_at', null)
           .order('gameweek_id', { ascending: true })
           .order('player_id', { ascending: true })
@@ -597,7 +596,6 @@ async function main(): Promise<void> {
         .from('prediction_log')
         .select('*', { count: 'exact', head: true })
         .eq('gameweek_id', gwId)
-        .eq('model_version', MODEL_VERSION)
         .is('settled_at', null)
       if (unsettledRowsCountError) {
         throw new SettleError(`prediction_log count check for gameweek ${gwId} failed: ${unsettledRowsCountError.message}`, 'prediction_log')
@@ -608,7 +606,6 @@ async function main(): Promise<void> {
         .from('prediction_log')
         .select('*', { count: 'exact', head: true })
         .eq('gameweek_id', gwId)
-        .eq('model_version', MODEL_VERSION)
       if (totalRowsForGwError) {
         throw new SettleError(`prediction_log total-row count for gameweek ${gwId} failed: ${totalRowsForGwError.message}`, 'prediction_log')
       }
@@ -633,12 +630,17 @@ async function main(): Promise<void> {
       rowsSkippedAlreadySettled += rowsAlreadySettledForGw + settlement.alreadySettledPlayerIds.length
       rowsLeftUnsettledNoActual += settlement.unsettledPlayerIds.length
       allErrors.push(...settlement.errors)
+      // Ticket #260: unsettledRows can now span more than one model_version for the same
+      // gameweek — this is purely a diagnostic, not a filter (buildSettlementRows already
+      // settles every row it's handed regardless of model_version).
+      const modelVersionsSettled = [...new Set(settlement.updates.map((u) => u.model_version as string))].sort()
 
       perGameweek.push({
         gameweekId: gwId,
         eligible: true,
         reason: eligibility.reason,
         rowsSettled: settlement.updates.length,
+        modelVersionsSettled,
         rowsLeftUnsettledNoActual: settlement.unsettledPlayerIds.length,
         rowsSkippedAlreadySettled: rowsAlreadySettledForGw + settlement.alreadySettledPlayerIds.length,
         unsettledRowsFetched: unsettledRows.length,

@@ -4,8 +4,10 @@
 // lockdown, and shown as a rolling figure in-app." This job is the "every projection stored"
 // half. It copies player_projections rows for the CURRENT gameweek (gameweeks.is_next — the
 // same "current gameweek" convention scripts/project-points.ts and
-// scripts/emit-projections-csv.ts already use) at MODEL_VERSION into public.prediction_log,
-// stamping captured_at. scripts/settle-predictions.ts is the other half — it fills in
+// scripts/emit-projections-csv.ts already use) into public.prediction_log, stamping
+// captured_at. Ticket #260: snapshots BOTH the active model (config/projection-model.json)
+// and baseline-v1, deduplicated when they're the same — see modelVersionsToSnapshot below.
+// scripts/settle-predictions.ts is the other half — it fills in
 // actual_points/actual_minutes/error/settled_at after lockdown, and never before.
 //
 // ============================================================================
@@ -31,14 +33,20 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
+import { readActiveModelVersionConfig } from './lib/activeModelVersion.ts'
 
 const JOB_NAME = 'snapshot-predictions'
 const PLAYER_PROJECTIONS_MIGRATION = 'supabase/migrations/20260815120000_player_projections.sql'
 const PREDICTION_LOG_MIGRATION = 'supabase/migrations/20260821090000_prediction_log.sql'
 const REFERENCE_SCHEMA_MIGRATION = 'supabase/migrations/20260811100000_reference_schema.sql'
 
-/** Must match scripts/project-points.ts's own MODEL_VERSION — duplicated, not imported; see that file's header and scripts/emit-projections-csv.ts's identical precedent for why every scripts/*.ts job is a standalone entry point. */
-export const MODEL_VERSION = 'baseline-v1'
+/** The one non-configurable secondary version — ticket #260: accuracy tracking must never lose baseline-v1 coverage on a model switch. */
+const BASELINE_MODEL_VERSION = 'baseline-v1'
+
+/** 'active' (config/projection-model.json) plus BASELINE_MODEL_VERSION, deduplicated — never snapshots the same model_version twice for one run. */
+export function modelVersionsToSnapshot(activeModel: string, secondaryModel: string = BASELINE_MODEL_VERSION): string[] {
+  return activeModel === secondaryModel ? [activeModel] : [activeModel, secondaryModel]
+}
 
 /** Rows written per upsert call — same batch size as project-points.ts, well under any PostgREST/Supabase request-size limit for a full ~600-player gameweek. */
 const UPSERT_BATCH_SIZE = 500
@@ -142,8 +150,10 @@ export interface DecideSnapshotActionInput {
   deadlineIso: string
   /** Current instant in epoch milliseconds. Always a parameter — never read from the system clock in this function. */
   nowMs: number
-  /** How many player_projections rows exist for this gameweek at MODEL_VERSION. */
+  /** How many player_projections rows exist for this gameweek at modelVersion. */
   projectionRowCount: number
+  /** Ticket #260: the model_version this decision is being made for — named in the "no projections" message. */
+  modelVersion: string
 }
 
 /**
@@ -168,7 +178,7 @@ export function decideSnapshotAction(input: DecideSnapshotActionInput): Snapshot
     return {
       outcome: 'skipped-no-projections',
       message:
-        `gameweek ${input.gameweekId} has zero player_projections rows at model_version='${MODEL_VERSION}' — ` +
+        `gameweek ${input.gameweekId} has zero player_projections rows at model_version='${input.modelVersion}' — ` +
         'nothing to snapshot yet. Run scripts/project-points.ts first.',
     }
   }
@@ -258,123 +268,135 @@ async function main(): Promise<void> {
     }
 
     // --------------------------------------------------------------------
-    // 2. player_projections for the current gameweek at MODEL_VERSION.
-    //    Paginated and count-verified (~600 rows, close to the 1,000-row
-    //    db-max-rows ceiling) — see scripts/lib/paginate.ts.
+    // 2. Which model_version(s) to snapshot — ticket #260. Always 'active'
+    //    (config/projection-model.json) plus baseline-v1, deduplicated.
     // --------------------------------------------------------------------
-    const {
-      rows: projectionRows,
-      error: projectionsError,
-      pages: projectionPagesFetched,
-    } = await fetchAllPages<ProjectionRow>((from, to) =>
-      supabase
-        .from('player_projections')
-        .select('gameweek_id, player_id, player_code, expected_points, expected_minutes, components')
-        .eq('gameweek_id', currentGw.id)
-        .eq('model_version', MODEL_VERSION)
-        .order('gameweek_id', { ascending: true })
-        .order('player_id', { ascending: true })
-        .order('model_version', { ascending: true })
-        .range(from, to)
-        .returns<ProjectionRow[]>(),
-    )
-    if (projectionsError) {
-      if (isMissingTable(projectionsError, 'player_projections')) {
-        throw new SnapshotError(
-          `the "player_projections" table does not exist. Apply ${PLAYER_PROJECTIONS_MIGRATION} first.`,
-          'player_projections',
-        )
-      }
-      throw new SnapshotError(`player_projections lookup failed: ${projectionsError.message}`, 'player_projections')
-    }
-
-    const { count: projectionRowsExpectedByCount, error: projectionsCountError } = await supabase
-      .from('player_projections')
-      .select('*', { count: 'exact', head: true })
-      .eq('gameweek_id', currentGw.id)
-      .eq('model_version', MODEL_VERSION)
-    if (projectionsCountError) {
-      throw new SnapshotError(`player_projections count check failed: ${projectionsCountError.message}`, 'player_projections')
-    }
-    assertRowCountMatches('player_projections', projectionRows.length, projectionRowsExpectedByCount ?? 0)
-
-    // --------------------------------------------------------------------
-    // 3. Decide. Pure — see decideSnapshotAction() above.
-    // --------------------------------------------------------------------
+    const { active: activeModel } = readActiveModelVersionConfig()
+    const modelVersions = modelVersionsToSnapshot(activeModel)
     const nowMs = Date.now()
-    const decision = decideSnapshotAction({
-      gameweekId: currentGw.id,
-      deadlineIso: currentGw.deadline_time,
-      nowMs,
-      projectionRowCount: projectionRows.length,
-    })
-
-    if (decision.outcome !== 'captured') {
-      console.log(`${JOB_NAME}: ${decision.message}`)
-      await recordJobRun(supabase, {
-        status: 'skipped',
-        message: `${JOB_NAME}: ${decision.message}`,
-        details: {
-          gameweekId: currentGw.id,
-          outcome: decision.outcome,
-          projectionRowsFetched: projectionRows.length,
-          projectionRowsExpectedByCount: projectionRowsExpectedByCount ?? 0,
-          projectionPagesFetched,
-          gwRowsFetched: gwRows.length,
-          gwRowsExpectedByCount: gwRowsExpectedByCount ?? 0,
-          gwPagesFetched,
-        },
-        startedAt,
-      })
-      return
-    }
-
-    // --------------------------------------------------------------------
-    // 4. Capture: upsert into prediction_log, batched, stamping captured_at
-    //    once per row for this run. Overwrites any prior snapshot for this
-    //    (gameweek_id, player_id, model_version) — latest-before-deadline
-    //    wins, per the freeze rule.
-    // --------------------------------------------------------------------
     const capturedAtIso = new Date(nowMs).toISOString()
-    const rowsToUpsert: JsonRecord[] = projectionRows.map((row) => ({
-      gameweek_id: row.gameweek_id,
-      player_id: row.player_id,
-      model_version: MODEL_VERSION,
-      player_code: row.player_code,
-      projected_points: row.expected_points,
-      projected_minutes: row.expected_minutes,
-      components: row.components,
-      captured_at: capturedAtIso,
-    }))
 
-    for (let i = 0; i < rowsToUpsert.length; i += UPSERT_BATCH_SIZE) {
-      const batch = rowsToUpsert.slice(i, i + UPSERT_BATCH_SIZE)
-      const { error } = await supabase
-        .from('prediction_log')
-        .upsert(batch, { onConflict: 'gameweek_id,player_id,model_version' })
-      if (error) {
-        if (isMissingTable(error, 'prediction_log')) {
-          throw new SnapshotError(`the "prediction_log" table does not exist. Apply ${PREDICTION_LOG_MIGRATION} first.`, 'prediction_log')
+    interface PerModelResult {
+      modelVersion: string
+      outcome: SnapshotDecision['outcome']
+      rowsWritten: number
+      projectionRowsFetched: number
+      projectionRowsExpectedByCount: number
+      projectionPagesFetched: number
+    }
+    const perModel: PerModelResult[] = []
+    let totalRowsWritten = 0
+
+    for (const modelVersion of modelVersions) {
+      // player_projections for the current gameweek at this model_version.
+      // Paginated and count-verified (~600 rows, close to the 1,000-row
+      // db-max-rows ceiling) — see scripts/lib/paginate.ts.
+      const {
+        rows: projectionRows,
+        error: projectionsError,
+        pages: projectionPagesFetched,
+      } = await fetchAllPages<ProjectionRow>((from, to) =>
+        supabase
+          .from('player_projections')
+          .select('gameweek_id, player_id, player_code, expected_points, expected_minutes, components')
+          .eq('gameweek_id', currentGw.id)
+          .eq('model_version', modelVersion)
+          .order('gameweek_id', { ascending: true })
+          .order('player_id', { ascending: true })
+          .order('model_version', { ascending: true })
+          .range(from, to)
+          .returns<ProjectionRow[]>(),
+      )
+      if (projectionsError) {
+        if (isMissingTable(projectionsError, 'player_projections')) {
+          throw new SnapshotError(
+            `the "player_projections" table does not exist. Apply ${PLAYER_PROJECTIONS_MIGRATION} first.`,
+            'player_projections',
+          )
         }
-        throw new SnapshotError(`upsert into "prediction_log" failed: ${error.message}`, 'prediction_log')
+        throw new SnapshotError(`player_projections lookup (model_version='${modelVersion}') failed: ${projectionsError.message}`, 'player_projections')
       }
+
+      const { count: projectionRowsExpectedByCount, error: projectionsCountError } = await supabase
+        .from('player_projections')
+        .select('*', { count: 'exact', head: true })
+        .eq('gameweek_id', currentGw.id)
+        .eq('model_version', modelVersion)
+      if (projectionsCountError) {
+        throw new SnapshotError(`player_projections count check (model_version='${modelVersion}') failed: ${projectionsCountError.message}`, 'player_projections')
+      }
+      assertRowCountMatches(`player_projections (${modelVersion})`, projectionRows.length, projectionRowsExpectedByCount ?? 0)
+
+      // Decide. Pure — see decideSnapshotAction() above.
+      const decision = decideSnapshotAction({
+        gameweekId: currentGw.id,
+        deadlineIso: currentGw.deadline_time,
+        nowMs,
+        projectionRowCount: projectionRows.length,
+        modelVersion,
+      })
+      console.log(`${JOB_NAME}: [${modelVersion}] ${decision.outcome === 'captured' ? 'captured.' : decision.message}`)
+
+      let rowsWritten = 0
+      if (decision.outcome === 'captured') {
+        // Capture: upsert into prediction_log, batched, stamping captured_at
+        // once per row for this run. Overwrites any prior snapshot for this
+        // (gameweek_id, player_id, model_version) — latest-before-deadline
+        // wins, per the freeze rule.
+        const rowsToUpsert: JsonRecord[] = projectionRows.map((row) => ({
+          gameweek_id: row.gameweek_id,
+          player_id: row.player_id,
+          model_version: modelVersion,
+          player_code: row.player_code,
+          projected_points: row.expected_points,
+          projected_minutes: row.expected_minutes,
+          components: row.components,
+          captured_at: capturedAtIso,
+        }))
+
+        for (let i = 0; i < rowsToUpsert.length; i += UPSERT_BATCH_SIZE) {
+          const batch = rowsToUpsert.slice(i, i + UPSERT_BATCH_SIZE)
+          const { error } = await supabase
+            .from('prediction_log')
+            .upsert(batch, { onConflict: 'gameweek_id,player_id,model_version' })
+          if (error) {
+            if (isMissingTable(error, 'prediction_log')) {
+              throw new SnapshotError(`the "prediction_log" table does not exist. Apply ${PREDICTION_LOG_MIGRATION} first.`, 'prediction_log')
+            }
+            throw new SnapshotError(`upsert into "prediction_log" failed: ${error.message}`, 'prediction_log')
+          }
+        }
+        rowsWritten = rowsToUpsert.length
+      }
+
+      totalRowsWritten += rowsWritten
+      perModel.push({
+        modelVersion,
+        outcome: decision.outcome,
+        rowsWritten,
+        projectionRowsFetched: projectionRows.length,
+        projectionRowsExpectedByCount: projectionRowsExpectedByCount ?? 0,
+        projectionPagesFetched,
+      })
     }
 
     const details: JsonRecord = {
       gameweekId: currentGw.id,
-      outcome: decision.outcome,
-      rowsWritten: rowsToUpsert.length,
+      modelVersionsSnapshotted: modelVersions,
+      rowsWritten: totalRowsWritten,
       capturedAt: capturedAtIso,
-      projectionRowsFetched: projectionRows.length,
-      projectionRowsExpectedByCount: projectionRowsExpectedByCount ?? 0,
-      projectionPagesFetched,
+      perModel,
       gwRowsFetched: gwRows.length,
       gwRowsExpectedByCount: gwRowsExpectedByCount ?? 0,
       gwPagesFetched,
     }
-    const message = `${JOB_NAME}: snapshotted ${rowsToUpsert.length} row(s) for gameweek ${currentGw.id} (model_version='${MODEL_VERSION}').`
+    const status = totalRowsWritten > 0 ? 'success' : 'skipped'
+    const message =
+      totalRowsWritten > 0
+        ? `${JOB_NAME}: snapshotted ${totalRowsWritten} row(s) for gameweek ${currentGw.id} across model_version(s) ${modelVersions.join(', ')}.`
+        : `${JOB_NAME}: nothing snapshotted for gameweek ${currentGw.id} across model_version(s) ${modelVersions.join(', ')} — see perModel for why.`
     console.log(message)
-    await recordJobRun(supabase, { status: 'success', message, details, startedAt })
+    await recordJobRun(supabase, { status, message, details, startedAt })
   } catch (err) {
     const message =
       err instanceof SnapshotError
