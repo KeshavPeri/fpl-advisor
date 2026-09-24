@@ -14,6 +14,7 @@ import {
   csvField,
   findEmptyGameweeks,
   mapPosition,
+  mergeActiveAndFallbackProjections,
   projectionKey,
   type CsvPlayerInput,
   type ProjectionValue,
@@ -209,6 +210,62 @@ describe('buildProjectionsCsv', () => {
 // so the reason for that upstream filter stays visible from the test file
 // alone.
 // ============================================================================
+
+// ============================================================================
+// mergeActiveAndFallbackProjections — ticket #260. DoD items 2 and 3.
+// ============================================================================
+
+describe('mergeActiveAndFallbackProjections', () => {
+  it('DoD item 2: with active === fallback (same map), every pair comes from that one map and no fallback pair is used', () => {
+    const horizon = [3, 4]
+    const players = [player({ id: 1 }), player({ id: 2, webName: 'Sub' })]
+    const baseline = new Map<string, ProjectionValue>([
+      [projectionKey(1, 3), { expectedPoints: 4.2, expectedMinutes: 90 }],
+      [projectionKey(1, 4), { expectedPoints: 5.1, expectedMinutes: 85 }],
+      [projectionKey(2, 3), { expectedPoints: 1, expectedMinutes: 20 }],
+      [projectionKey(2, 4), { expectedPoints: 2, expectedMinutes: 30 }],
+    ])
+
+    const merged = mergeActiveAndFallbackProjections(players, horizon, baseline, baseline)
+
+    expect(merged.fallbackPairsUsed).toBe(0)
+    expect(buildProjectionsCsv(players, horizon, merged.projectionByKey).csv).toBe(buildProjectionsCsv(players, horizon, baseline).csv)
+  })
+
+  it('DoD item 3: a gap in the active model for one (player, gameweek) pair comes from the fallback; every other pair comes from active', () => {
+    const horizon = [3, 4]
+    const players = [player({ id: 1 }), player({ id: 2, webName: 'Sub' })]
+    const active = new Map<string, ProjectionValue>([
+      [projectionKey(1, 3), { expectedPoints: 9, expectedMinutes: 90 }],
+      // (1, 4) deliberately absent from active — this is the gap.
+      [projectionKey(2, 3), { expectedPoints: 3, expectedMinutes: 60 }],
+      [projectionKey(2, 4), { expectedPoints: 4, expectedMinutes: 70 }],
+    ])
+    const fallback = new Map<string, ProjectionValue>([
+      [projectionKey(1, 3), { expectedPoints: 4.2, expectedMinutes: 90 }],
+      [projectionKey(1, 4), { expectedPoints: 5.1, expectedMinutes: 85 }],
+      [projectionKey(2, 3), { expectedPoints: 1, expectedMinutes: 20 }],
+      [projectionKey(2, 4), { expectedPoints: 2, expectedMinutes: 30 }],
+    ])
+
+    const merged = mergeActiveAndFallbackProjections(players, horizon, active, fallback)
+
+    expect(merged.fallbackPairsUsed).toBe(1)
+    expect(merged.projectionByKey.get(projectionKey(1, 3))).toEqual({ expectedPoints: 9, expectedMinutes: 90 }) // from active
+    expect(merged.projectionByKey.get(projectionKey(1, 4))).toEqual({ expectedPoints: 5.1, expectedMinutes: 85 }) // from fallback
+    expect(merged.projectionByKey.get(projectionKey(2, 3))).toEqual({ expectedPoints: 3, expectedMinutes: 60 }) // from active
+    expect(merged.projectionByKey.get(projectionKey(2, 4))).toEqual({ expectedPoints: 4, expectedMinutes: 70 }) // from active
+  })
+
+  it('leaves a pair unset (for buildProjectionsCsv to zero-fill) when neither active nor fallback has it', () => {
+    const horizon = [3]
+    const players = [player({ id: 1 })]
+    const merged = mergeActiveAndFallbackProjections(players, horizon, new Map(), new Map())
+    expect(merged.projectionByKey.size).toBe(0)
+    expect(merged.fallbackPairsUsed).toBe(0)
+    expect(buildProjectionsCsv(players, horizon, merged.projectionByKey).playerGameweekPairsZeroFilled).toBe(1)
+  })
+})
 
 describe('projectionKey / model_version filtering rationale', () => {
   it('keys only on (playerId, gameweekId) — a second model_version row for the same pair would silently overwrite the first if the caller failed to filter by model_version before building this map', () => {

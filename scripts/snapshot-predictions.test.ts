@@ -4,14 +4,15 @@
 // scripts/store-solver-output.test.ts and src/lib/notification/schedule.test.ts.
 
 import { describe, expect, it } from 'vitest'
-import { decideSnapshotAction, MODEL_VERSION } from './snapshot-predictions.ts'
+import { decideSnapshotAction, modelVersionsToSnapshot } from './snapshot-predictions.ts'
 
 const DEADLINE_ISO = '2026-09-19T10:00:00Z'
 const DEADLINE_MS = new Date(DEADLINE_ISO).getTime()
 const MINUTE_MS = 60 * 1000
+const MODEL_VERSION = 'baseline-v1'
 
-function decide(nowMs: number, projectionRowCount = 587) {
-  return decideSnapshotAction({ gameweekId: 5, deadlineIso: DEADLINE_ISO, nowMs, projectionRowCount })
+function decide(nowMs: number, projectionRowCount = 587, modelVersion = MODEL_VERSION) {
+  return decideSnapshotAction({ gameweekId: 5, deadlineIso: DEADLINE_ISO, nowMs, projectionRowCount, modelVersion })
 }
 
 describe('decideSnapshotAction — before the deadline: capture (overwrite)', () => {
@@ -64,8 +65,27 @@ describe('decideSnapshotAction — a gameweek with no projections', () => {
   })
 })
 
-describe('MODEL_VERSION', () => {
-  it('matches scripts/project-points.ts\'s own MODEL_VERSION constant', () => {
-    expect(MODEL_VERSION).toBe('baseline-v1')
+describe('decideSnapshotAction — modelVersion is named in the message', () => {
+  it('names whichever model_version was passed in, not a fixed constant', () => {
+    const decision = decide(DEADLINE_MS - MINUTE_MS, 0, 'gbm-v1')
+    if (decision.outcome === 'skipped-no-projections') {
+      expect(decision.message).toMatch(/model_version='gbm-v1'/)
+    } else {
+      throw new Error('expected skipped-no-projections')
+    }
+  })
+})
+
+describe('modelVersionsToSnapshot — ticket #260', () => {
+  it('DoD item 4: returns a single entry when active === the secondary (baseline-v1) model', () => {
+    expect(modelVersionsToSnapshot('baseline-v1')).toEqual(['baseline-v1'])
+  })
+
+  it('returns both, active first, when they differ', () => {
+    expect(modelVersionsToSnapshot('gbm-v1')).toEqual(['gbm-v1', 'baseline-v1'])
+  })
+
+  it('dedupes against an explicit secondary model too, not only the default', () => {
+    expect(modelVersionsToSnapshot('gbm-v1', 'gbm-v1')).toEqual(['gbm-v1'])
   })
 })

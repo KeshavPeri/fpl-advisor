@@ -53,12 +53,23 @@
 // this table would therefore emit one duplicate row per player the moment a
 // second model_version exists, and the solver's own de-duplication
 // (`drop_duplicates(subset=["ID"], keep="first")`) would silently pick
-// whichever arrived first. MODEL_VERSION below is read filtered on this one
-// named constant for that reason.
+// whichever arrived first. Every read below is filtered on an explicit
+// model_version for that reason.
 //
 // ============================================================================
-// PROJECTION_HORIZON and MODEL_VERSION are duplicated from
-// scripts/project-points.ts, not imported.
+// Active/fallback model — ticket #260.
+// ============================================================================
+// config/projection-model.json (scripts/lib/activeModelVersion.ts) names the
+// "active" model this job serves and a "fallback" model version used only
+// for a (player, horizon gameweek) pair the active model has no row for —
+// mergeActiveAndFallbackProjections is the pure function that does that.
+// Today both are 'baseline-v1', so this is a no-op: active covers every
+// pair, fallback is never read twice (see main()'s single-query branch when
+// they're equal), and the emitted CSV is unchanged.
+//
+// ============================================================================
+// PROJECTION_HORIZON is duplicated from scripts/project-points.ts, not
+// imported.
 // ============================================================================
 // This follows the same convention CLAUDE.md documents for readSupabaseEnv/
 // isMissingTable: each scripts/*.ts job is a standalone entry point, and
@@ -84,6 +95,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.js'
+import { readActiveModelVersionConfig } from './lib/activeModelVersion.js'
 
 const JOB_NAME = 'emit-projections-csv'
 const PLAYER_PROJECTIONS_MIGRATION = 'supabase/migrations/20260815120000_player_projections.sql'
@@ -91,9 +103,6 @@ const REFERENCE_SCHEMA_MIGRATION = 'supabase/migrations/20260811100000_reference
 
 /** Must match scripts/project-points.ts's own PROJECTION_HORIZON — duplicated, not imported; see file header. */
 export const PROJECTION_HORIZON = 5
-
-/** Must match scripts/project-points.ts's own MODEL_VERSION — duplicated, not imported; see file header. */
-export const MODEL_VERSION = 'baseline-v1'
 
 /** dev/solver.py:183's default xmin_lb — a player whose total horizon xMins falls below this is dropped from the solver's pool. Below this: warn, don't fail. */
 export const LOW_EXPECTED_MINUTES_THRESHOLD = 100
@@ -332,6 +341,47 @@ export function findEmptyGameweeks(horizonGwIds: readonly number[], gwIdsWithAny
   return horizonGwIds.filter((id) => !gwIdsWithAnyProjection.has(id))
 }
 
+export interface MergeActiveAndFallbackResult {
+  projectionByKey: Map<string, ProjectionValue>
+  fallbackPairsUsed: number
+}
+
+/**
+ * Ticket #260. For every (player, horizon gameweek) pair, prefers the active
+ * model's row; falls back to the fallback model's row only when the active
+ * model has none for that exact pair. Pure — no I/O. When `activeByKey` and
+ * `fallbackByKey` are the same map (active === fallback), every pair is
+ * found in `activeByKey` first and fallbackPairsUsed is always 0.
+ */
+export function mergeActiveAndFallbackProjections(
+  players: readonly CsvPlayerInput[],
+  horizonGwIds: readonly number[],
+  activeByKey: ReadonlyMap<string, ProjectionValue>,
+  fallbackByKey: ReadonlyMap<string, ProjectionValue>,
+): MergeActiveAndFallbackResult {
+  const projectionByKey = new Map<string, ProjectionValue>()
+  let fallbackPairsUsed = 0
+
+  for (const player of players) {
+    for (const gwId of horizonGwIds) {
+      const key = projectionKey(player.id, gwId)
+      const active = activeByKey.get(key)
+      if (active) {
+        projectionByKey.set(key, active)
+        continue
+      }
+      const fallback = fallbackByKey.get(key)
+      if (fallback) {
+        projectionByKey.set(key, fallback)
+        fallbackPairsUsed++
+      }
+      // Neither has a row for this pair — left unset; buildProjectionsCsv zero-fills it.
+    }
+  }
+
+  return { projectionByKey, fallbackPairsUsed }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -432,78 +482,107 @@ async function main(): Promise<void> {
     }))
 
     // --------------------------------------------------------------------
-    // 3. player_projections, filtered to MODEL_VERSION and the candidate
-    //    horizon. See file header for why model_version is filtered.
+    // 3. player_projections, for the active model and (if different) the
+    //    fallback model — ticket #260, config/projection-model.json. See
+    //    file header for why model_version is filtered.
     //
     //    THIS is the read that caused the ticket #43 incident: 587 players
     //    x 5 gameweeks = 2,935 rows, well past the 1,000-row db-max-rows
     //    ceiling an unbounded .select() silently truncates at. Paginated
     //    and count-verified — see scripts/lib/paginate.ts's file header.
     // --------------------------------------------------------------------
-    const {
-      rows: projectionRows,
-      error: projectionsError,
-      pages: projectionPagesFetched,
-    } = await fetchAllPages<ProjectionRow>((from, to) =>
-      supabase
+    const { active: activeModel, fallback: fallbackModel } = readActiveModelVersionConfig()
+
+    async function fetchProjectionRowsForModel(modelVersion: string) {
+      return fetchAllPages<ProjectionRow>((from, to) =>
+        supabase
+          .from('player_projections')
+          .select('gameweek_id, player_id, expected_points, expected_minutes')
+          .eq('model_version', modelVersion)
+          .in('gameweek_id', horizonGwIds)
+          .order('gameweek_id', { ascending: true })
+          .order('player_id', { ascending: true })
+          .order('model_version', { ascending: true })
+          .range(from, to)
+          .returns<ProjectionRow[]>(),
+      )
+    }
+
+    async function countProjectionRowsForModel(modelVersion: string) {
+      return supabase
         .from('player_projections')
-        .select('gameweek_id, player_id, expected_points, expected_minutes')
-        .eq('model_version', MODEL_VERSION)
+        .select('*', { count: 'exact', head: true })
+        .eq('model_version', modelVersion)
         .in('gameweek_id', horizonGwIds)
-        .order('gameweek_id', { ascending: true })
-        .order('player_id', { ascending: true })
-        .order('model_version', { ascending: true })
-        .range(from, to)
-        .returns<ProjectionRow[]>(),
-    )
-    if (projectionsError) {
-      if (isMissingTable(projectionsError, 'player_projections')) {
-        throw new CsvEmitError(
-          `the "player_projections" table does not exist. Apply ${PLAYER_PROJECTIONS_MIGRATION} first.`,
-          'player_projections',
-        )
+    }
+
+    const { rows: activeProjectionRows, error: activeProjectionsError, pages: activeProjectionPagesFetched } = await fetchProjectionRowsForModel(activeModel)
+    if (activeProjectionsError) {
+      if (isMissingTable(activeProjectionsError, 'player_projections')) {
+        throw new CsvEmitError(`the "player_projections" table does not exist. Apply ${PLAYER_PROJECTIONS_MIGRATION} first.`, 'player_projections')
       }
-      throw new CsvEmitError(`player_projections lookup failed: ${projectionsError.message}`, 'player_projections')
+      throw new CsvEmitError(`player_projections lookup (active model '${activeModel}') failed: ${activeProjectionsError.message}`, 'player_projections')
+    }
+    const { count: activeProjectionRowsExpectedByCount, error: activeProjectionsCountError } = await countProjectionRowsForModel(activeModel)
+    if (activeProjectionsCountError) {
+      throw new CsvEmitError(`player_projections count check (active model '${activeModel}') failed: ${activeProjectionsCountError.message}`, 'player_projections')
+    }
+    assertRowCountMatches('player_projections (active)', activeProjectionRows.length, activeProjectionRowsExpectedByCount ?? 0)
+
+    // Read once when active === fallback (ticket #260's own DoD) — no second query, no second count check.
+    let fallbackProjectionRows: ProjectionRow[]
+    let fallbackProjectionPagesFetched: number
+    let fallbackProjectionRowsExpectedByCount: number
+    if (fallbackModel === activeModel) {
+      fallbackProjectionRows = activeProjectionRows
+      fallbackProjectionPagesFetched = activeProjectionPagesFetched
+      fallbackProjectionRowsExpectedByCount = activeProjectionRowsExpectedByCount ?? 0
+    } else {
+      const { rows, error, pages } = await fetchProjectionRowsForModel(fallbackModel)
+      if (error) {
+        throw new CsvEmitError(`player_projections lookup (fallback model '${fallbackModel}') failed: ${error.message}`, 'player_projections')
+      }
+      const { count, error: countError } = await countProjectionRowsForModel(fallbackModel)
+      if (countError) {
+        throw new CsvEmitError(`player_projections count check (fallback model '${fallbackModel}') failed: ${countError.message}`, 'player_projections')
+      }
+      assertRowCountMatches('player_projections (fallback)', rows.length, count ?? 0)
+      fallbackProjectionRows = rows
+      fallbackProjectionPagesFetched = pages
+      fallbackProjectionRowsExpectedByCount = count ?? 0
     }
 
-    const { count: projectionRowsExpectedByCount, error: projectionsCountError } = await supabase
-      .from('player_projections')
-      .select('*', { count: 'exact', head: true })
-      .eq('model_version', MODEL_VERSION)
-      .in('gameweek_id', horizonGwIds)
-    if (projectionsCountError) {
-      throw new CsvEmitError(`player_projections count check failed: ${projectionsCountError.message}`, 'player_projections')
+    function buildProjectionByKeyMap(rows: readonly ProjectionRow[]): Map<string, ProjectionValue> {
+      const map = new Map<string, ProjectionValue>()
+      for (const row of rows) {
+        map.set(projectionKey(row.player_id, row.gameweek_id), { expectedPoints: row.expected_points, expectedMinutes: row.expected_minutes })
+      }
+      return map
     }
-    assertRowCountMatches('player_projections', projectionRows.length, projectionRowsExpectedByCount ?? 0)
+    const activeByKey = buildProjectionByKeyMap(activeProjectionRows)
+    const fallbackByKey = fallbackModel === activeModel ? activeByKey : buildProjectionByKeyMap(fallbackProjectionRows)
 
-    const projectionByKey = new Map<string, ProjectionValue>()
-    const gwIdsWithAnyProjection = new Set<number>()
-    for (const row of projectionRows) {
-      projectionByKey.set(projectionKey(row.player_id, row.gameweek_id), {
-        expectedPoints: row.expected_points,
-        expectedMinutes: row.expected_minutes,
-      })
-      gwIdsWithAnyProjection.add(row.gameweek_id)
-    }
+    // Any horizon gameweek with at least one row in EITHER model — see check 4 below.
+    const gwIdsWithAnyProjection = new Set<number>([...activeProjectionRows, ...fallbackProjectionRows].map((r) => r.gameweek_id))
 
     // --------------------------------------------------------------------
     // 4. Fail loudly if any horizon gameweek has zero projection rows at
-    //    all — a silent empty column would surface as an opaque solver
-    //    ValueError a step later (item 12).
+    //    all, in EITHER model — a silent empty column would surface as an
+    //    opaque solver ValueError a step later (item 12).
     // --------------------------------------------------------------------
     const emptyGameweeks = findEmptyGameweeks(horizonGwIds, gwIdsWithAnyProjection)
     if (emptyGameweeks.length > 0) {
       throw new CsvEmitError(
-        `player_projections has zero rows (model_version='${MODEL_VERSION}') for gameweek(s) ${emptyGameweeks.join(', ')}, ` +
-          `which are inside the current horizon (${horizonGwIds.join(', ')}). Run scripts/project-points.ts before emitting the CSV.`,
+        `player_projections has zero rows (active model_version='${activeModel}' or fallback '${fallbackModel}') for gameweek(s) ` +
+          `${emptyGameweeks.join(', ')}, which are inside the current horizon (${horizonGwIds.join(', ')}). Run scripts/project-points.ts before emitting the CSV.`,
         'player_projections',
       )
     }
 
     // --------------------------------------------------------------------
-    // 5. Report (not fail on) player_projections holding rows for
-    //    gameweeks beyond the candidate horizon — the signal that the two
-    //    jobs' independently-duplicated horizon length has drifted.
+    // 5. Report (not fail on) the active model holding rows for gameweeks
+    //    beyond the candidate horizon — the signal that the two jobs'
+    //    independently-duplicated horizon length has drifted.
     // --------------------------------------------------------------------
     // Paginated too: unbounded over a season, since player_projections only
     // ever grows and this reads every row with gameweek_id past the current
@@ -516,7 +595,7 @@ async function main(): Promise<void> {
       supabase
         .from('player_projections')
         .select('gameweek_id')
-        .eq('model_version', MODEL_VERSION)
+        .eq('model_version', activeModel)
         .gt('gameweek_id', maxHorizonGwId)
         .order('gameweek_id', { ascending: true })
         .order('player_id', { ascending: true })
@@ -530,9 +609,10 @@ async function main(): Promise<void> {
     const extraProjectionGameweekIdsBeyondHorizon = [...new Set(extraGwRows.map((r) => r.gameweek_id))].sort((a, b) => a - b)
 
     // --------------------------------------------------------------------
-    // 6. Build the CSV and write it.
+    // 6. Merge active/fallback, build the CSV and write it.
     // --------------------------------------------------------------------
-    const result = buildProjectionsCsv(csvPlayers, horizonGwIds, projectionByKey)
+    const merged = mergeActiveAndFallbackProjections(csvPlayers, horizonGwIds, activeByKey, fallbackByKey)
+    const result = buildProjectionsCsv(csvPlayers, horizonGwIds, merged.projectionByKey)
 
     await mkdir(dirname(outputPath), { recursive: true })
     await writeFile(outputPath, result.csv, 'utf8')
@@ -543,10 +623,11 @@ async function main(): Promise<void> {
           `${LOW_EXPECTED_MINUTES_THRESHOLD} — the solver's default xmin_lb will drop them from its pool.`,
       )
     }
-
     const details: JsonRecord = {
       outputPath,
-      modelVersion: MODEL_VERSION,
+      activeModel,
+      fallbackModel,
+      fallbackPairsUsed: merged.fallbackPairsUsed,
       horizonGameweekIds: horizonGwIds,
       distinctGameweeksCovered: horizonGwIds.length - emptyGameweeks.length,
       rowsWritten: result.rowsWritten,
@@ -557,13 +638,16 @@ async function main(): Promise<void> {
       playersRowsFetched: playerRows.length,
       playersRowsExpectedByCount: playersRowsExpectedByCount ?? 0,
       playersPagesFetched,
-      projectionRowsFetched: projectionRows.length,
-      projectionRowsExpectedByCount: projectionRowsExpectedByCount ?? 0,
-      projectionPagesFetched,
+      activeProjectionRowsFetched: activeProjectionRows.length,
+      activeProjectionRowsExpectedByCount: activeProjectionRowsExpectedByCount ?? 0,
+      activeProjectionPagesFetched,
+      fallbackProjectionRowsFetched: fallbackProjectionRows.length,
+      fallbackProjectionRowsExpectedByCount,
+      fallbackProjectionPagesFetched,
     }
     const message =
       `${JOB_NAME}: wrote ${result.rowsWritten} player rows across ${horizonGwIds.length} gameweek(s) ` +
-      `(${horizonGwIds.join(', ')}) to ${outputPath}.`
+      `(${horizonGwIds.join(', ')}) to ${outputPath} (active='${activeModel}', fallback='${fallbackModel}', ${merged.fallbackPairsUsed} fallback pair(s)).`
     console.log(message)
     await recordJobRun(supabase, { status: 'success', message, details, startedAt })
   } catch (err) {

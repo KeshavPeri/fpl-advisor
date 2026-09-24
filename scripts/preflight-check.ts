@@ -154,15 +154,13 @@ import { dirname } from 'node:path'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
 import { PREMIER_LEAGUE_COMPETITION } from './lib/competition.ts'
 import { formatSyncTimestamp } from '../src/lib/format.ts'
+import { readActiveModelVersionConfig } from './lib/activeModelVersion.ts'
 
 const JOB_NAME = 'preflight-check'
 const DEFAULT_REPORT_PATH = './out/preflight-report.md'
 const MS_PER_HOUR = 60 * 60 * 1000
 
-/** Must match scripts/project-points.ts's own MODEL_VERSION — duplicated, not imported (every scripts/*.ts job is a standalone entry point; src/lib/ is the one blessed cross-script import boundary, per CLAUDE.md and every prior job's own header). */
-const MODEL_VERSION = 'baseline-v1'
-
-/** Must match scripts/project-points.ts's own PROJECTION_HORIZON — duplicated for the same reason as MODEL_VERSION above. The window of upcoming gameweeks over which check 6 (team ratings) counts fixtures falling back to the FPL-difficulty scale. */
+/** Must match scripts/project-points.ts's own PROJECTION_HORIZON — duplicated, not imported (every scripts/*.ts job is a standalone entry point). The window of upcoming gameweeks over which check 6 (team ratings) counts fixtures falling back to the FPL-difficulty scale. */
 const PREFLIGHT_HORIZON = 5
 
 /** The solver's own verbatim HiGHS status string for a proven optimum (scripts/store-solver-output.ts's own file header: "never classified as optimal" for anything else). Not an enum — the solver is a pinned third-party dependency and this is its exact wording. */
@@ -225,8 +223,8 @@ const DEADLINE_10H_WINDOW_HOURS = 10
 
 /**
  * Must match scripts/project-points.ts's own MIN_FINISHED_FIXTURES_FOR_BASELINE
- * (ticket #115) — duplicated, not imported, same convention as MODEL_VERSION
- * above. project-points.ts's own 20-fixture decision is never re-derived here
+ * (ticket #115) — duplicated, not imported (every scripts/*.ts job is a
+ * standalone entry point). project-points.ts's own 20-fixture decision is never re-derived here
  * (this file reads its recorded `leagueBaselineGoalsSource` verbatim); this
  * constant exists only so the boundary on the finished-fixture count THIS
  * file independently reads (job_runs.details does not carry that count — see
@@ -247,8 +245,8 @@ const LEAGUE_BASELINE_GOALS_MAX_PLAUSIBLE = 2.5
 
 /**
  * Must match scripts/project-points.ts's own CURRENT_SEASON — duplicated,
- * not imported, same convention as MODEL_VERSION above. Ticket #236, check
- * 12 (current-season match data completeness).
+ * not imported (every scripts/*.ts job is a standalone entry point). Ticket
+ * #236, check 12 (current-season match data completeness).
  */
 const CURRENT_SEASON = '2026-2027'
 
@@ -593,6 +591,40 @@ export function checkProjections(input: ProjectionsCheckInput): CheckResult {
     id: 'projections',
     verdict: 'pass',
     reason: `${projectionRowCount} projection rows cover ${(coverage * 100).toFixed(1)}% of ${playersCount} players. ${breakdown}.`,
+    values,
+  }
+}
+
+/**
+ * Ticket #260. Called only when the active model has ZERO player_projections rows for the
+ * target gameweek — decides whether that alone should fail check 3. Not failed when the
+ * fallback model has rows (emit-projections-csv.ts will serve every player from it this
+ * gameweek); only "neither model has any rows" fails. No new verdict is introduced — "not
+ * failed" here is 'pass', same as every other check's normal healthy outcome.
+ */
+export function checkActiveModelHasProjections(input: {
+  gameweekId: number
+  activeModel: string
+  fallbackModel: string
+  fallbackProjectionRowCount: number
+}): CheckResult {
+  const { gameweekId, activeModel, fallbackModel, fallbackProjectionRowCount } = input
+  const values = { gameweekId, activeModel, fallbackModel, activeProjectionRowCount: 0, fallbackProjectionRowCount }
+  if (fallbackProjectionRowCount > 0) {
+    return {
+      id: 'projections',
+      verdict: 'pass',
+      reason:
+        `no "player_projections" rows for gameweek ${gameweekId} at the active model_version "${activeModel}", but the fallback ` +
+        `model_version "${fallbackModel}" has ${fallbackProjectionRowCount} row(s) — emit-projections-csv.ts will use the fallback ` +
+        'for every player this gameweek.',
+      values,
+    }
+  }
+  return {
+    id: 'projections',
+    verdict: 'fail',
+    reason: `no "player_projections" rows for gameweek ${gameweekId} at either the active model_version "${activeModel}" or the fallback model_version "${fallbackModel}".`,
     values,
   }
 }
@@ -1421,6 +1453,9 @@ async function main(): Promise<void> {
   const checks: CheckResult[] = []
 
   try {
+    // Ticket #260: the model version check 3 (projections) targets.
+    const { active: activeModel, fallback: fallbackModel } = readActiveModelVersionConfig()
+
     // --------------------------------------------------------------------
     // 1. gameweeks — resolves the ONE target gameweek every other check
     //    below reuses. See file header for the cascade rule.
@@ -1512,7 +1547,7 @@ async function main(): Promise<void> {
             .from('player_projections')
             .select('player_id, expected_points, expected_minutes')
             .eq('gameweek_id', targetGameweekId as number)
-            .eq('model_version', MODEL_VERSION)
+            .eq('model_version', activeModel)
             .order('gameweek_id', { ascending: true })
             .order('player_id', { ascending: true })
             .order('model_version', { ascending: true })
@@ -1523,95 +1558,121 @@ async function main(): Promise<void> {
             .from('player_projections')
             .select('*', { count: 'exact', head: true })
             .eq('gameweek_id', targetGameweekId as number)
-            .eq('model_version', MODEL_VERSION),
-      )
-      const playersRead = await safeFetchAllPages<PlayerAvailabilityRow>(
-        'players',
-        (from, to) =>
-          supabase
-            .from('players')
-            .select('id, web_name, status, chance_of_playing_next_round, team_id')
-            .order('id', { ascending: true })
-            .range(from, to)
-            .returns<PlayerAvailabilityRow[]>(),
-        () => supabase.from('players').select('*', { count: 'exact', head: true }),
-      )
-      const teamIdsRead = await safeFetchAllPages<TeamIdRow>(
-        'teams',
-        (from, to) => supabase.from('teams').select('id').order('id', { ascending: true }).range(from, to).returns<TeamIdRow[]>(),
-        () => supabase.from('teams').select('*', { count: 'exact', head: true }),
-      )
-      // Filtered in the database (eq on event_id) and read via the shared
-      // pagination helper, matching every other multi-row read in this file.
-      const gwFixturesRead = await safeFetchAllPages<FixtureRow>(
-        'fixtures',
-        (from, to) =>
-          supabase
-            .from('fixtures')
-            .select('team_h, team_a')
-            .eq('event_id', targetGameweekId as number)
-            .order('id', { ascending: true })
-            .range(from, to)
-            .returns<FixtureRow[]>(),
-        () => supabase.from('fixtures').select('*', { count: 'exact', head: true }).eq('event_id', targetGameweekId as number),
+            .eq('model_version', activeModel),
       )
 
       if (projRead.error) {
         projectionsCheck = buildCannotEvaluateResult('projections', projRead.error)
-      } else if (playersRead.error) {
-        projectionsCheck = buildCannotEvaluateResult('projections', playersRead.error)
-      } else if (teamIdsRead.error) {
-        projectionsCheck = buildCannotEvaluateResult('projections', teamIdsRead.error)
-      } else if (gwFixturesRead.error) {
-        projectionsCheck = buildCannotEvaluateResult('projections', gwFixturesRead.error)
+      } else if (projRead.rows.length === 0) {
+        // Ticket #260: the active model has zero rows this gameweek — check the fallback
+        // before failing (see checkActiveModelHasProjections). A count-only query: the
+        // per-player zero-row analysis below only applies once we know which model's rows
+        // are actually being analysed, and that never happens in this branch.
+        const fallbackCountRead =
+          fallbackModel === activeModel
+            ? { count: 0, error: null as string | null }
+            : await safeCount('player_projections', () =>
+                supabase
+                  .from('player_projections')
+                  .select('*', { count: 'exact', head: true })
+                  .eq('gameweek_id', targetGameweekId as number)
+                  .eq('model_version', fallbackModel),
+              )
+        projectionsCheck = fallbackCountRead.error
+          ? buildCannotEvaluateResult('projections', fallbackCountRead.error)
+          : checkActiveModelHasProjections({
+              gameweekId: targetGameweekId,
+              activeModel,
+              fallbackModel,
+              fallbackProjectionRowCount: fallbackCountRead.count,
+            })
       } else {
-        const playersById = new Map(playersRead.rows.map((p) => [p.id, p]))
-        const knownTeamIds = new Set(teamIdsRead.rows.map((t) => t.id))
-        const teamsWithFixture = new Set<number>()
-        for (const f of gwFixturesRead.rows) {
-          teamsWithFixture.add(f.team_h)
-          teamsWithFixture.add(f.team_a)
-        }
+        const playersRead = await safeFetchAllPages<PlayerAvailabilityRow>(
+          'players',
+          (from, to) =>
+            supabase
+              .from('players')
+              .select('id, web_name, status, chance_of_playing_next_round, team_id')
+              .order('id', { ascending: true })
+              .range(from, to)
+              .returns<PlayerAvailabilityRow[]>(),
+          () => supabase.from('players').select('*', { count: 'exact', head: true }),
+        )
+        const teamIdsRead = await safeFetchAllPages<TeamIdRow>(
+          'teams',
+          (from, to) => supabase.from('teams').select('id').order('id', { ascending: true }).range(from, to).returns<TeamIdRow[]>(),
+          () => supabase.from('teams').select('*', { count: 'exact', head: true }),
+        )
+        // Filtered in the database (eq on event_id) and read via the shared
+        // pagination helper, matching every other multi-row read in this file.
+        const gwFixturesRead = await safeFetchAllPages<FixtureRow>(
+          'fixtures',
+          (from, to) =>
+            supabase
+              .from('fixtures')
+              .select('team_h, team_a')
+              .eq('event_id', targetGameweekId as number)
+              .order('id', { ascending: true })
+              .range(from, to)
+              .returns<FixtureRow[]>(),
+          () => supabase.from('fixtures').select('*', { count: 'exact', head: true }).eq('event_id', targetGameweekId as number),
+        )
 
-        const zeroProjectionPlayers: ZeroProjectionPlayer[] = projRead.rows
-          .filter((r) => r.expected_points === 0 && r.expected_minutes === 0)
-          .map((r) => {
-            const player = playersById.get(r.player_id)
-            if (!player) {
-              // player_projections.player_id has a NOT NULL FK to players.id,
-              // so this should not happen against a consistent snapshot. If
-              // it does anyway (a read racing a delete), it is exactly the
-              // "could not evaluate" case this file never lets pass silently
-              // — treated the same as an unresolved team_id (teamHasFixture:
-              // null), which classifyZeroProjectionPlayer folds into the
-              // failing "available" bucket, not a legitimate cause.
-              return {
-                playerId: r.player_id,
-                webName: `player_id ${r.player_id} (no matching "players" row)`,
-                status: 'a',
-                chanceOfPlayingNextRound: null,
-                teamHasFixture: null,
+        if (playersRead.error) {
+          projectionsCheck = buildCannotEvaluateResult('projections', playersRead.error)
+        } else if (teamIdsRead.error) {
+          projectionsCheck = buildCannotEvaluateResult('projections', teamIdsRead.error)
+        } else if (gwFixturesRead.error) {
+          projectionsCheck = buildCannotEvaluateResult('projections', gwFixturesRead.error)
+        } else {
+          const playersById = new Map(playersRead.rows.map((p) => [p.id, p]))
+          const knownTeamIds = new Set(teamIdsRead.rows.map((t) => t.id))
+          const teamsWithFixture = new Set<number>()
+          for (const f of gwFixturesRead.rows) {
+            teamsWithFixture.add(f.team_h)
+            teamsWithFixture.add(f.team_a)
+          }
+
+          const zeroProjectionPlayers: ZeroProjectionPlayer[] = projRead.rows
+            .filter((r) => r.expected_points === 0 && r.expected_minutes === 0)
+            .map((r) => {
+              const player = playersById.get(r.player_id)
+              if (!player) {
+                // player_projections.player_id has a NOT NULL FK to players.id,
+                // so this should not happen against a consistent snapshot. If
+                // it does anyway (a read racing a delete), it is exactly the
+                // "could not evaluate" case this file never lets pass silently
+                // — treated the same as an unresolved team_id (teamHasFixture:
+                // null), which classifyZeroProjectionPlayer folds into the
+                // failing "available" bucket, not a legitimate cause.
+                return {
+                  playerId: r.player_id,
+                  webName: `player_id ${r.player_id} (no matching "players" row)`,
+                  status: 'a',
+                  chanceOfPlayingNextRound: null,
+                  teamHasFixture: null,
+                }
               }
-            }
-            const teamHasFixture = knownTeamIds.has(player.team_id) ? teamsWithFixture.has(player.team_id) : null
-            return {
-              playerId: player.id,
-              webName: player.web_name,
-              status: player.status,
-              chanceOfPlayingNextRound: player.chance_of_playing_next_round,
-              teamHasFixture,
-            }
-          })
+              const teamHasFixture = knownTeamIds.has(player.team_id) ? teamsWithFixture.has(player.team_id) : null
+              return {
+                playerId: player.id,
+                webName: player.web_name,
+                status: player.status,
+                chanceOfPlayingNextRound: player.chance_of_playing_next_round,
+                teamHasFixture,
+              }
+            })
 
-        projectionsCheck = checkProjections({
-          gameweekId: targetGameweekId,
-          modelVersion: MODEL_VERSION,
-          projectionRowCount: projRead.rows.length,
-          playersCount: playersRead.rows.length,
-          zeroProjectionPlayers,
-          coverageWarnThreshold: PROJECTION_COVERAGE_WARN_THRESHOLD,
-          coverageFailThreshold: PROJECTION_COVERAGE_FAIL_THRESHOLD,
-        })
+          projectionsCheck = checkProjections({
+            gameweekId: targetGameweekId,
+            modelVersion: activeModel,
+            projectionRowCount: projRead.rows.length,
+            playersCount: playersRead.rows.length,
+            zeroProjectionPlayers,
+            coverageWarnThreshold: PROJECTION_COVERAGE_WARN_THRESHOLD,
+            coverageFailThreshold: PROJECTION_COVERAGE_FAIL_THRESHOLD,
+          })
+        }
       }
     }
     checks.push(projectionsCheck)

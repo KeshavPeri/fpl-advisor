@@ -283,11 +283,8 @@ export async function fetchReasoning(): Promise<ReasoningRecommendationData | nu
   // Component breakdown for the four named players only — bounded by
   // playerIds.length (at most 4), never the whole ~600-row-per-gameweek
   // table, so this cannot hit the 1,000-row cap regardless of table size.
-  // Ordered by computed_at ascending so that IF more than one row exists
-  // for the same player (a future second model_version alongside
-  // 'baseline-v1', per that column's own migration comment) the map ends up
-  // holding the most recently computed one, without hardcoding a
-  // model_version string to filter by.
+  // baseline-v1 only (ticket #260) — this screen's breakdown assumes that
+  // model's shape; a second model_version would otherwise duplicate rows.
   const projections = new Map<number, PlayerProjectionData>()
   if (playerIds.length > 0) {
     try {
@@ -295,8 +292,8 @@ export async function fetchReasoning(): Promise<ReasoningRecommendationData | nu
         .from('player_projections')
         .select('player_id, components, model_version, computed_at')
         .eq('gameweek_id', recRow.gameweek_id)
+        .eq('model_version', 'baseline-v1')
         .in('player_id', playerIds)
-        .order('computed_at', { ascending: true })
         .returns<ProjectionRow[]>()
 
       if (projectionError) throw projectionError

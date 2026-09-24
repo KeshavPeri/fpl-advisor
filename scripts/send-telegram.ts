@@ -93,6 +93,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { assertRowCountMatches, fetchAllPages } from './lib/paginate.ts'
+import { readActiveModelVersionConfig } from './lib/activeModelVersion.ts'
 import {
   applyWindowMarker,
   classifyAvailability,
@@ -108,9 +109,6 @@ import {
 const JOB_NAME = 'send-telegram'
 const NOTIFICATIONS_MIGRATION = 'supabase/migrations/20260818090000_notifications.sql'
 const RECOMMENDATIONS_MIGRATION = 'supabase/migrations/20260817090000_recommendations.sql'
-
-/** Must match scripts/project-points.ts's own MODEL_VERSION — duplicated, not imported; every scripts/*.ts job is a standalone entry point (see CLAUDE.md's note on small helpers and every prior job's own header). */
-const MODEL_VERSION = 'baseline-v1'
 
 const TELEGRAM_API_BASE_URL = 'https://api.telegram.org'
 const TELEGRAM_MAX_ATTEMPTS = 3
@@ -471,6 +469,10 @@ export type SendOutcome = 'sent' | 'skipped' | 'failed'
 
 export async function runSend(trigger: NotificationTrigger, supabase: SupabaseClient, telegramEnv: TelegramEnv, startedAt: Date): Promise<SendOutcome> {
   try {
+    // Ticket #260: plan_snapshot.modelVersion is the active model (config/projection-model.json)
+    // — this file only labels the snapshot with it, never filters a query by it.
+    const { active: activeModel } = readActiveModelVersionConfig()
+
     // ------------------------------------------------------------------
     // 1. Current gameweek.
     // ------------------------------------------------------------------
@@ -612,7 +614,7 @@ export async function runSend(trigger: NotificationTrigger, supabase: SupabaseCl
           transferInName: recRow.transfer_in_player_id !== null ? (namesById.get(recRow.transfer_in_player_id) ?? null) : null,
           transferOutName: recRow.transfer_out_player_id !== null ? (namesById.get(recRow.transfer_out_player_id) ?? null) : null,
         },
-        MODEL_VERSION,
+        activeModel,
       )
 
       const { rows: reasonRows, error: reasonError } = await fetchAllPages<{ plan_index: number; order_index: number; reason: string }>((from, to) =>
