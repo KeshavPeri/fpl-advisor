@@ -25,7 +25,10 @@ VAASTAV_BASE = f'https://raw.githubusercontent.com/vaastav/Fantasy-Premier-Leagu
 VAASTAV_SEASONS = ['2022-23', '2023-24', '2024-25', '2025-26']
 
 CORE_REPO = 'olbauday/FPL-Core-Insights'
-CORE_DEFAULT_REF = 'main'
+# Pinned per docs/model-diagnosis-2026-09-24.md §8 ("tests pin Core to commit
+# 392f79ad85fcbe5c47b8f1e33d6c3dc787dcfd53"). QA (revision round 1) correctly caught this
+# pointing at `main` — a moving ref defeats the whole point of a pinned, reproducible source.
+CORE_DEFAULT_REF = '392f79ad85fcbe5c47b8f1e33d6c3dc787dcfd53'
 
 # The order that defines "strictly before" across seasons, and the current live season served
 # from Core once it stops appearing in vaastav's pinned snapshot.

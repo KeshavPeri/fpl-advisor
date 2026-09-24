@@ -1,6 +1,6 @@
 # gbm-v1 offline evaluation
 
-Generated 2026-09-24T15:11:13+00:00 · backend `lightgbm` · docs/model-diagnosis-2026-09-24.md §7/§8.
+Generated 2026-09-24T15:31:15+00:00 · backend `lightgbm` · docs/model-diagnosis-2026-09-24.md §7/§8.
 
 ## Liveness
 
