@@ -254,6 +254,10 @@ def load_history(through: tuple[str, int], core_ref: str = CORE_DEFAULT_REF) -> 
         # Current/live season: not yet in the pinned vaastav snapshot.
         frames.append(_load_core_season(season, through_gw=gw, ref=core_ref))
 
+    # An empty frame (e.g. the current season with no completed gameweeks yet) has no real dtypes
+    # to offer; concatenating it in would upcast otherwise-numeric columns to object. Drop it.
+    frames = [f for f in frames if len(f) > 0]
+
     if not frames:
         history = pd.DataFrame(columns=HISTORY_COLUMNS)
     else:

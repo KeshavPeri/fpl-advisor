@@ -38,11 +38,19 @@ class Model:
         self.feats = feats
 
 
+def _numeric(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """LightGBM and sklearn both require numeric dtypes; a frame built by concatenating several
+    sources can end up with an `object`-dtype column even when every value in it is a plain float
+    (e.g. an all-NaN column with no other rows to infer a dtype from). Coerce defensively rather
+    than rely on every caller getting concatenation dtypes right."""
+    return frame[columns].apply(pd.to_numeric, errors='coerce')
+
+
 def fit(frame: pd.DataFrame, target: str, seed: int = 0) -> Model:
     """target: 'total_points' | 'minutes'."""
     train = frame.dropna(subset=[target])
-    x = train[FEATURES]
-    y = train[target]
+    x = _numeric(train, FEATURES)
+    y = pd.to_numeric(train[target], errors='coerce')
     if BACKEND == 'lightgbm':
         params = dict(PARAMS, seed=seed)
         booster = lgb.train(params, lgb.Dataset(x, y), num_boost_round=NUM_BOOST_ROUND)
@@ -57,9 +65,7 @@ def fit(frame: pd.DataFrame, target: str, seed: int = 0) -> Model:
 
 
 def predict(model: Model, frame: pd.DataFrame) -> np.ndarray:
-    x = frame[model.feats]
-    if BACKEND == 'lightgbm':
-        return model.booster.predict(x)
+    x = _numeric(frame, model.feats)
     return model.booster.predict(x)
 
 
@@ -72,7 +78,7 @@ def contributions(model: Model, frame: pd.DataFrame, top: int = 5) -> list[list[
     breakdown as falling back to baseline-v1, per R2-T3)."""
     if BACKEND != 'lightgbm':
         return [[] for _ in range(len(frame))]
-    x = frame[model.feats]
+    x = _numeric(frame, model.feats)
     raw = model.booster.predict(x, pred_contrib=True)
     feats = model.feats
     out: list[list[dict]] = []
