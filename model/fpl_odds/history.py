@@ -43,9 +43,13 @@ _FALLBACK_1X2 = ("B365H", "B365D", "B365A")
 
 
 def _season_label(path: str) -> str:
-    """`E0_2223.csv` -> `2223`."""
+    """`E0_2223.csv` -> `'2022-23'` -- the format `fpl_model.sources`/`fpl_model.features` use
+    for `season` (`SEASON_ORDER`), not the raw `'2223'` file-name label. Ticket #264: this was a
+    contract bug in #261 -- nothing joins to `history` without it (the orchestrator's first join
+    attempt matched 0 rows)."""
     base = os.path.basename(path)
-    return base[len("E0_") : -len(".csv")]
+    raw = base[len("E0_") : -len(".csv")]
+    return f"20{raw[:2]}-{raw[2:]}"
 
 
 def _row_1x2_odds(row: pd.Series) -> dict:
