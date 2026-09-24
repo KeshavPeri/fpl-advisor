@@ -132,6 +132,28 @@ def test_missing_odds_gives_nan_not_a_crash():
         assert pd.isna(row[col])
 
 
+def test_football_data_wins_over_other_sources_on_the_same_fixture():
+    """When the same (season, home_code, away_code) pairing has rows from more than one odds
+    source, football-data wins (the ticket's own dedup rule)."""
+    history = _make_history([
+        _row(code=201, team_code=_HOME_CODE, opp_team_code=_AWAY_CODE, was_home=1.0, nfix=1),
+    ])
+    odds = pd.concat([
+        _odds_frame(),  # football-data, lambda_home=1.5
+        pd.DataFrame.from_records([{
+            'season': _SEASON, 'gw': None, 'kickoff_date': pd.Timestamp('2022-09-17'),
+            'home_code': _HOME_CODE, 'away_code': _AWAY_CODE,
+            'p_home': 0.9, 'p_draw': 0.05, 'p_away': 0.05,
+            'lambda_home': 9.9, 'lambda_away': 9.9, 'source': 'the-odds-api',
+        }]),
+    ], ignore_index=True)
+    frame = build_training_frame(history, odds=odds)
+    row = frame[frame['code'] == 201].iloc[0]
+
+    assert row['lambda_for'] == pytest.approx(_LAMBDA_HOME)
+    assert row['p_win'] == pytest.approx(_P_HOME)
+
+
 def test_no_odds_frame_gives_nan_columns_not_a_crash():
     """`odds=None` (run 1's default) still produces the four columns, all NaN -- this is what
     keeps `FEATURES` satisfied when a caller has no odds to pass."""
