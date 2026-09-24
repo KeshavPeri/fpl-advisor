@@ -32,3 +32,10 @@ dist-ssr
 
 # Local output from hand-run scripts (learned-model report, etc.)
 out/
+
+# model/ (ticket #258): downloaded CSVs cached across runs, and Python build artefacts.
+# model/reports/eval-latest.md is generated too, but it IS committed (the offline gate result).
+model/.cache/
+.venv/
+__pycache__/
+

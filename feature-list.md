@@ -108,10 +108,14 @@ credential in the browser, which is Tier 1.
     defensive-contribution counters added *#146*. **The substrate is finished; `run-backtest.ts`
     still reads neither `element_type` nor the two defcon counters**, which is why the 23% backtest
     exclusion and the defcon error are both unchanged. That consumer read is the open work.
-30. ⬜ **OpenFPL retrain on post-defcon data.** *Depends on 29.* Not started.
-31. ⬜ **Swap the projection source behind the CSV seam.** *Depends on 11, 30.* Should touch nothing
-    but the projection job. `player_projections.model_version` exists so a successor can be written
-    alongside `baseline-v1` rather than over it.
+30. 🔶 **OpenFPL retrain on post-defcon data.** *Depends on 29.* In progress — *#258* builds
+    `gbm-v1` (LightGBM, four seasons, offline gate) under `model/`. Nothing live changes yet; the
+    nightly job and `player_projections` wiring is run 2's ticket
+    (docs/model-diagnosis-2026-09-24.md §8, R2-T2).
+31. 🔶 **Swap the projection source behind the CSV seam.** *Depends on 11, 30.* In progress —
+    `config/projection-model.json` and the shared reader are R1-T3
+    (docs/model-diagnosis-2026-09-24.md §8), not part of *#258*. `player_projections.model_version`
+    exists so `gbm-v1` can be written alongside `baseline-v1` rather than over it.
 
 ## Wave 10 — backtest 🔶 partly done
 
