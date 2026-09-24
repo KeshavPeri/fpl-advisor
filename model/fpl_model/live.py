@@ -217,6 +217,12 @@ def build_payload(raw: pd.DataFrame, snapshot: pd.DataFrame, trained_through: st
         if pd.isna(player_id) or int(player_id) not in known_player_ids:
             skipped += 1
             continue
+        # `raw_projections`'s lambda_for/lambda_against columns come back from pandas as NaN
+        # (float64), never a real Python None, once the column also holds real float values
+        # elsewhere -- but jsonb has no NaN literal (bare `NaN` is not valid JSON, and PostgREST
+        # rejects it), so this must serialize as JSON null, not a NaN token.
+        lambda_for = row['lambda_for']
+        lambda_against = row['lambda_against']
         components = {
             'model': MODEL_VERSION,
             'trained_through': trained_through,
@@ -224,8 +230,8 @@ def build_payload(raw: pd.DataFrame, snapshot: pd.DataFrame, trained_through: st
             'raw_points': float(raw_points[i]),
             'raw_minutes': float(raw_minutes[i]),
             'has_odds': bool(row['has_odds']),
-            'lambda_for': row['lambda_for'],
-            'lambda_against': row['lambda_against'],
+            'lambda_for': None if pd.isna(lambda_for) else float(lambda_for),
+            'lambda_against': None if pd.isna(lambda_against) else float(lambda_against),
             'drivers': row['drivers'],
         }
         payload.append({

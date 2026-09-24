@@ -233,7 +233,7 @@ def test_dgw_player_equals_sum_of_two_single_fixture_predictions(history, snapsh
 
 def test_has_odds_and_lambda_for_ars_next_gw(raw_projections):
     row = raw_projections[(raw_projections['code'] == 1001) & (raw_projections['gw'] == 10)].iloc[0]
-    assert row['has_odds'] is True
+    assert bool(row['has_odds'])
     # Arsenal are home in fixture 501 -- lambda_for is lambda_home for the selected (newer) row.
     lambda_home, lambda_away = goal_expectancy(0.55, 0.25, 0.20)
     assert row['lambda_for'] == pytest.approx(lambda_home, abs=1e-9)
@@ -243,7 +243,7 @@ def test_has_odds_and_lambda_for_ars_next_gw(raw_projections):
 def test_no_odds_for_team_with_no_lambda_lookup_entry(raw_projections):
     che = raw_projections[raw_projections['code'] == 1003]
     assert che['has_odds'].eq(False).all()
-    assert che['lambda_for'].apply(lambda v: v is None).all()
+    assert che['lambda_for'].isna().all()
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +292,23 @@ def test_upsert_payload_shape(raw_projections, snapshot):
     assert components['trained_through'] == f'{SEASON} GW9'
     for driver in components['drivers']:
         assert set(driver.keys()) == {'feature', 'value', 'contribution'}
+
+
+def test_missing_odds_serialize_as_json_null_not_nan(raw_projections, snapshot):
+    """jsonb has no NaN literal -- a missing lambda must be a real Python None (json.dumps ->
+    `null`), never a bare float NaN (json.dumps -> the invalid-JSON token `NaN`)."""
+    payload, _skipped = live.build_payload(
+        raw_projections, snapshot, trained_through=f'{SEASON} GW9',
+        known_player_ids={101, 102, 103, 104}, computed_at='2026-09-24T18:00:00+00:00',
+    )
+    che_rows = [r for r in payload if r['player_code'] == 1003]
+    assert len(che_rows) == 5
+    for row in che_rows:
+        assert row['components']['lambda_for'] is None
+        assert row['components']['lambda_against'] is None
+    # json.dumps allows a bare NaN token by default (allow_nan=True) -- assert directly that the
+    # serialized payload contains no such token, since PostgREST would reject it as invalid JSON.
+    assert 'NaN' not in json.dumps(payload)
 
 
 def test_fk_skip_counts_and_drops_unknown_player(raw_projections, snapshot):
