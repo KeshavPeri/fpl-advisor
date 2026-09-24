@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { deriveCaptainConfidenceBand, deriveReasoningView, formatComponentLabel } from './derive.ts'
+import {
+  deriveCaptainConfidenceBand,
+  deriveReasoningView,
+  describeDriver,
+  formatComponentLabel,
+} from './derive.ts'
 import type {
   AlternativePlanData,
   PlayerProjectionData,
+  PlayerProjectionDriver,
   ReasoningRecommendationData,
   StartingXIPick,
 } from './types.ts'
@@ -444,5 +450,203 @@ describe('formatComponentLabel', () => {
 
   it('handles a key with no trailing "Points" gracefully', () => {
     expect(formatComponentLabel('xgPer90')).toBe('Xg per90')
+  })
+})
+
+// ============================================================================
+// describeDriver (ticket #266) — model/fpl_model/features.py's FEATURES,
+// copied here as a fixture exactly as computed by that file's own list
+// comprehensions (verified by hand against the module on this branch's
+// base, 132 names). This is a snapshot, not a live import — see this
+// ticket's own note on why: scripts/, model/ and src/ are separate
+// compilation environments and this ticket's Files list is src/ only.
+// ============================================================================
+
+const FROZEN_FEATURES: readonly string[] = [
+  // r{k}_{stat} — k in [1, 3, 5, 10, 38], stat in _STAT_COLS + [m60, app]
+  ...[1, 3, 5, 10, 38].flatMap((k) =>
+    [
+      'minutes',
+      'total_points',
+      'goals_scored',
+      'assists',
+      'expected_goals',
+      'expected_assists',
+      'bps',
+      'bonus',
+      'ict_index',
+      'threat',
+      'creativity',
+      'saves',
+      'clean_sheets',
+      'goals_conceded',
+      'starts',
+      'defensive_contribution',
+      'expected_goals_conceded',
+      'm60',
+      'app',
+    ].map((stat) => `r${k}_${stat}`)
+  ),
+  // p90_{k}_{stat} — k in [10, 38], stat in _P90_STATS
+  ...[10, 38].flatMap((k) =>
+    [
+      'expected_goals',
+      'expected_assists',
+      'total_points',
+      'bps',
+      'threat',
+      'creativity',
+      'defensive_contribution',
+      'saves',
+    ].map((stat) => `p90_${k}_${stat}`)
+  ),
+  'sd_minutes',
+  'sd_apps',
+  'rows_hist',
+  // team_feature_names — t_{gf,ga}_{k} then o + same, k in [5, 10, 20]
+  ...[5, 10, 20].flatMap((k) => [`t_gf_${k}`, `t_ga_${k}`]),
+  ...[5, 10, 20].flatMap((k) => [`ot_gf_${k}`, `ot_ga_${k}`]),
+  // _CONTEXT
+  'pos_i',
+  'value',
+  'was_home',
+  'nfix',
+  // _MARKET
+  'own_pct_rank',
+  'transfers_rank',
+]
+
+// The four odds names #133 adds behind USE_ODDS — not part of FEATURES
+// itself (appended only when odds are joined in), tested separately per
+// this ticket's own DoD wording ("the four odds names too").
+const ODDS_FEATURES: readonly string[] = ['lambda_for', 'lambda_against', 'p_win', 'p_cs']
+
+describe('describeDriver', () => {
+  it('has exactly 132 names in the frozen FEATURES fixture', () => {
+    // A guard on the fixture itself, not on describeDriver — if this ever
+    // fails, the fixture has drifted from model/fpl_model/features.py and
+    // needs re-copying, not a code fix here.
+    expect(FROZEN_FEATURES).toHaveLength(132)
+  })
+
+  it('describes every name in model/fpl_model/features.py\'s FEATURES, none null', () => {
+    for (const feature of FROZEN_FEATURES) {
+      expect(describeDriver(feature), `expected a description for "${feature}"`).not.toBeNull()
+    }
+  })
+
+  it('describes all four odds names', () => {
+    for (const feature of ODDS_FEATURES) {
+      expect(describeDriver(feature), `expected a description for "${feature}"`).not.toBeNull()
+    }
+  })
+
+  it('returns null for an unrecognised name, never a raw feature name', () => {
+    expect(describeDriver('some_future_feature_nobody_mapped')).toBeNull()
+  })
+
+  it('special-cases a 1-game rolling window as "last game", not "over the last 1 games"', () => {
+    expect(describeDriver('r1_total_points')).toBe('points last game')
+  })
+
+  it('phrases a multi-game rolling window with "over the last N games"', () => {
+    expect(describeDriver('r5_total_points')).toBe('points over the last 5 games')
+  })
+
+  it('phrases a per-90 feature with its window', () => {
+    expect(describeDriver('p90_10_expected_goals')).toBe('expected goals per 90 minutes, last 10 games')
+  })
+
+  it('distinguishes team from opponent, and scored from conceded', () => {
+    expect(describeDriver('t_gf_5')).toBe('team goals scored, last 5')
+    expect(describeDriver('t_ga_5')).toBe('team goals conceded, last 5')
+    expect(describeDriver('ot_gf_5')).toBe('opponent goals scored, last 5')
+    expect(describeDriver('ot_ga_5')).toBe('opponent goals conceded, last 5')
+  })
+
+  it('describes the named context, market and odds features exactly as the ticket specifies', () => {
+    expect(describeDriver('own_pct_rank')).toBe('popular with managers')
+    expect(describeDriver('transfers_rank')).toBe('being transferred in')
+    expect(describeDriver('value')).toBe('price')
+    expect(describeDriver('was_home')).toBe('playing at home')
+    expect(describeDriver('nfix')).toBe('number of fixtures')
+    expect(describeDriver('lambda_for')).toBe('expected team goals this fixture')
+    expect(describeDriver('lambda_against')).toBe('expected goals against')
+    expect(describeDriver('p_win')).toBe('chance of winning')
+    expect(describeDriver('p_cs')).toBe('clean-sheet chance')
+  })
+})
+
+// ============================================================================
+// deriveReasoningView — gbm-v1 learned-model block per player (ticket #266)
+// ============================================================================
+
+function driver(overrides: Partial<PlayerProjectionDriver> = {}): PlayerProjectionDriver {
+  return { feature: 'r5_total_points', value: 4.2, contribution: 0.8, ...overrides }
+}
+
+describe('deriveReasoningView — learned model (gbm-v1) block', () => {
+  it('renders a "Decided by" headline and the top three described drivers for a player with a gbm-v1 row', () => {
+    const projections = new Map([
+      [
+        3,
+        {
+          playerId: 3,
+          points: { appearancePoints: 2 },
+          modelVersion: 'baseline-v1',
+          computedAt: '2026-08-21T09:00:00Z',
+          learned: {
+            modelVersion: 'gbm-v1',
+            expectedPoints: 5.79,
+            drivers: [
+              driver({ feature: 'r5_total_points', contribution: 1.2 }),
+              driver({ feature: 'lambda_for', contribution: 0.9 }),
+              driver({ feature: 'own_pct_rank', contribution: -0.2 }),
+              driver({ feature: 'p_cs', contribution: 0.05 }),
+              driver({ feature: 'some_unknown_future_feature', contribution: 5 }),
+            ],
+          },
+        } satisfies PlayerProjectionData,
+      ],
+    ])
+
+    const view = deriveReasoningView(baseData({ projections }))
+    const captain = view.players.find((p) => p.role === 'Captain')!
+
+    expect(captain.learned).not.toBeNull()
+    expect(captain.learned!.headline).toBe('Decided by gbm-v1 · 5.8')
+    // Top three by |contribution|: r5_total_points (1.2), lambda_for (0.9),
+    // own_pct_rank (-0.2 magnitude 0.2, beats p_cs's 0.05). The unknown
+    // feature (contribution 5, the largest of all) is dropped before
+    // ranking, never shown with a raw name.
+    expect(captain.learned!.drivers).toHaveLength(3)
+    expect(captain.learned!.drivers.map((d) => d.feature)).toEqual([
+      'r5_total_points',
+      'lambda_for',
+      'own_pct_rank',
+    ])
+    expect(captain.learned!.drivers[0].description).toBe('points over the last 5 games')
+    expect(captain.learned!.drivers[0].direction).toBe('pushes up')
+    expect(captain.learned!.drivers[2].direction).toBe('pulls down')
+    // The baseline-v1 breakdown is untouched — still built from `points`.
+    expect(captain.components.map((c) => c.label)).toContain('Appearance')
+  })
+
+  it('renders no learned block, exactly as before this ticket, for a player with only a baseline-v1 row', () => {
+    const projections = new Map([[3, projection({ playerId: 3 })]])
+    const view = deriveReasoningView(baseData({ projections }))
+    const captain = view.players.find((p) => p.role === 'Captain')!
+
+    expect(captain.learned).toBeNull()
+    expect(captain.hasProjection).toBe(true)
+    const labels = captain.components.map((c) => c.label)
+    expect(labels).toContain('Appearance')
+    expect(labels).toContain('Goal')
+  })
+
+  it('renders no learned block for a player with no resolved projection at all', () => {
+    const view = deriveReasoningView(baseData({ projections: new Map() }))
+    const captain = view.players.find((p) => p.role === 'Captain')!
+    expect(captain.learned).toBeNull()
   })
 })

@@ -4,6 +4,7 @@ import type {
   ConfidenceBand,
   CoverageEntry,
   PlayerProjectionData,
+  PlayerProjectionDriver,
   ReasoningRecommendationData,
   StartingXIPick,
 } from './types.ts'
@@ -78,8 +79,15 @@ interface SolverPickRow {
   is_captain: boolean
 }
 
+/** Raw shape of `player_projections.components` — `baseline-v1` writes only
+ *  `points`; `gbm-v1` (ticket #131) writes only `drivers` (plus fields this
+ *  screen does not read, e.g. `trained_through`, `has_odds`). Both keys are
+ *  optional here for the same reason: one query now reads both model
+ *  versions in one pass (ticket #266), and neither model's row carries the
+ *  other's key. */
 interface ProjectionComponentsShape {
   points?: Record<string, number>
+  drivers?: PlayerProjectionDriver[]
 }
 
 interface ProjectionRow {
@@ -87,6 +95,11 @@ interface ProjectionRow {
   components: ProjectionComponentsShape | null
   model_version: string
   computed_at: string
+  /** `gbm-v1` only — `baseline-v1` rows carry the same column (NOT NULL on
+   *  the table), but this screen's baseline breakdown comes entirely from
+   *  `components.points`, never this column, so it is only read for what
+   *  it means on a `gbm-v1` row: `learned.expectedPoints`. */
+  expected_points: number
 }
 
 /**
@@ -281,29 +294,58 @@ export async function fetchReasoning(): Promise<ReasoningRecommendationData | nu
   }
 
   // Component breakdown for the four named players only — bounded by
-  // playerIds.length (at most 4), never the whole ~600-row-per-gameweek
-  // table, so this cannot hit the 1,000-row cap regardless of table size.
-  // baseline-v1 only (ticket #260) — this screen's breakdown assumes that
-  // model's shape; a second model_version would otherwise duplicate rows.
+  // playerIds.length x 2 (at most 8 rows: baseline-v1 and gbm-v1 per
+  // player), never the whole ~600-row-per-gameweek table, so this cannot
+  // hit the 1,000-row cap regardless of table size.
+  //
+  // baseline-v1 AND gbm-v1 (ticket #266, widened from baseline-v1-only
+  // #260): the two rows for one player are merged into a single
+  // PlayerProjectionData below, kept apart by model_version rather than
+  // read as two separate maps, so every other caller of `projections`
+  // (derive.ts) still does one lookup per player. Whichever row is
+  // processed first, the merge below reads any value already set by the
+  // other row via `existing` rather than overwriting it, so row order from
+  // Postgrest never matters.
   const projections = new Map<number, PlayerProjectionData>()
   if (playerIds.length > 0) {
     try {
       const { data: projectionRows, error: projectionError } = await supabase
         .from('player_projections')
-        .select('player_id, components, model_version, computed_at')
+        .select('player_id, components, model_version, computed_at, expected_points')
         .eq('gameweek_id', recRow.gameweek_id)
-        .eq('model_version', 'baseline-v1')
+        .in('model_version', ['baseline-v1', 'gbm-v1'])
         .in('player_id', playerIds)
         .returns<ProjectionRow[]>()
 
       if (projectionError) throw projectionError
       for (const row of projectionRows ?? []) {
-        projections.set(row.player_id, {
-          playerId: row.player_id,
-          points: row.components?.points ?? {},
-          modelVersion: row.model_version,
-          computedAt: row.computed_at,
-        })
+        const existing = projections.get(row.player_id)
+        if (row.model_version === 'gbm-v1') {
+          projections.set(row.player_id, {
+            playerId: row.player_id,
+            points: existing?.points ?? {},
+            // modelVersion/computedAt stay the baseline-v1 pair (ticket
+            // #266's own scope: "keep the existing points breakdown field
+            // as the baseline-v1 one") — only falling back to gbm-v1's own
+            // when no baseline-v1 row resolved for this player at all, so
+            // these two fields are never left unset.
+            modelVersion: existing?.modelVersion ?? row.model_version,
+            computedAt: existing?.computedAt ?? row.computed_at,
+            learned: {
+              modelVersion: row.model_version,
+              expectedPoints: row.expected_points,
+              drivers: row.components?.drivers ?? [],
+            },
+          })
+        } else {
+          projections.set(row.player_id, {
+            playerId: row.player_id,
+            points: row.components?.points ?? {},
+            modelVersion: row.model_version,
+            computedAt: row.computed_at,
+            learned: existing?.learned,
+          })
+        }
       }
     } catch {
       // Leave `projections` as whatever it already resolved — derive.ts

@@ -220,6 +220,61 @@
   margin-bottom: var(--space-1);
 }
 
+/* ---- Learned-model (gbm-v1) block — ticket #266 ----
+   Sits above the baseline-v1 breakdown, which stays the explainer
+   underneath. Absent entirely (no DOM, no extra spacing) for any player
+   with no gbm-v1 row, so the screen is pixel-identical to before this
+   ticket until the model switch happens. */
+
+.reasoning-player__learned {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.reasoning-player__learned-headline {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--accent-cyan);
+}
+
+.reasoning-player__drivers {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reasoning-player__driver {
+  font: var(--text-label);
+  color: var(--text-secondary);
+  padding-left: var(--space-3);
+  position: relative;
+}
+
+.reasoning-player__driver::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent-cyan);
+}
+
+.reasoning-player__breakdown-heading {
+  font: var(--text-label);
+  font-weight: 550;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-top: var(--space-1);
+}
+
 .reasoning-player__table {
   width: 100%;
   border-collapse: collapse;
