@@ -8,7 +8,9 @@ Supersedes the nav notes in `docs/my-ui-problems.md`. For the UI polish round (r
 1. **Floating glass pill, like Reddit's.** A rounded capsule floating above the content with side and
    bottom margins (not edge-to-edge, not docked). Icon plus small label per tab. Content scrolls
    visibly underneath it.
-2. **"Crazy premium" liquid glass.** The background behind the bar must look **refracted and
+2. **"Crazy premium" liquid glass — glow, not frost.** Keshav, after seeing the current bar: **no heavy blur**
+   (that reads as frosted). He wants a clear, premium glass finish with a *glow* — light blur at most,
+   bright rim, specular sheen, soft outer glow in the accent colour. The background behind the bar must look **refracted and
    distorted, not just blurred**: lensing at the curved edges, a bright specular rim, and slight
    magnification or warping of what passes underneath.
 3. **Premium tab-switch animation.** The active tab sits in its own darker inner pill (Reddit:
@@ -34,5 +36,6 @@ Supersedes the nav notes in `docs/my-ui-problems.md`. For the UI polish round (r
 - 60 fps on a mid iPhone. Only transform/opacity animations. Respect `prefers-reduced-motion`
   (no morph, instant state change).
 - Safe-area insets (home indicator). Tap targets ≥ 44 px, the collapsed circle included.
-- Four tabs today. Keep the existing routes. Only the shell and nav change.
+- **Four tabs, Reddit-style:** Home, Why (reasoning, `/reasoning`), Chips, Record. Drop today's raised
+  centre 'hump' on Home; every tab gets the same active treatment (the sliding inner pill). Keep the existing routes. Only the shell and nav change.
 - Impeccable / emil-design-eng skills allowed (polish ticket, CLAUDE.md §design-pass).
