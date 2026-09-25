@@ -37,6 +37,7 @@ a different branch; see `docs/model-diagnosis-2026-09-24.md` §8).
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sys
 from typing import Any
 
@@ -188,6 +189,19 @@ def project_horizon(history: pd.DataFrame, snapshot: pd.DataFrame, team_fixtures
     return pd.DataFrame(rows)
 
 
+def _json_safe(value):
+    """jsonb and `requests` (allow_nan=False) both reject NaN/inf; send JSON null instead."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    return value
+
+
 def build_payload(raw: pd.DataFrame, snapshot: pd.DataFrame, trained_through: str,
                    known_player_ids: set[int], computed_at: str) -> tuple[list[dict], int]:
     """The `player_projections` upsert payload: one dict per row, shaped exactly as the table's
@@ -234,6 +248,10 @@ def build_payload(raw: pd.DataFrame, snapshot: pd.DataFrame, trained_through: st
             'lambda_against': None if pd.isna(lambda_against) else float(lambda_against),
             'drivers': row['drivers'],
         }
+        if not (np.isfinite(expected_points[i]) and np.isfinite(expected_minutes[i])):
+            skipped += 1  # NOT NULL columns: a non-finite projection is skipped and counted
+            continue
+        components = _json_safe(components)
         payload.append({
             'gameweek_id': int(row['gw']),  # public.gameweeks.id IS the FPL event id
             'player_id': int(player_id),
@@ -248,7 +266,9 @@ def build_payload(raw: pd.DataFrame, snapshot: pd.DataFrame, trained_through: st
 
 
 def render_summary(payload: list[dict], skipped: int, next_gw: int, pct_fixtures_with_odds: float,
-                    now_cost_by_code: dict[int, int], team_by_code: dict[int, str]) -> str:
+                    now_cost_by_code: dict[int, int], team_by_code: dict[int, str],
+                    name_by_code: dict[int, str] | None = None) -> str:
+    name_by_code = name_by_code or {}
     lines = [
         f'live: wrote {len(payload)} row(s) to player_projections (model_version={MODEL_VERSION!r})',
         f'live: skipped {skipped} player row(s) not (yet) in public.players',
@@ -265,7 +285,8 @@ def render_summary(payload: list[dict], skipped: int, next_gw: int, pct_fixtures
         team = team_by_code.get(code, '?')
         price = now_cost_by_code.get(code)
         price_str = f'£{price / 10:.1f}m' if price is not None else '?'
-        lines.append(f'  {r["expected_points"]:.2f} pts  {team:<4} {price_str:>6}  code {code}')
+        name = name_by_code.get(code, f'code {code}')
+        lines.append(f'  {r["expected_points"]:.2f} pts  {name} ({team}, {price_str})')
     return '\n'.join(lines)
 
 
@@ -321,7 +342,8 @@ def run(url: str, secret_key: str, started_at: str) -> tuple[str, dict]:
     pct_with_odds = _pct_horizon_fixtures_with_odds(team_fixtures, fixture_lambda, next_gw)
     now_cost_by_code = dict(zip(snapshot['code'], snapshot['now_cost']))
     team_by_code = dict(zip(snapshot['code'], snapshot['team_short_name']))
-    summary = render_summary(payload, skipped, next_gw, pct_with_odds, now_cost_by_code, team_by_code)
+    name_by_code = dict(zip(snapshot['code'], snapshot['web_name']))
+    summary = render_summary(payload, skipped, next_gw, pct_with_odds, now_cost_by_code, team_by_code, name_by_code)
 
     finished_at = _now_iso()
     with_odds_rows = sum(1 for r in payload if r['components']['has_odds'])
@@ -357,6 +379,7 @@ def main() -> int:
         finished_at = _now_iso()
         message = f'live: failed: {exc}'
         print(message)
+        _annotate('error', message)
         try:
             supabase_io.insert_job_run(
                 url, secret_key, JOB_NAME, 'failure', message, {'error': str(exc)}, started_at, finished_at,
@@ -366,7 +389,15 @@ def main() -> int:
         return 1
 
     print(summary)
+    _annotate('notice', summary)
     return 0
+
+
+def _annotate(level: str, text: str) -> None:
+    """Repeat `text` as a GitHub Actions annotation, readable through the check-runs API."""
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        body = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+        print(f'::{level} title=gbm-v1::{body}')
 
 
 if __name__ == '__main__':
