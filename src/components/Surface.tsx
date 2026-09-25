@@ -20,14 +20,21 @@ interface SurfaceProps extends ComponentPropsWithoutRef<'div'> {
    */
   raised?: boolean
   /**
-   * F15/F5 — the real three-level elevation scale. 1 = recessed (list
-   * rows, nested cards, sits at 1.06:1 over the base ink — present,
-   * never a card), 2 = the standard panel (default, 1.25:1 over base),
-   * 3 = the loudest surface on a screen, meant for exactly one per
-   * screen (1.55:1 over base, 1.24:1 over level 2). Defaults to 2, or to
-   * 3 if `raised` is set and `level` is not (see `raised` above). No
-   * existing call site passes this yet — wiring individual screens to
-   * the level they actually need is the follow-up ticket's job.
+   * F15/F5, then ticket #275 (audit G2 — "two card styles (blue glass vs
+   * near-black) used with no meaning. Pick one, plus one emphasis
+   * variant"). This prop's three-way VALUE is unchanged, deliberately —
+   * every existing call site (DeadlineCountdown, ChipsScreen,
+   * ReasoningScreen…) still passes `level={1}`, `level={2}` or
+   * `level={3}`, and this ticket cannot edit those files (CLAUDE.md's
+   * scope constraint; "screens are not edited, they inherit through
+   * Surface"). What changed is the RESOLUTION: 1 and 2 now render
+   * identically — the one card material (--material-2) — and only 3
+   * renders as the emphasis variant (--material-3). The near-black
+   * level-1 fill (--material-1) that G2 named is gone from Surface
+   * entirely; see Surface.css's own header comment for why the token
+   * itself stays defined in index.css regardless (PlayerShirt.css and
+   * VerdictCard.css, both outside this ticket's scope, still read it
+   * directly for their own unrelated recess treatments).
    */
   level?: 1 | 2 | 3
   /**
@@ -77,9 +84,15 @@ function Surface({
   ...rest
 }: SurfaceProps) {
   const resolvedLevel = level ?? (raised ? 3 : 2)
+  // Ticket #275 — one card material plus one emphasis variant (audit
+  // G2): every caller's own level (1, 2 or 3) still resolves, but only
+  // resolvedLevel 3 renders as the distinct "emphasis" class; 1 and 2
+  // both render as the one base "surface--level-2" class. See the
+  // `level` prop's own doc comment above for the because.
+  const visualTier = resolvedLevel >= 3 ? 3 : 2
   const classes = [
     'surface',
-    `surface--level-${resolvedLevel}`,
+    `surface--level-${visualTier}`,
     padding === 'compact' ? 'surface--compact' : '',
     className ?? '',
   ]

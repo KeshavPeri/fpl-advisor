@@ -1,10 +1,9 @@
 /**
- * Coverage for AppBar.tsx/.css/NavIcons.tsx (ticket #166,
- * docs/ui-audit-2026-08-31.md F17, plus the ticket-79 follow-up that
- * gave the bar its icons and made it the app's glassiest surface). Same
- * renderToStaticMarkup pattern as Surface.test.ts, wrapped in
- * react-router's <MemoryRouter> because <NavLink> needs a router context
- * to render — react-router is an existing dependency, not a new one.
+ * Coverage for AppBar.tsx/.css/NavIcons.tsx — ticket #275's Reddit-style
+ * glass nav rewrite (docs/ui-nav-spec-2026-09-25.md), replacing the
+ * previous #202 dome/bump coverage entirely. Same renderToStaticMarkup
+ * pattern the file already used, wrapped in react-router's
+ * <MemoryRouter> because <NavLink>/useLocation need a router context.
  */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -13,10 +12,11 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
-import AppBar from './AppBar.tsx'
+import AppBar, { NAV_COLLAPSE_THRESHOLD_PX, NAV_COLLAPSE_TOP_GUARD_PX, nextNavScrollState } from './AppBar.tsx'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const css = readFileSync(path.join(here, 'AppBar.css'), 'utf8')
+const tsx = readFileSync(path.join(here, 'AppBar.tsx'), 'utf8')
 const iconsSource = readFileSync(path.join(here, 'NavIcons.tsx'), 'utf8')
 
 function renderAt(pathname: string): string {
@@ -25,23 +25,22 @@ function renderAt(pathname: string): string {
   )
 }
 
-describe('F17 — three top-level destinations, reachable from any route', () => {
-  it('renders links to /, /chips and /decisions with the audit\'s exact labels', () => {
+describe('ticket #275 — four equal destinations, one active treatment', () => {
+  it('renders links to /, /reasoning, /chips and /decisions with the spec\'s exact labels, in that order', () => {
     const html = renderAt('/')
-    // #194, section C — "This week" renamed to "Home"; the label lives on
-    // the `--home` item now, not necessarily first in DOM order (Home is
-    // last, so its own CSS rule can win the cascade tie for the circular
-    // shape — see AppBar.tsx's own comment).
-    expect(html).toMatch(/href="\/"[\s\S]*?<span class="app-bar__label">Home<\/span>/)
-    expect(html).toMatch(/href="\/chips"[\s\S]*?<span class="app-bar__label">Chips<\/span>/)
-    expect(html).toMatch(/href="\/decisions"[\s\S]*?<span class="app-bar__label">Record<\/span>/)
+    const order = ['href="/"', 'Home', 'href="/reasoning"', 'Why', 'href="/chips"', 'Chips', 'href="/decisions"', 'Record']
+    let cursor = -1
+    for (const token of order) {
+      const idx = html.indexOf(token, cursor + 1)
+      expect(idx).toBeGreaterThan(cursor)
+      cursor = idx
+    }
   })
 
-  it('does not link the three contextual routes (they stay reached from the surfaces they belong to)', () => {
+  it('does not link the two remaining contextual routes (unchanged — reached from the surfaces they belong to)', () => {
     const html = renderAt('/')
-    expect(html).not.toMatch(/href="\/reasoning"/)
-    expect(html).not.toMatch(/href="\/override"/)
     expect(html).not.toMatch(/href="\/squad"/)
+    expect(html).not.toMatch(/href="\/override"/)
   })
 
   it('marks the current route with aria-current="page" (NavLink\'s own default), which AppBar.css keys off', () => {
@@ -51,42 +50,49 @@ describe('F17 — three top-level destinations, reachable from any route', () =>
     expect(css).toMatch(/\.app-bar__item\[aria-current='page'\]/)
   })
 
-  it('the root link uses `end` so it is not active on every other route (NavLink\'s prefix-matching default)', () => {
+  it('the root link uses `end` so it is not active on every other route', () => {
     const html = renderAt('/chips')
-    // If `end` were missing, "/" would prefix-match "/chips" and both
-    // links would carry aria-current="page" simultaneously.
     const currentCount = (html.match(/aria-current="page"/g) ?? []).length
     expect(currentCount).toBe(1)
   })
+
+  it('one active rule applies identically to every tab — no per-tab special case (the old Home hump is gone)', () => {
+    // Historical comments legitimately mention the removed dome/mask by
+    // name (what this file replaces); checked for actual selectors/
+    // properties, not the bare word, so those comments don't self-trip.
+    expect(css).not.toMatch(/app-bar__item--home/)
+    expect(css).not.toMatch(/app-bar__dome-rim/)
+    expect(css).not.toMatch(/mask-image:/)
+    expect(css).not.toMatch(/mask-composite:/)
+  })
 })
 
-describe('every 44px minimum tap target and no hand-typed cubic-bezier', () => {
+describe('every 44px minimum tap target, including the collapsed circle', () => {
   it('.app-bar__item has a 44px min-height', () => {
     expect(css).toMatch(/\.app-bar__item\s*\{[^}]*min-height:\s*44px/)
   })
 
-  it('uses --ease-out / --dur-press tokens, not a re-typed cubic-bezier', () => {
-    expect(css).toMatch(/var\(--ease-out\)/)
-    expect(css).toMatch(/var\(--dur-press\)/)
-    expect(css).not.toMatch(/cubic-bezier\(/)
+  it('the collapsed button is exactly --nav-bar-height square', () => {
+    const rule = css.match(/\.app-bar__collapsed\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/width:\s*var\(--nav-bar-height\)/)
+    expect(rule).toMatch(/height:\s*var\(--nav-bar-height\)/)
   })
 
-  it('respects prefers-reduced-motion by dropping the press scale, keeping colour feedback', () => {
-    expect(css).toMatch(/prefers-reduced-motion:\s*reduce/)
+  it('--nav-bar-height is at least 44px', () => {
+    const indexCss = readFileSync(path.join(here, '..', 'index.css'), 'utf8')
+    const match = indexCss.match(/--nav-bar-height:\s*([\d.]+)rem/)
+    expect(match).not.toBeNull()
+    expect(Number(match![1]) * 16).toBeGreaterThanOrEqual(44)
   })
 })
 
-describe('ticket-79 follow-up, correction B — the bar has icons, drawn in this repo', () => {
-  it('every destination renders one inline SVG glyph alongside its label, plus the dome-rim arc (ticket #202, section C)', () => {
+describe('ticket #275 — WhyIcon, drawn in this repo, same rules as the other three', () => {
+  it('every destination renders one inline SVG glyph alongside its label, plus one more in the collapsed button', () => {
     const html = renderAt('/')
     const iconCount = (html.match(/<svg [^>]*class="app-bar__icon"/g) ?? []).length
-    expect(iconCount).toBe(3)
-    // Ticket #202 adds a fourth, non-icon SVG — the dome's own visible
-    // rim, the one curve a plain CSS `border` cannot draw around the
-    // masked union shape (see AppBar.css's own header comment).
-    const totalSvgCount = (html.match(/<svg /g) ?? []).length
-    expect(totalSvgCount).toBe(4)
-    expect(html).toMatch(/<svg [^>]*class="app-bar__dome-rim"/)
+    // Four tabs + the collapsed circle's own (always-rendered, opacity-
+    // crossfaded) icon — see AppBar.tsx's .app-bar__collapsed button.
+    expect(iconCount).toBe(5)
   })
 
   it('no icon library, no new dependency — NavIcons.tsx imports nothing but react types', () => {
@@ -95,171 +101,213 @@ describe('ticket-79 follow-up, correction B — the bar has icons, drawn in this
   })
 
   it('no emoji anywhere in the bar or the icon set', () => {
-    // Any codepoint carrying the Emoji_Presentation property, plus the
-    // variation-selector-16 that forces emoji rendering on the rest.
-    const emoji = /\p{Extended_Pictographic}|\uFE0F/u
+    const emoji = /\p{Extended_Pictographic}|️/u
     expect(emoji.test(iconsSource)).toBe(false)
-    expect(emoji.test(readFileSync(path.join(here, 'AppBar.tsx'), 'utf8'))).toBe(false)
+    expect(emoji.test(tsx)).toBe(false)
     expect(emoji.test(renderAt('/'))).toBe(false)
   })
 
-  it('one grid, one stroke weight, stroke not fill, currentColor', () => {
-    // Every glyph shares the same viewBox and the same stroke setup...
+  it('WhyIcon shares the one grid, stroke-not-fill, currentColor rules every other glyph follows', () => {
     const viewBoxes = iconsSource.match(/viewBox="[^"]*"/g) ?? []
     expect(new Set(viewBoxes)).toEqual(new Set(['viewBox="0 0 24 24"']))
-    expect(iconsSource).toMatch(/fill="none"/)
-    expect(iconsSource).toMatch(/stroke="currentColor"/)
-    // ...and no glyph fills a shape or hard-codes a colour of its own.
     expect(iconsSource).not.toMatch(/fill="(?!none)/)
-    // Checked against the rendered markup, where a prose "#166" cannot
-    // be mistaken for a colour: nothing in the bar names one at all.
     const rendered = renderAt('/')
     expect(rendered).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
     expect(rendered).not.toMatch(/rgba?\(/)
-    // ...the weight itself lives in CSS so the active state can change it.
-    expect(rendered).not.toMatch(/stroke-width/)
-    expect(css).toMatch(/\.app-bar__icon\s*\{[^}]*stroke-width:\s*var\(--nav-stroke\)/)
+    expect(rendered).not.toMatch(/stroke-width/) // weight lives in CSS, not inline
   })
 
-  it('every destination keeps an accessible name; the icons (and the dome-rim arc) are decorative', () => {
+  it('every destination keeps an accessible name; every icon is decorative', () => {
     const html = renderAt('/')
-    for (const label of ['Home', 'Chips', 'Record']) {
+    for (const label of ['Home', 'Why', 'Chips', 'Record']) {
       expect(html).toContain(`>${label}</span>`)
     }
-    // Three icon glyphs plus the dome-rim arc, all aria-hidden — the
-    // name never comes from a glyph.
-    const hidden = (html.match(/<svg [^>]*aria-hidden="true"/g) ?? []).length
-    expect(hidden).toBe(4)
-    expect(html).toMatch(/<svg [^>]*focusable="false"/)
-  })
-
-  it('the active destination is distinguishable without colour', () => {
-    // Stroke weight and label weight both change, independently of the
-    // cyan pill and the --text-* colour swap.
-    expect(css).toMatch(
-      /\.app-bar__item\[aria-current='page'\] \.app-bar__icon\s*\{[^}]*stroke-width:\s*var\(--nav-stroke-active\)/
-    )
-    expect(css).toMatch(
-      /\.app-bar__item\[aria-current='page'\] \.app-bar__label\s*\{[^}]*font-weight:\s*620/
-    )
-  })
-
-  it('adds no keyframe/animation motion — only the press feedback the foundations already define, plus static positioning offsets', () => {
-    expect(css).not.toMatch(/@keyframes|animation:/)
-    const transforms = css.match(/transform:\s*[^;]+;/g) ?? []
-    // Ticket #202, section C — `.app-bar`, `.app-bar__item--home` and
-    // `.app-bar__dome-rim` all centre themselves with the same
-    // `translateX(-50%)` now (the old Home-specific `translate(-50%,
-    // -58%)` is gone along with Home's own independent box — see this
-    // file's header comment and AppBar.css's).
-    expect(transforms.sort()).toEqual([
-      'transform: none;',
-      'transform: scale(0.96);',
-      'transform: translateX(-50%);',
-      'transform: translateX(-50%);',
-      'transform: translateX(-50%);',
-    ])
+    // Whole opening tags, not two independently-ordered substring checks —
+    // Glyph (NavIcons.tsx) sets aria-hidden before spreading `className`
+    // in, so it renders BEFORE `class=` in the tag, not after.
+    const iconTags = html.match(/<svg [^>]*>/g) ?? []
+    const iconOnlyTags = iconTags.filter((tag) => tag.includes('class="app-bar__icon"'))
+    expect(iconOnlyTags.length).toBe(5) // four tabs + the collapsed button's own
+    expect(iconOnlyTags.every((tag) => tag.includes('aria-hidden="true"'))).toBe(true)
   })
 })
 
-describe('#202, section C — one continuous piece of glass: a CSS mask union, not two overlapping bordered shapes', () => {
-  it('.app-bar itself carries the union mask (a pill-rect layer unioned with a fixed-radius circle layer)', () => {
-    const rule = css.match(/\.app-bar\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(rule).toMatch(/mask-image:/)
-    expect(rule).toMatch(/-webkit-mask-image:/)
-    expect(rule).toMatch(/radial-gradient\(\s*circle calc\(var\(--nav-home-size\) \/ 2\)/)
-    expect(rule).toMatch(/mask-composite:\s*add/)
+describe('ticket #275 — "glow, not frost": light blur, real refraction where supported, faux fallback otherwise', () => {
+  it('the shape carries a bright rim, a specular sheen and an outer glow, all via tokens (no hand-typed colour)', () => {
+    const shapeRule = css.match(/\.app-bar__shape\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(shapeRule).toMatch(/border:\s*1px solid var\(--nav-glass-rim\)/)
+    expect(shapeRule).toMatch(/border-top-color:\s*var\(--nav-glass-rim-bright\)/)
+    expect(shapeRule).toMatch(/var\(--nav-glass-glow\)/)
+    expect(css).toMatch(/\.app-bar__sheen\s*\{[^}]*background:\s*linear-gradient/)
   })
 
-  it('the mask box spans the full union bounding height — bump overshoot plus the pill\'s own height', () => {
-    const rule = css.match(/\.app-bar\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(rule).toMatch(/height:\s*calc\(var\(--nav-bump-overshoot\)\s*\+\s*var\(--nav-bar-height\)\)/)
-  })
-
-  it('Home is no longer its own bordered, backdrop-filtered box — it carries neither a background nor a backdrop-filter of its own', () => {
-    const rule = css.match(/\.app-bar__item--home\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(rule).toMatch(/position:\s*absolute/)
-    expect(rule).toMatch(/border-radius:\s*50%/)
-    expect(rule).toMatch(/width:\s*var\(--nav-home-size\)/)
-    expect(rule).toMatch(/height:\s*var\(--nav-home-size\)/)
-    expect(rule).not.toMatch(/background:/)
-    expect(rule).not.toMatch(/backdrop-filter:/)
-    expect(rule).not.toMatch(/border:/)
-  })
-
-  it('the dome-rim arc\'s path data is derived from the same two tokens the mask uses, not a hand-typed guess', () => {
-    const tsx = readFileSync(path.join(here, 'AppBar.tsx'), 'utf8')
-    expect(tsx).toMatch(/NAV_HOME_SIZE_PX\s*=\s*3\.75\s*\*\s*16/)
-    expect(tsx).toMatch(/NAV_BUMP_OVERSHOOT_PX\s*=\s*0\.9375\s*\*\s*16/)
-    expect(tsx).toMatch(/DOME_ARC_PATH/)
-    expect(tsx).toMatch(/large-arc-flag 0/) // documented, not just coded
-  })
-
-  it('a spacer reserves the circle\'s own footprint so the side items never collide with it', () => {
-    const rule = css.match(/\.app-bar__home-spacer\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(rule).toMatch(/width:\s*var\(--nav-home-size\)/)
-  })
-
-  it('one sharp type register across the whole bar — smaller/heavier/tighter, not layered with uppercase+wide-tracking too', () => {
-    const rule = css.match(/\.app-bar__label\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(rule).not.toMatch(/text-transform:\s*uppercase/)
-    expect(rule).toMatch(/font-weight:\s*650/)
-    expect(rule).toMatch(/letter-spacing:\s*-0\.006em/)
-  })
-})
-
-describe('#202, section C — the active destination carries a cyan fill and an outer bloom', () => {
-  it('the active item has a box-shadow the inactive items do not', () => {
-    const activeRule = css.match(/\.app-bar__item\[aria-current='page'\]\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(activeRule).toMatch(/box-shadow:\s*var\(--nav-active-glow\)/)
-    const inactiveRule = css.match(/\.app-bar__item\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(inactiveRule).not.toMatch(/box-shadow:\s*var\(--nav-active-glow\)/)
-  })
-
-  it('the active item takes the cyan accent (not just a neutral primary-text swap)', () => {
-    const activeRule = css.match(/\.app-bar__item\[aria-current='page'\]\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(activeRule).toMatch(/color:\s*var\(--accent-cyan\)/)
-    expect(activeRule).toMatch(/background:\s*var\(--accent-cyan-dim\)/)
-  })
-
-  it('the glow token is defined once, in index.css, not re-typed here', () => {
+  it('the refraction tier is lighter blur than the app\'s own panel blur — "light blur at most", never the old bar\'s heavy 28px', () => {
     const indexCss = readFileSync(path.join(here, '..', 'index.css'), 'utf8')
-    expect(indexCss).toMatch(/--nav-active-glow:/)
-    expect(css).not.toMatch(/--nav-active-glow:\s*0 0/) // not redefined locally
+    const px = (name: string) => Number(indexCss.match(new RegExp(`--${name}:\\s*(\\d+)px`))?.[1])
+    expect(px('nav-glass-blur')).toBeLessThan(px('panel-blur'))
+    expect(px('nav-glass-blur-faux')).toBeLessThan(px('material-bar-blur')) // still under the old "glassiest surface" ceiling
   })
 
-  it('applies identically to Home as to the two side items — no Home-specific override survives (the old "protect --material-bar" workaround is gone along with Home\'s own background)', () => {
-    expect(css).not.toMatch(/\.app-bar__item--home\[aria-current='page'\]/)
+  it('the refraction tier uses backdrop-filter: url(#…) with a real feDisplacementMap filter', () => {
+    const rule = css.match(/\.app-bar__shape--refract\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/backdrop-filter:[^;]*url\(#nav-glass-refraction\)/)
+    expect(tsx).toMatch(/feDisplacementMap/)
+    expect(tsx).toMatch(/id="nav-glass-refraction"/)
+  })
+
+  it('the faux tier (no url() support) uses heavier blur/saturation instead, per the nav spec\'s own instruction', () => {
+    const rule = css.match(/\.app-bar__shape--faux\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/backdrop-filter:\s*blur\(var\(--nav-glass-blur-faux\)\)\s*saturate\(var\(--nav-glass-saturate-faux\)\)/)
+  })
+
+  it('support is feature-detected with CSS.supports, not a user-agent sniff, and never throws where CSS is undefined (this test file\'s own Node environment)', () => {
+    expect(tsx).toMatch(/CSS\.supports/)
+    expect(tsx).not.toMatch(/navigator\.userAgent/)
+    // The module import above already exercised this at load time under
+    // vitest's Node environment (no `CSS` global) without throwing —
+    // this assertion documents that guarantee explicitly.
+    expect(typeof CSS).toBe('undefined')
   })
 })
 
-describe('#202, section C — the icon strokes are heavier than before', () => {
-  it('the resting and active stroke weights are both raised, one consistent increment apart', () => {
-    const barRule = css.match(/\.app-bar\s*\{[^}]*\}/)?.[0] ?? ''
-    expect(barRule).toMatch(/--nav-stroke:\s*1\.75/)
-    expect(barRule).toMatch(/--nav-stroke-active:\s*2\.25/)
+describe('ticket #275 — the tab-switch slide, stretch and icon bounce are transform/opacity only', () => {
+  it('the active pill slides via a CSS transition on transform, at the spring easing token', () => {
+    const rule = css.match(/\.app-bar__active-pill\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/transform:\s*translateX\(calc\(var\(--nav-active-index, 0\) \* 100%\)\)/)
+    expect(rule).toMatch(/transition:\s*transform var\(--dur-spring\) var\(--ease-spring\)/)
+  })
+
+  it('four equal-width tabs make the slide pure CSS — 25% width, no runtime measurement of tab positions', () => {
+    expect(css).toMatch(/\.app-bar__active-pill\s*\{[^}]*width:\s*25%/)
+    expect(css).toMatch(/\.app-bar__item\s*\{[^}]*flex:\s*1 1 0/)
+    expect(tsx).not.toMatch(/getBoundingClientRect/)
+  })
+
+  it('the stretch and the bounce are separate elements, each with its own @keyframes, both transform-only', () => {
+    expect(css).toMatch(/@keyframes nav-pill-stretch\s*\{[\s\S]*?scaleX/)
+    expect(css).toMatch(/@keyframes nav-icon-bounce\s*\{[\s\S]*?scale\(/)
+    // Sliced by position (start-of-rule to start-of-next-rule) rather than
+    // a brace-matching regex — a @keyframes block nests one `}` per stop,
+    // which a lazy `[\s\S]*?\}` would stop at prematurely.
+    const stretchStart = css.indexOf('@keyframes nav-pill-stretch')
+    const bounceStart = css.indexOf('@keyframes nav-icon-bounce')
+    const afterBounceStart = css.indexOf('/* ---- The collapsed circle', bounceStart)
+    expect(stretchStart).toBeGreaterThan(-1)
+    expect(bounceStart).toBeGreaterThan(stretchStart)
+    expect(afterBounceStart).toBeGreaterThan(bounceStart)
+    const stretchBlock = css.slice(stretchStart, bounceStart)
+    const bounceBlock = css.slice(bounceStart, afterBounceStart)
+    for (const block of [stretchBlock, bounceBlock]) {
+      const declarations = block.match(/^\s+[a-z-]+:/gm) ?? []
+      expect(new Set(declarations.map((d) => d.trim()))).toEqual(new Set(['transform:']))
+    }
+  })
+
+  it('the keyframes are retriggered via a reflow, not a remount, and only on a genuine tab change', () => {
+    expect(tsx).toMatch(/classList\.remove\('app-bar__pulse'\)/)
+    expect(tsx).toMatch(/void el\.offsetWidth/)
+    expect(tsx).toMatch(/classList\.add\('app-bar__pulse'\)/)
+    expect(tsx).toMatch(/prevDisplayIndexRef\.current === displayIndex\) return/)
+  })
+
+  it('no hand-typed cubic-bezier survives outside the two named easing tokens', () => {
+    expect(css).not.toMatch(/cubic-bezier\(/)
   })
 })
 
-describe('ticket-79 follow-up, correction A — the bar is the glassiest surface here', () => {
-  it('the bar carries the strongest backdrop blur in the app — every panel tier is strictly behind it (#194, section B)', () => {
-    expect(css).toMatch(/backdrop-filter:\s*blur\(var\(--material-bar-blur\)\)/)
-    const surfaceCss = readFileSync(path.join(here, 'Surface.css'), 'utf8')
-    // Panels carry blur again now (#194) — the bar's distinction is no
-    // longer "the only one with blur" but "the strongest one," asserted
-    // numerically in index.css.test.ts's "nav bar is the glassiest
-    // surface" test.
-    expect(surfaceCss).toMatch(/backdrop-filter:\s*blur\(var\(--panel-blur\)\)/)
+describe('ticket #275 — collapse on scroll: transform/opacity only, anchored at the shape\'s own left edge', () => {
+  it('the shape collapses via scaleX from a measured ratio, transform-origin: left — never width/border-radius', () => {
+    const rule = css.match(/\.app-bar__shape\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(rule).toMatch(/transform-origin:\s*left center/)
+    expect(rule).toMatch(/transition:\s*transform var\(--dur-collapse\) var\(--ease-out\)/)
+    expect(rule).not.toMatch(/width:/)
+    expect(rule).not.toMatch(/border-radius:\s*\d/) // it's `calc(var(--nav-bar-height) / 2)`, a constant throughout — not itself animated
+    const collapsedRule = css.match(/\[data-collapsed='true'\] \.app-bar__shape\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(collapsedRule).toMatch(/transform:\s*scaleX\(var\(--nav-collapse-scale/)
   })
 
-  it('the scrim no longer erases the one backdrop worth blurring', () => {
-    // A scrim that reaches solid --surface-0 above the bar's top edge
-    // leaves the bar as glass over a flat field — the F13 defect again.
-    expect(css).toMatch(/\.app-bar__scrim\s*\{[^}]*opacity:\s*var\(--scrim-strength\)/)
+  it('the collapse ratio is measured with ResizeObserver against the bar\'s own diameter token, not hand-typed', () => {
+    expect(tsx).toMatch(/ResizeObserver/)
+    expect(tsx).toMatch(/NAV_CIRCLE_DIAMETER_PX \/ width/)
+    expect(tsx).toMatch(/NAV_CIRCLE_DIAMETER_PX = 3\.5 \* 16/) // mirrors --nav-bar-height, index.css
   })
 
-  it('the bar saturates harder and catches more light than any panel', () => {
-    expect(css).toMatch(/saturate\(var\(--material-bar-saturate\)\)/)
-    expect(css).toMatch(/border-top-color:\s*var\(--material-edge-3\)/)
+  it('the row and the collapsed button crossfade via opacity, never a hide/show toggle of the shape itself', () => {
+    const rowRule = css.match(/\.app-bar__row\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rowRule).toMatch(/opacity:\s*1/)
+    const collapsedButtonRule = css.match(/(?<!\[data-collapsed='true'\] )\.app-bar__collapsed\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(collapsedButtonRule).toMatch(/opacity:\s*0/)
+  })
+
+  it('tapping the collapsed circle expands the bar — a plain button, not a NavLink', () => {
+    expect(tsx).toMatch(/<button[\s\S]*?className="app-bar__collapsed"[\s\S]*?onClick=\{\(\) => setCollapsed\(false\)\}/)
+  })
+})
+
+describe('ticket #275 — the scroll-direction → collapsed/expanded pure function, with a threshold', () => {
+  it('does nothing (stays expanded) while scrolling within the top guard', () => {
+    let state = { lastY: 0, collapsed: false }
+    state = nextNavScrollState(state, 10)
+    expect(state.collapsed).toBe(false)
+    state = nextNavScrollState(state, NAV_COLLAPSE_TOP_GUARD_PX)
+    expect(state.collapsed).toBe(false)
+  })
+
+  it('collapses once downward scroll exceeds the threshold past the top guard', () => {
+    let state = { lastY: NAV_COLLAPSE_TOP_GUARD_PX + 1, collapsed: false }
+    state = nextNavScrollState(state, NAV_COLLAPSE_TOP_GUARD_PX + 1 + NAV_COLLAPSE_THRESHOLD_PX)
+    expect(state.collapsed).toBe(true)
+  })
+
+  it('does NOT collapse on a small downward move under the threshold (no flicker)', () => {
+    const start = { lastY: 200, collapsed: false }
+    const state = nextNavScrollState(start, 200 + NAV_COLLAPSE_THRESHOLD_PX - 1)
+    expect(state.collapsed).toBe(false)
+    expect(state.lastY).toBe(200) // reference point unmoved, so it can still accumulate
+  })
+
+  it('small back-and-forth jitter under the threshold never accumulates into a flip', () => {
+    let state = { lastY: 300, collapsed: false }
+    for (const y of [304, 299, 305, 298, 303]) {
+      state = nextNavScrollState(state, y)
+      expect(state.collapsed).toBe(false)
+    }
+  })
+
+  it('re-expands once upward scroll reaches the threshold, not a moment before it', () => {
+    let state = { lastY: 500, collapsed: true }
+    state = nextNavScrollState(state, 500 - NAV_COLLAPSE_THRESHOLD_PX + 1)
+    expect(state.collapsed).toBe(true) // one px short of the threshold — not yet
+    state = nextNavScrollState(state, 500 - NAV_COLLAPSE_THRESHOLD_PX)
+    expect(state.collapsed).toBe(false)
+  })
+
+  it('always re-expands near the top, regardless of prior state', () => {
+    const state = nextNavScrollState({ lastY: 900, collapsed: true }, 5)
+    expect(state.collapsed).toBe(false)
+  })
+
+  it('clamps negative (iOS rubber-band overscroll) scrollY to 0', () => {
+    const state = nextNavScrollState({ lastY: 900, collapsed: true }, -40)
+    expect(state.collapsed).toBe(false)
+    expect(state.lastY).toBe(0)
+  })
+})
+
+describe('ticket #275 — prefers-reduced-motion: instant state changes, no morph', () => {
+  it('transform-driven transitions/animations rely on the existing global rule (index.css F8) — no local transform override needed', () => {
+    expect(css).not.toMatch(/prefers-reduced-motion[\s\S]*?transform:\s*none/)
+  })
+
+  it('the collapse crossfade\'s own transition-delay is zeroed locally (delay is not covered by the global rule)', () => {
+    const block = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*\}/)?.[0] ?? ''
+    expect(block).toMatch(/\.app-bar__row,\s*\n\s*\.app-bar__collapsed\s*\{[^}]*transition-delay:\s*0s/)
+  })
+})
+
+describe('ticket #275 — route change resets the bar to expanded', () => {
+  it('resets collapsed state and the scroll reference point on every pathname change', () => {
+    expect(tsx).toMatch(/\[location\.pathname\]\)/)
+    expect(tsx).toMatch(/setCollapsed\(false\)/)
   })
 })

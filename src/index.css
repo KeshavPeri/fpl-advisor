@@ -220,8 +220,95 @@
      It is the floor that keeps the bar's own quietest label legible at
      the worst case: --text-secondary measures 4.67:1 against the bar
      with solid --text-primary content directly behind it, still
-     over WCAG AA's 4.5:1, and 7.13:1 with nothing behind it. */
+     over WCAG AA's 4.5:1, and 7.13:1 with nothing behind it.
+
+     Ticket #275 note: --material-bar / --material-bar-blur /
+     --material-bar-saturate / --scrim-strength / --nav-home-size /
+     --nav-bump-overshoot / --nav-active-glow (this block and the two
+     above) are no longer read by AppBar.css — the Reddit-style rewrite
+     replaces the dome/bump silhouette and its scrim entirely (see the
+     new nav-glass-* block below). Left defined, unchanged, rather than
+     deleted: index.css.test.ts asserts relationships between them (e.g.
+     "the nav bar is the glassiest surface"), and that file is outside
+     this ticket's scope (CLAUDE.md file list). Two other out-of-scope
+     files (MiniLeagueCard.css, VerdictCard.css) also mention
+     --nav-active-glow / --material-bar-* by name in comments only, not
+     in functional CSS, so those comments go slightly stale rather than
+     wrong-and-broken. */
   --scrim-strength: 0.7;
+
+  /* ---- Ticket #275 — the Reddit-style glass nav bar, replacing the
+     #202 dome/bump silhouette above (four equal tabs now; no raised
+     centre item, so no union mask, no scrim). "Glow, not frost"
+     (docs/ui-nav-spec-2026-09-25.md, Keshav's own words after seeing the
+     old bar): the opposite trade-off from #194/#202, which spent blur
+     and saturation to make the bar deliberately the glassiest, most
+     opaque-reading surface in the app. This bar reads as CLEAR glass —
+     light blur at most, a bright rim, a specular sheen layer
+     (.app-bar__sheen, AppBar.css) and a soft outer glow in the accent
+     colour — with real edge refraction where `backdrop-filter: url(#…)
+     feDisplacementMap` is supported (Chromium; AppBar.tsx feature-
+     detects it with CSS.supports). As far as we know iOS Safari (the
+     owner's own phone, installed PWA) does not support SVG filters in
+     backdrop-filter, so --nav-glass-*-faux is the fallback treatment:
+     heavier blur and saturation stand in for real refraction, per the
+     nav spec's own explicit instruction. Neither tier borrows the old
+     --material-bar-blur (28px) — even the faux tier stays a step under
+     it, because "glow not frost" is a floor, not just the happy path. */
+  --nav-glass-blur: 5px;
+  --nav-glass-saturate: 150%;
+  --nav-glass-blur-faux: 24px;
+  --nav-glass-saturate-faux: 200%;
+  /* The fill itself: darker/more opaque than the old --material-bar
+     (0.5 alpha at a lighter rgba(24,32,54)) even though the blur is much
+     lower — with almost no blur, the fill's own colour is what keeps
+     live content behind it (shirts, text) from reading as illegible
+     noise, now that there is no scrim doing that job any more. */
+  --nav-glass-fill: rgba(17, 23, 40, 0.46);
+  --nav-glass-rim: rgba(199, 214, 238, 0.4);
+  --nav-glass-rim-bright: rgba(255, 255, 255, 0.75);
+  --nav-glass-sheen: rgba(255, 255, 255, 0.14);
+  /* Tight bright ring plus a soft wide bloom, same "light source falloff"
+     pairing as the old --nav-active-glow — this one sits on the glass
+     shape itself (AppBar.css's .app-bar__shape), not on a single active
+     item. */
+  --nav-glass-glow: 0 0 1px 0 var(--accent-cyan-line), 0 0 30px 3px var(--accent-cyan-ambient);
+  /* The active tab's own inner pill fill — darker/more saturated than
+     the glass around it, per the nav spec's reference frames (Reddit:
+     "active tab in a darker inner pill"). */
+  --nav-pill-active-fill: rgba(94, 200, 222, 0.16);
+  /* The bar's own resting height AND the collapsed circle's diameter —
+     one token, not two, so the pill-to-circle morph (AppBar.tsx) can be
+     a pure `transform: scaleX()` with the vertical axis untouched: at
+     the exact scale circleDiameter / measuredPillWidth, a box already
+     --nav-bar-height tall with border-radius = half of that stays a
+     true circle of that same diameter, never an ellipse. Raised from
+     the old bar's 3.25rem — a uniform 4-tab row with no raised centre
+     item needs the extra height to keep icon+label comfortably past the
+     44px tap-target floor without padding it out artificially. */
+  --nav-bar-height: 3.5rem;
+  /* AppShell.css's column padding-bottom and this bar's own bottom
+     offset derive from this one number, same reasoning as the #194
+     original: bar height (3.5rem) + the bar's own --space-3 gap off the
+     safe area + one more --space-4 breathing gap above the last panel,
+     rounded up generously rather than to the pixel. Lower than the old
+     7rem — the new bar has no circle overshooting its own top edge to
+     add headroom for. */
+  --nav-bar-reserve: 6rem;
+  /* A spring-style overshoot easing, for the tab-switch slide (the pill
+     travels slightly past its target and settles back) — distinct from
+     --ease-out, which never overshoots. Used only by AppBar.css's
+     transform-only transitions/keyframes, so prefers-reduced-motion's
+     existing global rule (below, F8) already collapses it to
+     imperceptible without a local override: transform isn't in that
+     rule's allowed transition-property list, and animation-duration is
+     forced to 0.01ms regardless of easing. */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-spring: 460ms;
+  /* The pill-to-circle morph's own duration — calmer than the spring
+     above (--ease-out, no overshoot): a size change reads as premium
+     gliding open/shut, not as a bounce. */
+  --dur-collapse: 360ms;
 
   /* --panel-fill / --panel-fill-raised alias the L2/L3 materials rather
      than carrying their own values, so the component stylesheets that
@@ -310,6 +397,17 @@
      the verdict headline's new size once the follow-up ticket applies it
      (audit F30). */
   --text-headline: 550 1.5rem/1.2 var(--font-sans);
+  /* Ticket #275 — the per-screen title AppShell now renders (audit G1:
+     "no screen titles... add a real title per screen"). Deliberately its
+     own step rather than reusing --text-display: the title sits above
+     every hero figure on the screen (the verdict's points, the
+     countdown), and design-reference.md's hierarchy rule is that only
+     one thing per screen is the loudest — reusing --text-display would
+     make the title compete with whatever hero number that screen already
+     has for that role, instead of quietly introducing the screen and
+     getting out of the way as the user scrolls (see AppShell.css's
+     scroll-fade). */
+  --text-screen-title: 650 1.75rem/1.15 var(--font-sans);
   --text-display: 600 2.25rem/1.1 var(--font-sans);
   /* F10 — the one figure allowed to be larger than --text-display: the
      deadline countdown, Revolut/Weather-style (audit F21, follow-up
@@ -328,6 +426,7 @@
      letter-spacing: 0. */
   --tracking-display: -0.022em;
   --tracking-headline: -0.01em;
+  --tracking-screen-title: -0.016em;
   --tracking-title: -0.006em;
   --tracking-body: 0em;
   --tracking-label: 0.006em;

@@ -13,6 +13,19 @@
   mechanism". Ticket-79 follow-up: that is still true (the steps are
   1.175:1 and 1.240:1, --panel-border is 1.145:1), but it is now paid
   for out of the fills' colour rather than out of their translucency.
+
+  Ticket #275 (audit G2 — "two card styles [blue glass vs near-black]
+  used with no meaning. Pick one, plus one emphasis variant"): the third,
+  near-black tier (--material-1) that the three-level scale below used to
+  expose as `.surface--level-1` is gone from this file. Surface.tsx still
+  accepts `level={1}` from every existing call site (untouched — this
+  ticket cannot edit screens) and now resolves it to the SAME class as
+  level 2, so those call sites' near-black cards become the one base
+  material automatically, with no edit of their own. `--material-1`
+  itself stays defined in index.css, unused here, because two files
+  outside this ticket's scope (PlayerShirt.css, VerdictCard.css) read it
+  directly for their own specific recess treatments — unrelated to
+  Surface's own card-style system, and not this ticket's to touch.
 */
 .surface {
   position: relative;
@@ -64,21 +77,17 @@
   border-radius: var(--radius-panel-sm);
 }
 
-/* F5/F15 — three genuinely separable materials, at ONE CONSTANT FILL
-   ALPHA (0.55). Every level differs only in the fill's own colour and in
-   how much light its top edge catches; none of them differ in opacity.
-   See src/index.css for the computed contrast at every boundary
-   (verified in index.css.test.ts): L1 1.062:1 over base; L2 1.248:1 over
-   base, 1.175:1 over L1; L3 1.548:1 over base, 1.240:1 over L2. Every
-   adjacent pair is more visible than --panel-border's own contrast
-   against a panel (1.145:1) — the elevation is the most visible thing on
-   a panel, not the least. */
-.surface--level-1 {
-  background: var(--material-1);
-  border-top-color: var(--material-edge-1);
-  box-shadow: inset 0 1px 0 0 var(--material-sheen-1);
-}
-
+/* F5/F15, narrowed by #275 to two: the one base card material
+   (surface--level-2, absorbing the old level-1 near-black tier — see
+   this file's header comment) and one emphasis variant
+   (surface--level-3), both still at the ONE CONSTANT FILL ALPHA (0.55)
+   F15 established — they differ only in the fill's own colour and in how
+   much light the top edge catches, never in opacity. See src/index.css
+   for the computed contrast (verified in index.css.test.ts): L2 1.248:1
+   over base; L3 1.548:1 over base, 1.240:1 over L2 — more visible than
+   --panel-border's own contrast against a panel (1.145:1), so the
+   elevation step is still the most visible thing on a panel, not the
+   least. */
 .surface--level-2 {
   background: var(--material-2);
   border-top-color: var(--material-edge-2);

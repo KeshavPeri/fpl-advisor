@@ -1,10 +1,11 @@
 /**
  * Coverage for Surface.tsx/.css's ticket #166 changes
- * (docs/ui-audit-2026-08-31.md F5/F11/F12/F15/F16). Rendered-output
- * assertions use react-dom/server's renderToStaticMarkup from a plain
- * .ts file, the same pattern VerdictCard.test.ts established, so
- * vitest.config.ts's `src/**\/*.test.ts`-only include glob doesn't need
- * to change.
+ * (docs/ui-audit-2026-08-31.md F5/F11/F12/F15/F16), plus ticket #275's
+ * narrowing to one card material plus one emphasis variant (audit G2).
+ * Rendered-output assertions use react-dom/server's renderToStaticMarkup
+ * from a plain .ts file, the same pattern VerdictCard.test.ts
+ * established, so vitest.config.ts's `src/**\/*.test.ts`-only include
+ * glob doesn't need to change.
  */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -30,24 +31,53 @@ describe('F11 — surface-arrive is gone', () => {
   })
 })
 
-describe('F15 — level/raised resolve to genuinely distinct classes', () => {
-  it('defaults to level 2', () => {
+describe('ticket #275 (audit G2) — Surface exposes one card material plus one emphasis variant', () => {
+  it('defaults to the base material (surface--level-2)', () => {
     const html = renderToStaticMarkup(createElement(Surface, {}, 'x'))
     expect(html).toMatch(/class="surface surface--level-2"/)
   })
 
-  it('raised (the legacy prop every existing call site still passes) resolves to level 3, not a no-op', () => {
+  it('raised (the legacy prop every existing call site still passes) resolves to the emphasis variant, not a no-op', () => {
     const html = renderToStaticMarkup(createElement(Surface, { raised: true }, 'x'))
     expect(html).toMatch(/class="surface surface--level-3"/)
   })
 
-  it('an explicit level overrides raised', () => {
-    const html = renderToStaticMarkup(createElement(Surface, { raised: true, level: 1 }, 'x'))
-    expect(html).toMatch(/class="surface surface--level-1"/)
+  it('level={1} (every existing call site\'s own near-black recess prop, e.g. DeadlineCountdown/ChipsScreen/ReasoningScreen) now renders the SAME class as level 2 — the near-black card style is gone, with no edit to any of those files', () => {
+    const html = renderToStaticMarkup(createElement(Surface, { level: 1 }, 'x'))
+    expect(html).toMatch(/class="surface surface--level-2"/)
   })
 
-  it('each level class maps to a distinct --material-* background in Surface.css', () => {
-    for (const level of [1, 2, 3]) {
+  it('level={2} renders the same base class as level 1 — they are visually one material now', () => {
+    const html1 = renderToStaticMarkup(createElement(Surface, { level: 1 }, 'x'))
+    const html2 = renderToStaticMarkup(createElement(Surface, { level: 2 }, 'x'))
+    expect(html1).toBe(html2)
+  })
+
+  it('an explicit level={3} overrides raised, and still resolves to the emphasis variant', () => {
+    const html = renderToStaticMarkup(createElement(Surface, { raised: false, level: 3 }, 'x'))
+    expect(html).toMatch(/class="surface surface--level-3"/)
+  })
+
+  it('only two visual tiers exist in the rendered output across every level value 1–3', () => {
+    const classes = [1, 2, 3].map((level) => {
+      const html = renderToStaticMarkup(createElement(Surface, { level: level as 1 | 2 | 3 }, 'x'))
+      return html.match(/class="surface (surface--level-\d)"/)?.[1]
+    })
+    expect(new Set(classes)).toEqual(new Set(['surface--level-2', 'surface--level-3']))
+  })
+
+  it('the near-black surface--level-1 rule no longer exists in Surface.css — --material-1 is not referenced by any actual declaration', () => {
+    // Checked as a real selector/declaration, not the bare token name —
+    // this file's own header comment legitimately names both in prose,
+    // explaining what was removed and why.
+    expect(css).not.toMatch(/\.surface--level-1\s*\{/)
+    expect(css).not.toMatch(/:\s*var\(--material-1\)/)
+    expect(css).not.toMatch(/:\s*var\(--material-edge-1\)/)
+    expect(css).not.toMatch(/:\s*var\(--material-sheen-1\)/)
+  })
+
+  it('the remaining two level classes each map to a distinct --material-* background in Surface.css', () => {
+    for (const level of [2, 3]) {
       expect(css).toMatch(new RegExp(`\\.surface--level-${level}\\s*\\{[^}]*background:\\s*var\\(--material-${level}\\)`))
     }
   })
@@ -97,8 +127,8 @@ describe('ticket-194 — panel blur is restored, now that the backdrop has real 
     expect(css).toMatch(/saturate\(var\(--panel-saturate\)\)/)
   })
 
-  it('each level takes its own light-catching top edge and sheen — the non-alpha elevation mechanism', () => {
-    for (const level of [1, 2, 3]) {
+  it('each remaining level takes its own light-catching top edge and sheen — the non-alpha elevation mechanism', () => {
+    for (const level of [2, 3]) {
       const rule = new RegExp(
         `\\.surface--level-${level}\\s*\\{[^}]*border-top-color:\\s*var\\(--material-edge-${level}\\)[^}]*` +
           `box-shadow:\\s*inset 0 1px 0 0 var\\(--material-sheen-${level}\\)`

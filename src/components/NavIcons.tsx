@@ -108,3 +108,27 @@ export function RecordIcon(props: IconProps) {
     </Glyph>
   )
 }
+
+/**
+ * "Why" (`/reasoning`) — ticket #275, the fourth tab added by the Reddit-
+ * style nav rewrite (docs/ui-nav-spec-2026-09-25.md). A circle holding a
+ * question mark: the plainest conventional glyph for "why", matching the
+ * other three icons' own restraint (a calendar for a bounded week, a
+ * stack for a finite held-in-reserve set, a log for an append-only
+ * ledger) rather than reaching for something that only reads once you
+ * already know what it means. A lightbulb or a chat bubble were both
+ * considered and rejected — a bulb reads as "idea/tip" more than "why
+ * this decision", and design-reference.md's "no chat bubbles, no AI
+ * framing" rule is specifically about not presenting the model's output
+ * as a conversation, which a nav icon for a literal, permanent screen
+ * destination would risk evoking for no gain over the simpler mark.
+ */
+export function WhyIcon(props: IconProps) {
+  return (
+    <Glyph {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M9.5 9.6a2.75 2.75 0 0 1 5.25 1.15c0 1.85-2.75 2.1-2.75 3.45" />
+      <path d="M12 17.15h.01" />
+    </Glyph>
+  )
+}

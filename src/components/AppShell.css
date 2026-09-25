@@ -212,6 +212,28 @@
   gap: var(--shell-gap, var(--space-6));
 }
 
+/* Ticket #275 — the per-screen title (audit G1), rendered here from
+   AppShell.tsx's ROUTE_TITLES map rather than by each screen. Its own
+   type step (--text-screen-title, index.css), not --text-display — see
+   that token's own comment for why: the title must not compete with
+   whatever hero figure the screen already has for "the loudest thing on
+   screen" (design-reference.md).
+
+   `will-change: transform, opacity` — AppShell.tsx's scroll handler
+   writes both every frame past the first scroll event, transform/opacity
+   only per the nav spec's own 60fps rule (which this shares, even though
+   it isn't part of the nav bar itself). `transform-origin: left top`
+   because the shrink must read as the title settling back toward its own
+   top-left corner (where it started), not toward its centre, which would
+   visibly drift it sideways as it scales down. */
+.app-shell__title {
+  font: var(--text-screen-title);
+  letter-spacing: var(--tracking-screen-title);
+  color: var(--text-primary);
+  transform-origin: left top;
+  will-change: transform, opacity;
+}
+
 /* F20 — lets a child cancel the column's own horizontal padding and
    safe-area inset, reaching the viewport edge. Nothing in this ticket's
    scope consumes it yet; the pitch (audit F25, follow-up ticket) is the
