@@ -20,6 +20,19 @@ what makes the run-1 parity test (build_decision_frame == build_training_frame a
 construction rather than by coincidence.
 
 Signatures below are FROZEN (docs/model-diagnosis-2026-09-24.md §8) — later tickets only import.
+
+Ticket #264 (run 2): market-odds features. When `odds` (the `fpl_odds.history.load_odds_history()`
+contract frame) is given and `USE_ODDS` is True, four columns are joined per row — `lambda_for`,
+`lambda_against`, `p_win`, `p_cs = exp(-lambda_against)`, computed from the row's OWN side of its
+own fixture. The join key is (season, home_code, away_code): each ordered pairing happens once a
+season in the Premier League, so no dates are needed. Home/away are derived from the row's own
+`team_code`/`opp_team_code`/`was_home` (>=0.5 counts as home), never read off the odds frame.
+NaN when there is no matching fixture in `odds`, or when the row is not a single fixture
+(`nfix != 1` — a blank or double gameweek row has no single (home_code, away_code) to join on).
+When the same (season, home_code, away_code) pairing has rows from more than one odds source,
+`football-data` wins (matches the priority `history.py`'s own docstring already assumes for the
+live path). Same join, same code path, for `build_training_frame` and `build_decision_frame` —
+no second implementation to drift.
 """
 from __future__ import annotations
 
@@ -28,6 +41,17 @@ import pandas as pd
 
 SEASON_ORDER = ['2022-23', '2023-24', '2024-25', '2025-26', '2026-27']
 SEASON_INDEX = {s: i for i, s in enumerate(SEASON_ORDER)}
+
+# Ticket #264: kept True after the offline gate passed (see model/reports/eval-latest.md and
+# model/README.md) -- captain avg points, the gate that matters most for this feature, improved
+# well past the +0.30 threshold. Flip to False (and re-run the gate) if a later run regresses it.
+USE_ODDS = True
+
+_ODDS_FEATURES = ['lambda_for', 'lambda_against', 'p_win', 'p_cs']
+# Source priority when the same (season, home_code, away_code) pairing appears more than once in
+# `odds` -- football-data (the historical CSVs, ticket #261) wins over the-odds-api (the live
+# feed, a later ticket). Any other/unknown source sorts after both.
+_ODDS_SOURCE_PRIORITY = {'football-data': 0, 'the-odds-api': 1}
 
 # Base per-gameweek stats rolled over several windows (docs/model-diagnosis-2026-09-24.md §4a).
 _STAT_COLS = [
@@ -133,11 +157,65 @@ FEATURES: list[str] = (
     + _team_feature_names()
     + _CONTEXT
     + _MARKET
+    + (_ODDS_FEATURES if USE_ODDS else [])
 )
 
 
-def _finalize(g: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+def _add_odds_features(g: pd.DataFrame, odds: pd.DataFrame | None) -> pd.DataFrame:
+    """Join `lambda_for`, `lambda_against`, `p_win`, `p_cs` onto `g` from `odds` (the
+    `fpl_odds.history.load_odds_history()` contract frame). See the module docstring for the
+    join key and the home/away and NaN rules. `g` must already carry `season`, `team_code`,
+    `opp_team_code`, `was_home`, `nfix` (i.e. this runs after `_prep`, before the assert against
+    `FEATURES`)."""
+    g = g.copy()
+    if odds is None or odds.empty:
+        for col in _ODDS_FEATURES:
+            g[col] = np.nan
+        return g
+
+    odds_slim = odds[['season', 'home_code', 'away_code', 'p_home', 'p_away', 'lambda_home', 'lambda_away', 'source']].copy()
+    odds_slim['_priority'] = odds_slim['source'].map(_ODDS_SOURCE_PRIORITY).fillna(99)
+    odds_slim = (
+        odds_slim.sort_values('_priority')
+        .drop_duplicates(subset=['season', 'home_code', 'away_code'], keep='first')
+        .drop(columns=['_priority', 'source'])
+    )
+    # Codes are small integers but may carry NaN on either side (blank-GW rows have no
+    # opp_team_code); cast both sides to float so the merge key type always matches.
+    for col in ('home_code', 'away_code'):
+        odds_slim[col] = pd.to_numeric(odds_slim[col], errors='coerce')
+
+    is_home = pd.to_numeric(g['was_home'], errors='coerce') >= 0.5
+    team_code = pd.to_numeric(g['team_code'], errors='coerce')
+    opp_team_code = pd.to_numeric(g['opp_team_code'], errors='coerce')
+    join_home_code = np.where(is_home, team_code, opp_team_code)
+    join_away_code = np.where(is_home, opp_team_code, team_code)
+
+    key = pd.DataFrame({
+        'season': g['season'].to_numpy(),
+        'home_code': join_home_code,
+        'away_code': join_away_code,
+    }, index=g.index)
+    merged = key.merge(odds_slim, on=['season', 'home_code', 'away_code'], how='left')
+    merged.index = g.index
+
+    lambda_for = np.where(is_home, merged['lambda_home'], merged['lambda_away'])
+    lambda_against = np.where(is_home, merged['lambda_away'], merged['lambda_home'])
+    p_win = np.where(is_home, merged['p_home'], merged['p_away'])
+
+    single_fixture = pd.to_numeric(g['nfix'], errors='coerce') == 1
+    g['lambda_for'] = np.where(single_fixture, lambda_for, np.nan)
+    g['lambda_against'] = np.where(single_fixture, lambda_against, np.nan)
+    g['p_win'] = np.where(single_fixture, p_win, np.nan)
+    g['p_cs'] = np.exp(-g['lambda_against'].astype(float))  # NaN propagates when lambda_against is NaN
+    return g
+
+
+def _finalize(g: pd.DataFrame, odds: pd.DataFrame | None = None) -> tuple[pd.DataFrame, list[str]]:
     g, feats = _rolling_features(_prep(g))
+    if USE_ODDS:
+        g = _add_odds_features(g, odds)
+        feats = feats + _ODDS_FEATURES
     assert feats == FEATURES, 'feature list drifted from the frozen FEATURES constant'
     return g, feats
 
@@ -148,11 +226,12 @@ def build_training_frame(history: pd.DataFrame,
     """One row per (code, season, gw) already in `history`, with point-in-time features and the
     row's own actual `total_points`/`minutes` attached as training targets.
 
-    `odds` and `snapshots` are accepted and ignored in gbm-v1 (run 1) — see
-    docs/model-diagnosis-2026-09-24.md §8: "Run 1 accepts and ignores odds; uses from snapshot
-    only price and ownership/transfer ranks", both of which `history` already carries per row.
+    `snapshots` is still accepted and ignored (per run 1 — docs/model-diagnosis-2026-09-24.md §8:
+    the price/ownership/transfer-rank inputs it would carry are already on `history` per row for a
+    completed gameweek). `odds` is used from run 2 (ticket #264) onwards — see the module
+    docstring for the join.
     """
-    g, _ = _finalize(history)
+    g, _ = _finalize(history, odds)
     return g
 
 
@@ -215,6 +294,6 @@ def build_decision_frame(history: pd.DataFrame,
         dec[stat_col] = np.nan
 
     combined = pd.concat([history, dec], ignore_index=True, sort=False)
-    g, _ = _finalize(combined)
+    g, _ = _finalize(combined, odds)
     out = g[(g['season'] == season) & (g['gw'] == gw) & (g['code'].isin(dec['code']))]
     return out.reset_index(drop=True)

@@ -43,9 +43,13 @@ _FALLBACK_1X2 = ("B365H", "B365D", "B365A")
 
 
 def _season_label(path: str) -> str:
-    """`E0_2223.csv` -> `2223`."""
+    """`E0_2223.csv` -> `'2022-23'` -- the format `fpl_model.sources`/`fpl_model.features` use
+    for `season` (`SEASON_ORDER`), not the raw `'2223'` file-name label. Ticket #264: this was a
+    contract bug in #261 -- nothing joins to `history` without it (the orchestrator's first join
+    attempt matched 0 rows)."""
     base = os.path.basename(path)
-    return base[len("E0_") : -len(".csv")]
+    raw = base[len("E0_") : -len(".csv")]
+    return f"20{raw[:2]}-{raw[2:]}"
 
 
 def _row_1x2_odds(row: pd.Series) -> dict:
@@ -62,8 +66,9 @@ def _row_1x2_odds(row: pd.Series) -> dict:
 
 def load_odds_history() -> pd.DataFrame:
     """Read every `model/data/odds/E0_*.csv`, convert 1X2 prices to expected goals, and return
-    the contract-columns DataFrame. `gw` is left null here — R2-T1 joins on kickoff date (+/- 1
-    day) and team codes rather than gameweek number."""
+    the contract-columns DataFrame. `gw` is left null here — ticket #264 (`fpl_model.features`)
+    joins on `(season, home_code, away_code)` instead: each ordered pairing happens once a
+    season, so neither `gw` nor `kickoff_date` is needed for the join."""
     paths = sorted(glob.glob(os.path.join(_ODDS_DIR, "E0_*.csv")))
     records = []
     unmapped_count = 0

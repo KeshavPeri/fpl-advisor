@@ -73,6 +73,10 @@ def test_load_odds_history_contract_shape():
     assert list(df.columns) == CONTRACT_COLUMNS
     assert (df["source"] == "football-data").all()
     assert df["gw"].isna().all()
+    # Ticket #264: `season` must be '2022-23' style (matching `fpl_model.features.SEASON_ORDER`),
+    # not the raw '2223' file-name label -- otherwise nothing joins to `history`. The orchestrator's
+    # first join attempt against the un-fixed '2223' style matched 0 rows.
+    assert set(df["season"].unique()) == {"2022-23", "2023-24", "2024-25", "2025-26", "2026-27"}
     # Every finished season contributes exactly 380 rows; 2026-27 contributes whatever is
     # committed so far (50 at the time of writing) -- assert only the lower bound so this test
     # does not need updating every time more of the current season is committed.
