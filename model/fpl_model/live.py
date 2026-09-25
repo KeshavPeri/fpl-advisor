@@ -123,12 +123,18 @@ def build_fixture_lambda_lookup(live_fixture_odds: pd.DataFrame,
 def project_horizon(history: pd.DataFrame, snapshot: pd.DataFrame, team_fixtures: pd.DataFrame,
                      fixture_lambda: dict[int, tuple[float, float]], next_gw: int,
                      points_model: Any, minutes_model: Any, combined_odds: pd.DataFrame | None = None,
-                     horizon: int = HORIZON, last_gw: int = LAST_GW) -> pd.DataFrame:
+                     horizon: int = HORIZON, last_gw: int = LAST_GW, season: str = SEASON) -> pd.DataFrame:
     """One row per (code, target gw) for every gw in `horizon_gameweeks(next_gw)`:
     `raw_points`/`raw_minutes` (pre-availability, summed across fixture slots; 0 for a blank
     gameweek team), `has_odds`, `lambda_for`, `lambda_against` and `drivers` (from the slot-0
     fixture only -- the ticket does not say how to combine two fixtures' SHAP drivers into one
-    row for a double gameweek, and slot 0 is that player's primary fixture that gw)."""
+    row for a double gameweek, and slot 0 is that player's primary fixture that gw).
+
+    `season` (ticket #281): the `(season, gw)` pair passed to `build_decision_frame` -- defaults
+    to the live module's own `SEASON` ('2026-27') so every existing caller is unaffected. Passing
+    a different pinned season (e.g. '2025-26') lets `model/fpl_replay/replay.py` reuse this exact
+    function for the season-replay harness instead of a second, drifting copy of the horizon-
+    prediction loop."""
     codes = snapshot[['code', 'position', 'team_code']].dropna(subset=['code', 'team_code'])
     target_gws = horizon_gameweeks(next_gw, horizon, last_gw)
     rows: list[dict] = []
@@ -155,7 +161,7 @@ def project_horizon(history: pd.DataFrame, snapshot: pd.DataFrame, team_fixtures
             fixture_id_by_code = dict(zip(target['code'], target['fixture_id']))
             target_fixtures = target[['code', 'team_code', 'opp_team_code', 'was_home', 'position']]
 
-            dec = build_decision_frame(history, (SEASON, gw), target_fixtures,
+            dec = build_decision_frame(history, (season, gw), target_fixtures,
                                         odds=combined_odds, snapshot=snapshot)
             pts = predict(points_model, dec)
             mins = predict(minutes_model, dec)

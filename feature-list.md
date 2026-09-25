@@ -125,9 +125,14 @@ credential in the browser, which is Tier 1.
 
 32. 🔶 **Season simulation harness.** The **projection-level** slices are built: the harness itself
     *#133*, multi-fixture gameweeks and the defcon diagnostic *#140*, ranking skill *#147*.
-    **The recommendation-level replay — transfers, captaincy, a season's league position — is not
-    built**, and cannot be a genuine replay of Keshav's own decisions: the app did not exist in
-    2025/26 and there is no stored squad for that season.
+    **The recommendation-level replay — transfers, captaincy, a season's league position** — cannot
+    be a genuine replay of Keshav's own decisions (the app did not exist in 2025/26 and there is no
+    stored squad for that season), but a **hypothetical** replay against 2025-26 using `gbm-v1` and
+    the real solver is In progress — *#281* (`model/fpl_replay/`) builds it, to answer
+    product-brief.md §9 Q2 (the transfer-hit threshold) rather than to reconstruct Keshav's actual
+    season. Offline-only: `python -m pytest tests` and a GW1-4 smoke run pass; the full
+    37-gameweek, five-setting run happens in `.github/workflows/season-replay.yml` after merge, and
+    the resulting threshold is a one-line `HIT_COST` change for a later ticket, not automatic.
 33. ✅ **Mini-league standings — display only.** *#271.* Classic league 848654
     (`config/mini-league.json`) is ingested nightly (`scripts/ingest-mini-league.ts`, paginated
     via `standings.has_next`) into `public.mini_league_standings`, keyed to the latest FINISHED

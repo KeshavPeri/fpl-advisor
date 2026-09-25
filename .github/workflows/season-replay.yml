@@ -1,0 +1,151 @@
+name: Season replay
+
+# Ticket #281 (feature-list item 32, the recommendation-level slice). Replays 2025-26 with
+# `gbm-v1` and the real, pinned solver (`sertalpbilal/FPL-Optimization-Tools`) at several
+# transfer-hit costs, to answer product-brief.md §9 Q2 directly from a backtest instead of from
+# taste. Public data only (vaastav's pinned snapshot, football-data.co.uk odds already committed
+# under model/data/odds) -- no Supabase secrets, no live FPL API call (the pinned solver's own
+# live bootstrap-static/fixtures calls are faked from vaastav's 2025-26 snapshot; see
+# model/fpl_replay/solver_io.py's own module docstring for why and how).
+#
+# **This changes nothing live.** Nothing here writes to Supabase, touches `player_projections`,
+# `config/projection-model.json`, or any table this app's recommendations read. The winning
+# hit_cost value is read from this run's own report/annotation by a human (or a later ticket),
+# never applied automatically -- see the ticket's own "Post-merge owner check (does not block
+# this PR)".
+#
+# workflow_dispatch only -- a full run replays 37 decision gameweeks x 5 settings against the
+# real solver; this is a measurement job run on demand, not a nightly one (same reasoning
+# backtest.yml's own header gives for the identical shape of decision).
+#
+# ============================================================================
+# Shape: a matrix job per setting, then one aggregation job.
+# ============================================================================
+# Five settings (`hit_cost` 4/6/8/no-hits, plus the never-transfer baseline) each run as their
+# own matrix job -- GW1's from-scratch squad build plus 37 more solver calls per hit_cost
+# setting (fewer for never-transfer, which never calls the solver again after GW1 -- see
+# model/fpl_replay/replay.py's own module docstring for why). Each job writes ONE JSON summary
+# (season totals + the per-gameweek net) as its own artifact; nothing here can combine five
+# parallel matrix jobs' own numbers into the single comparison table item 6 asks for, so a final
+# `aggregate` job (needs: every matrix job) downloads all five JSON artifacts, renders
+# `model/reports/season-replay.md`, uploads it, and repeats its summary table as a
+# `::notice title=season-replay::` annotation -- run logs and artifacts aren't reachable by the
+# orchestrator, annotations are (ticket #281 item 7, verbatim).
+
+on:
+  workflow_dispatch: {}
+
+env:
+  REPLAY_END_GW: '38'
+
+jobs:
+  replay:
+    strategy:
+      fail-fast: false
+      matrix:
+        setting: ['4', '6', '8', 'no-hits', 'never-transfer']
+    runs-on: ubuntu-latest
+    # Up to 38 solver calls (GW1's from-scratch build plus GW2-38), each time-limited to 60s
+    # (model/fpl_replay/solver_io.py's SOLVER_TIME_LIMIT_SECS) -- comfortably under 40 minutes
+    # even at the cap, plus real headroom for checkout/install/projection overhead per gameweek.
+    # never-transfer needs far less (one solve, then pure Python for every other gameweek) but
+    # runs the same job shape for a uniform matrix.
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache model data (vaastav + football-data odds are pinned/static)
+        uses: actions/cache@v4
+        with:
+          path: model/.cache
+          key: season-replay-model-cache-${{ hashFiles('model/fpl_model/sources.py') }}
+
+      - name: Install model dependencies
+        working-directory: model
+        run: pip install -r requirements.txt
+
+      - name: Check out solver at pinned commit
+        uses: actions/checkout@v6
+        with:
+          repository: sertalpbilal/FPL-Optimization-Tools
+          # Same pin as solver-run.yml/squad-rebuild-probe.yml -- see decisions/ticket-29.md and
+          # decisions/ticket-41.md. Do not move this to a branch or tag.
+          ref: 45131c5a41d7caadb5cb626c012bfa9111dca7a2
+          path: solver
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install solver dependencies (and pinned Python, via uv sync)
+        working-directory: solver
+        run: uv sync
+
+      - name: Run replay (${{ matrix.setting }})
+        working-directory: model
+        run: |
+          mkdir -p out
+          python -m fpl_replay.replay --mode run \
+            --setting "${{ matrix.setting }}" \
+            --start-gw 2 \
+            --end-gw "${{ env.REPLAY_END_GW }}" \
+            --solver-dir "${{ github.workspace }}/solver" \
+            --work-dir "${{ github.workspace }}/model/.replay-work" \
+            --out-json "${{ github.workspace }}/model/out/replay-${{ matrix.setting }}.json"
+
+      - name: Upload per-setting summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: season-replay-${{ matrix.setting }}
+          path: model/out/replay-${{ matrix.setting }}.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    needs: replay
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install model dependencies
+        working-directory: model
+        # solver_io/replay import pandas -- installed here too so `--mode aggregate` (pure
+        # Python + pandas, no solver, no network) can run without the full model stack.
+        run: pip install -r requirements.txt
+
+      - name: Download every per-setting summary artifact
+        uses: actions/download-artifact@v5
+        with:
+          pattern: season-replay-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Render combined report
+        working-directory: model
+        run: |
+          python -m fpl_replay.replay --mode aggregate \
+            --inputs ${{ github.workspace }}/artifacts/*.json \
+            --out-md reports/season-replay.md
+          cat reports/season-replay.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: season-replay-report
+          path: model/reports/season-replay.md
+          if-no-files-found: warn
+          retention-days: 90
