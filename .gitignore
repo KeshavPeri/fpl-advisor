@@ -39,3 +39,11 @@ model/.cache/
 .venv/
 __pycache__/
 
+# Ticket #281: the pinned sertalpbilal/FPL-Optimization-Tools checkout (season-replay.yml checks
+# it out to ./solver, matching solver-run.yml/squad-rebuild-probe.yml's own convention) and the
+# replay's own scratch config/results directory. Never committed -- a fresh checkout every run.
+/solver/
+model/.replay-work/
+model/.checkpoint*.json
+
+
