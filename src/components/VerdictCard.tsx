@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router'
 import { formatSyncTimestamp, toErrorMessage } from '../lib/format'
 import { deriveVerdictView } from '../lib/verdict/derive.ts'
 import { fetchVerdict } from '../lib/verdict/api.ts'
-import type { VerdictRecommendationData } from '../lib/verdict/types.ts'
+import type { ConfidenceBand, VerdictRecommendationData } from '../lib/verdict/types.ts'
 import { commitRecommendation, fetchCommitContext } from '../lib/commit/api.ts'
 import { deriveCommitView } from '../lib/commit/derive.ts'
 import type { CommitTarget, StoredCommitDecision } from '../lib/commit/types.ts'
@@ -25,6 +25,51 @@ type VerdictState =
   | { status: 'none' }
   | { status: 'error'; message: string }
   | { status: 'ready'; data: VerdictRecommendationData }
+
+/**
+ * H5 (docs/ui-audit-2026-09-25.md) — "'Plan confidence: coin-flip · Captain confidence:
+ * coin-flip' and then 'The top options are too close to separate' say the same thing. Say it
+ * once." Replaces both the two-clause confidence line and the separate coin-flip sentence with
+ * one badge. Ascending order — index 0 is the least confident band — so the weaker of the plan's
+ * own band and the captain's (when there is one to compare) decides the single word shown: a
+ * clear plan with a coin-flip captain pick is still, as a whole, a close call. Tier 3 — the exact
+ * wording and the "weaker wins" rule are this ticket's own judgement call, not specified by the
+ * ticket beyond the three words themselves; see this ticket's report.
+ */
+const CONFIDENCE_BADGE_LABEL: Record<ConfidenceBand, string> = {
+  'coin-flip': 'Close call',
+  marginal: 'Leaning',
+  clear: 'Clear',
+}
+
+const BAND_WEAKNESS: Record<ConfidenceBand, number> = {
+  'coin-flip': 0,
+  marginal: 1,
+  clear: 2,
+}
+
+function combinedConfidenceBand(
+  planBand: ConfidenceBand,
+  captainBand: ConfidenceBand | null
+): ConfidenceBand {
+  if (captainBand === null) return planBand
+  return BAND_WEAKNESS[captainBand] < BAND_WEAKNESS[planBand] ? captainBand : planBand
+}
+
+/**
+ * The badge itself — split out for the same reason VerdictPointsFigure below is: VerdictCard
+ * fetches via useEffect and can't be rendered synchronously into its 'ready' state, so a
+ * component this small is the only way to assert what actually renders for a given band
+ * (VerdictCard.test.ts), rather than only ever testing combinedConfidenceBand's return value in
+ * isolation.
+ */
+export function ConfidenceBadge({ band }: { band: ConfidenceBand }) {
+  return (
+    <span className="verdict-card__confidence-badge" data-band={band}>
+      {CONFIDENCE_BADGE_LABEL[band]}
+    </span>
+  )
+}
 
 interface VerdictPointsFigureProps {
   label: string
@@ -380,6 +425,14 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
   }
 
   const view = deriveVerdictView(state.data, gameweekId)
+  // view.confidenceWord is typed as a bare `string` on VerdictView (src/lib/verdict/types.ts,
+  // outside this ticket's scope), but derive.ts assigns it directly from
+  // `data.confidenceBand: ConfidenceBand` with no other producer — the cast below just recovers
+  // the narrower type that field's own single source already guarantees.
+  const confidenceBadge = combinedConfidenceBand(
+    view.confidenceWord as ConfidenceBand,
+    view.captainConfidenceBand
+  )
 
   return (
     // F12/F39 — the one `focal` (cyan glow) panel on the home screen: the
@@ -417,17 +470,15 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
         </div>
       )}
 
-      {/* #194, section D — "surface the captain confidence band next to
-          the plan confidence... so the two are read together." One line,
-          both bands, no threshold changes (view.captainConfidenceBand is
-          computed by the same deriveCaptainConfidenceBand this app
-          already ships — see derive.ts). Omitted entirely when there's
-          no safe captain gap to report, rather than showing a dash. */}
-      <p className="verdict-card__confidence">
-        Plan confidence: {view.confidenceWord}
-        {view.captainConfidenceBand && <> · Captain confidence: {view.captainConfidenceBand}</>}
-      </p>
-      {view.coinFlipNote && <p className="verdict-card__confidence-note">{view.coinFlipNote}</p>}
+      {/* Ticket #276 (H5) — was two lines saying the same thing twice
+          ("Plan confidence: coin-flip · Captain confidence: coin-flip"
+          then "The top options are too close to separate"). One badge
+          now: the weaker of the plan's own band and the captain's
+          (combinedConfidenceBand above), so a genuinely close call still
+          reads as one, whichever half of the recommendation it comes
+          from, and a clean recommendation isn't followed by a second
+          sentence repeating what the badge already said. */}
+      <ConfidenceBadge band={confidenceBadge} />
 
       {view.coverageNote && <p className="verdict-card__coverage">{view.coverageNote}</p>}
 

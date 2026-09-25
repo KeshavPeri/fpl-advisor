@@ -32,6 +32,12 @@ export interface PitchPlayer {
   isCaptain: boolean
   isViceCaptain: boolean
   availability: Availability
+  /**
+   * `players.teams(short_name)` (ticket #276, H3) — drives the shirt's club colour via
+   * src/lib/teamColours.ts. Optional/nullable: an older caller, or a player whose team join
+   * failed, still renders today's neutral shirt (PlayerShirt.tsx's own fallback), never crashes.
+   */
+  teamShortName?: string | null
 }
 
 export interface FormationRow {

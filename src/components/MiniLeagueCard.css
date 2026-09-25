@@ -1,13 +1,17 @@
 /*
-  The mini-league standings card (ticket #271) — product-brief.md §1/§5's display-only mini-
-  league standings, feature-list item 33. Same Surface-panel shape as AccuracyCard's 'full'
-  variant (title, one headline figure, a body line, then a quiet list) — this card has no
+  The mini-league standings card (ticket #271, redesigned by ticket #276 — "very bad and super
+  unsatisfying. Make it satisfying yet premium"). Same Surface-panel shape as AccuracyCard's
+  'full' variant (title, one headline figure, a body line, then a quiet list) — this card has no
   'summary' variant of its own, since it is used exactly once, on the home screen.
 
   Sizing note: the rank figure below uses --text-headline, not --text-display.
   design-reference.md/F30 (see VerdictCard.css) reserve --text-display for exactly one figure per
   screen — VerdictCard's projected points. This card sits one step down, same reasoning
   AccuracyCard.css states for its own figure.
+
+  The "premium moment" for leading (ticket #276) is the crown glyph below, not this card's own
+  Surface `focal` glow — VerdictCard.tsx's own comment reserves that cyan-panel-glow treatment for
+  exactly one panel on Home, deliberately, and this card mustn't compete with it.
 */
 
 .mini-league-card {
@@ -33,6 +37,16 @@
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
+}
+
+/* Ticket #276 — the crown glyph, leading's one subtle premium moment: a small cyan glyph with a
+   soft drop-shadow bloom, not a card-level glow (see this file's header). Sits to the left of the
+   rank figure, baseline-aligned with it via the parent's own `align-items: baseline`. */
+.mini-league-card__crown {
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--accent-cyan);
+  filter: drop-shadow(0 0 4px var(--accent-cyan-ambient));
 }
 
 .mini-league-card__rank-value {
@@ -73,7 +87,36 @@
   font-size: 0.7em;
 }
 
-.mini-league-card__gap {
+/* Ticket #276 — the gap bar, replacing the old plain gap sentence. A quiet recessed track
+   (--material-1, the same "present, never a card" tier PlayerShirt's badge recess uses) with a
+   cyan fill — the fill reads as "how much room is left to close" when behind, or "how far clear"
+   when leading; GAP_BAR_SCALE (MiniLeagueCard.tsx) is a fixed visual scale, not a real bound, so
+   the label's own number is always the exact figure regardless of how full the bar reads. */
+.mini-league-card__gapbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.mini-league-card__gapbar-track {
+  height: var(--space-1);
+  border-radius: var(--space-1);
+  background: var(--material-1);
+  overflow: hidden;
+}
+
+.mini-league-card__gapbar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent-cyan-line);
+  transition: width var(--dur-ambient) var(--ease-out);
+}
+
+.mini-league-card__gapbar-fill--leading {
+  background: var(--accent-cyan);
+}
+
+.mini-league-card__gapbar-label {
   font: var(--text-body);
   color: var(--text-secondary);
 }
@@ -93,9 +136,9 @@
   color: var(--accent-coral);
 }
 
-/* The compact standings table — leader, the place above, you (highlighted), the place below.
-   A quiet list, matching AccuracyCard's own per-gameweek breakdown, not a bordered/striped
-   table. */
+/* Ticket #276 — the standings table: top 3, plus you ± 1 when you're outside them, a divider
+   marking any skipped rank range (MiniLeagueCard.tsx). A quiet list, matching AccuracyCard's own
+   per-gameweek breakdown, not a bordered/striped table. */
 .mini-league-card__table {
   display: flex;
   flex-direction: column;
@@ -108,7 +151,7 @@
 .mini-league-card__row {
   display: grid;
   grid-template-columns: auto 1fr auto;
-  align-items: baseline;
+  align-items: center;
   column-gap: var(--space-3);
   padding: var(--space-2) var(--space-2);
   border-radius: var(--radius-control);
@@ -121,7 +164,8 @@
 
 /* Your own row — a cyan-tinted wash and a matching left rule, the same "recommended/positive"
    accent language as the nav's active-item glow (src/index.css's --nav-active-glow), never a
-   full accent fill (this is a highlight, not a call to action). */
+   full accent fill (this is a highlight, not a call to action). Ticket #276: "your row glowing" —
+   the wash/rule pairing already reads that way; kept, not re-invented. */
 .mini-league-card__row--you {
   background: var(--accent-cyan-dim);
   border-top-color: transparent;
@@ -142,7 +186,16 @@
   color: var(--text-secondary);
 }
 
-.mini-league-card__row-name {
+/* Ticket #276 — "team name prominent, manager name small": a two-line stack inside the same grid
+   cell the single name line used to occupy, so the table's own column widths are unchanged. */
+.mini-league-card__row-names {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.mini-league-card__row-team {
   font: var(--text-label);
   font-weight: 550;
   color: var(--text-secondary);
@@ -151,14 +204,34 @@
   white-space: nowrap;
 }
 
-.mini-league-card__row--you .mini-league-card__row-name {
+.mini-league-card__row--you .mini-league-card__row-team {
   color: var(--text-primary);
+}
+
+.mini-league-card__row-manager {
+  font: var(--text-label-tight);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mini-league-card__row-total {
   font: var(--text-label);
   color: var(--text-primary);
   text-align: right;
+}
+
+/* Ticket #276 — the divider marking a skipped rank range between the top-3 block and the "you ±
+   1" block below it. Plain, centred, quiet — a "···" rather than a ruled line, so it reads as
+   "rows omitted here" without implying a boundary the table doesn't otherwise have. */
+.mini-league-card__divider {
+  display: flex;
+  justify-content: center;
+  padding: calc(var(--space-1) / 2) 0;
+  font: var(--text-label);
+  color: var(--text-tertiary);
+  letter-spacing: 0.2em;
 }
 
 /* Loading placeholder — three bars shaped like the ordinary card's own content, same technique
@@ -200,6 +273,9 @@
   }
 }
 
-/* prefers-reduced-motion is already handled globally in src/index.css, which zeroes every
-   element's animation-duration — no local override needed here (same note as
-   AccuracyCard.css/VerdictCard.css/DeadlineCountdown.css). */
+/* prefers-reduced-motion is already handled globally in src/index.css: under reduced motion its
+   `transition-property` allow-list drops `width` entirely (only opacity/colour/background/border
+   survive), so `.mini-league-card__gapbar-fill`'s own width transition above is already inert
+   there with no local override needed — same note as AccuracyCard.css/VerdictCard.css/
+   DeadlineCountdown.css. The count-up numbers (MiniLeagueCard.tsx's useCountUp) are JS-driven,
+   not CSS, so they check prefers-reduced-motion themselves instead. */

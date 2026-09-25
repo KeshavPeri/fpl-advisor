@@ -132,17 +132,36 @@
   color: var(--accent-coral);
 }
 
-/* The confidence band as a word, never a number/percentage/bar/meter
-   (product-brief.md §8). Neutral colour — confidence itself isn't risk,
-   only a low band plus the coin-flip note below carries that meaning. */
-.verdict-card__confidence {
-  font: var(--text-body);
+/* Ticket #276 (H5) — the confidence band as one small badge, never a
+   number/percentage/bar/meter (product-brief.md §8) and never said twice
+   (VerdictCard.tsx's own comment on combinedConfidenceBand). Neutral by
+   default ("Leaning" — a mid band carries no particular charge); "Clear"
+   takes a quiet cyan tint (the same positive/recommended language as the
+   points figure above it) and "Close call" a quiet coral tint — the one
+   place this card's own coral-for-risk convention now lives, since the
+   sentence that used to carry that meaning ("too close to separate") is
+   gone. */
+.verdict-card__confidence-badge {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  margin-top: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--material-1);
   color: var(--text-secondary);
+  font: var(--text-label);
+  font-weight: 550;
 }
 
-.verdict-card__confidence-note {
-  font: var(--text-label);
-  color: var(--text-tertiary);
+.verdict-card__confidence-badge[data-band='clear'] {
+  background: var(--accent-cyan-dim);
+  color: var(--accent-cyan);
+}
+
+.verdict-card__confidence-badge[data-band='coin-flip'] {
+  background: var(--accent-coral-dim);
+  color: var(--accent-coral);
 }
 
 /* A player the model has no history for is a real gap in the recommendation

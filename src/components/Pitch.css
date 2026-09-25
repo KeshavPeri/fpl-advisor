@@ -1,11 +1,14 @@
 /*
-  The pitch itself: no green, no pitch texture, no team colours — an
-  abstract domain form (design-reference.md, References item 5 — "the
-  pitch layout is the one convention worth keeping"). Every value below is
-  a var(--…) token, or a calc() composed from two of them (F26/F27 — see
-  the comment on .pitch__row below for why: this ticket's scope forbids
-  adding a new token to src/index.css, and 56px/40px/40px have no single
-  existing token).
+  The pitch itself: no green, no pitch texture — an abstract domain form
+  (design-reference.md, References item 5 — "the pitch layout is the one
+  convention worth keeping"). Every value below is a var(--…) token, or a
+  calc() composed from two of them (F26/F27 — see the comment on
+  .pitch__row below for why: this ticket's scope forbids adding a new
+  token to src/index.css, and the shirt/row sizes below have no single
+  existing token). Ticket #276 adds the one place team colour DOES show
+  up: PlayerShirt.css's own shirt fill, subtly, per that file's own
+  header — this file (the field, the rows, the bench container) stays
+  colour-neutral either way.
 
   Ticket #169 / docs/ui-audit-2026-08-31.md — F25 (must-fix): the field is
   no longer a `<Surface>` (Pitch.tsx runs it full-bleed via `.bleed`
@@ -111,4 +114,43 @@
   justify-content: space-evenly;
   flex-wrap: wrap;
   gap: var(--space-3);
+}
+
+/* Ticket #276 (H4) — the ring legend, quiet and only present when at least one player on the
+   pitch actually carries a ring (Pitch.tsx). Sits below the bench (or below the field directly,
+   on a squad with no bench yet) as small, plain text with a matching ring swatch beside each
+   line — visible words, not colour/shape alone, per this app's own accessibility rule for the
+   availability ring (design-reference.md; pitchAvailability.ts's own `label`). */
+.pitch__legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  padding: 0 var(--space-4);
+  list-style: none;
+}
+
+.pitch__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font: var(--text-label-tight);
+  color: var(--text-tertiary);
+}
+
+.pitch__legend-ring {
+  width: var(--space-3);
+  height: var(--space-3);
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--material-1);
+}
+
+.pitch__legend-ring--solid {
+  border-color: var(--accent-coral);
+}
+
+.pitch__legend-ring--hollow {
+  border-color: var(--accent-coral-line);
 }

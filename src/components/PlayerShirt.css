@@ -1,14 +1,22 @@
 /*
   The player shirt — an abstract domain shape, not a broadcast-graphic team
-  kit (design-reference.md: "shirt as an abstract shape in the app's
-  neutral palette with tonal lift"). No club crest, no team colour, no
-  green. Every colour/spacing/radius value below is a var(--…) token from
-  src/index.css, or a calc() composed from two of them — F26/F28 need 56px
-  and 40px badges, neither of which has a single existing token, and this
-  ticket's scope forbids adding one to src/index.css (consume only); see
-  the size rules below for the exact composition. border-width is the one
-  place a literal px is used, which design-reference.md's execution rules
-  permit.
+  kit. Every colour/spacing/radius value below is a var(--…) token from
+  src/index.css, or a calc() composed from two of them — F26 needed 56px,
+  which has no single existing token, and this ticket's scope forbids
+  adding one to src/index.css (consume only); see the size rule below for
+  the exact composition. border-width is the one place a literal px is
+  used, which design-reference.md's execution rules permit.
+
+  Ticket #276 (H2/H3, docs/ui-audit-2026-09-25.md) — the bench no longer
+  gets a smaller, separately sized shirt: `.player-shirt--bench` and its
+  badge/captaincy-badge overrides are gone, PlayerShirt.tsx no longer takes
+  a `size` prop at all, and every shirt on the pitch — starting XI or bench
+  — is this one size and always shows its price. The shirt body can now
+  also tint toward a club colour (`.player-shirt__shirt--club`, set via CSS
+  custom properties PlayerShirt.tsx passes inline — see that file's own
+  comment for why that's the one inline style here); the un-tinted gradient
+  below is unchanged and is what a player with no resolvable club colour
+  still renders.
 */
 
 .player-shirt {
@@ -37,7 +45,9 @@
      var(--space-4)) = 64px, the largest step that still fits five shirts
      plus their gaps inside the pitch's own narrow-bleed width at 393px
      with room to spare once Pitch.css's row gap also tightens
-     (Pitch.layout.test.ts asserts the exact percentage). */
+     (Pitch.layout.test.ts asserts the exact percentage). Ticket #276 keeps
+     this exact value and now applies it to the bench too — see this
+     file's own header comment. */
   width: calc(var(--space-12) + var(--space-4));
   /* Ticket #44, finding 4 — the actual cause of the horizontal-scroll
      bug: without this, a flex item's automatic minimum width is its
@@ -49,13 +59,6 @@
      size back down; `min-width: 0` is the standard, belt-and-suspenders
      flex fix for this exact failure mode. */
   min-width: 0;
-}
-
-/* F28 (must-fix) — the bench's own, smaller footprint. 40px = calc(
-   var(--space-8) + var(--space-2)) = 32 + 8, the audit's exact proposed
-   value, again composed rather than a new token. */
-.player-shirt--bench {
-  width: calc(var(--space-8) + var(--space-2));
 }
 
 /* The badge is the ring's own element: a rounded square holding the shirt
@@ -81,10 +84,6 @@
   border: 2px solid transparent;
 }
 
-.player-shirt--bench .player-shirt__badge {
-  height: calc(var(--space-8) + var(--space-2));
-}
-
 .player-shirt__badge--ring-solid {
   border-color: var(--accent-coral);
 }
@@ -103,7 +102,10 @@
    token-only moves, no new hue, adapted from the audit's own proposal to
    this app's corrected elevation scale (ticket #79's follow-up, which
    post-dates the audit). The collar notch (::after below) then finishes
-   the read as a garment, not a badge icon. */
+   the read as a garment, not a badge icon. This is the fallback: a
+   player whose club has no entry in src/lib/teamColours.ts (or no
+   teamShortName at all) renders exactly this, unchanged from before
+   ticket #276. */
 .player-shirt__shirt {
   position: relative;
   width: 74%;
@@ -124,9 +126,29 @@
   );
 }
 
+/* Ticket #276 (H3) — the club-tinted variant. `--player-shirt-primary`/
+   `--player-shirt-secondary` are set inline by PlayerShirt.tsx from
+   src/lib/teamColours.ts; this rule only says HOW a colour pair becomes a
+   shirt (same gradient direction/shape as the neutral fallback above, same
+   --panel-border-strong edge — a club shirt reads as the identical
+   garment, just tinted, never a different shape or a brighter, more
+   literal one). teamColours.ts's own header explains why the pair itself
+   stays desaturated and close to this app's own surface luminance rather
+   than a bright literal kit colour. */
+.player-shirt__shirt--club {
+  background: linear-gradient(
+    165deg,
+    var(--player-shirt-primary) 0%,
+    var(--player-shirt-secondary) 100%
+  );
+}
+
 /* The collar notch — a small triangular cut, one step darker than the
    shirt body, sitting at the neckline so the silhouette reads as a
-   V-neck jersey rather than an abstract polygon. */
+   V-neck jersey rather than an abstract polygon. Stays the app's own
+   neutral --surface-1 on a club-tinted shirt too, the same way a real
+   collar reads as a garment detail rather than a second block of team
+   colour. */
 .player-shirt__shirt::after {
   content: '';
   position: absolute;
@@ -156,12 +178,6 @@
   font: var(--text-label);
   font-weight: 600;
   line-height: 1;
-}
-
-.player-shirt--bench .player-shirt__captaincy {
-  width: var(--space-4);
-  height: var(--space-4);
-  font-size: 0.625rem;
 }
 
 .player-shirt__captaincy--captain {
@@ -227,9 +243,10 @@
    the "generously spaced" half of that reference, layered on top the
    same way `.pitch__bench-title` layers weight onto `--text-label`
    elsewhere in this app. Explicitly not made bigger — the DoD is
-   explicit that name-fit is never solved by shrinking the number. Never
-   rendered on a bench shirt (size="bench") — F28: bench price is not a
-   decision input. */
+   explicit that name-fit is never solved by shrinking the number. Ticket
+   #276 (H2) — now rendered on every shirt, bench included; withholding
+   the bench's own price read as the bench mattering less than the
+   eleven, which is the opposite of this ticket's own instruction. */
 .player-shirt__price {
   font: var(--text-label);
   font-weight: 500;

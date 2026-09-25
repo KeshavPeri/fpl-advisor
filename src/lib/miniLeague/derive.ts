@@ -1,23 +1,27 @@
 /**
- * Pure derivation for the mini-league standings card (ticket #271). No I/O — takes every row
- * api.ts read for the latest ingested gameweek and returns a fully-resolved `MiniLeagueView` the
- * component renders with no further logic, matching src/lib/accuracy/derive.ts's own pure/impure
- * split.
+ * Pure derivation for the mini-league standings card (ticket #271, redesigned by ticket #276). No
+ * I/O — takes every row api.ts read for the latest ingested gameweek and returns a fully-resolved
+ * `MiniLeagueView` the component renders with no further logic, matching src/lib/accuracy/derive.ts's
+ * own pure/impure split.
  *
  * DISPLAY ONLY. This module (and everything else under src/lib/miniLeague/) must never be
  * imported by src/lib/scoring/, src/lib/projection/, or anything that feeds the solver or a
  * recommendation — product-brief.md §1's hard line. There is nothing here for that code to want
  * anyway (no points model, no objective function), but the boundary is stated so it stays that
  * way on purpose, not by accident.
+ *
+ * Ticket #276 ("Round 2 → Mini-league" in docs/ui-audit-2026-09-25.md): "make it satisfying yet
+ * premium." The table used to be a fixed leader/above/you/below shape; it's now "top 3, plus you
+ * ± 1 if you're outside them, with a divider for skipped ranks" — see `MiniLeagueRowEntry` in
+ * types.ts and `deriveMiniLeagueView` below.
  */
-import type { MiniLeagueStandingRow, MiniLeagueView } from './types.ts'
+import type { MiniLeagueRowEntry, MiniLeagueStandingRow, MiniLeagueView } from './types.ts'
 
 export const EMPTY_STATE_MESSAGE = 'Standings appear after the first gameweek is ingested.'
 
-/** How many rows to show when Keshav's own entry can't be matched (entryNotInLeague) — just
- *  enough for the card to read as a real leaderboard rather than a single bare row. Tier 3 —
- *  see decisions/ticket-271.md. */
-const FALLBACK_ROW_COUNT = 3
+/** How many rows sit at the top of the table, always — both the entryNotInLeague fallback and
+ *  the ordinary "top 3, plus you ± 1" shape (ticket #276's own wording). */
+const TOP_ROW_COUNT = 3
 
 function byRankAscending(a: MiniLeagueStandingRow, b: MiniLeagueStandingRow): number {
   const rankA = a.rank ?? Number.POSITIVE_INFINITY
@@ -25,8 +29,8 @@ function byRankAscending(a: MiniLeagueStandingRow, b: MiniLeagueStandingRow): nu
   return rankA - rankB
 }
 
-/** Collapses a list that may repeat the same manager (e.g. `above` and `leader` are the same row
- *  when `you` is 2nd) into one row per entryId, in rank order. */
+/** Collapses a list that may repeat the same manager (e.g. the "you ± 1" neighbourhood overlaps
+ *  the top-3 block when `you` sits just outside it) into one row per entryId, in rank order. */
 function dedupeByEntryId(rows: readonly (MiniLeagueStandingRow | null)[]): MiniLeagueStandingRow[] {
   const seen = new Set<number>()
   const result: MiniLeagueStandingRow[] = []
@@ -36,6 +40,25 @@ function dedupeByEntryId(rows: readonly (MiniLeagueStandingRow | null)[]): MiniL
     result.push(row)
   }
   return result.sort(byRankAscending)
+}
+
+/**
+ * Inserts a `{kind:'divider'}` entry wherever two consecutive rows' own `rank` values are not
+ * adjacent (ticket #276: "a divider for skipped ranks") — e.g. top 3 then a gap before "you ± 1"
+ * once you're outside the top 3. A null `rank` on either side never triggers a divider: standings
+ * rows carry `rank` nullable (the migration's own column), and there's nothing reliable to
+ * compare in that case, so this stays silent rather than guessing.
+ */
+function withDividers(rows: readonly MiniLeagueStandingRow[]): MiniLeagueRowEntry[] {
+  const entries: MiniLeagueRowEntry[] = []
+  rows.forEach((row, index) => {
+    const previous = rows[index - 1]
+    if (previous && previous.rank !== null && row.rank !== null && row.rank - previous.rank > 1) {
+      entries.push({ kind: 'divider' })
+    }
+    entries.push({ kind: 'row', row })
+  })
+  return entries
 }
 
 /**
@@ -64,18 +87,21 @@ export function deriveMiniLeagueView(
       entryNotInLeague: false,
       leader: null,
       above: null,
-      below: null,
       gapToLeader: null,
       gapToAbove: null,
+      leadOverSecond: null,
       movement: null,
+      isLeading: false,
       rows: [],
     }
   }
 
   const sorted = [...rows].sort(byRankAscending)
   const leader = sorted[0]
+  const second = sorted.length > 1 ? sorted[1] : null
   const gameweekId = sorted[0].gameweekId
   const leagueSize = sorted.length
+  const top3 = sorted.slice(0, TOP_ROW_COUNT)
 
   const entryIdNum = parseEntryId(fplEntryId)
   const youIndex = entryIdNum === null ? -1 : sorted.findIndex((row) => row.entryId === entryIdNum)
@@ -90,11 +116,12 @@ export function deriveMiniLeagueView(
       entryNotInLeague: true,
       leader,
       above: null,
-      below: null,
       gapToLeader: null,
       gapToAbove: null,
+      leadOverSecond: null,
       movement: null,
-      rows: dedupeByEntryId(sorted.slice(0, FALLBACK_ROW_COUNT)),
+      isLeading: false,
+      rows: withDividers(top3),
     }
   }
 
@@ -107,6 +134,19 @@ export function deriveMiniLeagueView(
   const gapToAbove =
     above && you.total !== null && above.total !== null ? above.total - you.total : null
   const movement = you.lastRank !== null && you.rank !== null ? you.lastRank - you.rank : null
+  const isLeading = gapToLeader === 0
+  const leadOverSecond =
+    isLeading && second && you.total !== null && second.total !== null
+      ? you.total - second.total
+      : null
+
+  // Ticket #276: "top 3, plus you ± 1 if you're outside them." Already inside the top 3
+  // (youIndex < TOP_ROW_COUNT) means top3 alone already contains you — the neighbourhood adds
+  // nothing new, so it's left empty rather than dragging in ranks 4/5 for someone in 2nd.
+  const neighbourhood =
+    youIndex < TOP_ROW_COUNT
+      ? []
+      : [above, you, below].filter((row): row is MiniLeagueStandingRow => row !== null)
 
   return {
     hasData: true,
@@ -117,10 +157,11 @@ export function deriveMiniLeagueView(
     entryNotInLeague: false,
     leader,
     above,
-    below,
     gapToLeader,
     gapToAbove,
+    leadOverSecond,
     movement,
-    rows: dedupeByEntryId([leader, above, you, below]),
+    isLeading,
+    rows: withDividers(dedupeByEntryId([...top3, ...neighbourhood])),
   }
 }

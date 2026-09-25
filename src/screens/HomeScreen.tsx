@@ -144,6 +144,8 @@ function HomeScreen() {
             isCaptain: pick.isCaptain,
             isViceCaptain: pick.isViceCaptain,
             availability: deriveAvailability(player.status, player.chanceOfPlayingNextRound),
+            // Ticket #276 (H3) — src/lib/teamColours.ts looks this up to tint the shirt.
+            teamShortName: player.teamShortName,
           })
         }
 
