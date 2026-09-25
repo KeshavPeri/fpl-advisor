@@ -95,7 +95,8 @@ credential in the browser, which is Tier 1.
 
 ## Wave 8 — full-squad solving 🔶 built, never run
 
-28. 🔶 **Wildcard and free-hit full-squad solve.** *#134* built `squad-rebuild-probe.yml` and
+28. ✅ **Wildcard and free-hit full-squad solve.** *#134* built `squad-rebuild-probe.yml` and
+    **First dispatched 25 Sept 2026 on gbm-v1 projections: every step green, rebuilt squad stored.**
     `store-squad-advisory.ts`, with five stated guard rails keeping `preseason: true` away from
     every stored table. **The workflow has never been dispatched** — a `workflow_dispatch` file is
     only invocable once it is on the default branch, so nothing has yet proved the solver behaves
