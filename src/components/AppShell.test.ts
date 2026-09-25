@@ -1,39 +1,106 @@
 /**
- * Coverage for AppShell.tsx/.css's ticket #166 changes
- * (docs/ui-audit-2026-08-31.md F17/F18/F19/F20). Same renderToStaticMarkup
- * pattern as Surface.test.ts / VerdictCard.test.ts.
+ * Coverage for AppShell.tsx/.css. Ticket #275 adds a per-route title
+ * (ROUTE_TITLES), which needs `useLocation` — every render below is
+ * wrapped in react-router's <MemoryRouter>, same pattern AppBar.test.ts
+ * already established, rather than the old bare
+ * `createElement(AppShell, …)` calls.
  */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import AppShell from './AppShell.tsx'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const css = readFileSync(path.join(here, 'AppShell.css'), 'utf8')
+const tsx = readFileSync(path.join(here, 'AppShell.tsx'), 'utf8')
+
+function renderAt(pathname: string, props: Record<string, unknown> = {}): string {
+  return renderToStaticMarkup(
+    createElement(MemoryRouter, { initialEntries: [pathname] }, createElement(AppShell, props, 'x'))
+  )
+}
+
+describe('ticket #275 — a real title per route (audit G1)', () => {
+  it('renders the right title for every route App.tsx defines', () => {
+    const cases: Array<[string, string]> = [
+      ['/', 'Home'],
+      ['/reasoning', 'Why'],
+      ['/chips', 'Chips'],
+      ['/decisions', 'Record'],
+      ['/squad', 'Squad'],
+      ['/override', 'Override'],
+    ]
+    for (const [pathname, title] of cases) {
+      const html = renderAt(pathname)
+      expect(html).toMatch(new RegExp(`<h1 class="app-shell__title"[^>]*>${title}</h1>`))
+    }
+  })
+
+  it('the title renders before {children} — it introduces the screen, not the other way round', () => {
+    const html = renderAt('/')
+    expect(html.indexOf('app-shell__title')).toBeLessThan(html.indexOf('>x<'))
+  })
+
+  it('screens are not edited to get this — AppShell owns the title, not any screen file', () => {
+    expect(tsx).toMatch(/ROUTE_TITLES/)
+    expect(tsx).not.toMatch(/from ['"]\.\.\/screens/)
+  })
+
+  it('the title takes its own type step, not --text-display (must not compete with a screen\'s own hero figure)', () => {
+    expect(css).toMatch(/\.app-shell__title\s*\{[^}]*font:\s*var\(--text-screen-title\)/)
+    expect(css).not.toMatch(/\.app-shell__title\s*\{[^}]*font:\s*var\(--text-display\)/)
+  })
+})
+
+describe('ticket #275 — the title fades/shrinks on scroll (fixes audit G8)', () => {
+  it('the same scroll handler that drives the backdrop parallax also writes the title\'s opacity/transform', () => {
+    expect(tsx).toMatch(/titleRef\.current\.style\.opacity/)
+    expect(tsx).toMatch(/titleRef\.current\.style\.transform/)
+    // One listener, not two — ticket #275's own header-comment claim.
+    const listenerCount = (tsx.match(/addEventListener\('scroll'/g) ?? []).length
+    expect(listenerCount).toBe(1)
+  })
+
+  it('the title fade is transform/opacity only, matching the nav bar\'s own 60fps rule', () => {
+    const fnBody = tsx.match(/function applyScrollEffects\(\)\s*\{[\s\S]*?\n {4}\}/)?.[0] ?? ''
+    expect(fnBody).toMatch(/titleRef\.current\.style\.opacity = /)
+    expect(fnBody).toMatch(/titleRef\.current\.style\.transform = /)
+    expect(fnBody).not.toMatch(/titleRef\.current\.style\.(width|height|fontSize)/)
+  })
+
+  it('skips the update under prefers-reduced-motion — the title still scrolls away normally, just without the animated fade', () => {
+    const fnBody = tsx.match(/function applyScrollEffects\(\)\s*\{[\s\S]*?\n {4}\}/)?.[0] ?? ''
+    const guardIndex = fnBody.indexOf('if (prefersReducedMotion()) return')
+    const titleIndex = fnBody.indexOf('titleRef.current.style.opacity')
+    expect(guardIndex).toBeGreaterThan(-1)
+    expect(titleIndex).toBeGreaterThan(guardIndex)
+  })
+})
 
 describe('F19 — the escalated wash is a real, opt-in layer', () => {
   it('defaults to escalated: false — no current screen changes today', () => {
-    const html = renderToStaticMarkup(createElement(AppShell, {}, 'x'))
+    const html = renderAt('/')
     expect(html).toMatch(/class="app-shell"/)
-    expect(html).not.toMatch(/app-shell--escalated/)
+    expect(html).not.toMatch(/app-shell--escalated"/)
     expect(html).toMatch(/app-shell__backdrop--escalated/)
   })
 
   it('escalated: true adds the modifier class that drives the CSS crossfade', () => {
-    const html = renderToStaticMarkup(createElement(AppShell, { escalated: true }, 'x'))
+    const html = renderAt('/', { escalated: true })
     expect(html).toMatch(/class="app-shell app-shell--escalated"/)
   })
 
   it('the escalated layer opacity-crossfades using --dur-ambient, not a hand-typed duration', () => {
     expect(css).toMatch(/\.app-shell__backdrop--escalated\s*\{[^}]*transition:\s*opacity\s+var\(--dur-ambient\)/)
-    expect(css).not.toMatch(/\d+ms\s+cubic-bezier/) // no hand-typed cubic-bezier survives here
+    expect(css).not.toMatch(/\d+ms\s+cubic-bezier/)
   })
 })
 
-describe('#194, section H — M2 (screen transitions), accepted in the Part 3 motion audit and finally built', () => {
+describe('#194, section H — M2 (screen transitions)', () => {
   it('the column plays a real entrance keyframe at the app\'s own --dur-enter/--ease-out tokens, no hand-typed values', () => {
     expect(css).toMatch(/animation:\s*app-shell-screen-enter\s+var\(--dur-enter\)\s+var\(--ease-out\)/)
   })
@@ -44,29 +111,27 @@ describe('#194, section H — M2 (screen transitions), accepted in the Part 3 mo
     expect(keyframes).toMatch(/to\s*\{[^}]*opacity:\s*1[^}]*transform:\s*translateY\(0\)/)
   })
 
-  it('the floating bar is structurally excluded from the entrance animation — AppShell.tsx renders no <AppBar>, only the backdrop/grain layers and the column', () => {
-    const tsx = readFileSync(path.join(here, 'AppShell.tsx'), 'utf8')
-    expect(tsx).not.toMatch(/AppBar/)
-    // AppBar.test.ts's own "adds no motion" assertion is what proves the
-    // bar carries no animation at all — this only proves AppShell can't
-    // apply one to it, since the bar isn't one of AppShell's children
-    // (it's a sibling of <Routes> in App.tsx, so it never remounts and
-    // this keyframe never has a reason to touch it).
+  it('the floating bar is structurally excluded from the entrance animation — AppShell.tsx renders no <AppBar>', () => {
+    // Checked for actual JSX usage, not the bare word — this file's own
+    // ticket #275 comments legitimately mention AppBar.tsx by name (the
+    // sibling scroll-collapse effect they compare against).
+    expect(tsx).not.toMatch(/<AppBar/)
+    expect(tsx).not.toMatch(/from ['"]\.\/AppBar/)
   })
 })
 
 describe('#194, section A1 — no home-screen content renders above the top safe-area inset', () => {
-  it('the column\'s own padding-top adds --space-6 on top of env(safe-area-inset-top), so every child (including the countdown, its first child) starts clear of it', () => {
+  it('the column\'s own padding-top adds --space-6 on top of env(safe-area-inset-top)', () => {
     expect(css).toMatch(/padding-top:\s*calc\(env\(safe-area-inset-top\)\s*\+\s*var\(--space-6\)\)/)
   })
 })
 
-describe('F17/#194 A3 — the column reserves space for the floating bar', () => {
-  it('padding-bottom accounts for the bar\'s real reserved height via the shared --nav-bar-reserve token, not just the safe area', () => {
+describe('ticket #275 — the column reserves space for the (shorter, hump-free) new bar', () => {
+  it('padding-bottom accounts for the bar\'s real reserved height via the shared --nav-bar-reserve token', () => {
     expect(css).toMatch(/padding-bottom:\s*calc\(env\(safe-area-inset-bottom\)\s*\+\s*var\(--nav-bar-reserve\)\)/)
   })
 
-  it('the static (non-safe-area) portion of the reserve is at least the bar height plus one gap (rendering-fault DoD)', () => {
+  it('the static (non-safe-area) portion of the reserve is at least the bar\'s own height plus one gap', () => {
     const indexCss = readFileSync(path.join(here, '..', 'index.css'), 'utf8')
     const px = (raw: string) => (raw.trim().endsWith('rem') ? parseFloat(raw) * 16 : parseFloat(raw))
     const extract = (name: string) => {
@@ -74,8 +139,8 @@ describe('F17/#194 A3 — the column reserves space for the floating bar', () =>
       if (!match) throw new Error(`token --${name} not found`)
       return match[1].trim()
     }
-    const barHeight = px(extract('nav-home-size')) // the bar's own rendered height is at least as tall as its circular centre item
-    const oneGap = px(extract('space-3')) // the bar's own offset from the safe area — the "one gap" the DoD names
+    const barHeight = px(extract('nav-bar-height'))
+    const oneGap = px(extract('space-3'))
     const reserve = px(extract('nav-bar-reserve'))
     expect(reserve).toBeGreaterThanOrEqual(barHeight + oneGap)
   })
@@ -108,7 +173,7 @@ describe('#202, section A — the grain layer is folded into app-shell__backdrop
     const rule = css.match(/\.app-shell__backdrop\s*\{[^}]*\}/)?.[0] ?? ''
     const gradientCount = (rule.match(/radial-gradient\(/g) ?? []).length
     expect(gradientCount).toBeGreaterThan(2)
-    expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}\b/) // no hard-coded hue, tokens only
+    expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
   })
 
   it('a separate app-shell__grain rule no longer exists — it is one layer of app-shell__backdrop now', () => {
@@ -116,7 +181,6 @@ describe('#202, section A — the grain layer is folded into app-shell__backdrop
   })
 
   it('translates on scroll via a ref-applied transform, gated behind prefers-reduced-motion, transform-only', () => {
-    const tsx = readFileSync(path.join(here, 'AppShell.tsx'), 'utf8')
     expect(tsx).toMatch(/prefersReducedMotion/)
     expect(tsx).toMatch(/translate3d\(0,/)
     expect(tsx).toMatch(/window\.scrollY/)

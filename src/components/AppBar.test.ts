@@ -57,9 +57,13 @@ describe('ticket #275 — four equal destinations, one active treatment', () => 
   })
 
   it('one active rule applies identically to every tab — no per-tab special case (the old Home hump is gone)', () => {
+    // Historical comments legitimately mention the removed dome/mask by
+    // name (what this file replaces); checked for actual selectors/
+    // properties, not the bare word, so those comments don't self-trip.
     expect(css).not.toMatch(/app-bar__item--home/)
-    expect(css).not.toMatch(/dome/i)
-    expect(css).not.toMatch(/mask-image/)
+    expect(css).not.toMatch(/app-bar__dome-rim/)
+    expect(css).not.toMatch(/mask-image:/)
+    expect(css).not.toMatch(/mask-composite:/)
   })
 })
 
@@ -83,10 +87,12 @@ describe('every 44px minimum tap target, including the collapsed circle', () => 
 })
 
 describe('ticket #275 — WhyIcon, drawn in this repo, same rules as the other three', () => {
-  it('every destination renders one inline SVG glyph alongside its label', () => {
+  it('every destination renders one inline SVG glyph alongside its label, plus one more in the collapsed button', () => {
     const html = renderAt('/')
     const iconCount = (html.match(/<svg [^>]*class="app-bar__icon"/g) ?? []).length
-    expect(iconCount).toBe(4)
+    // Four tabs + the collapsed circle's own (always-rendered, opacity-
+    // crossfaded) icon — see AppBar.tsx's .app-bar__collapsed button.
+    expect(iconCount).toBe(5)
   })
 
   it('no icon library, no new dependency — NavIcons.tsx imports nothing but react types', () => {
@@ -121,7 +127,7 @@ describe('ticket #275 — WhyIcon, drawn in this repo, same rules as the other t
     // in, so it renders BEFORE `class=` in the tag, not after.
     const iconTags = html.match(/<svg [^>]*>/g) ?? []
     const iconOnlyTags = iconTags.filter((tag) => tag.includes('class="app-bar__icon"'))
-    expect(iconOnlyTags.length).toBe(4)
+    expect(iconOnlyTags.length).toBe(5) // four tabs + the collapsed button's own
     expect(iconOnlyTags.every((tag) => tag.includes('aria-hidden="true"'))).toBe(true)
   })
 })
@@ -268,11 +274,11 @@ describe('ticket #275 — the scroll-direction → collapsed/expanded pure funct
     }
   })
 
-  it('re-expands once upward scroll exceeds the threshold', () => {
+  it('re-expands once upward scroll reaches the threshold, not a moment before it', () => {
     let state = { lastY: 500, collapsed: true }
+    state = nextNavScrollState(state, 500 - NAV_COLLAPSE_THRESHOLD_PX + 1)
+    expect(state.collapsed).toBe(true) // one px short of the threshold — not yet
     state = nextNavScrollState(state, 500 - NAV_COLLAPSE_THRESHOLD_PX)
-    expect(state.collapsed).toBe(true) // not yet — exactly at the threshold boundary
-    state = nextNavScrollState(state, 500 - NAV_COLLAPSE_THRESHOLD_PX - NAV_COLLAPSE_THRESHOLD_PX)
     expect(state.collapsed).toBe(false)
   })
 
