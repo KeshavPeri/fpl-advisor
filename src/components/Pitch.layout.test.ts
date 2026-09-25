@@ -74,7 +74,6 @@ function declaredLength(css: string, selector: string, property: string): number
 // ---- The values this file's DoD is actually about ----
 
 const STARTING_SHIRT_WIDTH = declaredLength(playerShirtCss, '.player-shirt', 'width')
-const BENCH_SHIRT_WIDTH = declaredLength(playerShirtCss, '.player-shirt--bench', 'width')
 const ROW_GAP = declaredLength(pitchCss, '.pitch__row', 'gap')
 const FIELD_ROW_TO_ROW_GAP = declaredLength(pitchCss, '.pitch__field', 'gap')
 const NAME_PRICE_GAP = declaredLength(playerShirtCss, '.player-shirt', 'gap')
@@ -92,8 +91,23 @@ describe('#194/#202, section E/D — the pitch is wider, tighter, and the bench 
     expect(STARTING_SHIRT_WIDTH).toBeGreaterThan(PREVIOUS_STARTING_SHIRT_WIDTH)
   })
 
-  it('the bench shirt width is strictly less than the starting-XI width', () => {
-    expect(BENCH_SHIRT_WIDTH).toBeLessThan(STARTING_SHIRT_WIDTH)
+  // Ticket #276 (H2, docs/ui-audit-2026-09-25.md) — "bench players too small, make them same
+  // size as main team." PlayerShirt no longer has a `size` prop or a `.player-shirt--bench`
+  // modifier at all (PlayerShirt.tsx/.css); every shirt, bench included, is `.player-shirt`,
+  // so there is no separate width to compare — that absence IS the DoD item ("bench and
+  // starting shirts render at the same size"), checked directly against the source below.
+  it('PlayerShirt.css declares no separate, smaller bench shirt size any more', () => {
+    expect(playerShirtCss).not.toMatch(/\.player-shirt--bench\s*[,{]/)
+  })
+
+  it('PlayerShirt.tsx no longer takes a size prop — nothing left to pass "bench" to', () => {
+    const playerShirtTsx = readFileSync(path.join(here, 'PlayerShirt.tsx'), 'utf8')
+    expect(playerShirtTsx).not.toMatch(/size\s*[?:]/)
+  })
+
+  it('Pitch.tsx renders the bench with the exact same PlayerShirt props (minus availability/name/price identity) as the starting XI — no size="bench"', () => {
+    const pitchTsx = readFileSync(path.join(here, 'Pitch.tsx'), 'utf8')
+    expect(pitchTsx).not.toMatch(/size=["']bench["']/)
   })
 
   it('the bench is not built from Surface (no <Surface> import in Pitch.tsx\'s bench branch)', () => {
