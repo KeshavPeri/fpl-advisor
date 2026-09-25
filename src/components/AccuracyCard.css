@@ -1,12 +1,12 @@
 /*
   The rolling accuracy display (ticket #96) — product-brief.md §2's
-  "rolling figure in-app". Two variants as of ticket #169
-  (docs/ui-audit-2026-08-31.md F34): `.accuracy-card-summary` is the home
-  screen's single quiet line (no Surface, no panel, no --text-display
-  figure — the accuracy card no longer competes with the verdict card for
-  the one loudest figure a screen is allowed). `.accuracy-card` is the full
+  "rolling figure in-app". Two variants: `.accuracy-card` is the full
   panel — the rolling figure, the bias line, the per-gameweek breakdown —
-  used only on /reasoning now (ReasoningScreen.tsx).
+  used only on /reasoning (ReasoningScreen.tsx). `.accuracy-card-summary-
+  tile` is the home screen's own small titled tile (ticket #276, H1,
+  docs/ui-audit-2026-09-25.md — "a random line... needs a tile, and be
+  intentional"; replaces the earlier `.accuracy-card-summary`, a bare,
+  untitled sentence with no panel at all).
 
   This is a measurement, not a projection: unlike the verdict card's
   projected points, decimals ARE permitted here (see derive.ts's own
@@ -14,19 +14,83 @@
   never jitter.
 */
 
-/* F34 — the home screen's whole footprint for this feature. No panel: it
-   sits directly on the base ink, the quietest thing on the screen. */
-.accuracy-card-summary {
-  font: var(--text-body);
-  color: var(--text-secondary);
+/* Ticket #276 (H1) — the home screen's own compact tile: a real Surface
+   (padding="compact", the same recessed-density option `Surface.tsx`'s
+   own `padding` prop already offers) so it reads as an intentional, titled
+   card rather than the previous bare sentence. The value figure below
+   stays at --text-headline, not --text-display — F30/F34 reserve
+   --text-display for exactly one element on the home screen
+   (VerdictCard's own points figure); MiniLeagueCard's rank figure sits at
+   the same --text-headline tier for the same reason. */
+.accuracy-card-summary-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
 }
 
-.accuracy-card-summary--loading {
+.accuracy-card-summary-tile__title {
+  font: var(--text-label);
   color: var(--text-tertiary);
 }
 
-.accuracy-card-summary--error {
+.accuracy-card-summary-tile__value {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  font: var(--text-headline);
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+.accuracy-card-summary-tile__unit {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* A sample too small to read yet is a real state, not a missing number — same treatment as the
+   full variant's own .accuracy-card__figure-value--small below. */
+.accuracy-card-summary-tile__value--small {
+  margin-top: var(--space-1);
+  font: var(--text-body);
   color: var(--accent-coral);
+}
+
+.accuracy-card-summary-tile__line {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.accuracy-card-summary-tile__error {
+  font: var(--text-label);
+  color: var(--accent-coral);
+}
+
+.accuracy-card-summary-tile--loading {
+  gap: var(--space-3);
+}
+
+.accuracy-card-summary-tile__skeleton-line {
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: accuracy-card-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.accuracy-card-summary-tile__skeleton-line--title {
+  height: var(--space-3);
+  width: 50%;
+}
+
+.accuracy-card-summary-tile__skeleton-line--figure {
+  height: var(--space-6);
+  width: 35%;
+  margin-top: var(--space-1);
+}
+
+.accuracy-card-summary-tile__skeleton-line--body {
+  height: var(--space-3);
+  width: 70%;
 }
 
 .accuracy-card {

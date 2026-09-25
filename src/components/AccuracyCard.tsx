@@ -83,6 +83,19 @@ function biasLine(view: AccuracyView): string | null {
 // view.pendingActive is set — i.e. the active model (config/projection-model.json)
 // doesn't yet have MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE settled gameweeks of its
 // own, so the figures above still come from the older, fallback version.
+// Ticket #276 (H1, docs/ui-audit-2026-09-25.md) — "a random line that needs a tile, and be
+// intentional." The home tile's own "one plain line": sample size plus the bias, folded into one
+// sentence (no separate paragraph, no "and M projections" clause — that level of detail stays on
+// the full /reasoning card, see sampleLabel above). Takes `rolling` as its own parameter, not
+// `view.rolling`, so a caller can never pass this the null case by mistake — it's only ever
+// invoked once `rolling` is already known non-null (see the 'summary' ready branch below).
+function summaryTileLine(rolling: NonNullable<AccuracyView['rolling']>, view: AccuracyView): string {
+  const gwWord = rolling.gameweeksSettled === 1 ? 'gameweek' : 'gameweeks'
+  const bias = biasLine(view)
+  const biasClause = bias ? `, ${bias.replace(/^It runs /, 'running ').replace(/\.$/, '')}` : ''
+  return `Over ${rolling.gameweeksSettled} ${gwWord}${biasClause}.`
+}
+
 function pendingActiveLine(pendingActive: NonNullable<AccuracyView['pendingActive']>): string {
   return (
     `Recommendations now use ${pendingActive.modelVersion} — its accuracy shows here after ` +
@@ -169,8 +182,21 @@ function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
   }, [])
 
   if (state.status === 'loading') {
+    // Ticket #276 (H1) — the summary variant is now a small titled tile (a Surface, like every
+    // other card's loading state), not a bare paragraph — see this file's header note and the
+    // 'ready' branch below for the full shape.
     if (variant === 'summary') {
-      return <p className="accuracy-card-summary accuracy-card-summary--loading">Checking model accuracy…</p>
+      return (
+        <Surface
+          className="accuracy-card-summary-tile accuracy-card-summary-tile--loading"
+          padding="compact"
+          aria-hidden="true"
+        >
+          <div className="accuracy-card-summary-tile__skeleton-line accuracy-card-summary-tile__skeleton-line--title" />
+          <div className="accuracy-card-summary-tile__skeleton-line accuracy-card-summary-tile__skeleton-line--figure" />
+          <div className="accuracy-card-summary-tile__skeleton-line accuracy-card-summary-tile__skeleton-line--body" />
+        </Surface>
+      )
     }
     return (
       <Surface className="accuracy-card accuracy-card--loading" aria-hidden="true">
@@ -184,9 +210,12 @@ function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
   if (state.status === 'error') {
     if (variant === 'summary') {
       return (
-        <p className="accuracy-card-summary accuracy-card-summary--error" role="alert">
-          Couldn't load model accuracy: {state.message}.
-        </p>
+        <Surface className="accuracy-card-summary-tile" padding="compact" role="alert">
+          <p className="accuracy-card-summary-tile__title">Prediction accuracy</p>
+          <p className="accuracy-card-summary-tile__error">
+            Couldn't load model accuracy: {state.message}.
+          </p>
+        </Surface>
       )
     }
     return (
@@ -204,9 +233,10 @@ function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
   if (!view.hasData) {
     if (variant === 'summary') {
       return (
-        <p className="accuracy-card-summary" role="status">
-          {view.emptyStateMessage}
-        </p>
+        <Surface className="accuracy-card-summary-tile" padding="compact" role="status">
+          <p className="accuracy-card-summary-tile__title">Prediction accuracy</p>
+          <p className="accuracy-card-summary-tile__line">{view.emptyStateMessage}</p>
+        </Surface>
       )
     }
     return (
@@ -221,28 +251,29 @@ function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
   if (!rolling) return null // hasData: true always carries a rolling figure — defensive only.
 
   if (variant === 'summary') {
-    // #194, section D — "rewrite every string on the screen... this
-    // includes the accuracy line, which stays a single line." Was two
-    // sentences ("Model accuracy: X points average error over N
-    // gameweeks." plus the bias sentence) — "Model accuracy:" also read
-    // as the app labelling its own output, which design-reference.md's
-    // interface-writing rules flag as self-explanation. One clause now;
-    // the bias figure (when present) folds in rather than trailing as a
-    // second sentence.
-    const bias = biasLine(view)
+    // Ticket #276 (H1, docs/ui-audit-2026-09-25.md) — was a bare, untitled sentence at the
+    // bottom of the home screen ("a random line... needs a tile, and be intentional"). Now a
+    // small titled tile: "Prediction accuracy", one big figure (--text-headline — the same
+    // second-tier size MiniLeagueCard's own rank figure uses; F30/F34 reserve --text-display for
+    // exactly one element on the home screen, VerdictCard's points figure), one plain line below
+    // it. No stray sentence, no separate bias paragraph.
     return (
-      <p className="accuracy-card-summary" role="status">
+      <Surface className="accuracy-card-summary-tile" padding="compact" role="status">
+        <p className="accuracy-card-summary-tile__title">Prediction accuracy</p>
         {rolling.tooSmall || rolling.mae === null ? (
-          TOO_SMALL_MESSAGE
+          <p className="accuracy-card-summary-tile__value accuracy-card-summary-tile__value--small">
+            {TOO_SMALL_MESSAGE}
+          </p>
         ) : (
           <>
-            <span className="num">{rolling.mae}</span> points average error over{' '}
-            <span className="num">{rolling.gameweeksSettled}</span>{' '}
-            {rolling.gameweeksSettled === 1 ? 'gameweek' : 'gameweeks'}
-            {bias ? `, ${bias.replace(/^It runs /, 'running ').replace(/\.$/, '')}.` : '.'}
+            <p className="accuracy-card-summary-tile__value">
+              <span className="num">{rolling.mae}</span>
+              <span className="accuracy-card-summary-tile__unit">pts avg error</span>
+            </p>
+            <p className="accuracy-card-summary-tile__line">{summaryTileLine(rolling, view)}</p>
           </>
         )}
-      </p>
+      </Surface>
     )
   }
 
