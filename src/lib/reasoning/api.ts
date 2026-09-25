@@ -43,6 +43,12 @@ interface RecommendationRow {
    *  one this app recommends; 1 and 2 (when present) are ticket #102's
    *  alternatives. */
   plan_index: number
+  /** Ticket #277 — the recommendation's own solve time, set explicitly by
+   *  scripts/generate-recommendations.ts on every upsert. Read here (Plan
+   *  A's own row only) instead of falling back to a projection row's
+   *  computed_at, which was the reasoning-screen footer bug this ticket
+   *  fixes. */
+  updated_at: string
 }
 
 /** Just enough to find the latest gameweek that has ANY stored
@@ -148,7 +154,7 @@ export async function fetchReasoning(): Promise<ReasoningRecommendationData | nu
       'gameweek_id, is_roll, transfer_in_player_id, transfer_out_player_id, ' +
         'captain_player_id, vice_captain_player_id, hit_cost, gross_points_rounded, ' +
         'net_points_rounded, confidence_band, coverage, gameweeks(name), solution_index, ' +
-        'solver_run_id, plan_index'
+        'solver_run_id, plan_index, updated_at'
     )
     .eq('gameweek_id', latestGameweekId)
     .order('plan_index', { ascending: true })
@@ -392,5 +398,6 @@ export async function fetchReasoning(): Promise<ReasoningRecommendationData | nu
     startingXI,
     projections,
     alternatives,
+    updatedAt: recRow.updated_at,
   }
 }
