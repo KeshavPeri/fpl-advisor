@@ -1,5 +1,20 @@
 import { supabase } from '../supabase'
 import type { PredictionLogRow } from './types.ts'
+import projectionModelConfig from '../../../config/projection-model.json'
+
+/**
+ * The model_version actually driving today's recommendations — ticket #272.
+ * config/projection-model.json's "active" field is the one switch
+ * scripts/lib/activeModelVersion.ts also reads (for the Node-side jobs), but
+ * that module reads the file off disk with node:fs, which doesn't exist in
+ * the browser build. src/ and scripts/ are separate compilation environments
+ * (CLAUDE.md's sharing rule), so this reads the same file the other way:
+ * a JSON import, resolved and inlined by Vite at BUILD time
+ * (tsconfig.app.json's resolveJsonModule). That means a model switch takes
+ * effect on the next deploy of `main`, not live — exactly what this
+ * ticket's Build section says ("a switch commit redeploys").
+ */
+export const activeModelVersion: string = projectionModelConfig.active
 
 /**
  * Same wrapping as src/lib/squad/api.ts's raise() / src/lib/verdict/api.ts's

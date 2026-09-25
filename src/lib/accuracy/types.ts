@@ -88,9 +88,23 @@ export interface AccuracyView {
   /** Present only when hasData is false — states what the card is waiting
    *  for and when settlement happens, never a spinner or a bare zero. */
   emptyStateMessage: string | null
-  /** The model_version selectCurrentModelVersion resolved to. Null only
-   *  alongside hasData: false. */
+  /** The model_version this view's figures are built from — either the
+   *  active model (config/projection-model.json) once it has enough settled
+   *  history, or the fallback selectCurrentModelVersion resolved to before
+   *  then. See pendingActive below. Null only alongside hasData: false. */
   modelVersion: string | null
+  /**
+   * Set (ticket #272) exactly when the figures above come from a fallback
+   * version rather than the live active model — i.e. the active model from
+   * config/projection-model.json has fewer than
+   * derive.ts's MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE settled gameweeks of its
+   * own, including when it has none at all or doesn't appear in the rows.
+   * `settledGameweeks` is how many of that active model's own settled
+   * gameweeks exist so far, so the UI can say "N so far". Null once the
+   * active model has enough history to be shown directly (or alongside
+   * hasData: false, where there's nothing to compare against yet).
+   */
+  pendingActive: { modelVersion: string; settledGameweeks: number } | null
   /** Null only alongside hasData: false. */
   rolling: RollingAccuracyFigure | null
   /** Ascending by gameweekId. Empty only alongside hasData: false. */
