@@ -29,7 +29,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../lib/supabase.ts', () => ({ supabase: {}, supabaseConfigured: false }))
 
-const { VerdictPointsFigure } = await import('./VerdictCard.tsx')
+const { VerdictPointsFigure, ConfidenceBadge } = await import('./VerdictCard.tsx')
 
 describe('#194, section A2 — the action row does not stick to the viewport while scrolling', () => {
   it('position: sticky appears nowhere in VerdictCard.css', () => {
@@ -75,6 +75,50 @@ describe('#194, section D — Why this / Register override are buttons, not link
     const commitHeight = px(commitRule.match(/min-height:\s*([^;]+);/)![1])
     const secondaryHeight = px(secondaryRule.match(/min-height:\s*([^;]+);/)![1])
     expect(secondaryHeight).toBeLessThan(commitHeight)
+  })
+})
+
+describe('ticket #276 (H5) — ConfidenceBadge renders exactly the three named words', () => {
+  it('"coin-flip" renders "Close call"', () => {
+    const html = renderToStaticMarkup(createElement(ConfidenceBadge, { band: 'coin-flip' }))
+    expect(html).toContain('Close call')
+    expect(html).toContain('data-band="coin-flip"')
+  })
+
+  it('"marginal" renders "Leaning"', () => {
+    const html = renderToStaticMarkup(createElement(ConfidenceBadge, { band: 'marginal' }))
+    expect(html).toContain('Leaning')
+    expect(html).toContain('data-band="marginal"')
+  })
+
+  it('"clear" renders "Clear"', () => {
+    const html = renderToStaticMarkup(createElement(ConfidenceBadge, { band: 'clear' }))
+    expect(html).toContain('Clear')
+    expect(html).toContain('data-band="clear"')
+  })
+})
+
+describe('ticket #276 (H5) — the old repeated confidence text is gone', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const tsx = readFileSync(path.join(here, 'VerdictCard.tsx'), 'utf8')
+  const css = readFileSync(path.join(here, 'VerdictCard.css'), 'utf8')
+
+  it('no separate "Plan confidence:" / "Captain confidence:" JSX text, and no coin-flip sentence, survive as rendered content', () => {
+    expect(tsx).not.toMatch(/>\s*Plan confidence:/)
+    expect(tsx).not.toMatch(/Captain confidence: \{/)
+    expect(tsx).not.toMatch(/>\{view\.coinFlipNote/)
+  })
+
+  it('the old confidence classes are gone from both files (only the -badge class survives)', () => {
+    expect(tsx).not.toMatch(/"verdict-card__confidence"/)
+    expect(tsx).not.toMatch(/verdict-card__confidence-note/)
+    expect(css).not.toMatch(/\.verdict-card__confidence\s*\{/)
+    expect(css).not.toMatch(/\.verdict-card__confidence-note\s*\{/)
+  })
+
+  it('renders exactly one <ConfidenceBadge>', () => {
+    expect((tsx.match(/<ConfidenceBadge /g) ?? []).length).toBe(1)
+    expect(css).toMatch(/\.verdict-card__confidence-badge\s*\{/)
   })
 })
 

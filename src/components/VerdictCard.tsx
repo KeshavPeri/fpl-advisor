@@ -56,6 +56,21 @@ function combinedConfidenceBand(
   return BAND_WEAKNESS[captainBand] < BAND_WEAKNESS[planBand] ? captainBand : planBand
 }
 
+/**
+ * The badge itself — split out for the same reason VerdictPointsFigure below is: VerdictCard
+ * fetches via useEffect and can't be rendered synchronously into its 'ready' state, so a
+ * component this small is the only way to assert what actually renders for a given band
+ * (VerdictCard.test.ts), rather than only ever testing combinedConfidenceBand's return value in
+ * isolation.
+ */
+export function ConfidenceBadge({ band }: { band: ConfidenceBand }) {
+  return (
+    <span className="verdict-card__confidence-badge" data-band={band}>
+      {CONFIDENCE_BADGE_LABEL[band]}
+    </span>
+  )
+}
+
 interface VerdictPointsFigureProps {
   label: string
   points: number | null
@@ -463,9 +478,7 @@ function VerdictCard({ gameweekId, gameweekName }: VerdictCardProps) {
           reads as one, whichever half of the recommendation it comes
           from, and a clean recommendation isn't followed by a second
           sentence repeating what the badge already said. */}
-      <span className="verdict-card__confidence-badge" data-band={confidenceBadge}>
-        {CONFIDENCE_BADGE_LABEL[confidenceBadge]}
-      </span>
+      <ConfidenceBadge band={confidenceBadge} />
 
       {view.coverageNote && <p className="verdict-card__coverage">{view.coverageNote}</p>}
 
