@@ -33,6 +33,13 @@ import './ReasoningScreen.css'
  * the nav bar (App.tsx, persistent across every route including this
  * contextual one) is the navigation now, on every screen, not only the
  * three it lists as destinations.
+ *
+ * #266 — once a named player has a `gbm-v1` row (only after the nightly job
+ * runs and the owner switches the active model), a "Decided by gbm-v1" line
+ * and its top three reasons render above that player's breakdown, which is
+ * then explicitly headed "Breakdown (explainable model)" and stays the
+ * `baseline-v1` explainer underneath. Absent that row, this screen is
+ * unchanged from before this ticket.
  */
 
 type ScreenState =
@@ -177,19 +184,47 @@ function ReasoningContent({ data }: { data: ReasoningRecommendationData | null }
               <p className="reasoning-player__name">{player.name}</p>
               <p className="reasoning-player__coverage">{player.coverageNote}</p>
 
+              {/* Ticket #266 — once gbm-v1 decides a pick, name it and give
+                  the top three reasons in plain words, ABOVE the
+                  baseline-v1 breakdown that remains the explainer. Nothing
+                  here renders when `learned` is null (no gbm-v1 row yet, or
+                  the model hasn't switched) — the screen is then unchanged
+                  from before this ticket. */}
+              {player.learned && (
+                <div className="reasoning-player__learned">
+                  <p className="reasoning-player__learned-headline">{player.learned.headline}</p>
+                  {player.learned.drivers.length > 0 && (
+                    <ul className="reasoning-player__drivers">
+                      {player.learned.drivers.map((driver) => (
+                        <li key={driver.feature} className="reasoning-player__driver">
+                          {driver.description} {driver.direction}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
               {player.hasProjection ? (
-                <table className="reasoning-player__table">
-                  <tbody>
-                    {player.components.map((component) => (
-                      <tr key={component.key}>
-                        <td className="reasoning-player__component-label">{component.label}</td>
-                        <td className="reasoning-player__component-value num">
-                          {component.value.toFixed(2)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <>
+                  {player.learned && (
+                    <p className="reasoning-player__breakdown-heading">
+                      Breakdown (explainable model)
+                    </p>
+                  )}
+                  <table className="reasoning-player__table">
+                    <tbody>
+                      {player.components.map((component) => (
+                        <tr key={component.key}>
+                          <td className="reasoning-player__component-label">{component.label}</td>
+                          <td className="reasoning-player__component-value num">
+                            {component.value.toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
               ) : (
                 <p className="reasoning-player__unavailable">
                   No stored projection for this player this gameweek.

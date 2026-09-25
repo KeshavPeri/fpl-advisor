@@ -115,7 +115,10 @@ credential in the browser, which is Tier 1.
 31. 🔶 **Swap the projection source behind the CSV seam.** *Depends on 11, 30.* In progress —
     `config/projection-model.json` and the shared reader are R1-T3
     (docs/model-diagnosis-2026-09-24.md §8), not part of *#258*. `player_projections.model_version`
-    exists so `gbm-v1` can be written alongside `baseline-v1` rather than over it.
+    exists so `gbm-v1` can be written alongside `baseline-v1` rather than over it. The reasoning
+    screen now names the deciding model and its top three reasons in plain words per named player,
+    with the `baseline-v1` breakdown kept underneath as the explainer — *#266*. Live yet: only once
+    the nightly `gbm-v1` job (*#131*) has run and the owner has switched the active model.
 
 ## Wave 10 — backtest 🔶 partly done
 

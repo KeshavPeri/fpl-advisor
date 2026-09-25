@@ -46,6 +46,36 @@ export interface StartingXIPick {
  */
 export type ProjectionPointsBreakdown = Record<string, number>
 
+/**
+ * One driver behind a `gbm-v1` player's learned-model prediction — one entry
+ * of the up-to-five `components.drivers` array written by
+ * `model/fpl_model/live.py` (ticket #131) from `train.contributions`.
+ * `feature` is the model's own generated column name (e.g. `r5_total_points`,
+ * `lambda_for`) — `derive.ts`'s `describeDriver` turns it into plain words;
+ * this type carries the raw name through unchanged. `value` is the feature's
+ * own value at prediction time (null when the model had nothing to compute
+ * it from), `contribution` is the driver's signed effect on the prediction —
+ * its sign is what `derive.ts` reads to say "pushes up" / "pulls down".
+ */
+export interface PlayerProjectionDriver {
+  feature: string
+  value: number | null
+  contribution: number
+}
+
+/**
+ * The `gbm-v1` half of a player's projection row (ticket #266) — present
+ * only when a `gbm-v1` row was resolved for this player this gameweek,
+ * alongside (never instead of) the `baseline-v1` breakdown above. `points`
+ * and `modelVersion`/`computedAt` on `PlayerProjectionData` stay the
+ * `baseline-v1` ones, unchanged since #79 — this block is additive.
+ */
+export interface PlayerProjectionLearned {
+  modelVersion: string
+  expectedPoints: number
+  drivers: readonly PlayerProjectionDriver[]
+}
+
 /** One player's resolved projection row for this gameweek — read once per
  *  named player (transfer-in/out, captain, vice-captain), never the whole
  *  ~600-row table (see api.ts's own comment on why no pagination loop is
@@ -55,6 +85,12 @@ export interface PlayerProjectionData {
   points: ProjectionPointsBreakdown
   modelVersion: string
   computedAt: string
+  /** The `gbm-v1` row for this same player/gameweek, when one exists
+   *  (ticket #266) — see `PlayerProjectionLearned`'s own header. Undefined
+   *  when only `baseline-v1` resolved, or no projection resolved at all;
+   *  the reasoning screen then renders exactly as it did before this
+   *  ticket. */
+  learned?: PlayerProjectionLearned
 }
 
 /** Which role a named player plays in the recommendation — matches
