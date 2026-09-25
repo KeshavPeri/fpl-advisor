@@ -92,6 +92,60 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: npx tsx scripts/project-points.ts
 
+      - name: Resolve model cache key (gbm-v1)
+        # Ticket #265 (R2-T2). Computes the actions/cache key ahead of the "Project points
+        # (gbm-v1)" step below: VAASTAV_SHA (pinned, from model/fpl_model/sources.py) plus
+        # FPL-Core-Insights' current `main` sha, resolved fresh here -- so a moved upstream Core
+        # `main` invalidates the cache instead of silently reusing yesterday's files.
+        # model/fpl_model/fpl_api.py's resolve_core_ref() resolves the same sha again inside the
+        # job itself (that is the one sources.load_history actually uses -- never the literal
+        # 'main', see that function's docstring); this step exists only so the cache key can see
+        # it in advance. Runs on the runner's preinstalled python3, before Python is even
+        # otherwise set up for this job.
+        id: model-cache-key
+        run: |
+          vaastav_sha=$(grep -oP "VAASTAV_SHA = '\K[0-9a-f]+" model/fpl_model/sources.py)
+          core_sha=$(curl -sS -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/olbauday/FPL-Core-Insights/commits/main \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])")
+          echo "key=${vaastav_sha}-${core_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python (gbm-v1)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache model data (gbm-v1)
+        uses: actions/cache@v4
+        with:
+          path: model/.cache
+          key: model-cache-${{ steps.model-cache-key.outputs.key }}
+
+      - name: Project points (gbm-v1)
+        # Ticket #265 (R2-T2). Runs `gbm-v1` (#263, offline-gated: 5-GW Spearman 0.589 vs 0.453
+        # for points-per-appearance, model/reports/eval-latest.md) and writes its rows into
+        # player_projections NEXT TO baseline-v1 (model_version='gbm-v1', same table, same PK --
+        # a different model_version never collides with the "Project points" step above).
+        # THIS DOES NOT CHANGE RECOMMENDATIONS: config/projection-model.json stays on
+        # 'baseline-v1' until the owner flips it after checking the first run (see the ticket's
+        # "Post-merge owner check"; "Emit projections CSV" below still reads only `active`,
+        # which this step never touches).
+        #
+        # continue-on-error: true -- the baseline-v1 path (this step's own failure, and every
+        # step after it) must still run even if this step fails. A failure is still visible as a
+        # red step here, and (when Supabase itself is reachable) as a job_runs row with
+        # status='failure' -- model/fpl_model/live.py's own top-level error handling, mirroring
+        # scripts/heartbeat.ts's main().catch(...).
+        working-directory: model
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          pip install -r requirements.txt
+          python -m fpl_model.live
+
       - name: Sync squad from FPL
         # Ticket #14. Runs after the FPL ingest step above, which populates
         # the gameweeks and players tables this job reads from. FPL_ENTRY_ID

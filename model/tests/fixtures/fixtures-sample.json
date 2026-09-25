@@ -1,0 +1,18 @@
+[
+  {
+    "id": 501, "event": 10, "team_h": 1, "team_a": 3,
+    "team_h_difficulty": 2, "team_a_difficulty": 3, "kickoff_time": "2026-10-03T14:00:00Z"
+  },
+  {
+    "id": 502, "event": 11, "team_h": 2, "team_a": 3,
+    "team_h_difficulty": 2, "team_a_difficulty": 3, "kickoff_time": "2026-10-10T14:00:00Z"
+  },
+  {
+    "id": 503, "event": 11, "team_h": 4, "team_a": 2,
+    "team_h_difficulty": 3, "team_a_difficulty": 2, "kickoff_time": "2026-10-13T19:45:00Z"
+  },
+  {
+    "id": 504, "event": 15, "team_h": 5, "team_a": 1,
+    "team_h_difficulty": 3, "team_a_difficulty": 3, "kickoff_time": "2026-11-14T14:00:00Z"
+  }
+]

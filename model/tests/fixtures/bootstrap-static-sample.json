@@ -1,0 +1,44 @@
+{
+  "events": [
+    {"id": 9, "name": "Gameweek 9", "is_previous": true, "is_current": false, "is_next": false, "finished": true},
+    {"id": 10, "name": "Gameweek 10", "is_previous": false, "is_current": true, "is_next": true, "finished": false},
+    {"id": 11, "name": "Gameweek 11", "is_previous": false, "is_current": false, "is_next": false, "finished": false},
+    {"id": 12, "name": "Gameweek 12", "is_previous": false, "is_current": false, "is_next": false, "finished": false},
+    {"id": 13, "name": "Gameweek 13", "is_previous": false, "is_current": false, "is_next": false, "finished": false},
+    {"id": 14, "name": "Gameweek 14", "is_previous": false, "is_current": false, "is_next": false, "finished": false},
+    {"id": 15, "name": "Gameweek 15", "is_previous": false, "is_current": false, "is_next": false, "finished": false}
+  ],
+  "teams": [
+    {"id": 1, "code": 3, "name": "Arsenal", "short_name": "ARS"},
+    {"id": 2, "code": 7, "name": "Aston Villa", "short_name": "AVL"},
+    {"id": 3, "code": 11, "name": "Bournemouth", "short_name": "BOU"},
+    {"id": 4, "code": 13, "name": "Brentford", "short_name": "BRE"},
+    {"id": 5, "code": 90, "name": "Chelsea", "short_name": "CHE"}
+  ],
+  "elements": [
+    {
+      "id": 101, "code": 1001, "team": 1, "element_type": 3, "web_name": "ArsMid",
+      "status": "a", "chance_of_playing_next_round": null, "now_cost": 80,
+      "selected_by_percent": "15.5", "transfers_in_event": 1000, "transfers_out_event": 200,
+      "penalties_order": null
+    },
+    {
+      "id": 102, "code": 1002, "team": 2, "element_type": 4, "web_name": "AvlFwd",
+      "status": "a", "chance_of_playing_next_round": null, "now_cost": 95,
+      "selected_by_percent": "22.0", "transfers_in_event": 2000, "transfers_out_event": 100,
+      "penalties_order": 1
+    },
+    {
+      "id": 103, "code": 1003, "team": 5, "element_type": 2, "web_name": "CheDef",
+      "status": "a", "chance_of_playing_next_round": null, "now_cost": 50,
+      "selected_by_percent": "5.0", "transfers_in_event": 10, "transfers_out_event": 500,
+      "penalties_order": null
+    },
+    {
+      "id": 104, "code": 1004, "team": 1, "element_type": 1, "web_name": "ArsGk",
+      "status": "i", "chance_of_playing_next_round": null, "now_cost": 45,
+      "selected_by_percent": "1.0", "transfers_in_event": 0, "transfers_out_event": 50,
+      "penalties_order": null
+    }
+  ]
+}
