@@ -50,6 +50,17 @@ import type {
  *  DoD names this figure explicitly ("fewer than 50 measured rows"). */
 export const MIN_SAMPLE_SIZE = 50
 
+/**
+ * Ticket #272: how many of its own settled gameweeks the active model
+ * (config/projection-model.json's "active") needs before the card switches
+ * to showing ITS figures instead of the fallback version's. Below this, a
+ * freshly-switched-to model would otherwise never be shown at all — the
+ * pre-#272 rule picked whichever version had the most settled rows, which
+ * is always the old model for weeks after a switch. See selectCurrentModelVersion's
+ * unchanged fallback rule and deriveAccuracyView's own use of both.
+ */
+export const MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE = 3
+
 /** A prediction_log row that has actually been settled — every nullable
  *  settle-time field narrowed to its real type. Never exported: callers
  *  (api.ts, tests) only ever need PredictionLogRow; this is derive.ts's own
@@ -144,10 +155,14 @@ function computeGroupFigures(rows: readonly SettledRow[]): GroupFigures {
 }
 
 /**
- * Picks the one model_version this view is built from — the ticket
- * explicitly scopes out comparing versions ("read model_version but don't
- * race two"), so every figure this module produces must come from exactly
- * one version's rows, never a blend.
+ * Picks the one model_version this view is built from when the active model
+ * (config/projection-model.json) doesn't yet have enough settled history of
+ * its own — see deriveAccuracyView's own MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE
+ * check, which runs before this is ever called. The ticket that introduced
+ * this function scoped out comparing versions ("read model_version but
+ * don't race two"), so every figure this module produces must still come
+ * from exactly one version's rows, never a blend — this is just no longer
+ * unconditionally "the current one".
  *
  * Chosen by which version has the most settled rows, tie-broken by the
  * latest capturedAt among them. Row-count, not recency alone, is the
@@ -214,7 +229,30 @@ function deriveBias(
   return { biasWord, biasSentence }
 }
 
-export function deriveAccuracyView(rows: readonly PredictionLogRow[]): AccuracyView {
+/**
+ * Ticket #272: the ticket builds `deriveAccuracyView(rows, activeModelVersion)`.
+ * `activeModelVersion` is config/projection-model.json's "active" field
+ * (src/lib/accuracy/api.ts reads it via a JSON import) — the model version
+ * actually driving today's recommendations, which is not necessarily the one
+ * with the most settled history. Rule:
+ *
+ *   - If `activeModelVersion` has >= MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE settled
+ *     gameweeks of its OWN, the view is built from it directly.
+ *   - Otherwise the view falls back to selectCurrentModelVersion's older
+ *     rule (most settled rows) exactly as before this ticket, and
+ *     `pendingActive` is set so the UI can say the active model is still
+ *     accumulating history and how much it has so far — including zero, when
+ *     `activeModelVersion` has no settled rows at all, or doesn't appear in
+ *     `rows` at all.
+ *
+ * This keeps the card from showing a just-retired model's accuracy for weeks
+ * after a switch (this ticket's own Why), without ever showing a
+ * freshly-switched-to model's figures before they mean anything.
+ */
+export function deriveAccuracyView(
+  rows: readonly PredictionLogRow[],
+  activeModelVersion: string
+): AccuracyView {
   const settledRows = rows
     .map(toSettledRow)
     .filter((row): row is SettledRow => row !== null)
@@ -224,6 +262,7 @@ export function deriveAccuracyView(rows: readonly PredictionLogRow[]): AccuracyV
       hasData: false,
       emptyStateMessage: EMPTY_STATE_MESSAGE,
       modelVersion: null,
+      pendingActive: null,
       rolling: null,
       perGameweek: [],
       biasWord: null,
@@ -231,7 +270,20 @@ export function deriveAccuracyView(rows: readonly PredictionLogRow[]): AccuracyV
     }
   }
 
-  const modelVersion = selectCurrentModelVersion(settledRows)
+  const activeSettledGameweeks = new Set(
+    settledRows
+      .filter((row) => row.modelVersion === activeModelVersion)
+      .map((row) => row.gameweekId)
+  ).size
+  const activeHasEnoughHistory = activeSettledGameweeks >= MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE
+
+  const modelVersion = activeHasEnoughHistory
+    ? activeModelVersion
+    : selectCurrentModelVersion(settledRows)
+  const pendingActive = activeHasEnoughHistory
+    ? null
+    : { modelVersion: activeModelVersion, settledGameweeks: activeSettledGameweeks }
+
   const versionRows = settledRows.filter((row) => row.modelVersion === modelVersion)
 
   const byGameweek = new Map<number, SettledRow[]>()
@@ -275,6 +327,7 @@ export function deriveAccuracyView(rows: readonly PredictionLogRow[]): AccuracyV
     hasData: true,
     emptyStateMessage: null,
     modelVersion,
+    pendingActive,
     rolling,
     perGameweek,
     biasWord,

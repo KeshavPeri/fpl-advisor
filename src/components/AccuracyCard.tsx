@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { fetchPredictionLog } from '../lib/accuracy/api.ts'
-import { deriveAccuracyView } from '../lib/accuracy/derive.ts'
+import { activeModelVersion, fetchPredictionLog } from '../lib/accuracy/api.ts'
+import { MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE, deriveAccuracyView } from '../lib/accuracy/derive.ts'
 import type { AccuracyView, GameweekAccuracyFigure } from '../lib/accuracy/types.ts'
 import { toErrorMessage } from '../lib/format'
 import Surface from './Surface'
@@ -79,6 +79,17 @@ function biasLine(view: AccuracyView): string | null {
   return `It runs ${magnitude} points ${direction} per player.`
 }
 
+// Ticket #272: the ticket's own literal wording. Shown only when
+// view.pendingActive is set — i.e. the active model (config/projection-model.json)
+// doesn't yet have MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE settled gameweeks of its
+// own, so the figures above still come from the older, fallback version.
+function pendingActiveLine(pendingActive: NonNullable<AccuracyView['pendingActive']>): string {
+  return (
+    `Recommendations now use ${pendingActive.modelVersion} — its accuracy shows here after ` +
+    `${MIN_SETTLED_GAMEWEEKS_FOR_ACTIVE} settled gameweeks (${pendingActive.settledGameweeks} so far).`
+  )
+}
+
 function GameweekRow({ figure }: { figure: GameweekAccuracyFigure }) {
   return (
     <li className="accuracy-card__gw-row">
@@ -144,7 +155,7 @@ function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
       try {
         const rows = await fetchPredictionLog()
         if (cancelled) return
-        setState({ status: 'ready', view: deriveAccuracyView(rows) })
+        setState({ status: 'ready', view: deriveAccuracyView(rows, activeModelVersion) })
       } catch (err) {
         if (cancelled) return
         setState({ status: 'error', message: toErrorMessage(err) })
@@ -241,6 +252,10 @@ function AccuracyCard({ variant = 'full' }: AccuracyCardProps) {
         Prediction accuracy{' '}
         <span className="accuracy-card__model-version num">{view.modelVersion}</span>
       </p>
+
+      {view.pendingActive && (
+        <p className="accuracy-card__pending-active">{pendingActiveLine(view.pendingActive)}</p>
+      )}
 
       <div className="accuracy-card__rolling">
         <AccuracyFigure

@@ -45,6 +45,16 @@
   color: var(--text-tertiary);
 }
 
+/* Ticket #272 — one muted line under the model name when the card is still
+   showing a fallback version's figures because the live active model
+   hasn't settled enough gameweeks yet. Same quiet treatment as
+   .accuracy-card__model-version: this is a status note, not a recommendation
+   or a warning, so it stays neutral, never coral or cyan. */
+.accuracy-card__pending-active {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
 /* The rolling MAE — Revolut-style (design-reference.md reference 2): the
    one important number, large and tabular, with a small quiet label. Same
    treatment as .verdict-card__points. */
