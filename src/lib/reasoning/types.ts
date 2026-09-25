@@ -176,4 +176,12 @@ export interface ReasoningRecommendationData {
   /** Every OTHER stored plan for this same gameweek (`plan_index` 1, 2),
    *  ordered ascending. See `AlternativePlanData`'s own header. */
   alternatives: readonly AlternativePlanData[]
+  /** `recommendations.updated_at` for Plan A (`plan_index = 0`) — the
+   *  recommendation's OWN solve time, set explicitly by
+   *  scripts/generate-recommendations.ts on every upsert. Ticket #277: the
+   *  footer used to read a resolved player_projections row's `computed_at`
+   *  instead, which could legitimately differ from when the recommendation
+   *  itself was produced. This is the one correct source for "Updated …"
+   *  on the reasoning screen. */
+  updatedAt: string
 }

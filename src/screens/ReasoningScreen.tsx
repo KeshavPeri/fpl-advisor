@@ -1,45 +1,31 @@
 import { useEffect, useState } from 'react'
-import AccuracyCard from '../components/AccuracyCard'
 import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { toErrorMessage } from '../lib/format'
 import { fetchReasoning } from '../lib/reasoning/api.ts'
 import { deriveReasoningView } from '../lib/reasoning/derive.ts'
+import type { ReasoningOtherOptionView, ReasoningPlayerView } from '../lib/reasoning/derive.ts'
 import type { ReasoningRecommendationData } from '../lib/reasoning/types.ts'
 import './ReasoningScreen.css'
 
 /**
- * The reasoning screen (ticket #79, feature-list item 21) — `/reasoning`.
- * design-reference.md names this the one screen in the app where
- * information density is correct (the Linear reference); everywhere else
- * stays calm. Owns its own fetch, independent of the home screen and the
- * verdict card — reached by tapping through from VerdictCard's new link,
- * but works as a direct navigation too.
- *
- * Plan A is the recommendation this screen exists to explain, and its own
- * rendering (headline, totals, captain confidence, per-player breakdown) is
- * unchanged since #79. Ticket #102 adds Plan B/Plan C below it, in their own
- * visually subordinate section — every alternative is rendered as a
- * difference off Plan A, never as a competing option; see
- * ./ReasoningContent's own comment and design-reference.md's rule that only
- * the home screen's verdict is "the loudest thing on the screen" — here
- * Plan A keeps that role relative to B/C, not relative to the rest of the
- * app. All display logic lives in `src/lib/reasoning/derive.ts`
+ * The "Why" tab (ticket #79, feature-list item 21; rebuilt for plain
+ * language by ticket #277 — "the plan and the reasons in ten seconds, no
+ * jargon"). Owns its own fetch, independent of the home screen and the
+ * verdict card. All display logic lives in `src/lib/reasoning/derive.ts`
  * (`deriveReasoningView`) — this component fetches, derives, and renders
  * whatever the view says, the same split VerdictCard/deriveVerdictView and
  * Pitch/pitchLayout already establish.
  *
- * #194, section C — the back-to-Home link and "Reasoning" caption are gone:
- * the nav bar (App.tsx, persistent across every route including this
- * contextual one) is the navigation now, on every screen, not only the
- * three it lists as destinations.
+ * Ticket #277's own DoD: the hero (gameweek, plan, confidence badge, at
+ * most one plain sentence) plus the first player card must fit on one
+ * 390px phone screen without scrolling — see ReasoningScreen.css's own
+ * comment on why the hero Surface is one compact panel rather than
+ * several, and why player cards default to their disclosures CLOSED.
  *
- * #266 — once a named player has a `gbm-v1` row (only after the nightly job
- * runs and the owner switches the active model), a "Decided by gbm-v1" line
- * and its top three reasons render above that player's breakdown, which is
- * then explicitly headed "Breakdown (explainable model)" and stays the
- * `baseline-v1` explainer underneath. Absent that row, this screen is
- * unchanged from before this ticket.
+ * No screen-title header is added here (out of this ticket's scope — see
+ * its own Files list) and `<AccuracyCard variant="full" />` is removed
+ * outright (build item 8, R5): accuracy stays a Home-screen concern.
  */
 
 type ScreenState =
@@ -108,38 +94,30 @@ function ReasoningContent({ data }: { data: ReasoningRecommendationData | null }
 
   return (
     <>
-      <Surface className="reasoning-summary">
-        <p className="reasoning-gameweek">{view.gameweekName}</p>
-        <p className="reasoning-headline">{view.headline}</p>
+      {/* Ticket #277, build items 1-2 — the whole plan, one confidence
+          badge, at most one plain sentence, and the headline figure, all
+          in ONE panel: this is the "read in 10 seconds" section, and the
+          DoD requires it (plus the first player card) to fit on one 390px
+          screen. Deliberately not two Surfaces (hero + headline) — one
+          panel is less vertical padding to spend on the same information. */}
+      <Surface className="reasoning-hero" focal>
+        <p className="reasoning-hero__gameweek">{view.gameweekName}</p>
+        <p className="reasoning-hero__line">{view.heroLine}</p>
 
-        {view.reasons.length > 0 && (
-          <ul className="reasoning-list">
-            {view.reasons.map((reason, index) => (
-              // Stored reason lines have no stable id of their own — this
-              // list is a static, ordered render of a fetched snapshot
-              // (never reordered or edited in place), so the position in
-              // the array is a safe key here, same convention already used
-              // by Pitch.tsx for its own read-only, order-stable lists.
-              <li key={index} className="reasoning-list__item">
-                {reason}
-              </li>
-            ))}
-          </ul>
-        )}
-      </Surface>
+        <div className="reasoning-hero__meta">
+          {view.confidenceLabel && (
+            <span className={`reasoning-badge reasoning-badge--${view.confidenceBand}`}>
+              {view.confidenceLabel}
+            </span>
+          )}
+          {view.heroSentence && <span className="reasoning-hero__sentence">{view.heroSentence}</span>}
+        </div>
 
-      {/* F46 (should-fix, docs/ui-audit-2026-08-31.md) — was three separate
-          panels (totals, captain, one per player — up to five siblings at
-          the same weight). Now one L2 section holding the whole decision
-          detail, with each sub-block recessed (level={1}) inside it —
-          "more information per panel", per design-reference.md's own
-          naming of this screen as the one place density is correct. */}
-      <Surface className="reasoning-detail">
-        <div className="reasoning-total">
-          <p className="reasoning-total__label">{view.horizonLabel}</p>
-          <p className="reasoning-total__value num">
-            {view.horizonGross !== null ? view.horizonGross : 'Unavailable'}
+        <div className="reasoning-hero__headline">
+          <p className="reasoning-hero__headline-value num">
+            {view.headlineValue !== null ? view.headlineValue : '—'}
           </p>
+          <p className="reasoning-hero__headline-caption">{view.headlineCaption}</p>
         </div>
 
         {view.hit && (
@@ -152,177 +130,162 @@ function ReasoningContent({ data }: { data: ReasoningRecommendationData | null }
             </p>
           </div>
         )}
-
-        <div className="reasoning-confidence">
-          <p className="reasoning-confidence__label">Confidence: {view.confidenceWord}</p>
-        </div>
-
-        {view.captainBand !== null ? (
-          <Surface
-            className={`reasoning-captain reasoning-captain--${view.captainBand}`}
-            level={1}
-            padding="compact"
-            role={view.captainBand === 'coin-flip' ? 'status' : undefined}
-          >
-            <p className="reasoning-captain__label">Captain confidence: {view.captainBand}</p>
-            {view.captainNote && <p className="reasoning-captain__note">{view.captainNote}</p>}
-          </Surface>
-        ) : (
-          <Surface className="reasoning-captain" level={1} padding="compact">
-            <p className="reasoning-captain__label">Captain confidence unavailable</p>
-            <p className="reasoning-captain__note">
-              The starting XI for this gameweek couldn't be read, so the captain gap can't be
-              compared.
-            </p>
-          </Surface>
-        )}
-
-        <div className="reasoning-players">
-          {view.players.map((player) => (
-            <Surface key={player.role} className="reasoning-player" level={1} padding="compact">
-              <p className="reasoning-player__role">{player.role}</p>
-              <p className="reasoning-player__name">{player.name}</p>
-              <p className="reasoning-player__coverage">{player.coverageNote}</p>
-
-              {/* Ticket #266 — once gbm-v1 decides a pick, name it and give
-                  the top three reasons in plain words, ABOVE the
-                  baseline-v1 breakdown that remains the explainer. Nothing
-                  here renders when `learned` is null (no gbm-v1 row yet, or
-                  the model hasn't switched) — the screen is then unchanged
-                  from before this ticket. */}
-              {player.learned && (
-                <div className="reasoning-player__learned">
-                  <p className="reasoning-player__learned-headline">{player.learned.headline}</p>
-                  {player.learned.drivers.length > 0 && (
-                    <ul className="reasoning-player__drivers">
-                      {player.learned.drivers.map((driver) => (
-                        <li key={driver.feature} className="reasoning-player__driver">
-                          {driver.description} {driver.direction}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-
-              {player.hasProjection ? (
-                <>
-                  {player.learned && (
-                    <p className="reasoning-player__breakdown-heading">
-                      Breakdown (explainable model)
-                    </p>
-                  )}
-                  <table className="reasoning-player__table">
-                    <tbody>
-                      {player.components.map((component) => (
-                        <tr key={component.key}>
-                          <td className="reasoning-player__component-label">{component.label}</td>
-                          <td className="reasoning-player__component-value num">
-                            {component.value.toFixed(2)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </>
-              ) : (
-                <p className="reasoning-player__unavailable">
-                  No stored projection for this player this gameweek.
-                </p>
-              )}
-            </Surface>
-          ))}
-        </div>
       </Surface>
 
-      {/* Alternatives (ticket #102) — deliberately the quietest section on
-          the screen: smaller labels, no --text-display figures, no accent
-          headline. Plan A already had its say above; this section exists
-          only to show how close the call was, per product-brief.md §8.
-          F46 — one L1 recessed panel instead of one Surface per
-          alternative (each alternative is now a plain block inside it,
-          separated by a rule), matching the quieter register the section
-          already asked for. */}
-      {(view.coinFlipNote || view.alternativesEmptyNote || view.alternatives.length > 0) && (
+      {view.captainLabel ? (
         <Surface
-          className="reasoning-alternatives"
+          className={`reasoning-captain reasoning-captain--${view.captainBand}`}
+          level={1}
+          padding="compact"
+          role={view.captainBand === 'coin-flip' ? 'status' : undefined}
+        >
+          <p className="reasoning-captain__label">{view.captainLabel}</p>
+          {view.captainNote && <p className="reasoning-captain__note">{view.captainNote}</p>}
+        </Surface>
+      ) : (
+        <Surface className="reasoning-captain" level={1} padding="compact">
+          <p className="reasoning-captain__label">Captain confidence unavailable</p>
+          <p className="reasoning-captain__note">
+            The starting XI for this gameweek couldn't be read, so the captain gap can't be
+            compared.
+          </p>
+        </Surface>
+      )}
+
+      <div className="reasoning-players">
+        {view.players.map((player) => (
+          <PlayerCard key={player.role} player={player} />
+        ))}
+      </div>
+
+      {/* Other options (ticket #277, build item 6; was "Alternatives
+          considered", ticket #102) — one collapsed line per plan, each its
+          own <details> for the full detail. No duplicated transfer
+          sentence: the summary line IS the difference, nothing repeats
+          it. */}
+      {(view.otherOptionsEmptyNote || view.otherOptions.length > 0) && (
+        <Surface
+          className="reasoning-other-options"
           level={1}
           role="region"
-          aria-label="Alternative plans"
+          aria-label="Other options"
         >
-          <p className="reasoning-alternatives__heading">Alternatives considered</p>
+          <p className="reasoning-other-options__heading">Other options</p>
 
-          {view.coinFlipNote && (
-            <p className="reasoning-alternatives-coinflip__note" role="status">
-              {view.coinFlipNote}
-            </p>
+          {view.otherOptionsEmptyNote && (
+            <p className="reasoning-other-options__empty">{view.otherOptionsEmptyNote}</p>
           )}
 
-          {view.alternativesEmptyNote && (
-            <p className="reasoning-alternatives-empty__note">{view.alternativesEmptyNote}</p>
-          )}
-
-          {view.alternatives.map((alternative) => (
-            <div key={alternative.label} className="reasoning-alternative">
-              <div className="reasoning-alternative__header">
-                <p className="reasoning-alternative__label">{alternative.label}</p>
-                <p className="reasoning-alternative__gap">
-                  <span className="num">
-                    {alternative.pointsGap > 0 ? `+${alternative.pointsGap}` : alternative.pointsGap}
-                  </span>{' '}
-                  <span className="reasoning-alternative__gap-text">pts vs Plan A</span>
-                </p>
-              </div>
-
-              <p className="reasoning-alternative__diff">{alternative.differenceText}</p>
-
-              {alternative.reasonHeadline && (
-                <p className="reasoning-alternative__reason">{alternative.reasonHeadline}</p>
-              )}
-
-              <div className="reasoning-alternative__meta">
-                <span className="reasoning-alternative__confidence">
-                  Confidence: {alternative.confidenceWord}
-                </span>
-                {alternative.hit && (
-                  <span className="reasoning-alternative__hit">
-                    <span className="num">−{alternative.hit.cost}</span> hit ·{' '}
-                    <span className="num">{alternative.hit.net}</span> net
-                  </span>
-                )}
-              </div>
-
-              <ul className="reasoning-alternative__players">
-                {alternative.players.map((player) => (
-                  <li key={player.role} className="reasoning-alternative__player">
-                    <span className="reasoning-alternative__player-role">{player.role}</span>
-                    <span className="reasoning-alternative__player-name">{player.name}</span>
-                    <span className="reasoning-alternative__player-coverage">{player.coverageNote}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+          {view.otherOptions.map((option) => (
+            <OtherOptionRow key={option.label} option={option} />
           ))}
         </Surface>
       )}
 
-      {/* F46 — the model/computed-at footer is now a plain quiet line, not
-          its own panel: a one-sentence footnote never needed material
-          under it. */}
-      <p className="reasoning-meta__line">
-        Model: {view.modelVersion ?? 'Unavailable'}
-        {view.computedAtLabel && <> · Computed {view.computedAtLabel}</>}
+      {/* Ticket #277, build item 7 — the footer used to read a resolved
+          projection row's model/computed-at, which could legitimately
+          differ from when the recommendation itself was produced (the
+          bug this ticket fixes). Now the recommendation's own solve time
+          only, no model name. */}
+      <p className="reasoning-footer">
+        {view.updatedAtLabel ? `Updated ${view.updatedAtLabel}` : 'Update time unavailable'}
+      </p>
+    </>
+  )
+}
+
+/** One player: role, name, the single-gameweek figure, up to 3 plain
+ *  reason chips, a coverage note only when there's a data gap, and the
+ *  8-row breakdown behind a closed-by-default "See the numbers"
+ *  disclosure (build item 5). Native `<details>`/`<summary>`, same pattern
+ *  DecisionHistoryScreen.tsx already uses — free keyboard/VoiceOver
+ *  disclosure semantics, no extra React state. */
+function PlayerCard({ player }: { player: ReasoningPlayerView }) {
+  return (
+    <Surface className="reasoning-player" level={1} padding="compact">
+      <p className="reasoning-player__role">{player.role}</p>
+      <p className="reasoning-player__name">{player.name}</p>
+      {/* Only the number itself is mono/tabular (.num) — the surrounding
+          words stay sans, per design-reference.md's G3 rule that mono is
+          for figures only, never a whole sentence. */}
+      <p className="reasoning-player__points">
+        {player.points !== null ? (
+          <>
+            <span className="num">{player.points.toFixed(1)}</span> pts next gameweek
+          </>
+        ) : (
+          'Points unavailable'
+        )}
       </p>
 
-      {/* Ticket #169 / docs/ui-audit-2026-08-31.md F34 (must-fix) — the
-          rolling-accuracy panel (figure, bias line, per-gameweek
-          breakdown) moves here from the home screen, which now shows only
-          AccuracyCard's one-line `variant="summary"`. This is the one
-          screen design-reference.md names as correct for this density
-          (reference 4, Linear), and removing the nested scroll region the
-          home-screen card used to need (F36) is easiest on a full page. */}
-      <AccuracyCard variant="full" />
-    </>
+      {player.chips.length > 0 && (
+        <ul className="reasoning-player__chips">
+          {player.chips.map((chip) => (
+            <li key={chip} className="reasoning-chip">
+              {chip}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {player.coverageNote && <p className="reasoning-player__coverage">{player.coverageNote}</p>}
+
+      {player.hasProjection ? (
+        <details className="reasoning-player__details">
+          <summary className="reasoning-player__details-summary">See the numbers</summary>
+          <table className="reasoning-player__table">
+            <tbody>
+              {player.components.map((component) => (
+                <tr key={component.key}>
+                  <td className="reasoning-player__component-label">{component.label}</td>
+                  <td className="reasoning-player__component-value num">
+                    {component.value.toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      ) : (
+        <p className="reasoning-player__unavailable">No stored points for this player this gameweek.</p>
+      )}
+    </Surface>
+  )
+}
+
+/** One alternative plan, collapsed to its own one-line summary, expanding
+ *  on tap into confidence, hit cost and the per-player detail. */
+function OtherOptionRow({ option }: { option: ReasoningOtherOptionView }) {
+  return (
+    <details className="reasoning-other-option">
+      <summary className="reasoning-other-option__summary">
+        <span className="reasoning-other-option__label">{option.label}</span>
+        <span className="reasoning-other-option__line">{option.summaryLine}</span>
+      </summary>
+
+      <div className="reasoning-other-option__detail">
+        <p className="reasoning-other-option__confidence">Confidence: {option.confidenceLabel}</p>
+
+        {option.hit && (
+          <p className="reasoning-other-option__hit">
+            <span className="num">−{option.hit.cost}</span> hit ·{' '}
+            <span className="num">{option.hit.net}</span> net
+          </p>
+        )}
+
+        <ul className="reasoning-other-option__players">
+          {option.players.map((player) => (
+            <li key={player.role} className="reasoning-other-option__player">
+              <span className="reasoning-other-option__player-role">{player.role}</span>
+              <span className="reasoning-other-option__player-name">{player.name}</span>
+              {player.coverageNote && (
+                <span className="reasoning-other-option__player-coverage">{player.coverageNote}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </details>
   )
 }
 

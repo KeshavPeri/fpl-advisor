@@ -1,17 +1,13 @@
 /*
-  The reasoning screen (ticket #79, feature-list item 21) — the one screen in
-  this app where information density is correct (design-reference.md,
-  reference 4: Linear). Everywhere else in the app stays calm and spare;
-  here, more state is communicated per screen — through tighter spacing,
-  small labels and weight, not through extra chrome or borders. Still built
-  entirely from Surface (translucent layered material, never a flat card
-  with a 1px border) and the existing token set from src/index.css — no new
-  token is introduced here.
+  The "Why" tab (ticket #79) — rebuilt for plain language by ticket #277
+  (docs/ui-audit-2026-09-25.md, "Reasoning" round 2 direction: "one screen
+  you can read in 10 seconds"). Still built entirely from Surface
+  (translucent layered material, never a flat card with a 1px border) and
+  the existing token set from src/index.css — no new token introduced here.
+  The `<details>`/`<summary>` disclosure treatment (chevron, [open]
+  rotation) matches DecisionHistoryScreen.css's established pattern exactly
+  — this ticket extends existing UI, it does not invent a new one.
 */
-
-/* #194, section C — the back-link header (a "Home" link plus a redundant
-   screen-name caption) is deleted outright: the persistent nav bar
-   (App.tsx) is the navigation now, on every screen. */
 
 /* ---- Loading / error / empty ---- */
 
@@ -64,81 +60,103 @@
   margin-top: var(--space-2);
 }
 
-/* ---- Summary: gameweek, headline, every stored reason line ---- */
+/* ---- Hero (build items 1-2) ----
+   One panel: gameweek, the plan in one line, one confidence badge, at
+   most one plain sentence, then the headline figure (Revolut reference —
+   large tabular number, small quiet label). Ticket DoD: this panel plus
+   the first player card must fit on one 390px screen, so it stays ONE
+   Surface rather than splitting hero/headline into two. */
 
-.reasoning-summary {
+.reasoning-hero {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
-.reasoning-gameweek {
+.reasoning-hero__gameweek {
   font: var(--text-label);
   color: var(--text-tertiary);
 }
 
-.reasoning-headline {
-  font: var(--text-title);
+.reasoning-hero__line {
+  font: var(--text-headline);
+  letter-spacing: var(--tracking-headline);
   color: var(--text-primary);
 }
 
-.reasoning-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.reasoning-hero__meta {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
 }
 
-.reasoning-list__item {
+.reasoning-hero__sentence {
   font: var(--text-body);
   color: var(--text-secondary);
-  padding-left: var(--space-3);
-  position: relative;
 }
 
-.reasoning-list__item::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0.65em;
-  width: 4px;
-  height: 4px;
+/* ---- Confidence badge — product-brief.md §8's three bands, one word
+   each, never the raw band name repeated in prose (G5). Cyan for a
+   confident call, coral for a genuine coin flip (risk/uncertainty, per
+   design-reference.md's accent convention), a quiet neutral for the
+   middle "Leaning" band — no green, no yellow. ---- */
+
+.reasoning-badge {
+  display: inline-flex;
+  align-items: center;
+  font: var(--text-label);
+  font-weight: 550;
+  white-space: nowrap;
+  padding: var(--space-1) var(--space-3);
   border-radius: 999px;
-  background: var(--accent-cyan);
+  border: 1px solid transparent;
 }
 
-/* ---- F46 (should-fix, docs/ui-audit-2026-08-31.md) — the decision
-   detail: was three separate panels (totals, captain, one per player).
-   Now one L2 section; captain and each player are L1-recessed blocks
-   inside it (Surface level={1} padding="compact" in ReasoningScreen.tsx),
-   so density comes from more information per panel rather than more
-   panels. ---- */
+.reasoning-badge--clear {
+  background: var(--accent-cyan-dim);
+  border-color: var(--accent-cyan-line);
+  color: var(--accent-cyan);
+}
 
-.reasoning-detail {
+.reasoning-badge--marginal {
+  background: transparent;
+  border-color: var(--panel-border-strong);
+  color: var(--text-secondary);
+}
+
+.reasoning-badge--coin-flip {
+  background: var(--accent-coral-dim);
+  border-color: var(--accent-coral-line);
+  color: var(--accent-coral);
+}
+
+/* ---- Headline figure — the single-gameweek total, whole number only
+   (product-brief.md §8: no decimals in the primary recommendation view).
+   ---- */
+
+.reasoning-hero__headline {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  margin-top: var(--space-2);
 }
 
-/* ---- Totals: the horizon figure, the hit block, the confidence word ---- */
-
-.reasoning-total__label {
-  font: var(--text-label);
-  color: var(--text-tertiary);
-}
-
-.reasoning-total__value {
+.reasoning-hero__headline-value {
   font: var(--text-display);
   color: var(--accent-cyan);
-  letter-spacing: 0.01em;
+  letter-spacing: var(--tracking-display);
+}
+
+.reasoning-hero__headline-caption {
+  font: var(--text-label);
+  color: var(--text-tertiary);
 }
 
 .reasoning-hit {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  margin-top: var(--space-1);
 }
 
 .reasoning-hit__label {
@@ -149,11 +167,6 @@
 .reasoning-hit__figures {
   font: var(--text-body);
   color: var(--accent-coral);
-}
-
-.reasoning-confidence__label {
-  font: var(--text-body);
-  color: var(--text-secondary);
 }
 
 /* ---- Captain confidence ---- */
@@ -184,7 +197,7 @@
   color: var(--text-primary);
 }
 
-/* ---- Per-player component breakdown — the dense part ---- */
+/* ---- Player cards (build items 3, 5) ---- */
 
 .reasoning-players {
   display: flex;
@@ -196,16 +209,11 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  /* Padding comes from Surface's own padding="compact" (ReasoningScreen.tsx)
-     now — F46 recessed these to level={1} inside .reasoning-detail rather
-     than leaving them as their own top-level panels. */
 }
 
 .reasoning-player__role {
   font: var(--text-label);
   font-weight: 550;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
@@ -214,70 +222,85 @@
   color: var(--text-primary);
 }
 
-.reasoning-player__coverage {
-  font: var(--text-label);
+.reasoning-player__points {
+  font: var(--text-body);
   color: var(--text-secondary);
   margin-bottom: var(--space-1);
 }
 
-/* ---- Learned-model (gbm-v1) block — ticket #266 ----
-   Sits above the baseline-v1 breakdown, which stays the explainer
-   underneath. Absent entirely (no DOM, no extra spacing) for any player
-   with no gbm-v1 row, so the screen is pixel-identical to before this
-   ticket until the model switch happens. */
+/* ---- Reason chips — plain football language, up to 3, built from the
+   driver's own VALUE (derive.ts's `reasonChip`), never a feature name and
+   never "pushes up/pulls down". Quiet neutral pills, matching the same
+   border/fill convention chip statuses elsewhere in the app already use
+   (ChipsScreen.css), not an accent colour — a chip is a reason, not a
+   verdict. ---- */
 
-.reasoning-player__learned {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  margin-bottom: var(--space-2);
-}
-
-.reasoning-player__learned-headline {
-  font: var(--text-body);
-  font-weight: 550;
-  color: var(--accent-cyan);
-}
-
-.reasoning-player__drivers {
+.reasoning-player__chips {
   margin: 0;
   padding: 0;
   list-style: none;
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: var(--space-1);
 }
 
-.reasoning-player__driver {
-  font: var(--text-label);
+.reasoning-chip {
+  font: var(--text-label-tight);
   color: var(--text-secondary);
-  padding-left: var(--space-3);
-  position: relative;
-}
-
-.reasoning-player__driver::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0.55em;
-  width: 4px;
-  height: 4px;
+  background: var(--panel-fill-raised);
+  border: 1px solid var(--panel-border);
   border-radius: 999px;
-  background: var(--accent-cyan);
+  padding: var(--space-1) var(--space-2);
 }
 
-.reasoning-player__breakdown-heading {
+.reasoning-player__coverage {
+  font: var(--text-label);
+  color: var(--accent-coral);
+}
+
+/* ---- "See the numbers" disclosure (build item 5) — closed by default,
+   same native <details>/<summary> treatment as
+   DecisionHistoryScreen.css's .decisions-entry__summary: no default
+   browser marker, a small rotating chevron instead. ---- */
+
+.reasoning-player__details {
+  margin-top: var(--space-1);
+}
+
+.reasoning-player__details-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   font: var(--text-label);
   font-weight: 550;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--text-tertiary);
-  margin-top: var(--space-1);
+  cursor: pointer;
+  list-style: none;
+}
+
+.reasoning-player__details-summary::-webkit-details-marker {
+  display: none;
+}
+
+.reasoning-player__details-summary::after {
+  content: '';
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 1.5px solid var(--text-tertiary);
+  border-bottom: 1.5px solid var(--text-tertiary);
+  transform: rotate(-45deg);
+  transition: transform var(--dur-press) var(--ease-out);
+}
+
+.reasoning-player__details[open] .reasoning-player__details-summary::after {
+  transform: rotate(45deg);
 }
 
 .reasoning-player__table {
   width: 100%;
   border-collapse: collapse;
+  margin-top: var(--space-1);
 }
 
 .reasoning-player__table tr + tr {
@@ -301,100 +324,104 @@
 .reasoning-player__unavailable {
   font: var(--text-label);
   color: var(--accent-coral);
+  margin-top: var(--space-1);
 }
 
-/* ---- Alternatives (Plan B / Plan C) — ticket #102 ----
-   Deliberately the quietest section on the screen: no --text-display
-   figure anywhere here (that size is Plan A's alone, above), smaller
-   heading than reasoning-headline. Plan A already had its say above; this
-   section exists only to show how close the call was, per
-   product-brief.md §8.
+/* ---- Other options (build item 6) — collapsed to one line per plan,
+   each its own <details> (same chevron treatment as the player-card
+   disclosure above). Deliberately the quietest section on the screen: no
+   --text-display figure here, that size is the hero's alone. ---- */
 
-   F46 (should-fix) — was one Surface per alternative (plus one each for
-   the coin-flip and empty notes). Now one recessed L1 panel (Surface
-   level={1} in ReasoningScreen.tsx) holding every alternative as a plain
-   block, separated by a rule — the section was already the quietest one
-   on the screen; this makes it one panel instead of several. */
-
-.reasoning-alternatives {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.reasoning-alternatives__heading {
-  font: var(--text-label);
-  font-weight: 550;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
-
-.reasoning-alternatives-coinflip__note {
-  font: var(--text-body);
-  color: var(--text-primary);
-}
-
-.reasoning-alternatives-empty__note {
-  font: var(--text-body);
-  color: var(--text-secondary);
-}
-
-.reasoning-alternative {
+.reasoning-other-options {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--panel-border);
 }
 
-.reasoning-alternative__header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.reasoning-alternative__label {
+.reasoning-other-options__heading {
   font: var(--text-label);
   font-weight: 550;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
-.reasoning-alternative__gap {
-  font: var(--text-label);
+.reasoning-other-options__empty {
+  font: var(--text-body);
   color: var(--text-secondary);
 }
 
-.reasoning-alternative__gap .num {
-  color: var(--text-primary);
+.reasoning-other-option {
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--panel-border);
 }
 
-.reasoning-alternative__diff {
+.reasoning-other-options > .reasoning-other-option:first-of-type {
+  padding-top: 0;
+  border-top: none;
+}
+
+.reasoning-other-option__summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.reasoning-other-option__summary::-webkit-details-marker {
+  display: none;
+}
+
+.reasoning-other-option__summary::after {
+  content: '';
+  flex-shrink: 0;
+  align-self: center;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-left: auto;
+  border-right: 1.5px solid var(--text-tertiary);
+  border-bottom: 1.5px solid var(--text-tertiary);
+  transform: rotate(-45deg);
+  transition: transform var(--dur-press) var(--ease-out);
+}
+
+.reasoning-other-option[open] .reasoning-other-option__summary::after {
+  transform: rotate(45deg);
+}
+
+.reasoning-other-option__label {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.reasoning-other-option__line {
   font: var(--text-body);
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
-.reasoning-alternative__reason {
-  font: var(--text-label);
-  color: var(--text-secondary);
-}
-
-.reasoning-alternative__meta {
+.reasoning-other-option__detail {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.reasoning-other-option__confidence {
   font: var(--text-label);
   color: var(--text-secondary);
 }
 
-.reasoning-alternative__hit {
+.reasoning-other-option__hit {
+  font: var(--text-label);
   color: var(--accent-coral);
 }
 
-.reasoning-alternative__players {
+.reasoning-other-option__players {
   margin: 0;
   padding: 0;
   list-style: none;
@@ -403,7 +430,7 @@
   gap: var(--space-1);
 }
 
-.reasoning-alternative__player {
+.reasoning-other-option__player {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -411,26 +438,23 @@
   font: var(--text-label-tight);
 }
 
-.reasoning-alternative__player-role {
+.reasoning-other-option__player-role {
   color: var(--text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
-.reasoning-alternative__player-name {
+.reasoning-other-option__player-name {
   color: var(--text-primary);
   font-weight: 550;
 }
 
-.reasoning-alternative__player-coverage {
-  color: var(--text-secondary);
+.reasoning-other-option__player-coverage {
+  color: var(--accent-coral);
 }
 
-/* ---- Model version / computed-at footer ----
-   F46 — no longer its own Surface: a one-sentence footnote never needed
-   material under it. */
+/* ---- Footer (build item 7) — the recommendation's own solve time only,
+   no model name. ---- */
 
-.reasoning-meta__line {
+.reasoning-footer {
   font: var(--text-label);
   color: var(--text-tertiary);
 }
