@@ -154,3 +154,12 @@ Gates compare against baselines computed on **this run's own walk-forward**, not
 reference figures from the 24 Sept diagnosis run (which are printed in the report for comparison
 only) — the two should be close, but the gate is never allowed to depend on numbers this code
 didn't itself produce.
+
+## Parked: learned availability (diagnosis R3-T1) — tested offline 25 Sept 2026, not ticketed
+
+Adding end-of-GW `status`, `chance_of_playing_next_round`, `penalties_order` (Core 2025-26 snapshots,
+GW g−1 for GW g) as features gave 5-GW active Spearman 0.5906 with the live availability rule vs
+0.5906 for today's model × rule (13,259 rows); captain 6.81 vs 6.65, within noise. No gain — parked.
+Gotcha: Core's 2025-26 GW2–10 files record fit (`a`) players as chance `0.0`, not null; clean that
+before using those snapshots (2026-27 files are fine). Offline eval here omits the rule; with it,
+production's figure is 0.591, not 0.586.
