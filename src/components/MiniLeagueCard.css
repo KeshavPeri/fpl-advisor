@@ -1,0 +1,205 @@
+/*
+  The mini-league standings card (ticket #271) — product-brief.md §1/§5's display-only mini-
+  league standings, feature-list item 33. Same Surface-panel shape as AccuracyCard's 'full'
+  variant (title, one headline figure, a body line, then a quiet list) — this card has no
+  'summary' variant of its own, since it is used exactly once, on the home screen.
+
+  Sizing note: the rank figure below uses --text-headline, not --text-display.
+  design-reference.md/F30 (see VerdictCard.css) reserve --text-display for exactly one figure per
+  screen — VerdictCard's projected points. This card sits one step down, same reasoning
+  AccuracyCard.css states for its own figure.
+*/
+
+.mini-league-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.mini-league-card__title {
+  font: var(--text-title);
+  color: var(--text-primary);
+}
+
+.mini-league-card__headline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+}
+
+.mini-league-card__rank-figure {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.mini-league-card__rank-value {
+  font: var(--text-headline);
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+.mini-league-card__rank-of {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+/* Rank movement since the previous gameweek — cyan for up, coral for down, matching
+   design-reference.md's committed "no green, no yellow; blue-cyan good, coral bad" rule. A flat
+   (unchanged, or not-yet-known) reading stays neutral text, never accented either way. */
+.mini-league-card__movement {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font: var(--text-label);
+  font-weight: 550;
+}
+
+.mini-league-card__movement--flat {
+  color: var(--text-tertiary);
+}
+
+.mini-league-card__movement--up {
+  color: var(--accent-cyan);
+}
+
+.mini-league-card__movement--down {
+  color: var(--accent-coral);
+}
+
+.mini-league-card__movement-arrow {
+  font-size: 0.7em;
+}
+
+.mini-league-card__gap {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.mini-league-card__notice {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.mini-league-card__empty {
+  font: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.mini-league-card__error {
+  font: var(--text-body);
+  color: var(--accent-coral);
+}
+
+/* The compact standings table — leader, the place above, you (highlighted), the place below.
+   A quiet list, matching AccuracyCard's own per-gameweek breakdown, not a bordered/striped
+   table. */
+.mini-league-card__table {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mini-league-card__row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  column-gap: var(--space-3);
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius-control);
+  border-top: 1px solid var(--panel-border);
+}
+
+.mini-league-card__row:first-child {
+  border-top: none;
+}
+
+/* Your own row — a cyan-tinted wash and a matching left rule, the same "recommended/positive"
+   accent language as the nav's active-item glow (src/index.css's --nav-active-glow), never a
+   full accent fill (this is a highlight, not a call to action). */
+.mini-league-card__row--you {
+  background: var(--accent-cyan-dim);
+  border-top-color: transparent;
+  box-shadow: inset 2px 0 0 var(--accent-cyan);
+}
+
+.mini-league-card__row--you + .mini-league-card__row {
+  border-top-color: transparent;
+}
+
+.mini-league-card__row-rank {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+  min-width: 1.5em;
+}
+
+.mini-league-card__row--you .mini-league-card__row-rank {
+  color: var(--text-secondary);
+}
+
+.mini-league-card__row-name {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-league-card__row--you .mini-league-card__row-name {
+  color: var(--text-primary);
+}
+
+.mini-league-card__row-total {
+  font: var(--text-label);
+  color: var(--text-primary);
+  text-align: right;
+}
+
+/* Loading placeholder — three bars shaped like the ordinary card's own content, same technique
+   as AccuracyCard.css / VerdictCard.css's own skeletons. */
+.mini-league-card--loading {
+  gap: var(--space-4);
+}
+
+.mini-league-card__skeleton-line {
+  border-radius: var(--radius-control);
+  background: var(--panel-fill-raised);
+  opacity: 0.5;
+  animation: mini-league-card-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.mini-league-card__skeleton-line--title {
+  height: var(--space-4);
+  width: 45%;
+}
+
+.mini-league-card__skeleton-line--figure {
+  height: var(--space-6);
+  width: 30%;
+  margin-top: var(--space-2);
+}
+
+.mini-league-card__skeleton-line--body {
+  height: var(--space-4);
+  width: 70%;
+}
+
+@keyframes mini-league-card-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+/* prefers-reduced-motion is already handled globally in src/index.css, which zeroes every
+   element's animation-duration — no local override needed here (same note as
+   AccuracyCard.css/VerdictCard.css/DeadlineCountdown.css). */

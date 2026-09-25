@@ -158,6 +158,17 @@ jobs:
           FPL_ENTRY_ID: ${{ secrets.FPL_ENTRY_ID }}
         run: npx tsx scripts/sync-squad.ts
 
+      - name: Ingest mini-league
+        # Ticket #271 (feature-list item 33). Display only (product-brief.md §1) — standings
+        # never feed the solver or any recommendation. continue-on-error: true because this must
+        # never stop the projection/recommendation path below it: a mini-league fetch failure is
+        # a missing card on the home screen, not a reason to skip a real gameweek decision.
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/ingest-mini-league.ts
+
       - name: Emit projections CSV
         # Ticket #34 (product-brief.md §6c — "the seam"). Runs after the
         # "Project points" step above, which populates player_projections

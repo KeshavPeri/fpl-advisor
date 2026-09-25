@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import AccuracyCard from '../components/AccuracyCard'
 import AppShell from '../components/AppShell'
 import DeadlineCountdown, { type DeadlineCountdownState } from '../components/DeadlineCountdown'
+import MiniLeagueCard from '../components/MiniLeagueCard'
 import { deriveAvailability } from '../components/pitchAvailability'
 import Pitch, { type PitchPlayer } from '../components/Pitch'
 import PitchSkeleton from '../components/PitchSkeleton'
@@ -66,6 +67,13 @@ import './HomeScreen.css'
  * RHYTHM between sections (a bigger break before the verdict than between
  * the pitch and the accuracy line) is not done here; every section still
  * sits at AppShell's one constant `--shell-gap`.
+ *
+ * Ticket #271 adds MiniLeagueCard below the accuracy line — product-brief.md
+ * §1/§5's display-only mini-league standings (feature-list item 33). It owns
+ * its own read (src/lib/miniLeague/api.ts), independent of every state above,
+ * same "a failed or slow read here must never block or blank something else"
+ * principle AccuracyCard already follows. Nothing it reads or renders ever
+ * feeds the solver or a recommendation.
  */
 
 type LoadState =
@@ -250,6 +258,14 @@ function HomeScreen() {
           than between the pitch and the bench above it. */}
       <div className="home-accuracy">
         <AccuracyCard variant="summary" />
+      </div>
+
+      {/* Ticket #271 — mini-league standings, display only, below the accuracy
+          line per this ticket's own DoD. Wrapped the same way as
+          .home-accuracy/.home-verdict above so it gets a real break rather
+          than AppShell's one constant --shell-gap alone. */}
+      <div className="home-mini-league">
+        <MiniLeagueCard />
       </div>
     </AppShell>
   )

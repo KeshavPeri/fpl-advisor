@@ -19,6 +19,10 @@
   margin-top: var(--space-2);
 }
 
+.home-mini-league {
+  margin-top: var(--space-2);
+}
+
 .home-status-text {
   font: var(--text-body);
   color: var(--text-secondary);

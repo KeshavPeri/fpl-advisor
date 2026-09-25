@@ -127,7 +127,17 @@ credential in the browser, which is Tier 1.
     **The recommendation-level replay — transfers, captaincy, a season's league position — is not
     built**, and cannot be a genuine replay of Keshav's own decisions: the app did not exist in
     2025/26 and there is no stored squad for that season.
-33. ⬜ **Mini-league comparison** against the ~20 real managers. *Depends on 32.* Not started.
+33. ✅ **Mini-league standings — display only.** *#271.* Classic league 848654
+    (`config/mini-league.json`) is ingested nightly (`scripts/ingest-mini-league.ts`, paginated
+    via `standings.has_next`) into `public.mini_league_standings`, keyed to the latest FINISHED
+    gameweek — standings only ever reflect a completed gameweek, per product-brief.md §3. Shown
+    on the home screen (`MiniLeagueCard`, below the accuracy card): rank of N, movement since the
+    previous gameweek, gap to the leader and to the place above, and a compact table (leader,
+    above, Keshav highlighted, below). **Display only, forever** — product-brief.md §1: "must
+    never enter the optimiser's objective," and nothing in `src/lib/scoring/`,
+    `src/lib/projection/` or the solver input reads this table. This is the FPL-API-standings
+    half of the original item; the season-simulation-based **comparison** this item's own
+    "Depends on 32" originally pointed at is not built and still depends on 32.
 
 ---
 

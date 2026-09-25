@@ -1,0 +1,23 @@
+{
+  "league": {
+    "id": 848654,
+    "name": "Test Mini-League"
+  },
+  "standings": {
+    "has_next": false,
+    "page": 2,
+    "results": [
+      {
+        "id": 3,
+        "entry": 333,
+        "entry_name": "Third Wheel FC",
+        "player_name": "Priya Nair",
+        "rank": 3,
+        "last_rank": 3,
+        "rank_sort": 3,
+        "total": 190,
+        "event_total": 55
+      }
+    ]
+  }
+}
