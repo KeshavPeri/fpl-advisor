@@ -31,6 +31,15 @@ export interface MiniLeagueStandingRow {
   fetchedAt: string
 }
 
+/**
+ * One entry in `MiniLeagueView.rows` (ticket #276) — either a real standings row, or a divider
+ * marking a skipped rank range between the top-3 block and the "you ± 1" block below it. A
+ * discriminated union rather than `MiniLeagueStandingRow | null` so a caller can never mistake a
+ * divider for a row with missing data — the two are rendered completely differently
+ * (MiniLeagueCard.tsx).
+ */
+export type MiniLeagueRowEntry = { kind: 'row'; row: MiniLeagueStandingRow } | { kind: 'divider' }
+
 /** Fully-resolved display data for MiniLeagueCard — the component does no further derivation. */
 export interface MiniLeagueView {
   hasData: boolean
@@ -54,21 +63,29 @@ export interface MiniLeagueView {
   /** The row immediately above `you` by rank. Null when `you` is the leader, or when `you` is
    *  null. */
   above: MiniLeagueStandingRow | null
-  /** The row immediately below `you` by rank. Null when `you` is last, or when `you` is null. */
-  below: MiniLeagueStandingRow | null
   /** leader.total - you.total. 0 exactly when `you` is the leader. Null when `you` is null or
    *  either total is unavailable. */
   gapToLeader: number | null
   /** above.total - you.total. Null when there is no row above (you're the leader), when `you`
    *  is null, or when either total is unavailable. */
   gapToAbove: number | null
+  /** Ticket #276 — you.total - (rank 2's) total, only ever populated when `isLeading` is true;
+   *  null otherwise, including when there's no rank-2 row to compare against. The gap bar's own
+   *  "Leading by N" figure when you're 1st (gapToAbove is null in that case, by construction —
+   *  there's no row above the leader). */
+  leadOverSecond: number | null
   /** you.lastRank - you.rank — positive means rank improved (moved up) since the previous
    *  gameweek, negative means it fell. Null when `you` is null or lastRank is unavailable (e.g.
    *  the league's first-ever recorded gameweek). */
   movement: number | null
-  /** The compact table MiniLeagueCard renders: leader, above, you (highlighted), below, in rank
-   *  order, deduplicated by entryId (adjacent positions collapse into one row — e.g. `above` and
-   *  `leader` are the same manager when `you` is 2nd). When `you` is null (entryNotInLeague),
-   *  this is the top few rows by rank instead, so the card still shows something meaningful. */
-  rows: readonly MiniLeagueStandingRow[]
+  /** Ticket #276 — true exactly when `you` is rank 1 (gapToLeader === 0). Drives the card's one
+   *  "premium moment" (a crown glyph) — false, never true, when `you` is null. */
+  isLeading: boolean
+  /** Ticket #276 — top 3 by rank, plus `you` and the rows immediately above/below `you` when
+   *  `you` falls outside the top 3 (a rank already in the top 3 adds nothing new — deduplicated
+   *  by entryId). A `{kind:'divider'}` entry marks every place this list's own rank sequence
+   *  skips at least one rank, so MiniLeagueCard can render "···" there rather than implying a
+   *  contiguous table. When `you` is null (entryNotInLeague), this is the top 3 rows instead, so
+   *  the card still shows something meaningful. */
+  rows: readonly MiniLeagueRowEntry[]
 }
