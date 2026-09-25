@@ -319,3 +319,12 @@ def test_fk_skip_counts_and_drops_unknown_player(raw_projections, snapshot):
     )
     assert skipped == 5  # one row per horizon gw for the one missing player
     assert all(r['player_code'] != 1003 for r in payload)
+
+
+def test_json_safe_turns_nan_and_inf_into_null():
+    import json
+    import numpy as np
+    out = live._json_safe({'a': float('nan'), 'b': [np.float64('inf'), 1.5, np.int64(3)],
+                           'drivers': [{'feature': 'p90_10_saves', 'value': np.nan, 'contribution': 0.1}]})
+    assert out == {'a': None, 'b': [None, 1.5, 3], 'drivers': [{'feature': 'p90_10_saves', 'value': None, 'contribution': 0.1}]}
+    json.dumps(out, allow_nan=False)
