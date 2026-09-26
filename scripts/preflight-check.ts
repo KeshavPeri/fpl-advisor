@@ -69,24 +69,30 @@
 // competition, a player over the 38-match season cap, a tracked job whose
 // most recent run failed or is stale, a missing required env var that would
 // itself make the notification absent (Supabase or Telegram credentials),
-// the deadline having passed with no scheduled notification ever sent, a
-// team with no ClubElo rating or a horizon fixture falling back to FPL's
-// own difficulty scale, a team's ClubElo rating stale beyond
-// ELO_STALE_HOURS (ticket #230 — see check 6's own section below for why a
-// whole-season model defect on live data is exactly the failure mode this
-// file exists to catch, and why "never an automatic failure" was wrong), or
-// — check 12, ticket #236, the same failure mode again — zero current-season
-// player_match_stats rows, or a current-season opponent_team_code /
-// team_code / element_type null share exceeding MAX_NULL_SHARE (10%): a
-// blank source column (teams.csv's own fotmob_name) silently emptied
-// opponent_team_code on every current-season row for four gameweeks while
-// check 7 (which only counts `competition`) kept passing.
+// the deadline having passed with no scheduled notification ever sent, the
+// active model (scripts/lib/activeModelVersion.ts) having zero
+// player_projections rows for the next gameweek or a newest computed_at
+// older than LIVE_MODEL_PROJECTIONS_STALE_HOURS (ticket #285 — replaces
+// ticket #230's ClubElo-freshness check, retired the same ticket: since
+// ticket #238 market odds are the top fixture-strength tier and ClubElo is
+// abandoned, and since 25 Sept gbm-v1 makes the picks and does not read
+// team ratings at all — the old check guarded nothing live traffic still
+// depended on, and nothing checked that the model that actually runs had
+// actually run), or — check 12, ticket #236, the same "silently stopped
+// being true" failure mode again — zero current-season player_match_stats
+// rows, or a current-season opponent_team_code / team_code / element_type
+// null share exceeding MAX_NULL_SHARE (10%): a blank source column
+// (teams.csv's own fotmob_name) silently emptied opponent_team_code on
+// every current-season row for four gameweeks while check 7 (which only
+// counts `competition`) kept passing.
 // WARN: degrades quality without breaking the chain — a projection row
-// count slightly (not drastically) under the player count, a missing
-// FPL_ENTRY_ID (squad can still be entered manually), or a check-12 null
-// share between WARN_NULL_SHARE_FLOOR (2%) and MAX_NULL_SHARE (10%). See
-// decisions/ticket-69.md for the two calls that were genuinely ambiguous
-// (all-zero projection rows; TELEGRAM_* severity).
+// count slightly (not drastically) under the player count, fewer than 90%
+// of players having a live-model projection row for the next gameweek
+// (ticket #285), a missing FPL_ENTRY_ID (squad can still be entered
+// manually), or a check-12 null share between WARN_NULL_SHARE_FLOOR (2%)
+// and MAX_NULL_SHARE (10%). See decisions/ticket-69.md for the two calls
+// that were genuinely ambiguous (all-zero projection rows; TELEGRAM_*
+// severity).
 //
 // ============================================================================
 // job_runs.job_name — 'solver-run' is shared by THREE scripts.

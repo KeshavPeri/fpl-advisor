@@ -6,6 +6,14 @@
 // playerstats.csv) added by ticket #248 — see that section, below
 // buildTeamCodeMap, for its own full header.
 //
+// TICKET #285: the #176 name/short_name fallback below only PARTIALLY resolved opponents (it
+// cannot help a club whose `name` cell is already an abbreviation), which left
+// player_match_stats.opponent_team_code null on 64.1% of current-season rows (preflight check
+// 12, ticket #236). buildClubCodeBySlug now seeds its slug map from
+// scripts/lib/coreClubSlugs.ts — a small, hand-built, hand-verified table read directly off
+// FPL-Core-Insights' own fixtures.csv, ahead of teams.csv entirely — see that function's own
+// "first resolver wins" comment, below.
+//
 // TICKET #63 FINDING (verified 18 Aug 2026, live data) — WHAT IT GOT RIGHT.
 // A club whose `code` has no row in the ingested season's teams.csv — i.e.
 // counted under `teamsCodesNotInCsv` below — used to be left with whatever
@@ -214,6 +222,10 @@ import { parseCompetition } from './lib/competition.js'
 // pattern-matched locally; widening that one import to a multi-name list
 // would still be correct code but would break that grep for no real benefit.
 import { parseMatchClubSlugs, type CompetitionToken } from './lib/competition.js'
+// Ticket #285: the hand-built, verified-against-real-fixtures.csv slug -> team_code map — the
+// FIRST resolver buildClubCodeBySlug consults, ahead of teams.csv's own fotmob_name/name
+// fallback below. See scripts/lib/coreClubSlugs.ts's own header for the full "because".
+import { CORE_CLUB_SLUG_TO_TEAM_CODE } from './lib/coreClubSlugs.ts'
 
 const JOB_NAME = 'ingest-core-insights'
 
@@ -467,12 +479,21 @@ export function buildEloByCode(records: Array<Record<string, string>>): EloByCod
 }
 
 // ============================================================================
-// Club slug -> team_code — ticket #167. Built from the SAME teams.csv
-// already fetched for elo above, off its fotmob_name column, which was
-// verified directly against real fetched data (2025-2026, 17 Aug 2026) to
-// slugify EXACTLY to the club-name segments FPL-Core-Insights uses in
-// match_id: "Brighton & Hove Albion" -> "brighton-hove-albion",
-// "AFC Bournemouth" -> "afc-bournemouth", "Manchester United" ->
+// Club slug -> team_code — ticket #167, superseded as the PRIMARY source by ticket #285.
+//
+// TICKET #285: buildClubCodeBySlug now seeds codeBySlug from scripts/lib/coreClubSlugs.ts's
+// hand-built, verified-against-fixtures.csv map FIRST — see that file's own header and
+// buildClubCodeBySlug's "first resolver wins" comment below. That map alone resolves all 20
+// current clubs regardless of what teams.csv's own fotmob_name/name/short_name columns say. The
+// two teams.csv-derived paths documented below are now a FALLBACK for a slug the literal map does
+// not (yet) cover — e.g. a newly-promoted club before this file's map is updated — not the
+// primary path any more. They are left in place rather than deleted, per the ticket's own scope
+// ("Keep skip-and-count for anything still unmapped").
+//
+// Built from the SAME teams.csv already fetched for elo above, off its fotmob_name column, which
+// was verified directly against real fetched data (2025-2026, 17 Aug 2026) to slugify EXACTLY to
+// the club-name segments FPL-Core-Insights uses in match_id: "Brighton & Hove Albion" ->
+// "brighton-hove-albion", "AFC Bournemouth" -> "afc-bournemouth", "Manchester United" ->
 // "manchester-united" -- all confirmed against real GW1 match_id values.
 // teams.csv's OTHER name columns do not: "name" holds abbreviations like
 // "Man Utd" / "Nott'm Forest" / "Spurs" that do not match match_id at all.
@@ -518,16 +539,20 @@ export function slugifyClubName(name: string): string {
     .replace(/\s+/g, '-')
 }
 
-// Ticket #176: which of the two source columns a codeBySlug entry's slug was
-// built from — lets countOpponentsResolvedViaFallback (below) report how
-// many resolved opponents came from the fallback specifically, separately
-// from the pre-existing matchRowsWithOpponentTeamCode total.
-export type ClubSlugSource = 'fotmob_name' | 'name_or_short_name_fallback'
+// Ticket #176 (fotmob_name / name_or_short_name_fallback): which of the two teams.csv columns a
+// codeBySlug entry's slug was built from — lets countOpponentsResolvedViaFallback (below) report
+// how many resolved opponents came from the fallback specifically, separately from the
+// pre-existing matchRowsWithOpponentTeamCode total.
+// Ticket #285: 'core_club_slugs' marks an entry seeded from the hand-built, verified
+// scripts/lib/coreClubSlugs.ts map — the first resolver, consulted before either teams.csv path.
+export type ClubSlugSource = 'core_club_slugs' | 'fotmob_name' | 'name_or_short_name_fallback'
 
 export interface ClubCodeBySlugResult {
-  // slug -> team_code, built from teams.csv rows with a parseable code and
-  // EITHER a non-blank fotmob_name, OR (ticket #176, when fotmob_name is
-  // blank) a slug derived from that same row's name or short_name.
+  // slug -> team_code. Seeded FIRST (ticket #285) from the hand-built
+  // scripts/lib/coreClubSlugs.ts map, then filled in from teams.csv rows with a parseable code
+  // and EITHER a non-blank fotmob_name, OR (ticket #176, when fotmob_name is blank) a slug
+  // derived from that same row's name or short_name — but only for a slug the literal map does
+  // not already cover; see buildClubCodeBySlug's own "first resolver wins" comment.
   codeBySlug: Map<string, number>
   // Ticket #176: slug -> which column produced it. Has exactly the same
   // keys as codeBySlug (an entry removed from codeBySlug for being a
@@ -558,7 +583,13 @@ export interface ClubCodeBySlugResult {
   duplicateSlugs: number
 }
 
-export function buildClubCodeBySlug(teamRecords: Array<Record<string, string>>): ClubCodeBySlugResult {
+export function buildClubCodeBySlug(
+  teamRecords: Array<Record<string, string>>,
+  // Ticket #285. Defaulted, not required — every existing 1-argument call site (including every
+  // test written before this ticket) keeps working unchanged; a test wanting to isolate the
+  // teams.csv fallback path in miniature can still pass a smaller map.
+  coreClubSlugToTeamCode: ReadonlyMap<string, number> = CORE_CLUB_SLUG_TO_TEAM_CODE
+): ClubCodeBySlugResult {
   const codeBySlug = new Map<string, number>()
   const slugSource = new Map<string, ClubSlugSource>()
   const seenSlugs = new Set<string>()
@@ -567,8 +598,25 @@ export function buildClubCodeBySlug(teamRecords: Array<Record<string, string>>):
   let fallbackSlugUnresolvable = 0
   let duplicateSlugs = 0
 
+  // Ticket #285: seed the FIRST resolver before touching teams.csv at all. Every entry here is
+  // hand-verified against Core's own fixtures.csv (scripts/lib/coreClubSlugs.ts's own header) —
+  // it does not depend on teams.csv's fotmob_name column being populated, which is exactly the
+  // column that has been blank for the whole 2026-27 season (#167/#176).
+  for (const [slug, code] of coreClubSlugToTeamCode) {
+    seenSlugs.add(slug)
+    codeBySlug.set(slug, code)
+    slugSource.set(slug, 'core_club_slugs')
+  }
+
   const register = (slug: string, code: number, source: ClubSlugSource): void => {
     if (seenSlugs.has(slug)) {
+      if (slugSource.get(slug) === 'core_club_slugs') {
+        // Ticket #285: the literal map already resolved this slug — first resolver wins.
+        // teams.csv's own guess (right or wrong) is silently discarded, not treated as an
+        // ambiguous duplicate — an ambiguous duplicate is two candidates this file cannot choose
+        // between; this is one already-chosen answer and one lower-priority opinion.
+        return
+      }
       duplicateSlugs++
       codeBySlug.delete(slug) // ambiguous — neither candidate code is kept, never guessed
       slugSource.delete(slug)
