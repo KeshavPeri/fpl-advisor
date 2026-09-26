@@ -123,7 +123,7 @@ credential in the browser, which is Tier 1.
 
 ## Wave 10 — backtest 🔶 partly done
 
-32. 🔶 **Season simulation harness.** The **projection-level** slices are built: the harness itself
+32. ✅ **Season simulation harness.** The **projection-level** slices are built: the harness itself
     *#133*, multi-fixture gameweeks and the defcon diagnostic *#140*, ranking skill *#147*.
     **The recommendation-level replay — transfers, captaincy, a season's league position** — cannot
     be a genuine replay of Keshav's own decisions (the app did not exist in 2025/26 and there is no

@@ -163,3 +163,18 @@ GW g−1 for GW g) as features gave 5-GW active Spearman 0.5906 with the live av
 Gotcha: Core's 2025-26 GW2–10 files record fit (`a`) players as chance `0.0`, not null; clean that
 before using those snapshots (2026-27 files are fine). Offline eval here omits the rule; with it,
 production's figure is 0.591, not 0.586.
+
+## Season replay result (26 Sept 2026, `season-replay.yml` run on ba30eeb, 2025-26, 37 decision GWs)
+
+| Setting | Net points | Hits |
+|---|---|---|
+| hit_cost 4 / 6 / 8 / no-hits | 1750 (identical) | 0 |
+| never-transfer (XI + captain chosen on projections) | 1492 | 0 |
+
+- Weekly transfers with gbm-v1 beat holding the GW1 squad by **+258 points (~7 per GW)**.
+- The solver took **zero hits** even at hit_cost 4. With gbm-v1's projections no hit ever clears its own
+  cost over the decayed 5-GW horizon, so stricter settings change nothing. **Keep `HIT_COST = 4`.**
+  Brief §9 Q2 answered: no change.
+- Caveats: no chips, no auto-subs, availability factor 1 throughout.
+- The first run's hindsight bug (baseline chose its XI on actual points) had inflated never-transfer by
+  401 points (1893 vs 1492). Fixed in #283.
