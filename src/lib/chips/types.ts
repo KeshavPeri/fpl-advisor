@@ -6,7 +6,15 @@
  * across the scripts/src compilation boundary, the same "small local copy
  * of a domain type it merely reads" call src/lib/verdict/types.ts and
  * src/lib/reasoning/types.ts already document for this codebase.
+ *
+ * `PositionCode` is the one exception, imported from `src/lib/squad/
+ * positions.ts` below — same precedent `src/lib/override/types.ts`'s own
+ * header comment sets (that module reads squad/api.ts's fetchPlayers and
+ * fetchExistingSquad too, for the identical reason: naming a player's
+ * position a second, unrelated way here would be duplication with no
+ * offsetting isolation benefit).
  */
+import type { PositionCode } from '../squad/positions'
 
 /** The four chip identifiers FPL's own API uses — see derive.ts's CHIP_DISPLAY_NAMES for the source and the mapping to display names. */
 export type KnownChipId = 'wildcard' | 'freehit' | 'bboost' | '3xc'
@@ -92,17 +100,98 @@ export interface ChipAdvisoryView {
  * versa) — see scripts/store-squad-advisory.ts for how this is written.
  */
 export interface SquadAdvisoryRow {
+  /** Ticket #284. `chip_advisories`' own append-only bigint identity primary key. api.ts passes through EVERY matching WC/FH row (not just the latest) so derive.ts's deriveSquadAdvisories can pick the latest one per chip code itself (highest `id` wins) — a pure, unit-testable reduction, rather than one buried in a database query. Never rendered. */
+  id: number
   chipCode: 'WC' | 'FH'
   /** chip-enabled objective minus chip-free objective, already computed by the database (a GENERATED column) — never recomputed here. Can be large; see SQUAD_ADVISORY_HORIZON_NOTE in derive.ts for why a large number is not itself an instruction. */
   delta: number
+  /** Ticket #284. `chip_advisories.gameweek_id` for this row — the target gameweek the whole rebuild was solved for (never a chip's own later horizon gameweek; a preseason rebuild has none — see scripts/store-squad-advisory.ts's own buildSquadAdvisoryRow comment). Needed for the Free Hit "for Gameweek N only" label. */
+  gameweekId: number
+  /** Ticket #284. The fifteen players this rebuild picked, from `public.chip_rebuild_picks`. Empty when nothing is stored for this advisory yet — a row written before ticket #284, or chip_rebuild_picks' own migration not yet applied when it was written (see scripts/store-squad-advisory.ts's own header) — the Chips screen renders no "See the squad" disclosure in that case, never a broken/empty one. */
+  picks: readonly ChipRebuildPickRow[]
 }
 
 /**
- * One squad-rebuild advisory resolved for display — ticket #134. States a
- * point gap and its five-gameweek limitation; never a "play this chip"
- * instruction (product-brief.md §6a — see SQUAD_ADVISORY_HORIZON_NOTE in
- * derive.ts). design-reference.md: never coloured as a warning — a large
- * delta is information, not an alarm.
+ * One row of `public.chip_rebuild_picks` — ticket #284. See
+ * scripts/store-squad-advisory.ts for how it is written: one row per player
+ * in the rebuild solve's own results CSV, for solution_index 0 and the
+ * first rebuild gameweek only.
+ */
+export interface ChipRebuildPickRow {
+  playerId: number
+  playerCode: number | null
+  /** Verbatim from the results CSV's own "pos" column, e.g. "GKP" — see the migration's own column comment. The squad-rebuild disclosure groups by `elementType` (resolved via the wider player pool, ChipPlayerOption below) instead, so this app's position vocabulary stays the one place (src/lib/squad/positions.ts) — this field is read only as a fallback label for a player id the current player pool no longer recognises (see buildSquadRebuildView in derive.ts). */
+  position: string
+  isStarting: boolean
+  benchOrder: number | null
+  isCaptain: boolean
+  isViceCaptain: boolean
+  expectedPoints: number
+}
+
+/**
+ * One player, trimmed to what the squad-rebuild disclosure needs to show a
+ * name and group by position — ticket #284. Read directly from
+ * `src/lib/squad/api.ts`'s `fetchPlayers`, the same source
+ * `src/lib/override/types.ts`'s `OverridePlayerOption` already trims for the
+ * identical reason (that type carries price/team/availability fields this
+ * disclosure never shows either).
+ */
+export interface ChipPlayerOption {
+  id: number
+  webName: string
+  elementType: PositionCode
+}
+
+/** One player named in a squad-rebuild disclosure's position group, bench list, or In/Out comparison — ticket #284. */
+export interface SquadRebuildPlayerView {
+  playerId: number
+  name: string
+  isCaptain: boolean
+}
+
+/** One position's starting-XI block within a squad-rebuild disclosure — ticket #284. */
+export interface SquadRebuildPositionGroupView {
+  /** e.g. "Goalkeepers" — `${POSITION_LABEL[position]}s`, same pluralisation SquadEntryScreen.tsx already uses. Falls back to the raw CSV `position` string for a player id the current player pool doesn't recognise (see ChipRebuildPickRow.position and buildSquadRebuildView in derive.ts) — such a group is never silently dropped. */
+  label: string
+  starters: readonly SquadRebuildPlayerView[]
+}
+
+/**
+ * The rebuild squad's "In / Out vs your team" comparison against the
+ * currently-saved squad (`src/lib/squad/api.ts`'s `fetchExistingSquad`) —
+ * ticket #284. `known` is false only when nothing has ever been saved for
+ * this gameweek at all — distinct from an empty `playersIn`/`playersOut`
+ * pair, which means the saved squad and the rebuild squad are IDENTICAL
+ * (zero changes), a real, informative answer in its own right.
+ */
+export type SquadRebuildComparisonView =
+  | { known: false }
+  | { known: true; playersIn: readonly SquadRebuildPlayerRefView[]; playersOut: readonly SquadRebuildPlayerRefView[] }
+
+/** A bare player reference (id + name) for an In/Out line — ticket #284. No captain/points fields: those belong to the squad the player is IN, not to a one-line "who left" mention. */
+export interface SquadRebuildPlayerRefView {
+  playerId: number
+  name: string
+}
+
+/** The fully-resolved "See the squad" disclosure for one stored squad-rebuild advisory — ticket #284. Null on `SquadAdvisoryView.squad` when nothing is stored yet (see SquadAdvisoryRow.picks). */
+export interface SquadRebuildSquadView {
+  positionGroups: readonly SquadRebuildPositionGroupView[]
+  /** Ordered by bench_order (1-4) — bench sits separately from the position groups, matching design-reference.md's "bench sits visually separated below the pitch" convention. */
+  bench: readonly SquadRebuildPlayerView[]
+  captainName: string | null
+  /** This ONE gameweek's projected points, captain's contribution doubled — from the rebuild solve's own results CSV, the SAME target gameweek chip_rebuild_picks was filtered to (never chip_advisories.delta, which is a five-gameweek horizon figure). Null only if the starting XI isn't exactly eleven players — should never happen given scripts/store-squad-advisory.ts's own DoD guard, but this file never trusts an unfiltered input either (same discipline src/lib/verdict/derive.ts's sumGameweekPoints uses). */
+  gameweekPointsWhole: number | null
+  comparison: SquadRebuildComparisonView
+}
+
+/**
+ * One squad-rebuild advisory resolved for display — ticket #134, extended by
+ * #284. States a point gap and its five-gameweek limitation; never a "play
+ * this chip" instruction (product-brief.md §6a — see
+ * SQUAD_ADVISORY_HORIZON_NOTE in derive.ts). design-reference.md: never
+ * coloured as a warning — a large delta is information, not an alarm.
  */
 export interface SquadAdvisoryView {
   chipCode: 'WC' | 'FH'
@@ -110,6 +199,12 @@ export interface SquadAdvisoryView {
   displayName: string
   /** Math.round(delta) — design-reference.md forbids decimal points on a projected-points figure; see derive.ts. */
   deltaWhole: number
+  /** Ticket #284. The gameweek this rebuild squad was solved for. */
+  gameweekId: number
+  /** Ticket #284. "Gameweek N" — used in the Free Hit "for Gameweek N only" label. */
+  gameweekLabel: string
+  /** Ticket #284. Null when SquadAdvisoryRow.picks was empty — the Chips screen renders no "See the squad" disclosure for this advisory in that case. */
+  squad: SquadRebuildSquadView | null
 }
 
 /** Everything deriveChipState needs, already read by src/lib/chips/api.ts. */
@@ -122,6 +217,10 @@ export interface ChipSourceData {
   chipAdvisories: readonly ChipAdvisoryRow[]
   /** The current/next gameweek's squad-rebuild advisory rows (WC/FH only — see api.ts), the latest stored row per chip code. Empty when squad-rebuild-probe.yml has never been dispatched for this gameweek. */
   squadAdvisories: readonly SquadAdvisoryRow[]
+  /** Ticket #284. The wider player pool (`src/lib/squad/api.ts`'s `fetchPlayers`) — read only when `squadAdvisories` is non-empty, since nothing else on this screen needs a name/position lookup. Empty otherwise. */
+  players: readonly ChipPlayerOption[]
+  /** Ticket #284. The fifteen player ids in the currently-saved squad for the current/next gameweek (`src/lib/squad/api.ts`'s `fetchExistingSquad`) — what each rebuild squad's "In / Out vs your team" is compared against. Null when nothing has been saved for that gameweek yet (fetchExistingSquad returned null), distinct from an empty set — see SquadRebuildComparisonView's own `known` flag. Also null when `squadAdvisories` is empty (nothing to compare). */
+  existingSquadPlayerIds: ReadonlySet<number> | null
 }
 
 /** One chip already used, resolved for display. */

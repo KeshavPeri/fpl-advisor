@@ -16,12 +16,15 @@
  */
 
 import { formatDeadlineInstant } from '../deadlineCountdown'
+import { POSITION_LABEL, POSITION_ORDER } from '../squad/positions'
 import type {
   ChipAdvisoryDecision,
   ChipAdvisoryRow,
   ChipAdvisoryView,
   ChipExpiryBand,
   ChipExpiryWarning,
+  ChipPlayerOption,
+  ChipRebuildPickRow,
   ChipSetTimeRemaining,
   ChipSlotView,
   ChipSourceData,
@@ -33,6 +36,11 @@ import type {
   SecondChipSetView,
   SquadAdvisoryRow,
   SquadAdvisoryView,
+  SquadRebuildComparisonView,
+  SquadRebuildPlayerRefView,
+  SquadRebuildPlayerView,
+  SquadRebuildPositionGroupView,
+  SquadRebuildSquadView,
   UsedChipView,
 } from './types.ts'
 
@@ -284,22 +292,158 @@ export const SQUAD_ADVISORY_DISPLAY_NAMES: Readonly<Record<'WC' | 'FH', string>>
 export const SQUAD_ADVISORY_HORIZON_NOTE =
   "This is a five-gameweek view — a wildcard or free hit's real value depends on fixtures the model cannot see."
 
+/** A starting XI is exactly eleven players — the literal FPL rule, same guard src/lib/verdict/derive.ts's own sumGameweekPoints uses (see that file's own comment on why an impossible count renders as unavailable rather than a wrong number). Ticket #284. */
+const REBUILD_LINEUP_SIZE = 11
+
 /**
- * Resolves each stored squad-rebuild advisory row for display. `delta` is
- * already a database-computed figure (chip_advisories' own GENERATED
- * column, same one CHIP/TC/BB advisories share) — this only rounds it to a
- * whole number, per design-reference.md's "no decimal projected-points
- * values" rule, and attaches a display name. Every SquadAdvisoryRow's
- * `chipCode` is already narrowed to 'WC' | 'FH' by api.ts's own query (see
- * that file), so there is no "unknown chip" fallback to render here — unlike
- * deriveChipAdvisories above, which reads a bare `string` chip_code that can
- * genuinely be anything.
+ * Sums the rebuild squad's THIS-gameweek projected points (ticket #284) —
+ * `chip_rebuild_picks.expected_points` for the starting eleven, captain's
+ * contribution counted twice, rounded to a whole number — the exact same
+ * arithmetic and the exact same "not exactly eleven -> null, never a wrong
+ * number" guard src/lib/verdict/derive.ts's own sumGameweekPoints uses for
+ * the live squad's verdict card. A local copy rather than an import: that
+ * function reads a different feature's own `GameweekPick` shape (see this
+ * file's own header note on PositionCode for when this codebase DOES share
+ * a type instead of copying it — a full function is not that case).
  */
-function deriveSquadAdvisories(rows: readonly SquadAdvisoryRow[]): SquadAdvisoryView[] {
-  return rows.map((row) => ({
+function sumRebuildGameweekPoints(picks: readonly ChipRebuildPickRow[]): number | null {
+  const starters = picks.filter((p) => p.isStarting)
+  if (starters.length !== REBUILD_LINEUP_SIZE) return null
+  const total = starters.reduce((sum, p) => sum + p.expectedPoints * (p.isCaptain ? 2 : 1), 0)
+  return Math.round(total)
+}
+
+function playerName(players: ReadonlyMap<number, ChipPlayerOption>, playerId: number): string {
+  return players.get(playerId)?.webName ?? `Player ${playerId}`
+}
+
+function toPlayerView(pick: ChipRebuildPickRow, players: ReadonlyMap<number, ChipPlayerOption>): SquadRebuildPlayerView {
+  return { playerId: pick.playerId, name: playerName(players, pick.playerId), isCaptain: pick.isCaptain }
+}
+
+/**
+ * Builds the "See the squad" disclosure's full view for one stored
+ * squad-rebuild advisory — ticket #284. Returns null when there are no
+ * stored picks at all (SquadAdvisoryRow.picks empty — a row written before
+ * this ticket, or before chip_rebuild_picks' own migration was applied; see
+ * scripts/store-squad-advisory.ts's own header) so the caller renders no
+ * disclosure rather than an empty one.
+ *
+ * Position groups are built from the WIDER PLAYER POOL's own `elementType`
+ * (never the raw CSV `position` string stored alongside each pick) so
+ * grouping/ordering always matches this app's one position vocabulary
+ * (src/lib/squad/positions.ts) — the same one the squad-entry screen and
+ * the pitch use. A starter whose player id the current pool doesn't
+ * recognise at all (e.g. departed since the rebuild ran) is never silently
+ * dropped from the squad: it falls into its own group, labelled with its
+ * own stored `position` string verbatim, rather than vanishing from every
+ * `POSITION_ORDER` group's filter.
+ */
+export function buildSquadRebuildView(
+  picks: readonly ChipRebuildPickRow[],
+  players: ReadonlyMap<number, ChipPlayerOption>,
+  existingSquadPlayerIds: ReadonlySet<number> | null
+): SquadRebuildSquadView | null {
+  if (picks.length === 0) return null
+
+  const starters = picks.filter((p) => p.isStarting)
+  const bench = [...picks.filter((p) => !p.isStarting)].sort((a, b) => (a.benchOrder ?? 0) - (b.benchOrder ?? 0))
+
+  const positionGroups: SquadRebuildPositionGroupView[] = []
+  const grouped = new Set<number>()
+  for (const position of POSITION_ORDER) {
+    const groupStarters = starters.filter((p) => players.get(p.playerId)?.elementType === position)
+    if (groupStarters.length === 0) continue
+    positionGroups.push({ label: `${POSITION_LABEL[position]}s`, starters: groupStarters.map((p) => toPlayerView(p, players)) })
+    for (const p of groupStarters) grouped.add(p.playerId)
+  }
+  const unrecognised = starters.filter((p) => !grouped.has(p.playerId))
+  if (unrecognised.length > 0) {
+    const byRawPosition = new Map<string, ChipRebuildPickRow[]>()
+    for (const p of unrecognised) {
+      const list = byRawPosition.get(p.position)
+      if (list) list.push(p)
+      else byRawPosition.set(p.position, [p])
+    }
+    for (const [rawPosition, rows] of byRawPosition) {
+      positionGroups.push({ label: rawPosition, starters: rows.map((p) => toPlayerView(p, players)) })
+    }
+  }
+
+  const captainPick = picks.find((p) => p.isCaptain) ?? null
+
+  const pickedIds = new Set(picks.map((p) => p.playerId))
+  let comparison: SquadRebuildComparisonView
+  if (existingSquadPlayerIds === null) {
+    comparison = { known: false }
+  } else {
+    const playersIn: SquadRebuildPlayerRefView[] = picks
+      .filter((p) => !existingSquadPlayerIds.has(p.playerId))
+      .map((p) => ({ playerId: p.playerId, name: playerName(players, p.playerId) }))
+    const playersOut: SquadRebuildPlayerRefView[] = [...existingSquadPlayerIds]
+      .filter((id) => !pickedIds.has(id))
+      .map((id) => ({ playerId: id, name: playerName(players, id) }))
+    comparison = { known: true, playersIn, playersOut }
+  }
+
+  return {
+    positionGroups,
+    bench: bench.map((p) => toPlayerView(p, players)),
+    captainName: captainPick ? playerName(players, captainPick.playerId) : null,
+    gameweekPointsWhole: sumRebuildGameweekPoints(picks),
+    comparison,
+  }
+}
+
+/**
+ * The single latest row per chip code — ticket #284, moved here (from
+ * api.ts) so it is a pure, unit-testable reduction: `chip_advisories` is
+ * append-only and squad-rebuild-probe.yml can be dispatched by hand between
+ * its nightly runs (see that workflow's own header), so api.ts passes
+ * through EVERY matching WC/FH row rather than pre-deduping in the query.
+ * "Latest" is the highest `id` (chip_advisories' own append-only bigint
+ * identity primary key) — Wildcard and Free Hit are resolved independently,
+ * each keeping its own most recent row, exactly as api.ts's own comment on
+ * the squad-rebuild query already documents. A `Map` preserves each chip
+ * code's first-seen order, so a caller passing `[WC, FH]` still gets `[WC,
+ * FH]` back, not an arbitrary reordering.
+ */
+function latestSquadAdvisoryPerChip(rows: readonly SquadAdvisoryRow[]): SquadAdvisoryRow[] {
+  const latestByChipCode = new Map<string, SquadAdvisoryRow>()
+  for (const row of rows) {
+    const existing = latestByChipCode.get(row.chipCode)
+    if (!existing || row.id > existing.id) latestByChipCode.set(row.chipCode, row)
+  }
+  return [...latestByChipCode.values()]
+}
+
+/**
+ * Resolves each stored squad-rebuild advisory row for display — first
+ * reducing to the latest row per chip code (see latestSquadAdvisoryPerChip
+ * above). `delta` is already a database-computed figure (chip_advisories'
+ * own GENERATED column, same one CHIP/TC/BB advisories share) — this only
+ * rounds it to a whole number, per design-reference.md's "no decimal
+ * projected-points values" rule, and attaches a display name. Every
+ * SquadAdvisoryRow's `chipCode` is already narrowed to 'WC' | 'FH' by
+ * api.ts's own query (see that file), so there is no "unknown chip"
+ * fallback to render here — unlike deriveChipAdvisories above, which reads a
+ * bare `string` chip_code that can genuinely be anything. Ticket #284 adds
+ * `squad` — see buildSquadRebuildView above — built against the SAME
+ * `players`/`existingSquadPlayerIds` for every row, since both are read once
+ * for the whole screen, not once per chip.
+ */
+function deriveSquadAdvisories(
+  rows: readonly SquadAdvisoryRow[],
+  players: ReadonlyMap<number, ChipPlayerOption>,
+  existingSquadPlayerIds: ReadonlySet<number> | null
+): SquadAdvisoryView[] {
+  return latestSquadAdvisoryPerChip(rows).map((row) => ({
     chipCode: row.chipCode,
     displayName: SQUAD_ADVISORY_DISPLAY_NAMES[row.chipCode],
     deltaWhole: Math.round(row.delta),
+    gameweekId: row.gameweekId,
+    gameweekLabel: `Gameweek ${row.gameweekId}`,
+    squad: buildSquadRebuildView(row.picks, players, existingSquadPlayerIds),
   }))
 }
 
@@ -453,7 +597,8 @@ export function deriveChipState(data: ChipSourceData, nowMs: number): DerivedChi
   }
 
   const chipAdvisories = deriveChipAdvisories(data.chipAdvisories)
-  const squadAdvisories = deriveSquadAdvisories(data.squadAdvisories)
+  const playersById = new Map(data.players.map((p) => [p.id, p]))
+  const squadAdvisories = deriveSquadAdvisories(data.squadAdvisories, playersById, data.existingSquadPlayerIds)
 
   return {
     hasUsedAnyChip: usedChips.length > 0,

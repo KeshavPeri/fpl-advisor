@@ -101,6 +101,14 @@ credential in the browser, which is Tier 1.
     every stored table. **The workflow has never been dispatched** — a `workflow_dispatch` file is
     only invocable once it is on the default branch, so nothing has yet proved the solver behaves
     sanely building a squad from nothing. **This is an outstanding human check, not a ticket.**
+    *#284* (26 Sep 2026) closed the other half: the workflow now runs both chips **nightly** at
+    19:00 UTC (`workflow_dispatch` kept for an ad hoc single-chip check), and the fifteen picked
+    players are stored (`chip_rebuild_picks`, new migration) and shown on the Chips screen under
+    each "Squad rebuild" row via a closed-by-default "See the squad" disclosure — starting XI and
+    bench grouped by position, captain marked, projected points for that one gameweek, and an
+    In/Out comparison against the saved squad. **The squad behind the points delta is now visible
+    every night, not just the number.** Applying the new migration and confirming the first
+    nightly dispatch remain the same kind of post-merge, owner-only check as before.
 
 ## Wave 9 — the model upgrade
 

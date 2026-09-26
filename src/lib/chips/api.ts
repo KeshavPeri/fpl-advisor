@@ -1,5 +1,6 @@
+import { fetchExistingSquad, fetchPlayers } from '../squad/api'
 import { supabase } from '../supabase'
-import type { ChipAdvisoryRow, ChipSourceData, ChipUsageRecord, GameweekDeadline, SquadAdvisoryRow } from './types.ts'
+import type { ChipAdvisoryRow, ChipPlayerOption, ChipRebuildPickRow, ChipSourceData, ChipUsageRecord, GameweekDeadline, SquadAdvisoryRow } from './types.ts'
 
 /**
  * The solver's own two-letter codes for the chip-TIMING advisory (ticket
@@ -47,6 +48,41 @@ interface SquadAdvisoryDbRow {
   id: number
   chip_code: string
   delta: number
+}
+
+/** One row of `public.chip_rebuild_picks`, as selected below — ticket #284. See scripts/store-squad-advisory.ts for how it is written. */
+interface ChipRebuildPickDbRow {
+  chip_advisory_id: number
+  player_id: number
+  player_code: number | null
+  position: string
+  is_starting: boolean
+  bench_order: number | null
+  is_captain: boolean
+  is_vice_captain: boolean
+  expected_points: number
+}
+
+/**
+ * Same shape scripts/store-squad-advisory.ts's own isMissingTable uses —
+ * ticket #284. `chip_rebuild_picks` is a NEW table in this same ticket, and
+ * Vercel auto-deploys `main` the moment this PR merges while applying its
+ * migration to the live Supabase project is a separate, owner-only,
+ * post-merge step (supabase/README.md) — so this screen must tolerate the
+ * table not existing yet for however long that gap lasts, rather than
+ * turning the whole Chips screen into an error page over a table that
+ * merely hasn't been migrated in yet. `chip_advisories` itself predates this
+ * ticket and is never treated this way — only the query below, which is new.
+ */
+interface PostgrestLikeError {
+  code?: string
+  message?: string
+}
+
+function isMissingTable(error: PostgrestLikeError, tableName: string): boolean {
+  if (error.code === 'PGRST205' || error.code === '42P01') return true
+  const message = error.message ?? ''
+  return new RegExp(tableName).test(message) && /schema cache|does not exist|relation.*does not exist/i.test(message)
 }
 
 /**
@@ -150,6 +186,8 @@ export async function fetchChipSourceData(): Promise<ChipSourceData> {
   // --------------------------------------------------------------------
   let chipAdvisories: ChipAdvisoryRow[] = []
   const squadAdvisories: SquadAdvisoryRow[] = []
+  let players: ChipPlayerOption[] = []
+  let existingSquadPlayerIds: ReadonlySet<number> | null = null
   if (nextGameweek !== null) {
     const { data: advisoryRows, error: advisoryError } = await supabase
       .from('chip_advisories')
@@ -173,16 +211,13 @@ export async function fetchChipSourceData(): Promise<ChipSourceData> {
       }))
 
     // ------------------------------------------------------------------
-    // Squad-rebuild advisory (ticket #134, item 28) — the WC/FH rows the
-    // query above deliberately excludes. squad-rebuild-probe.yml is
-    // dispatched irregularly (never nightly), so "latest per solver run"
-    // is the wrong grouping here — instead, this takes the single most
-    // recent row (highest `id`, chip_advisories' own append-only bigint
-    // identity primary key — see that migration's header) for EACH chip
-    // code independently: Wildcard and Free Hit are two separate
-    // questions, so a Wildcard probe from last week and a Free Hit probe
-    // from yesterday can both still be the "latest known answer" for
-    // their own chip at once. Bounded by the same `.limit(50)` discipline.
+    // Squad-rebuild advisory (ticket #134, item 28; nightly since #284) —
+    // the WC/FH rows the query above deliberately excludes. Every matching
+    // row is passed through (never pre-deduped here) — ticket #284 moved
+    // "keep only the latest row per chip code" into derive.ts's own
+    // latestSquadAdvisoryPerChip, so that reduction is a pure, unit-tested
+    // function rather than logic buried in this query. Bounded by the same
+    // `.limit(50)` discipline this file's own header comment establishes.
     // ------------------------------------------------------------------
     const { data: squadRebuildRows, error: squadRebuildError } = await supabase
       .from('chip_advisories')
@@ -194,13 +229,61 @@ export async function fetchChipSourceData(): Promise<ChipSourceData> {
       .returns<SquadAdvisoryDbRow[]>()
     if (squadRebuildError) raise(squadRebuildError)
 
-    const seenChipCodes = new Set<string>()
+    // ------------------------------------------------------------------
+    // Ticket #284 — the fifteen stored picks behind EVERY one of those rows
+    // (not just the latest per chip — see above), if any. `chip_rebuild_
+    // picks` may not exist on the live database yet (see isMissingTable's
+    // own comment above) — that failure is swallowed, never thrown, leaving
+    // every SquadAdvisoryRow.picks empty (derive.ts then renders no "See
+    // the squad" disclosure) rather than failing the whole screen over a
+    // table that merely hasn't been migrated in yet. Bounded: at most 15
+    // rows per advisory, at most 50 advisories (the query above's own
+    // limit), so `.limit(750)` can never approach PostgREST's 1,000-row cap.
+    // ------------------------------------------------------------------
+    const advisoryIds = (squadRebuildRows ?? []).map((row) => row.id)
+    const pickRowsByAdvisoryId = new Map<number, ChipRebuildPickDbRow[]>()
+    if (advisoryIds.length > 0) {
+      const { data: pickRows, error: pickError } = await supabase
+        .from('chip_rebuild_picks')
+        .select('chip_advisory_id, player_id, player_code, position, is_starting, bench_order, is_captain, is_vice_captain, expected_points')
+        .in('chip_advisory_id', advisoryIds)
+        .limit(750)
+        .returns<ChipRebuildPickDbRow[]>()
+      if (pickError && !isMissingTable(pickError, 'chip_rebuild_picks')) raise(pickError)
+      for (const row of pickRows ?? []) {
+        const list = pickRowsByAdvisoryId.get(row.chip_advisory_id)
+        if (list) list.push(row)
+        else pickRowsByAdvisoryId.set(row.chip_advisory_id, [row])
+      }
+    }
+
     for (const row of squadRebuildRows ?? []) {
-      if (seenChipCodes.has(row.chip_code)) continue
-      seenChipCodes.add(row.chip_code)
-      squadAdvisories.push({ chipCode: row.chip_code as 'WC' | 'FH', delta: row.delta })
+      const picks: ChipRebuildPickRow[] = (pickRowsByAdvisoryId.get(row.id) ?? []).map((p) => ({
+        playerId: p.player_id,
+        playerCode: p.player_code,
+        position: p.position,
+        isStarting: p.is_starting,
+        benchOrder: p.bench_order,
+        isCaptain: p.is_captain,
+        isViceCaptain: p.is_vice_captain,
+        expectedPoints: p.expected_points,
+      }))
+      squadAdvisories.push({ id: row.id, chipCode: row.chip_code as 'WC' | 'FH', delta: row.delta, gameweekId: nextGameweek.id, picks })
+    }
+
+    // ------------------------------------------------------------------
+    // Ticket #284 — the wider player pool and the currently-saved squad,
+    // read only when there is at least one squad-rebuild row to show a
+    // "See the squad" disclosure for; nothing else on this screen needs
+    // either. `fetchPlayers`/`fetchExistingSquad` are src/lib/squad/api.ts's
+    // own reads, reused rather than duplicated (this ticket's own scope).
+    // ------------------------------------------------------------------
+    if (squadAdvisories.length > 0) {
+      const [playerRows, existingSquad] = await Promise.all([fetchPlayers(), fetchExistingSquad(nextGameweek.id)])
+      players = playerRows.map((p) => ({ id: p.id, webName: p.webName, elementType: p.elementType }))
+      existingSquadPlayerIds = existingSquad ? new Set(existingSquad.picks.map((p) => p.playerId)) : null
     }
   }
 
-  return { chipsUsed, gameweeks, chipAdvisories, squadAdvisories }
+  return { chipsUsed, gameweeks, chipAdvisories, squadAdvisories, players, existingSquadPlayerIds }
 }
