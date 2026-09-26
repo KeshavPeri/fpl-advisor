@@ -748,14 +748,24 @@ describe('slugifyClubName — real fotmob_name -> match_id-slug pairings', () =>
 
 // ============================================================================
 // buildClubCodeBySlug — ticket #167.
+//
+// Ticket #285: every call below passes `new Map()` as the third argument,
+// overriding the real (now non-empty) CORE_CLUB_SLUG_TO_TEAM_CODE default —
+// these tests are about the teams.csv fotmob_name/name/short_name paths
+// specifically, in isolation, exactly as they were before #285 added a
+// higher-priority source. See the dedicated "first resolver" describe block
+// below for tests of the real default map taking priority.
 // ============================================================================
 
 describe('buildClubCodeBySlug', () => {
   it('builds a slug -> code map from well-formed rows, using fotmob_name (never name/short_name)', () => {
-    const result = buildClubCodeBySlug([
-      { code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: 'Arsenal' },
-      { code: '36', name: 'Brighton', short_name: 'BHA', fotmob_name: 'Brighton & Hove Albion' },
-    ])
+    const result = buildClubCodeBySlug(
+      [
+        { code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: 'Arsenal' },
+        { code: '36', name: 'Brighton', short_name: 'BHA', fotmob_name: 'Brighton & Hove Albion' },
+      ],
+      new Map(),
+    )
     expect(result.codeBySlug.get('arsenal')).toBe(3)
     expect(result.codeBySlug.get('brighton-hove-albion')).toBe(36)
     expect(result.blankFotmobName).toBe(0)
@@ -767,7 +777,7 @@ describe('buildClubCodeBySlug', () => {
   // Defect 2 in the ticket). A blank fotmob_name cell now falls back to this
   // same row's own `name` column, single-word case.
   it('falls back to name when fotmob_name is blank — a single-word club (ticket #176)', () => {
-    const result = buildClubCodeBySlug([{ code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' }])
+    const result = buildClubCodeBySlug([{ code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' }], new Map())
     expect(result.codeBySlug.get('arsenal')).toBe(3)
     expect(result.slugSource.get('arsenal')).toBe('name_or_short_name_fallback')
     expect(result.blankFotmobName).toBe(1)
@@ -777,7 +787,7 @@ describe('buildClubCodeBySlug', () => {
 
   // Ticket #176's own named DoD case: a multi-word club name.
   it('falls back to name when fotmob_name is blank — a multi-word club, wolverhampton-wanderers (ticket #176)', () => {
-    const result = buildClubCodeBySlug([{ code: '39', name: 'Wolverhampton Wanderers', short_name: 'WOL', fotmob_name: '' }])
+    const result = buildClubCodeBySlug([{ code: '39', name: 'Wolverhampton Wanderers', short_name: 'WOL', fotmob_name: '' }], new Map())
     expect(result.codeBySlug.get('wolverhampton-wanderers')).toBe(39)
     expect(result.slugSource.get('wolverhampton-wanderers')).toBe('name_or_short_name_fallback')
     expect(result.fallbackSlugsResolved).toBe(1)
@@ -786,7 +796,7 @@ describe('buildClubCodeBySlug', () => {
   // Ticket #176: falls back a level further, to short_name, only when name
   // itself is also blank.
   it('falls back to short_name when both fotmob_name and name are blank (ticket #176)', () => {
-    const result = buildClubCodeBySlug([{ code: '3', name: '', short_name: 'ARS', fotmob_name: '' }])
+    const result = buildClubCodeBySlug([{ code: '3', name: '', short_name: 'ARS', fotmob_name: '' }], new Map())
     expect(result.codeBySlug.get('ars')).toBe(3)
     expect(result.slugSource.get('ars')).toBe('name_or_short_name_fallback')
     expect(result.fallbackSlugsResolved).toBe(1)
@@ -804,7 +814,7 @@ describe('buildClubCodeBySlug', () => {
   // — verified directly against real fetched data, 1 Sept 2026 (see this
   // file's header).
   it('derives a slug from an abbreviated name that will not match any real fixture — added to the map, not guessed at here', () => {
-    const result = buildClubCodeBySlug([{ code: '1', name: 'Man Utd', short_name: 'MUN', fotmob_name: '' }])
+    const result = buildClubCodeBySlug([{ code: '1', name: 'Man Utd', short_name: 'MUN', fotmob_name: '' }], new Map())
     expect(result.codeBySlug.get('man-utd')).toBe(1)
     expect(result.codeBySlug.has('manchester-united')).toBe(false)
     expect(result.fallbackSlugsResolved).toBe(1)
@@ -813,7 +823,7 @@ describe('buildClubCodeBySlug', () => {
   // Ticket #176: neither name nor short_name is usable — no slug can be
   // derived for this club at all this run. Counted, not guessed.
   it('counts a row as fallback-unresolvable when fotmob_name, name and short_name are all blank (ticket #176)', () => {
-    const result = buildClubCodeBySlug([{ code: '3', name: '', short_name: '', fotmob_name: '' }])
+    const result = buildClubCodeBySlug([{ code: '3', name: '', short_name: '', fotmob_name: '' }], new Map())
     expect(result.codeBySlug.size).toBe(0)
     expect(result.blankFotmobName).toBe(1)
     expect(result.fallbackSlugsResolved).toBe(0)
@@ -822,41 +832,92 @@ describe('buildClubCodeBySlug', () => {
 
   // Ticket #176's own reconciliation requirement.
   it('blankFotmobName reconciles exactly against fallbackSlugsResolved + fallbackSlugUnresolvable', () => {
-    const result = buildClubCodeBySlug([
-      { code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' },
-      { code: '39', name: 'Wolverhampton Wanderers', short_name: 'WOL', fotmob_name: '' },
-      { code: '4', name: '', short_name: '', fotmob_name: '' },
-    ])
+    const result = buildClubCodeBySlug(
+      [
+        { code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' },
+        { code: '39', name: 'Wolverhampton Wanderers', short_name: 'WOL', fotmob_name: '' },
+        { code: '4', name: '', short_name: '', fotmob_name: '' },
+      ],
+      new Map(),
+    )
     expect(result.blankFotmobName).toBe(3)
     expect(result.fallbackSlugsResolved + result.fallbackSlugUnresolvable).toBe(3)
   })
 
   // The real, observed 2026-2027 case (verified 31 Aug 2026): every row's
   // fotmob_name is blank. This must not be treated as a bug — see the job's
-  // own header comment.
+  // own header comment. In isolation from the ticket #285 literal map (which
+  // is exactly what resolves this real case today — see the "first
+  // resolver" describe block below), the teams.csv-only path alone still
+  // resolves nothing for two single-word names with no fallback data.
   it('an entire teams.csv with every fotmob_name blank resolves an empty map, not an error', () => {
-    const result = buildClubCodeBySlug([
-      { code: '3', fotmob_name: '' },
-      { code: '7', fotmob_name: '' },
-    ])
+    const result = buildClubCodeBySlug(
+      [
+        { code: '3', fotmob_name: '' },
+        { code: '7', fotmob_name: '' },
+      ],
+      new Map(),
+    )
     expect(result.codeBySlug.size).toBe(0)
     expect(result.blankFotmobName).toBe(2)
   })
 
   it('a row whose code does not parse is skipped, uncounted (nothing to join it onto)', () => {
-    const result = buildClubCodeBySlug([{ code: '', fotmob_name: 'Arsenal' }])
+    const result = buildClubCodeBySlug([{ code: '', fotmob_name: 'Arsenal' }], new Map())
     expect(result.codeBySlug.size).toBe(0)
     expect(result.blankFotmobName).toBe(0)
     expect(result.duplicateSlugs).toBe(0)
   })
 
   it('a slug shared by two codes is removed from the map (never guessed) and counted as a conflict', () => {
-    const result = buildClubCodeBySlug([
-      { code: '3', fotmob_name: 'Arsenal' },
-      { code: '99', fotmob_name: 'Arsenal' },
-    ])
+    const result = buildClubCodeBySlug(
+      [
+        { code: '3', fotmob_name: 'Arsenal' },
+        { code: '99', fotmob_name: 'Arsenal' },
+      ],
+      new Map(),
+    )
     expect(result.codeBySlug.has('arsenal')).toBe(false)
     expect(result.duplicateSlugs).toBe(1)
+  })
+})
+
+// ============================================================================
+// buildClubCodeBySlug — ticket #285: the literal scripts/lib/coreClubSlugs.ts
+// map is the FIRST resolver, ahead of teams.csv's own fotmob_name/name
+// fallback. These tests use the real default (no override) — see the
+// describe block above for the isolated teams.csv-only paths.
+// ============================================================================
+
+describe('buildClubCodeBySlug — ticket #285 first-resolver priority', () => {
+  it('resolves via the literal map even when teams.csv has fotmob_name blank for every club (the real 2026-27 case)', () => {
+    // No coreClubSlugToTeamCode override — uses the real CORE_CLUB_SLUG_TO_TEAM_CODE default.
+    const result = buildClubCodeBySlug([
+      { code: '3', name: '', short_name: '', fotmob_name: '' },
+      { code: '1', name: 'Man Utd', short_name: 'MUN', fotmob_name: '' }, // would derive "man-utd" via fallback if reached
+    ])
+    expect(result.codeBySlug.get('arsenal')).toBe(3)
+    expect(result.slugSource.get('arsenal')).toBe('core_club_slugs')
+    expect(result.codeBySlug.get('manchester-united')).toBe(1)
+    expect(result.slugSource.get('manchester-united')).toBe('core_club_slugs')
+    // The fallback still runs per-ROW (it has no way to know code 1 was already resolved under a
+    // different slug string) and adds "man-utd" as a harmless extra alias for the same code — it
+    // just never matches any real match_id, exactly as ticket #176's own test already covers.
+    expect(result.codeBySlug.get('man-utd')).toBe(1)
+    expect(result.slugSource.get('man-utd')).toBe('name_or_short_name_fallback')
+  })
+
+  it('a teams.csv row cannot override a slug the literal map already resolved — first resolver wins, not an ambiguous duplicate', () => {
+    const result = buildClubCodeBySlug([{ code: '999', name: '', short_name: '', fotmob_name: 'Arsenal' }])
+    expect(result.codeBySlug.get('arsenal')).toBe(3) // the literal map's code, not teams.csv's 999
+    expect(result.slugSource.get('arsenal')).toBe('core_club_slugs')
+    expect(result.duplicateSlugs).toBe(0) // discarded silently, never counted as an ambiguous conflict
+  })
+
+  it('teams.csv can still resolve a slug the literal map does not cover (a club not yet added to it)', () => {
+    const result = buildClubCodeBySlug([{ code: '500', name: 'Some New Club', short_name: 'SNC', fotmob_name: '' }])
+    expect(result.codeBySlug.get('some-new-club')).toBe(500)
+    expect(result.slugSource.get('some-new-club')).toBe('name_or_short_name_fallback')
   })
 })
 
@@ -1271,6 +1332,11 @@ describe('countOpponentsResolvedViaFallback', () => {
 // ============================================================================
 
 describe('opponent resolution via the name/short_name fallback, end to end (ticket #176)', () => {
+  // Ticket #285: every buildClubCodeBySlug call in this block passes `new Map()` to isolate the
+  // name/short_name fallback path from the (now real, non-empty) CORE_CLUB_SLUG_TO_TEAM_CODE
+  // default — several of the club/code pairings used below happen to match real codes in that
+  // literal map, which would otherwise resolve these rows via 'core_club_slugs' before the
+  // fallback path this block exists to test ever runs.
   it('resolves an opponent for a 2026-2027-shaped season whose teams.csv has blank fotmob_name for every club, single-word clubs', () => {
     // Mirrors the real 2026-2027 data/teams.csv shape verified 1 Sept 2026:
     // fotmob_name blank for every row, name populated.
@@ -1278,7 +1344,7 @@ describe('opponent resolution via the name/short_name fallback, end to end (tick
       { code: '3', name: 'Arsenal', short_name: 'ARS', fotmob_name: '' },
       { code: '11', name: 'Everton', short_name: 'EVE', fotmob_name: '' },
     ]
-    const { codeBySlug, slugSource } = buildClubCodeBySlug(teamRecords)
+    const { codeBySlug, slugSource } = buildClubCodeBySlug(teamRecords, new Map())
     const teamCodeByPlayerId = new Map([[10, 3]]) // player on Arsenal
     const record = {
       player_id: '10',
@@ -1295,7 +1361,7 @@ describe('opponent resolution via the name/short_name fallback, end to end (tick
       { code: '39', name: 'Wolverhampton Wanderers', short_name: 'WOL', fotmob_name: '' },
       { code: '54', name: 'Fulham', short_name: 'FUL', fotmob_name: '' },
     ]
-    const { codeBySlug } = buildClubCodeBySlug(teamRecords)
+    const { codeBySlug } = buildClubCodeBySlug(teamRecords, new Map())
     const teamCodeByPlayerId = new Map([[20, 54]]) // player on Fulham
     const record = {
       player_id: '20',
@@ -1316,7 +1382,7 @@ describe('opponent resolution via the name/short_name fallback, end to end (tick
       { code: '1', name: 'Man Utd', short_name: 'MUN', fotmob_name: '' },
       { code: '9', name: 'Hull City', short_name: 'HUL', fotmob_name: '' },
     ]
-    const { codeBySlug } = buildClubCodeBySlug(teamRecords)
+    const { codeBySlug } = buildClubCodeBySlug(teamRecords, new Map())
     const teamCodeByPlayerId = new Map([[30, 9]]) // player on Hull City
     const record = {
       player_id: '30',
