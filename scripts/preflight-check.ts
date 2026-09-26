@@ -166,9 +166,6 @@ const JOB_NAME = 'preflight-check'
 const DEFAULT_REPORT_PATH = './out/preflight-report.md'
 const MS_PER_HOUR = 60 * 60 * 1000
 
-/** Must match scripts/project-points.ts's own PROJECTION_HORIZON — duplicated, not imported (every scripts/*.ts job is a standalone entry point). The window of upcoming gameweeks over which check 6 (team ratings) counts fixtures falling back to the FPL-difficulty scale. */
-const PREFLIGHT_HORIZON = 5
-
 /** The solver's own verbatim HiGHS status string for a proven optimum (scripts/store-solver-output.ts's own file header: "never classified as optimal" for anything else). Not an enum — the solver is a pinned third-party dependency and this is its exact wording. */
 const OPTIMAL_SOLVER_STATUS = 'Optimal'
 
@@ -185,17 +182,27 @@ const MAX_PREMIER_LEAGUE_MATCHES_PER_SEASON = 38
 const STALE_JOB_HOURS = 36
 
 /**
- * Staleness threshold for check 6 (team ratings), ticket #230. `teams.elo_stale_since`
- * (supabase/migrations/20260901090000_teams_elo_stale_since.sql, ticket #176) is set the
- * FIRST time a team's rating cannot be reconfirmed against the ingested season file and left
- * untouched on every subsequent run it stays unconfirmed — so its age is how long the rating
- * has gone without a fresh source value, not how long since it was last checked. A rating that
- * has gone 240 hours (ten days) without reconfirmation has missed at least one full round of
- * fixtures. Judgement call, stated as such, following the same pattern as this file's own
- * `staleHoursThreshold = 36` in check 8 above — no calibration data exists yet for exactly
- * where this line should sit. Tier 3, decided here. See decisions/ticket-230.md.
+ * Staleness threshold for check 6 (live model projections), ticket #285 — replaces #230's
+ * ELO_STALE_HOURS, retired the same ticket (ClubElo is abandoned since #238's market odds and
+ * gbm-v1 doesn't read team ratings at all — see this file's own top-of-file "Fail vs warn"
+ * section). The nightly chain runs project-points.ts once daily
+ * (.github/workflows/scheduled-jobs.yml, 17:45 UTC) same as every other job check 8 tracks — 30
+ * hours (stated verbatim in the ticket) leaves a bit more slack than check 8's own 36h
+ * STALE_JOB_HOURS would, deliberately: the LIVE MODEL's own projections are the thing gbm-v1's
+ * picks are made from, so this threshold is intentionally tighter than a generic job-freshness
+ * check would need to be. Tier 3, decided here.
  */
-const ELO_STALE_HOURS = 240
+const LIVE_MODEL_PROJECTIONS_STALE_HOURS = 30
+
+/**
+ * Coverage warn floor for check 6 (live model projections), ticket #285: fewer than 90% of
+ * public.players having an active-model row for the next gameweek degrades quality (some
+ * players fall back to a lower-tier model in emit-projections-csv.ts) without breaking the
+ * chain outright — a WARN, not a FAIL, per the ticket's own Build step 1. Tier 3, decided here,
+ * same round-number judgement-call pattern as check 3's own
+ * PROJECTION_COVERAGE_WARN_THRESHOLD below.
+ */
+const LIVE_MODEL_PROJECTIONS_COVERAGE_WARN_THRESHOLD = 0.9
 
 /**
  * Coverage tolerances for check 3 (projections). A row COUNT slightly under
@@ -709,50 +716,81 @@ export function checkSolver(input: SolverCheckInput): CheckResult {
 }
 
 // ----------------------------------------------------------------------------
-// 6. Team ratings — ticket #230, superseding #69's "never an automatic
-//    failure" call. Check 6 tested `elo === null` and nothing else, which
-//    measures PRESENCE when the thing that matters is FRESHNESS: it passed
-//    on 12 Sept 2026 while every rating in the table was four months old
-//    and stamped stale via `teams.elo_stale_since` (ticket #176) — a signal
-//    this check never read. Now FAILs on a missing rating, an FDR-fallback
-//    fixture, OR a rating stale beyond ELO_STALE_HOURS. See decisions/ticket-230.md.
+// 6. Live model projections — ticket #285, retiring #230's ClubElo-freshness
+//    check ("team ratings"). ClubElo is abandoned (since #238, market odds
+//    are the top fixture-strength tier) and gbm-v1 — the model that has made
+//    the picks since 25 Sept 2026 — never reads team ratings at all, so the
+//    old check guarded a signal nothing downstream still consumes. Nothing
+//    in this file checked that the model that ACTUALLY runs had actually
+//    run, which is the gap this check closes: FAILs when the active model
+//    (scripts/lib/activeModelVersion.ts) has zero player_projections rows
+//    for the next gameweek, or when its newest computed_at is older than
+//    LIVE_MODEL_PROJECTIONS_STALE_HOURS; WARNs (never fails) when fewer than
+//    LIVE_MODEL_PROJECTIONS_COVERAGE_WARN_THRESHOLD of public.players have a
+//    row from it. See decisions/ticket-285.md.
 // ----------------------------------------------------------------------------
 
-export interface TeamRatingsCheckInput {
-  nullEloTeamsCount: number
-  totalTeamsCount: number
-  fixturesFallbackCount: number
-  totalFixturesInHorizon: number
-  /** Count of "teams" rows with a non-null elo_stale_since older than ELO_STALE_HOURS. */
-  staleEloTeamsCount: number
-  /** Age, in days, of the single oldest non-null elo_stale_since mark across ALL teams — reported as evidence on every verdict (including pass), not only when it drives a fail. Null when no team has a stale mark at all. */
-  oldestStaleMarkAgeDays: number | null
+export interface LiveModelProjectionsCheckInput {
+  gameweekId: number
+  activeModel: string
+  /** Row count in "player_projections" for (gameweekId, activeModel). */
+  rowCount: number
+  playersCount: number
+  /** The newest `computed_at` among those rows, as epoch ms — null only when rowCount is 0 (there is nothing to date) or the value genuinely could not be read, both of which are treated as "cannot prove freshness", never as fresh. */
+  newestComputedAtMs: number | null
+  nowMs: number
+  staleHours: number
+  coverageWarnThreshold: number
 }
 
-export function checkTeamRatings(input: TeamRatingsCheckInput): CheckResult {
-  const { nullEloTeamsCount, totalTeamsCount, fixturesFallbackCount, totalFixturesInHorizon, staleEloTeamsCount, oldestStaleMarkAgeDays } = input
-  const values = { nullEloTeamsCount, totalTeamsCount, fixturesFallbackCount, totalFixturesInHorizon, staleEloTeamsCount, oldestStaleMarkAgeDays }
-  if (nullEloTeamsCount > 0 || fixturesFallbackCount > 0) {
+export function checkLiveModelProjections(input: LiveModelProjectionsCheckInput): CheckResult {
+  const { gameweekId, activeModel, rowCount, playersCount, newestComputedAtMs, nowMs, staleHours, coverageWarnThreshold } = input
+  const coverage = playersCount > 0 ? rowCount / playersCount : 0
+  const ageHours = newestComputedAtMs !== null ? (nowMs - newestComputedAtMs) / MS_PER_HOUR : null
+  const values = { gameweekId, activeModel, rowCount, playersCount, coverage, newestComputedAtMs, ageHours, staleHours, coverageWarnThreshold }
+
+  if (rowCount === 0) {
     return {
-      id: 'team-ratings',
+      id: 'live-model-projections',
       verdict: 'fail',
-      reason:
-        `${nullEloTeamsCount}/${totalTeamsCount} team(s) have no ClubElo rating; ` +
-        `${fixturesFallbackCount}/${totalFixturesInHorizon} fixture(s) in the ${PREFLIGHT_HORIZON}-gameweek horizon fall back to FPL difficulty.`,
+      reason: `no "player_projections" rows for the active model_version "${activeModel}" at gameweek ${gameweekId} — the live model did not run.`,
       values,
     }
   }
-  if (staleEloTeamsCount > 0) {
+  if (ageHours === null) {
     return {
-      id: 'team-ratings',
+      id: 'live-model-projections',
       verdict: 'fail',
-      reason:
-        `${staleEloTeamsCount}/${totalTeamsCount} team(s) have a ClubElo rating stale beyond ${(ELO_STALE_HOURS / 24).toFixed(0)} days ` +
-        `(oldest stale mark: ${oldestStaleMarkAgeDays !== null ? oldestStaleMarkAgeDays.toFixed(1) : 'unknown'} days old).`,
+      reason: `"${activeModel}" projection rows exist for gameweek ${gameweekId} but no computed_at could be read — cannot evaluate freshness.`,
       values,
     }
   }
-  return { id: 'team-ratings', verdict: 'pass', reason: 'every team has a ClubElo rating; no horizon fixture uses the FDR fallback; no rating is stale.', values }
+  if (ageHours > staleHours) {
+    return {
+      id: 'live-model-projections',
+      verdict: 'fail',
+      reason: `newest "${activeModel}" projection for gameweek ${gameweekId} is ${ageHours.toFixed(1)}h old, past the ${staleHours}h staleness threshold.`,
+      values,
+    }
+  }
+  if (coverage < coverageWarnThreshold) {
+    return {
+      id: 'live-model-projections',
+      verdict: 'warn',
+      reason:
+        `"${activeModel}" projections cover only ${(coverage * 100).toFixed(1)}% of players (${rowCount}/${playersCount}) for gameweek ${gameweekId}, ` +
+        `below the ${(coverageWarnThreshold * 100).toFixed(0)}% target.`,
+      values,
+    }
+  }
+  return {
+    id: 'live-model-projections',
+    verdict: 'pass',
+    reason:
+      `${rowCount} "${activeModel}" projection row(s) for gameweek ${gameweekId} cover ${(coverage * 100).toFixed(1)}% of ${playersCount} players, ` +
+      `newest ${ageHours.toFixed(1)}h old.`,
+    values,
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -1208,7 +1246,7 @@ const CHECK_ORDER: readonly string[] = [
   'projections',
   'recommendation',
   'solver',
-  'team-ratings',
+  'live-model-projections',
   'match-data',
   'job-freshness',
   'notifications',
@@ -1223,7 +1261,7 @@ const CHECK_TITLES: Readonly<Record<string, string>> = {
   projections: 'Projections',
   recommendation: 'Recommendation',
   solver: 'Solver',
-  'team-ratings': 'Team ratings',
+  'live-model-projections': 'Live model projections',
   'match-data': 'Match data',
   'job-freshness': 'Job freshness',
   notifications: 'Notifications',
@@ -1351,12 +1389,6 @@ interface GameweekRow {
   name: string
   deadline_time: string
   is_next: boolean
-}
-
-interface TeamRow {
-  id: number
-  elo: number | null
-  elo_stale_since: string | null
 }
 
 interface FixtureRow {
@@ -1538,9 +1570,8 @@ async function main(): Promise<void> {
     //    That means this check now also needs, for every all-zero row, the
     //    owning player's status/chance/team_id (players) and whether that
     //    team has a fixture THIS gameweek (fixtures, filtered to
-    //    targetGameweekId only — a narrower window than check 6's own
-    //    PREFLIGHT_HORIZON read, and an independent query, matching this
-    //    file's per-check convention of not sharing reads across checks).
+    //    targetGameweekId only) — an independent query, matching this
+    //    file's per-check convention of not sharing reads across checks.
     // --------------------------------------------------------------------
     let projectionsCheck: CheckResult
     if (targetGameweekId === null) {
@@ -1733,72 +1764,72 @@ async function main(): Promise<void> {
     checks.push(solverCheck)
 
     // --------------------------------------------------------------------
-    // 6. Team ratings
+    // 6. Live model projections — ticket #285. Independent read from check 3
+    //    (projections): that check evaluates the all-zero-row population for
+    //    the active model's rows; this one only asks whether the active
+    //    model produced ANY rows at all, how fresh they are, and how many
+    //    players they cover — see checkLiveModelProjections's own header for
+    //    why this replaces the retired ClubElo "team ratings" check.
     // --------------------------------------------------------------------
-    let teamRatingsCheck: CheckResult
+    let liveModelProjectionsCheck: CheckResult
     if (targetGameweekId === null) {
-      teamRatingsCheck = buildCannotEvaluateResult('team-ratings', UNRESOLVED_GAMEWEEK_REASON)
+      liveModelProjectionsCheck = buildCannotEvaluateResult('live-model-projections', UNRESOLVED_GAMEWEEK_REASON)
     } else {
-      const teamsRead = await safeFetchAllPages<TeamRow>(
-        'teams',
-        (from, to) => supabase.from('teams').select('id, elo, elo_stale_since').order('id', { ascending: true }).range(from, to).returns<TeamRow[]>(),
-        () => supabase.from('teams').select('*', { count: 'exact', head: true }),
+      const liveModelRowCountRead = await safeCount('player_projections', () =>
+        supabase
+          .from('player_projections')
+          .select('*', { count: 'exact', head: true })
+          .eq('gameweek_id', targetGameweekId as number)
+          .eq('model_version', activeModel),
       )
-      if (teamsRead.error) {
-        teamRatingsCheck = buildCannotEvaluateResult('team-ratings', teamsRead.error)
+      const liveModelPlayersCountRead = await safeCount('players', () => supabase.from('players').select('*', { count: 'exact', head: true }))
+      if (liveModelRowCountRead.error) {
+        liveModelProjectionsCheck = buildCannotEvaluateResult('live-model-projections', liveModelRowCountRead.error)
+      } else if (liveModelPlayersCountRead.error) {
+        liveModelProjectionsCheck = buildCannotEvaluateResult('live-model-projections', liveModelPlayersCountRead.error)
+      } else if (liveModelRowCountRead.count === 0) {
+        // No point querying for a newest computed_at when there are no rows to date.
+        liveModelProjectionsCheck = checkLiveModelProjections({
+          gameweekId: targetGameweekId,
+          activeModel,
+          rowCount: 0,
+          playersCount: liveModelPlayersCountRead.count,
+          newestComputedAtMs: null,
+          nowMs,
+          staleHours: LIVE_MODEL_PROJECTIONS_STALE_HOURS,
+          coverageWarnThreshold: LIVE_MODEL_PROJECTIONS_COVERAGE_WARN_THRESHOLD,
+        })
       } else {
-        const targetIndex = gwRowsSorted.findIndex((g) => g.id === targetGameweekId)
-        const horizonIds = targetIndex >= 0 ? gwRowsSorted.slice(targetIndex, targetIndex + PREFLIGHT_HORIZON).map((g) => g.id) : []
-        if (horizonIds.length === 0) {
-          teamRatingsCheck = buildCannotEvaluateResult(
-            'team-ratings',
-            `cannot evaluate — could not determine the ${PREFLIGHT_HORIZON}-gameweek horizon starting at gameweek ${targetGameweekId}.`,
-          )
+        // Bounded to at most one row by order + limit(1) — exempt from pagination per this
+        // file's own "Pagination" section header (a query that cannot return a second row for
+        // the cap to silently trim).
+        const newestRead = await safeMaybeSingle<{ computed_at: string }>('player_projections', () =>
+          supabase
+            .from('player_projections')
+            .select('computed_at')
+            .eq('gameweek_id', targetGameweekId as number)
+            .eq('model_version', activeModel)
+            .order('computed_at', { ascending: false })
+            .limit(1)
+            .maybeSingle<{ computed_at: string }>(),
+        )
+        if (newestRead.error) {
+          liveModelProjectionsCheck = buildCannotEvaluateResult('live-model-projections', newestRead.error)
         } else {
-          const fixturesRead = await safeFetchAllPages<FixtureRow>(
-            'fixtures',
-            (from, to) =>
-              supabase
-                .from('fixtures')
-                .select('team_h, team_a')
-                .in('event_id', horizonIds)
-                .order('id', { ascending: true })
-                .range(from, to)
-                .returns<FixtureRow[]>(),
-            () => supabase.from('fixtures').select('*', { count: 'exact', head: true }).in('event_id', horizonIds),
-          )
-          if (fixturesRead.error) {
-            teamRatingsCheck = buildCannotEvaluateResult('team-ratings', fixturesRead.error)
-          } else {
-            const eloById = new Map(teamsRead.rows.map((t) => [t.id, t.elo]))
-            const nullEloTeamsCount = teamsRead.rows.filter((t) => t.elo === null).length
-            const fixturesFallbackCount = fixturesRead.rows.filter(
-              (f) => (eloById.get(f.team_h) ?? null) === null || (eloById.get(f.team_a) ?? null) === null,
-            ).length
-            // Ticket #230: elo_stale_since is set the first time a rating goes
-            // unconfirmed and left untouched on every run it stays that way
-            // (supabase/migrations/20260901090000_teams_elo_stale_since.sql),
-            // so its age IS the length of the unconfirmed streak. Computed over
-            // ALL non-null marks, not only ones past the threshold, so
-            // oldestStaleMarkAgeDays is meaningful evidence even on a pass.
-            const staleAgeHoursByTeam = teamsRead.rows
-              .filter((t) => t.elo_stale_since !== null)
-              .map((t) => (nowMs - new Date(t.elo_stale_since as string).getTime()) / MS_PER_HOUR)
-            const staleEloTeamsCount = staleAgeHoursByTeam.filter((ageHours) => ageHours > ELO_STALE_HOURS).length
-            const oldestStaleMarkAgeDays = staleAgeHoursByTeam.length > 0 ? Math.max(...staleAgeHoursByTeam) / 24 : null
-            teamRatingsCheck = checkTeamRatings({
-              nullEloTeamsCount,
-              totalTeamsCount: teamsRead.rows.length,
-              fixturesFallbackCount,
-              totalFixturesInHorizon: fixturesRead.rows.length,
-              staleEloTeamsCount,
-              oldestStaleMarkAgeDays,
-            })
-          }
+          liveModelProjectionsCheck = checkLiveModelProjections({
+            gameweekId: targetGameweekId,
+            activeModel,
+            rowCount: liveModelRowCountRead.count,
+            playersCount: liveModelPlayersCountRead.count,
+            newestComputedAtMs: newestRead.row ? new Date(newestRead.row.computed_at).getTime() : null,
+            nowMs,
+            staleHours: LIVE_MODEL_PROJECTIONS_STALE_HOURS,
+            coverageWarnThreshold: LIVE_MODEL_PROJECTIONS_COVERAGE_WARN_THRESHOLD,
+          })
         }
       }
     }
-    checks.push(teamRatingsCheck)
+    checks.push(liveModelProjectionsCheck)
 
     // --------------------------------------------------------------------
     // 7. Match data — independent of the target gameweek.

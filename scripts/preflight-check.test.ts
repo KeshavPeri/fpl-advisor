@@ -15,6 +15,7 @@ import {
   checkCurrentSeasonMatchData,
   checkJobFreshness,
   checkLeagueBaselineGoals,
+  checkLiveModelProjections,
   checkMatchData,
   checkNextGameweek,
   checkNotifications,
@@ -23,7 +24,6 @@ import {
   checkRecommendation,
   checkSolver,
   checkSquad,
-  checkTeamRatings,
   classifyZeroProjectionPlayer,
   computeOverallVerdict,
   worstVerdict,
@@ -495,58 +495,73 @@ describe('checkSolver', () => {
 })
 
 // ============================================================================
-// 6. Team ratings — ticket #230. FAILs on a missing rating, an FDR-fallback
-// fixture, OR a rating stale beyond ELO_STALE_HOURS (240h / 10 days).
+// 6. Live model projections — ticket #285. Replaces the retired ClubElo
+// "team ratings" check (#230): FAILs when the active model has no rows for
+// the next gameweek or its newest computed_at is stale beyond
+// LIVE_MODEL_PROJECTIONS_STALE_HOURS (30h); WARNs (never fails) under the
+// 90% player-coverage target; PASSes when healthy.
 // ============================================================================
 
-describe('checkTeamRatings', () => {
-  const freshInput = {
-    nullEloTeamsCount: 0,
-    totalTeamsCount: 20,
-    fixturesFallbackCount: 0,
-    totalFixturesInHorizon: 25,
-    staleEloTeamsCount: 0,
-    oldestStaleMarkAgeDays: null as number | null,
+describe('checkLiveModelProjections', () => {
+  const staleHours = 30
+  const coverageWarnThreshold = 0.9
+  const healthyInput = {
+    gameweekId: 5,
+    activeModel: 'gbm-v1',
+    rowCount: 600,
+    playersCount: 620,
+    newestComputedAtMs: NOW - HOUR,
+    nowMs: NOW,
+    staleHours,
+    coverageWarnThreshold,
   }
 
-  it('pass: all fresh — every team rated, no fallback fixtures, no stale marks', () => {
-    const result = checkTeamRatings(freshInput)
+  it('pass: healthy — active model has fresh rows covering >=90% of players', () => {
+    const result = checkLiveModelProjections(healthyInput)
+    expect(result.verdict).toBe('pass')
+    expect(result.reason).toContain('gbm-v1')
+  })
+
+  it('fail: no active-model rows for the next gameweek at all', () => {
+    const result = checkLiveModelProjections({ ...healthyInput, rowCount: 0, newestComputedAtMs: null })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('no "player_projections" rows')
+    expect(result.reason).toContain('gbm-v1')
+    expect(result.reason).toContain('did not run')
+  })
+
+  it('fail: rows exist but the newest computed_at is older than the staleness threshold', () => {
+    const result = checkLiveModelProjections({ ...healthyInput, newestComputedAtMs: NOW - 31 * HOUR })
+    expect(result.verdict).toBe('fail')
+    expect(result.reason).toContain('31.0h old')
+    expect(result.reason).toContain('30h staleness threshold')
+  })
+
+  it('pass: exactly at the staleness threshold is not yet stale', () => {
+    const result = checkLiveModelProjections({ ...healthyInput, newestComputedAtMs: NOW - 30 * HOUR })
     expect(result.verdict).toBe('pass')
   })
 
-  it('pass: a stale mark newer than the threshold passes', () => {
-    // 3 days old — well under the 10-day threshold, so it does not count
-    // toward staleEloTeamsCount, but its age is still reported as evidence.
-    const result = checkTeamRatings({ ...freshInput, staleEloTeamsCount: 0, oldestStaleMarkAgeDays: 3 })
+  it('warn, not fail, when player coverage is under 90%', () => {
+    const result = checkLiveModelProjections({ ...healthyInput, rowCount: 500, playersCount: 620 })
+    expect(result.verdict).toBe('warn')
+    expect(result.reason).toContain('80.6%')
+  })
+
+  it('pass: exactly at the 90% coverage target', () => {
+    const result = checkLiveModelProjections({ ...healthyInput, rowCount: 558, playersCount: 620 })
     expect(result.verdict).toBe('pass')
-    expect(result.values.oldestStaleMarkAgeDays).toBe(3)
   })
 
-  it('fail: one stale fails', () => {
-    const result = checkTeamRatings({ ...freshInput, staleEloTeamsCount: 1, oldestStaleMarkAgeDays: 121.4 })
+  it('reads the active model name from its own input rather than a hardcoded string', () => {
+    const result = checkLiveModelProjections({ ...healthyInput, activeModel: 'some-future-model' })
+    expect(result.reason).toContain('some-future-model')
+    expect(result.reason).not.toContain('gbm-v1')
+  })
+
+  it('fail beats warn: zero rows fails even though coverage would also be under threshold', () => {
+    const result = checkLiveModelProjections({ ...healthyInput, rowCount: 0, newestComputedAtMs: null, playersCount: 620 })
     expect(result.verdict).toBe('fail')
-    expect(result.reason).toContain('1/20')
-    expect(result.reason).toContain('10 days')
-    expect(result.reason).toContain('121.4')
-  })
-
-  it('fail: a null elo still fails as it does today', () => {
-    const result = checkTeamRatings({ ...freshInput, nullEloTeamsCount: 3 })
-    expect(result.verdict).toBe('fail')
-    expect(result.reason).toContain('3/20')
-  })
-
-  it('fail: some horizon fixtures fall back to FPL difficulty', () => {
-    const result = checkTeamRatings({ ...freshInput, fixturesFallbackCount: 4 })
-    expect(result.verdict).toBe('fail')
-    expect(result.reason).toContain('4/25')
-  })
-
-  it('reports staleEloTeamsCount, totalTeamsCount and oldestStaleMarkAgeDays in values regardless of verdict', () => {
-    const result = checkTeamRatings({ ...freshInput, staleEloTeamsCount: 2, oldestStaleMarkAgeDays: 15.5 })
-    expect(result.values.staleEloTeamsCount).toBe(2)
-    expect(result.values.totalTeamsCount).toBe(20)
-    expect(result.values.oldestStaleMarkAgeDays).toBe(15.5)
   })
 })
 
