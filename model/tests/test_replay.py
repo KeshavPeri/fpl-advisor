@@ -485,3 +485,16 @@ def test_project_horizon_default_season_is_the_live_modules_own_season(
         season='2025-26',
     )
     assert seen_decisions and all(season == '2025-26' for season, _gw in seen_decisions)
+
+
+def test_never_transfer_picks_on_projection_not_hindsight():
+    """Regression: the baseline once chose its XI/captain on ACTUAL points (hindsight)."""
+    from fpl_replay import rules
+    squad = [rules.LineupPlayer(code=i, position=p, points=0.0) for i, p in enumerate(
+        ['GK', 'GK'] + ['DEF'] * 5 + ['MID'] * 5 + ['FWD'] * 3)]
+    proj = {p.code: 1.0 for p in squad}
+    proj[14] = 9.0            # projected captain
+    actual = {p.code: 2.0 for p in squad}
+    actual[13] = 20.0          # hindsight hero the manager could not know
+    chosen, cap = rules.pick_best_lineup([rules.LineupPlayer(p.code, p.position, proj[p.code]) for p in squad])
+    assert cap == 14

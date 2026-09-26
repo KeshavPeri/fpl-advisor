@@ -50,7 +50,7 @@ jobs:
     # even at the cap, plus real headroom for checkout/install/projection overhead per gameweek.
     # never-transfer needs far less (one solve, then pure Python for every other gameweek) but
     # runs the same job shape for a uniform matrix.
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
       - name: Check out repository
         uses: actions/checkout@v6

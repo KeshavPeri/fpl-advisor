@@ -239,7 +239,9 @@ def project_for_gw(data: SeasonData, folds: dict[int, Fold], g: int,
     `has_odds`/`lambda_for`/`lambda_against` OUTPUT metadata, which this replay never reads --
     the model's own odds INPUT features still come from `combined_odds` below, unaffected."""
     fold_cutoff = fold_for_gw(g)
-    fold = folds.setdefault(fold_cutoff, train_fold(fold_cutoff))
+    if fold_cutoff not in folds:  # setdefault would retrain on every call
+        folds[fold_cutoff] = train_fold(fold_cutoff)
+    fold = folds[fold_cutoff]
     history = load_history((SEASON, g))
     raw = live_module.project_horizon(
         history, data.snapshot, data.team_fixtures, fixture_lambda={}, next_gw=g,
@@ -542,18 +544,26 @@ def play_gameweek(data: SeasonData, folds: dict[int, Fold], solver_dir: Path, wo
 # ---------------------------------------------------------------------------
 
 def run_never_transfer_baseline(data: SeasonData, gw1_state: SquadState, gw1_result: GameweekResult,
-                                 end_gw: int) -> list[GameweekResult]:
+                                 end_gw: int, folds: dict[int, Fold] | None = None,
+                                 projected: dict[tuple[int, int], float] | None = None) -> list[GameweekResult]:
+    """Hold the GW1 squad. The XI and captain are chosen each week on PROJECTED points (what a
+    manager knows before the deadline) and scored on actual points. Choosing on actual points
+    would be hindsight and flatter this baseline."""
     squad_codes = list(gw1_state.purchase_price)
     results = [gw1_result]
     for g in range(FIRST_DECISION_GW, end_gw + 1):
-        squad = [
-            rules.LineupPlayer(
-                code=c, position=ELEMENT_TYPE_TO_POSITION[data.element_by_code[c]['element_type']],
-                points=data.actual_points.get((c, g), 0.0),
-            )
-            for c in squad_codes
-        ]
-        lineup, captain_code = rules.pick_best_lineup(squad)
+        if projected is not None:
+            proj_g = {c: projected.get((c, g), 0.0) for c in squad_codes}
+        else:
+            raw = project_for_gw(data, folds if folds is not None else {}, g, horizon=1)
+            raw = raw[raw['gw'] == g]
+            proj_g = {c: 0.0 for c in squad_codes}
+            proj_g.update({int(c): float(v) for c, v in zip(raw['code'], raw['raw_points']) if int(c) in proj_g})
+        position = {c: ELEMENT_TYPE_TO_POSITION[data.element_by_code[c]['element_type']] for c in squad_codes}
+        chosen, captain_code = rules.pick_best_lineup(
+            [rules.LineupPlayer(code=c, position=position[c], points=proj_g[c]) for c in squad_codes])
+        lineup = [rules.LineupPlayer(code=p.code, position=p.position,
+                                     points=data.actual_points.get((p.code, g), 0.0)) for p in chosen]
         score = rules.score_lineup(lineup, captain_code)
         results.append(GameweekResult(
             gw=g, transfers_made=0, hits=0, hit_points=0.0, actual_score=score, net_points=score,
@@ -570,7 +580,7 @@ def run_setting(data: SeasonData, folds: dict[int, Fold], solver_dir: Path, work
                  hit_cost_setting, gw1_state: SquadState, gw1_result: GameweekResult,
                  end_gw: int) -> list[GameweekResult]:
     if hit_cost_setting == 'never-transfer':
-        return run_never_transfer_baseline(data, gw1_state, gw1_result, end_gw)
+        return run_never_transfer_baseline(data, gw1_state, gw1_result, end_gw, folds=folds)
     results = [gw1_result]
     state = gw1_state
     for g in range(FIRST_DECISION_GW, end_gw + 1):
@@ -769,7 +779,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if setting == 'never-transfer':
         if resume_from_gw <= args.end_gw:
-            results = results + run_never_transfer_baseline(data, state, results[0], args.end_gw)[len(results):]
+            results = results + run_never_transfer_baseline(data, state, results[0], args.end_gw, folds=folds)[len(results):]
         if args.checkpoint_path:
             _save_checkpoint(args.checkpoint_path, state, results)
     else:
