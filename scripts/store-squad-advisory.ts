@@ -1,11 +1,25 @@
 // Store the wildcard/free-hit squad-rebuild advisory — ticket #134
-// (feature-list item 28, first slice). Runs after BOTH solves in
-// .github/workflows/squad-rebuild-probe.yml (workflow_dispatch only, never
-// part of the nightly chain): a normal chip-free solve as a baseline, and a
-// preseason: true rebuild solve that replaces the whole squad. See
-// scripts/build-solver-input.ts's buildRebuildSolverConfig for how that
-// config is built, and docs/solver-notes.md for the full write-up of what
-// preseason: true does and why it is safe only here.
+// (feature-list item 28, first slice), extended by ticket #284 (the second
+// half). Runs after BOTH solves in .github/workflows/squad-rebuild-probe.yml
+// (nightly since #284, plus workflow_dispatch for an ad hoc check): a normal
+// chip-free solve as a baseline, and a preseason: true rebuild solve that
+// replaces the whole squad. See scripts/build-solver-input.ts's
+// buildRebuildSolverConfig for how that config is built, and
+// docs/solver-notes.md for the full write-up of what preseason: true does
+// and why it is safe only here.
+//
+// TICKET #284 — this script now ALSO stores the fifteen players the rebuild
+// solve actually picked, to public.chip_rebuild_picks, right after its own
+// chip_advisories insert, in the SAME run: a points delta with nothing
+// behind it is not useful without the squad that produced it (see this
+// ticket's own WHY). Read from the rebuild solve's own results CSV —
+// solution_index 0, the first rebuild gameweek only, never the rest of the
+// five-gameweek horizon a preseason rebuild also touches — never the
+// baseline's results CSV. If chip_rebuild_picks hasn't been migrated onto
+// the live database yet, this script logs that and still records the
+// chip_advisories row successfully (see buildChipRebuildPickRows and its
+// call site in main() below) — the migration landing after merge must never
+// regress the advisory ticket #134 already ships.
 //
 // TICKET #160: the rebuild solve is ALSO chip-free now. Before #160,
 // buildRebuildSolverConfig granted the requested variant's chip (wc: 1 or
@@ -22,19 +36,27 @@
 // ============================================================================
 // THE SAFETY CASE — read this before touching anything below.
 // ============================================================================
-// This script writes exactly ONE row to public.chip_advisories (the SAME
-// table ticket #126 already uses for Bench Boost/Triple Captain timing —
-// no migration; chip_code just carries "WC" or "FH" instead of "TC"/"BB")
-// and one row to job_runs. It NEVER writes to solver_picks, recommendations,
-// or any table the verdict card, the Telegram message, or the notification
-// schedule reads. `.github/workflows/squad-rebuild-probe.yml` itself never
-// calls store-solver-output.ts, generate-recommendations.ts or
-// send-telegram.ts — see that workflow's own header for the full safety
-// case. The rebuilt squad's actual fifteen players are never read by this
-// script at all: only each solve's own Results-table SCORE (via
-// scripts/lib/solver-output.ts) is used. Reading which players the solver
-// would pick is the point of looking (the workflow uploads that as an
-// artefact); storing them is a different feature, explicitly out of scope.
+// This script writes to public.chip_advisories (the SAME table ticket #126
+// already uses for Bench Boost/Triple Captain timing — no migration for
+// #134; chip_code just carries "WC" or "FH" instead of "TC"/"BB"),
+// public.chip_rebuild_picks (NEW, ticket #284 — the fifteen players behind
+// that advisory's own delta), and job_runs. It NEVER writes to solver_picks,
+// recommendations, or any table the verdict card, the Telegram message, or
+// the notification schedule reads. `.github/workflows/squad-rebuild-probe.
+// yml` itself never calls store-solver-output.ts, generate-recommendations.
+// ts or send-telegram.ts — see that workflow's own header for the full
+// safety case.
+//
+// #134 originally said the rebuilt squad's actual fifteen players were
+// "never read by this script at all" and that storing them was "a different
+// feature, explicitly out of scope" — #284 is that feature. Each solve's
+// own Results-table SCORE (via scripts/lib/solver-output.ts) is still used
+// for the chip_advisories row exactly as before; the REBUILD solve's own
+// results CSV (never the baseline's) is now ALSO read, but only for
+// solution_index 0 and the first rebuild gameweek — never the rest of the
+// horizon — and only to populate chip_rebuild_picks, a table read solely by
+// the Chips screen's own squad-rebuild disclosure (never by
+// recommendations/solver_picks/the Telegram message).
 //
 // ============================================================================
 // solver_run_id — reused, never written by this script.
@@ -68,23 +90,33 @@
 // ============================================================================
 // Reads SUPABASE_URL, SUPABASE_SECRET_KEY (required), REBUILD_VARIANT
 // (required, 'wc' or 'fh' — no default; this script refuses to guess which
-// chip a run was for), BASELINE_SOLVER_LOG_PATH and REBUILD_SOLVER_LOG_PATH
-// (both optional, sensible defaults below). Writes to job_runs (always) and
-// public.chip_advisories (INSERT only — `.delete(` and `.upsert(` do not
-// appear in this file; a re-run adds a new row, matching chip_advisories'
-// own append-only shape, see that migration's header).
+// chip a run was for), BASELINE_SOLVER_LOG_PATH, REBUILD_SOLVER_LOG_PATH,
+// REBUILD_SOLVER_CONFIG_PATH and SOLVER_RESULTS_DIR (all optional, sensible
+// defaults below — the last two are ticket #284's own additions, read to
+// recover the rebuild solve's own results CSV). Writes to job_runs (always),
+// public.chip_advisories and public.chip_rebuild_picks (INSERT only —
+// `.delete(` and `.upsert(` do not appear in this file; a re-run adds new
+// rows, matching chip_advisories' own append-only shape, see that
+// migration's header).
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import { readFile } from 'node:fs/promises'
+import { parse } from 'csv-parse/sync'
+import { readdir, readFile } from 'node:fs/promises'
+import { BENCH_SIZE, SQUAD_SIZE, STARTING_XI_SIZE } from '../src/lib/squad/positions.ts'
 import { parseSolverOutput, type ParsedSolverOutput, type SolverSolution } from './lib/solver-output.js'
 
 const JOB_NAME = 'squad-rebuild-probe'
 const CHIP_ADVISORIES_MIGRATION = 'supabase/migrations/20260828100000_chip_advisories.sql'
+const CHIP_REBUILD_PICKS_MIGRATION = 'supabase/migrations/20260926090000_chip_rebuild_picks.sql'
 const REFERENCE_SCHEMA_MIGRATION = 'supabase/migrations/20260811100000_reference_schema.sql'
 const SOLVER_OUTPUT_MIGRATION = 'supabase/migrations/20260816090000_solver_output.sql'
 
 const DEFAULT_BASELINE_SOLVER_LOG_PATH = './solver/solve.log'
 const DEFAULT_REBUILD_SOLVER_LOG_PATH = './solver/solve-rebuild.log'
+/** Ticket #284. Matches squad-rebuild-probe.yml's own workflow-level `REBUILD_SOLVER_CONFIG_PATH` env default. Read for its "datasource" field only — the same recover-rather-than-rederive reasoning scripts/store-solver-output.ts's own SolverConfigFile read uses — so the results-CSV filename stem this script looks for can never disagree with what scripts/build-solver-input.ts actually wrote. */
+const DEFAULT_REBUILD_SOLVER_CONFIG_PATH = './solver/data/solver-config-rebuild.json'
+/** Ticket #284. Matches squad-rebuild-probe.yml's own workflow-level `SOLVER_RESULTS_DIR` env default, and scripts/store-solver-output.ts's own default for the same directory. */
+const DEFAULT_SOLVER_RESULTS_DIR = './solver/data/results'
 
 export type SquadRebuildVariant = 'wc' | 'fh'
 /** The chip_advisories.chip_code value for each variant — verbatim uppercase, matching the solver's own Results-table token shape ("WC5", "FH5"), same convention TC/BB already use. */
@@ -119,12 +151,18 @@ function readSupabaseEnv(): SupabaseEnv | null {
 interface PathEnv {
   baselineLogPath: string
   rebuildLogPath: string
+  /** Ticket #284. */
+  rebuildSolverConfigPath: string
+  /** Ticket #284. */
+  solverResultsDir: string
 }
 
 function readPathEnv(): PathEnv {
   return {
     baselineLogPath: process.env.BASELINE_SOLVER_LOG_PATH ?? DEFAULT_BASELINE_SOLVER_LOG_PATH,
     rebuildLogPath: process.env.REBUILD_SOLVER_LOG_PATH ?? DEFAULT_REBUILD_SOLVER_LOG_PATH,
+    rebuildSolverConfigPath: process.env.REBUILD_SOLVER_CONFIG_PATH ?? DEFAULT_REBUILD_SOLVER_CONFIG_PATH,
+    solverResultsDir: process.env.SOLVER_RESULTS_DIR ?? DEFAULT_SOLVER_RESULTS_DIR,
   }
 }
 
@@ -160,7 +198,7 @@ export class StoreSquadAdvisoryError extends Error {
   }
 }
 
-interface PostgrestLikeError {
+export interface PostgrestLikeError {
   code?: string
   message?: string
 }
@@ -169,6 +207,38 @@ function isMissingTable(error: PostgrestLikeError, tableName: string): boolean {
   if (error.code === 'PGRST205' || error.code === '42P01') return true
   const message = error.message ?? ''
   return new RegExp(tableName).test(message) && /schema cache|does not exist|relation.*does not exist/i.test(message)
+}
+
+/** Ticket #284. Discriminated result of attempting the chip_rebuild_picks insert — see resolveChipRebuildPicksInsertOutcome below. */
+export type ChipRebuildPicksInsertOutcome =
+  | { outcome: 'stored'; count: number }
+  | { outcome: 'skipped'; reason: string }
+
+/**
+ * Ticket #284's own DoD: "the store step still writes the advisory when the picks table is
+ * missing." By the time this function is ever called, the chip_advisories row is ALREADY
+ * committed (main()'s own step 4 runs before step 5's picks logic) — this function's only job is
+ * deciding whether a chip_rebuild_picks write failure should also fail the whole job (any genuine
+ * error — thrown, same as every other write failure in this script) or be treated as an expected,
+ * transitional state that still reports success (the migration landing after this PR merges — see
+ * the file header's own note on why a missing TABLE is never conflated with a genuine failure).
+ * Pure — no I/O — so this exact decision is unit-testable against a bare error object, no
+ * database and no filesystem, which is what proves the DoD's "still writes the advisory" claim:
+ * this function is only ever reached AFTER that write already succeeded, and a missing-table
+ * error here provably never becomes a thrown exception.
+ */
+export function resolveChipRebuildPicksInsertOutcome(
+  error: PostgrestLikeError | null,
+  pickCount: number,
+): ChipRebuildPicksInsertOutcome {
+  if (error === null) return { outcome: 'stored', count: pickCount }
+  if (isMissingTable(error, 'chip_rebuild_picks')) {
+    return {
+      outcome: 'skipped',
+      reason: `the "chip_rebuild_picks" table does not exist yet. Apply ${CHIP_REBUILD_PICKS_MIGRATION} to see the squad on the Chips screen.`,
+    }
+  }
+  throw new StoreSquadAdvisoryError(`chip_rebuild_picks insert failed: ${error.message}`, 'chip_rebuild_picks')
 }
 
 // ============================================================================
@@ -336,6 +406,118 @@ export function countDistinctObjectiveValues(solutions: readonly SolverSolution[
 }
 
 // ============================================================================
+// chip_rebuild_picks — ticket #284. Pure — no I/O, same discipline as
+// buildSquadAdvisoryRow above: every input is already resolved/already
+// parsed, passed as a plain parameter, so a value from a different run or a
+// different gameweek can never reach a row here (the #72 trap).
+// ============================================================================
+
+export interface ChipRebuildPickRow {
+  chip_advisory_id: number
+  player_id: number
+  player_code: number | null
+  position: string
+  is_starting: boolean
+  bench_order: number | null
+  is_captain: boolean
+  is_vice_captain: boolean
+  expected_points: number
+}
+
+export class ChipRebuildPicksBuildError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ChipRebuildPicksBuildError'
+  }
+}
+
+/**
+ * Maps ONE row of the rebuild solve's results CSV onto one chip_rebuild_picks row. Columns are
+ * the same shape scripts/store-solver-output.ts's own mapResultsCsvRow reads (id, week, pos,
+ * lineup, bench, captain, vicecaptain, iter, xP — verified by reading dev/solver.py's source and
+ * by an actual run, per that function's own comment) plus the raw `pos` column verbatim, matching
+ * the "third-party output is ground truth" convention chip_advisories.chip_code and
+ * solver_runs.solver_status already use in this codebase. `bench` is -1 for a starting player,
+ * 0-3 for bench — shifted by +1 to match squad_picks.bench_order's / solver_picks.bench_order's
+ * 1-4 convention, the exact same mapping mapResultsCsvRow uses (duplicated here rather than
+ * imported: this is a different script's row shape, chip_rebuild_picks, not solver_picks).
+ */
+export function mapRebuildResultsCsvRow(
+  row: Record<string, string>,
+  chipAdvisoryId: number,
+  playerCode: number | null,
+): ChipRebuildPickRow {
+  const benchRaw = Number(row.bench)
+  return {
+    chip_advisory_id: chipAdvisoryId,
+    player_id: Number(row.id),
+    player_code: playerCode,
+    position: row.pos,
+    is_starting: row.lineup === '1',
+    bench_order: benchRaw >= 0 ? benchRaw + 1 : null,
+    is_captain: row.captain === '1',
+    is_vice_captain: row.vicecaptain === '1',
+    expected_points: Number(row.xP),
+  }
+}
+
+/**
+ * Filters the rebuild solve's FULL results CSV (every gameweek in the five-gameweek horizon,
+ * every solution) down to the fifteen rows this advisory actually explains — solution_index 0
+ * (the Results table's "iter 0" row, the same solution buildSquadAdvisoryRow above reads for the
+ * comparison) and `targetGameweekId` (the SAME gameweek the whole advisory was filed for —
+ * buildSquadAdvisoryRow's own comment: "the target gameweek the whole rebuild was solved for";
+ * there is no separate "chip's own gameweek" for a preseason rebuild to read instead) — and
+ * validates the ticket's own DoD shape before building rows: exactly SQUAD_SIZE (15) rows,
+ * STARTING_XI_SIZE (11) starting and BENCH_SIZE (4) bench, exactly one captain and one
+ * vice-captain. Throws, never guesses — same discipline as buildSquadAdvisoryRow's own three
+ * guards; a malformed or unexpectedly-shaped squad must surface as a job failure, not a silently
+ * wrong or partial row set.
+ */
+export function buildChipRebuildPickRows(params: {
+  chipAdvisoryId: number
+  targetGameweekId: number
+  csvRows: readonly Record<string, string>[]
+  codeByPlayerId: ReadonlyMap<number, number | null>
+}): ChipRebuildPickRow[] {
+  const { chipAdvisoryId, targetGameweekId, csvRows, codeByPlayerId } = params
+
+  const relevantRows = csvRows.filter(
+    (row) => Number(row.iter) === 0 && Number(row.week) === targetGameweekId,
+  )
+  if (relevantRows.length !== SQUAD_SIZE) {
+    throw new ChipRebuildPicksBuildError(
+      `expected exactly ${SQUAD_SIZE} rows for solution_index 0, gameweek ${targetGameweekId} in the rebuild solve's ` +
+        `results CSV, found ${relevantRows.length}.`,
+    )
+  }
+
+  const rows = relevantRows.map((row) =>
+    mapRebuildResultsCsvRow(row, chipAdvisoryId, codeByPlayerId.get(Number(row.id)) ?? null),
+  )
+
+  const startingCount = rows.filter((r) => r.is_starting).length
+  const benchCount = rows.length - startingCount
+  if (startingCount !== STARTING_XI_SIZE || benchCount !== BENCH_SIZE) {
+    throw new ChipRebuildPicksBuildError(
+      `expected ${STARTING_XI_SIZE} starting and ${BENCH_SIZE} bench players, found ${startingCount} starting and ` +
+        `${benchCount} bench.`,
+    )
+  }
+
+  const captainCount = rows.filter((r) => r.is_captain).length
+  const viceCaptainCount = rows.filter((r) => r.is_vice_captain).length
+  if (captainCount !== 1 || viceCaptainCount !== 1) {
+    throw new ChipRebuildPicksBuildError(
+      `expected exactly one captain and one vice-captain, found ${captainCount} captain(s) and ` +
+        `${viceCaptainCount} vice-captain(s).`,
+    )
+  }
+
+  return rows
+}
+
+// ============================================================================
 // Row shapes read from Supabase
 // ============================================================================
 
@@ -346,6 +528,12 @@ interface GameweekRow {
 
 interface SolverRunIdRow {
   id: number
+}
+
+/** Ticket #284 — same shape scripts/store-solver-output.ts's own PlayerCodeRow reads. */
+interface PlayerCodeRow {
+  id: number
+  code: number | null
 }
 
 // ============================================================================
@@ -456,9 +644,9 @@ async function main(): Promise<void> {
     }
 
     // --------------------------------------------------------------------
-    // 4. Build and insert — the only table this step writes to besides
-    //    job_runs. See the file header's "THE SAFETY CASE" for what it
-    //    deliberately never touches.
+    // 4. Build and insert the advisory row. `.select('id').single()` reads
+    //    back its own generated identity — needed as the FK anchor for the
+    //    fifteen chip_rebuild_picks rows in step 5 below (ticket #284).
     // --------------------------------------------------------------------
     const row = buildSquadAdvisoryRow({
       gameweekId: nextGw.id,
@@ -468,7 +656,11 @@ async function main(): Promise<void> {
       baselineSolutions: baselineParsed.solutions,
     })
 
-    const { error: insertError } = await supabase.from('chip_advisories').insert(row)
+    const { data: insertedAdvisory, error: insertError } = await supabase
+      .from('chip_advisories')
+      .insert(row)
+      .select('id')
+      .single()
     if (insertError) {
       if (isMissingTable(insertError, 'chip_advisories')) {
         throw new StoreSquadAdvisoryError(
@@ -478,10 +670,94 @@ async function main(): Promise<void> {
       }
       throw new StoreSquadAdvisoryError(`chip_advisories insert failed: ${insertError.message}`, 'chip_advisories')
     }
+    const chipAdvisoryId = (insertedAdvisory as { id: number }).id
+
+    // --------------------------------------------------------------------
+    // 5. Ticket #284 — the fifteen players behind that advisory's own
+    //    delta, from the REBUILD solve's own results CSV (never the
+    //    baseline's). A missing chip_rebuild_picks TABLE is swallowed —
+    //    logged, counted in job_runs.details, and the run still reports
+    //    success — because the migration lands after this PR merges (see
+    //    the file header); any OTHER failure here (a malformed CSV, an
+    //    unexpected pick count, a genuine Supabase error) still throws, same
+    //    as every other step above — the advisory row already committed in
+    //    step 4 is not rolled back, matching this script's existing
+    //    "insert now, let a later failure surface as job_runs failure"
+    //    posture (see e.g. the solver_runs pattern scripts/store-solver-
+    //    output.ts documents).
+    // --------------------------------------------------------------------
+    let picksStored: number | null = null
+    let picksSkippedReason: string | null = null
+    try {
+      const rebuildConfigText = await readFile(paths.rebuildSolverConfigPath, 'utf8')
+      const rebuildConfig = JSON.parse(rebuildConfigText) as { datasource?: unknown }
+      if (typeof rebuildConfig.datasource !== 'string' || rebuildConfig.datasource === '') {
+        throw new StoreSquadAdvisoryError(
+          `rebuild solver config at ${paths.rebuildSolverConfigPath} is missing "datasource".`,
+          'rebuild_solver_config',
+        )
+      }
+      const datasource = rebuildConfig.datasource
+
+      let resultFilenames: string[] = []
+      try {
+        const entries = await readdir(paths.solverResultsDir)
+        resultFilenames = entries.filter((f) => f.startsWith(`${datasource}_`) && f.endsWith('.csv')).sort()
+      } catch {
+        resultFilenames = []
+      }
+      if (resultFilenames.length === 0) {
+        throw new StoreSquadAdvisoryError(
+          `no rebuild results CSV found under ${paths.solverResultsDir} matching "${datasource}_*.csv" — the rebuild ` +
+            'solve step may not have produced one.',
+          'rebuild_results_csv',
+        )
+      }
+
+      const csvRows: Array<Record<string, string>> = []
+      for (const filename of resultFilenames) {
+        const csvText = await readFile(`${paths.solverResultsDir}/${filename}`, 'utf8')
+        csvRows.push(...(parse(csvText, { columns: true, skip_empty_lines: true, trim: true }) as Array<Record<string, string>>))
+      }
+
+      const playerIds = [...new Set(csvRows.filter((r) => Number(r.iter) === 0 && Number(r.week) === nextGw.id).map((r) => Number(r.id)))]
+      const { data: playerRows, error: playerError } = await supabase
+        .from('players')
+        .select('id, code')
+        .in('id', playerIds)
+        .returns<PlayerCodeRow[]>()
+      if (playerError) {
+        throw new StoreSquadAdvisoryError(`players lookup failed: ${playerError.message}`, 'players')
+      }
+      const codeByPlayerId = new Map<number, number | null>((playerRows ?? []).map((p) => [p.id, p.code]))
+
+      const pickRows = buildChipRebuildPickRows({
+        chipAdvisoryId,
+        targetGameweekId: nextGw.id,
+        csvRows,
+        codeByPlayerId,
+      })
+
+      const { error: picksInsertError } = await supabase.from('chip_rebuild_picks').insert(pickRows)
+      const outcome = resolveChipRebuildPicksInsertOutcome(picksInsertError, pickRows.length)
+      if (outcome.outcome === 'stored') {
+        picksStored = outcome.count
+      } else {
+        picksSkippedReason = outcome.reason
+        console.error(`${JOB_NAME}/store-squad-advisory: ${picksSkippedReason} The chip_advisories row above was still stored.`)
+      }
+    } catch (picksErr) {
+      if (picksErr instanceof StoreSquadAdvisoryError || picksErr instanceof ChipRebuildPicksBuildError) {
+        throw picksErr
+      }
+      const picksMessage = picksErr instanceof Error ? picksErr.message : String(picksErr)
+      throw new StoreSquadAdvisoryError(`unexpected failure storing chip_rebuild_picks: ${picksMessage}`, 'chip_rebuild_picks')
+    }
 
     const message =
       `${JOB_NAME}/store-squad-advisory: stored a ${row.chip_code} squad-rebuild advisory for gameweek ${nextGw.id} ` +
-      `(delta ${(row.chip_enabled_objective - row.chip_free_objective).toFixed(2)}), compared against solver_runs id ${solverRunId}.`
+      `(delta ${(row.chip_enabled_objective - row.chip_free_objective).toFixed(2)}), compared against solver_runs id ${solverRunId}. ` +
+      (picksStored !== null ? `Stored ${picksStored} chip_rebuild_picks row(s).` : `Picks not stored: ${picksSkippedReason}`)
     console.log(message)
 
     await recordJobRun(supabase, {
@@ -491,6 +767,7 @@ async function main(): Promise<void> {
         gameweekId: nextGw.id,
         solverRunId,
         variant,
+        chipAdvisoryId,
         chipEnabledObjective: row.chip_enabled_objective,
         chipFreeObjective: row.chip_free_objective,
         baselinePoolSizeAfter: baselineParsed.poolSizeAfter,
@@ -499,6 +776,9 @@ async function main(): Promise<void> {
         // (up to 3, Plan A/B/C) carried — see countDistinctObjectiveValues' own comment above.
         // The first real dispatch (30 Aug 2026) found this was 1, not 3.
         rebuildDistinctObjectiveCount: countDistinctObjectiveValues(rebuildParsed.solutions),
+        // Ticket #284.
+        picksStored,
+        picksSkippedReason,
       },
       startedAt,
     })
@@ -508,9 +788,11 @@ async function main(): Promise<void> {
         ? err.message
         : err instanceof SquadAdvisoryBuildError
           ? err.message
-          : err instanceof Error
-            ? `unexpected failure: ${err.message}`
-            : `unexpected failure: ${String(err)}`
+          : err instanceof ChipRebuildPicksBuildError
+            ? err.message
+            : err instanceof Error
+              ? `unexpected failure: ${err.message}`
+              : `unexpected failure: ${String(err)}`
 
     console.error(`${JOB_NAME}/store-squad-advisory: failed: ${message}`)
 

@@ -1,63 +1,88 @@
 name: Squad rebuild probe
 
 # Ticket #134 (feature-list item 28, first slice) — "is my squad far enough
-# from optimal that a wildcard is worth playing?" A dispatch-only diagnostic,
-# same shape as .github/workflows/solver-chip-probe.yml (#114): it runs the
-# solver in a mode this app has never used in a stored run, reads back a
-# single number, and stores nothing that could reach a recommendation. See
-# docs/solver-notes.md for the full write-up of what preseason: true does
-# and why it is safe only here.
+# from optimal that a wildcard is worth playing?" Originally a dispatch-only
+# diagnostic, same shape as .github/workflows/solver-chip-probe.yml (#114):
+# it runs the solver in a mode this app has never used in a stored run and
+# reads back a single number. See docs/solver-notes.md for the full write-up
+# of what preseason: true does and why it is safe only here.
 #
-# workflow_dispatch ONLY — manual trigger, nothing automatic. Never wired
-# into any other workflow, including solver-run.yml or the daily
-# ingest/projection chain: enabling `preseason: true` on any path that
-# stores picks would silently replace the app's recommendation with a
-# full-squad rebuild it never told anyone it was making — see
-# scripts/build-solver-input.ts's own header ("DELIBERATELY UNAUTHENTICATED,
-# FOREVER") and its "Rebuild config" section for the isolation this workflow
-# depends on.
+# TICKET #284 (feature-list item 28, the second half) — runs NIGHTLY now
+# (see `on.schedule` below), at 19:00 UTC, after solver-run.yml's own
+# 18:20 UTC solve so this workflow reads that night's fresh projections/
+# squad state. Both chips are probed every night, via the matrix strategy
+# below, rather than one dispatch picking a single variant — `variant` stays
+# a workflow_dispatch input (for an ad hoc single-chip check), but a
+# scheduled run always resolves the matrix to BOTH `wc` and `fh`, each its
+# own independent job (see `strategy.matrix` below). `fail-fast: false` so a
+# bad Wildcard solve never cancels the Free Hit one, or vice versa.
+#
+# Still never wired into any OTHER workflow, and still never touches
+# solver-run.yml or the daily ingest/projection chain itself: enabling
+# `preseason: true` on any path that feeds `recommendations` would silently
+# replace the app's live recommendation with a full-squad rebuild it never
+# told anyone it was making — see scripts/build-solver-input.ts's own header
+# ("DELIBERATELY UNAUTHENTICATED, FOREVER") and its "Rebuild config" section
+# for the isolation this workflow depends on. Running nightly changes WHEN
+# this workflow fires, never WHAT it is allowed to touch.
 #
 # ============================================================================
 # THE SAFETY CASE.
 # ============================================================================
 # This workflow calls scripts/emit-projections-csv.ts and
 # scripts/build-solver-input.ts (both unmodified by this ticket) and
-# scripts/store-squad-advisory.ts (new, ticket #134) — and NOTHING else that
-# writes application state. In particular, this file never stores solver
-# picks, never generates a recommendation, never sends a notification of any
-# kind, and never snapshots a prediction — no step below calls any of the
-# scripts that do those four things, by name or otherwise. The rebuilt squad
-# itself — which fifteen players the solver would pick — is never read by
-# any script here at all; it exists only in the solve's own stdout log and
-# results CSV, both uploaded as artefacts below (with `if: always()`, so a
-# failed store step still leaves the squad readable) and never stored
-# anywhere else. Reading which players the solver would pick is the point of
-# looking; storing them is a different feature, explicitly out of this
-# ticket's scope.
+# scripts/store-squad-advisory.ts (#134, extended by #284) — and NOTHING
+# else that writes application state. This file never generates a
+# recommendation, never sends a notification of any kind, and never
+# snapshots a prediction — no step below calls any of the scripts that do
+# those three things, by name or otherwise, and none of its own writes ever
+# reach `recommendations`, `solver_picks` or `notifications` (see
+# scripts/store-squad-advisory.ts's own header for exactly which two tables
+# it writes instead: `chip_advisories` and, since #284, `chip_rebuild_picks`
+# — both read only by the Chips screen's own squad-rebuild advisory, never
+# by anything upstream of a decision). #134 originally also said the
+# rebuilt squad itself was "never read by any script here at all" and that
+# storing it was "explicitly out of scope" — #284 is precisely the ticket
+# that put it in scope: the fifteen players ARE now read (from the rebuild
+# solve's own results CSV, solution_index 0, the first rebuild gameweek
+# only) and stored, because a points delta with nothing behind it (chip_
+# advisories alone) is not useful without the squad that produced it. What
+# stayed true throughout: nothing this workflow stores is a "play this chip"
+# instruction (product-brief.md §6a) — a stored squad and its delta are
+# still presented as an advisory on the Chips screen, never fed back into
+# `recommendations`/`solver_picks`/the Telegram message. Every results CSV
+# and log is still uploaded as a workflow artefact regardless (`if:
+# always()`), unchanged from #134.
 #
-# Runs TWO solves, both against the SAME projections CSV and the SAME
-# horizon (this ticket's own scope): a normal chip-free baseline (identical
-# in shape to solver-run.yml's own "Run solver" step) and a
-# preseason: true, single-chip-variant rebuild (wc OR fh, chosen by this
-# dispatch's own `variant` input — never both; see
-# scripts/build-solver-input.ts's buildRebuildSolverConfig). Both solves'
-# own team.json is built from squads/squad_picks — this app's own record of
-# the squad — never from FPL's authenticated in-progress-squad endpoint;
-# preseason: true discards it as soon as the solve starts (that is the
-# entire point of a rebuild probe) but never touches the database, and
-# team.json itself is rewritten fresh on this workflow's own next dispatch
+# Runs TWO solves per variant, both against the SAME projections CSV and the
+# SAME horizon (this ticket's own scope): a normal chip-free baseline
+# (identical in shape to solver-run.yml's own "Run solver" step) and a
+# preseason: true, single-chip-variant rebuild (wc OR fh — never both in the
+# same solve; see scripts/build-solver-input.ts's buildRebuildSolverConfig).
+# Both solves' own team.json is built from squads/squad_picks — this app's
+# own record of the squad — never from FPL's authenticated in-progress-squad
+# endpoint; preseason: true discards it as soon as the solve starts (that is
+# the entire point of a rebuild probe) but never touches the database, and
+# team.json itself is rewritten fresh on this workflow's own next run
 # regardless.
 on:
   workflow_dispatch:
     inputs:
       variant:
-        description: 'Which chip to probe — never both in one run (see scripts/build-solver-input.ts)'
+        description: 'Which chip to probe on a MANUAL dispatch only — a scheduled run always probes both (see strategy.matrix below)'
         required: true
         type: choice
         options:
           - wc
           - fh
         default: wc
+  schedule:
+    # 19:00 UTC — after solver-run.yml's own 18:20 UTC solve (ticket #284).
+    # Singapore is UTC+8 with no DST, so this is 03:00 the FOLLOWING day in
+    # Singapore — same date-line caveat solver-run.yml's own cron comment
+    # already flags. Do not "fix" this to look like a Singapore-evening time
+    # without re-deriving the UTC value.
+    - cron: '0 19 * * *'
 
 env:
   PROJECTIONS_CSV_PATH: solver/data/fpladvisor.csv
@@ -71,13 +96,25 @@ env:
 jobs:
   squad-rebuild-probe:
     runs-on: ubuntu-latest
+    strategy:
+      # Ticket #284. A manual workflow_dispatch resolves the matrix to the
+      # single chip the person picked (wrapped in a one-element JSON array,
+      # since `matrix.variant` must be a list); a scheduled run (or any
+      # other trigger) always resolves it to BOTH chips, one independent job
+      # each. `fail-fast: false` — a bad Wildcard solve must never cancel
+      # the Free Hit job, or vice versa; each is its own diagnostic.
+      fail-fast: false
+      matrix:
+        variant: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.variant)) || fromJSON('["wc", "fh"]') }}
     # Two solves, each with its own secs: 300 time limit (see
     # scripts/build-solver-input.ts's SOLVER_TIME_LIMIT_SECS) — the same
     # "up to ~10 minutes for two solves, plus single-digit-minute overhead,
     # plus real headroom" reasoning solver-run.yml's own timeout-minutes
     # comment uses for its own two-solve run. A full-squad rebuild explores
     # a much larger search space than a single-transfer solve, so this
-    # leaves the same 35-minute budget rather than a smaller one.
+    # leaves the same 35-minute budget rather than a smaller one — PER
+    # matrix job; the two variants' jobs run on separate runners in
+    # parallel, never sharing this budget.
     timeout-minutes: 35
     steps:
       - name: Check out repository
@@ -167,7 +204,7 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           SOLVER_CONFIG_PATH: ${{ env.REBUILD_SOLVER_CONFIG_PATH }}
           SOLVER_SECS: '300'
-          REBUILD_VARIANT: ${{ inputs.variant }}
+          REBUILD_VARIANT: ${{ matrix.variant }}
         run: npx tsx scripts/build-solver-input.ts
 
       - name: Run solver (rebuild)
@@ -188,25 +225,35 @@ jobs:
       - name: Store squad-rebuild advisory
         id: store-squad-advisory
         # Reads BOTH BASELINE_SOLVER_LOG_PATH and REBUILD_SOLVER_LOG_PATH —
-        # never a results CSV — parses both with scripts/lib/solver-output.ts,
-        # and stores ONE public.chip_advisories row (chip_code = "WC" or
-        # "FH", never both) keyed to the freshest EXISTING solver_runs row
-        # for the target gameweek. Writes to chip_advisories and job_runs
-        # only — see scripts/store-squad-advisory.ts's own file header for
-        # the full safety case. Gated on BOTH build steps' own squad_found
-        # outputs, matching solver-run.yml's own gating convention.
+        # parses both with scripts/lib/solver-output.ts, and stores ONE
+        # public.chip_advisories row (chip_code = "WC" or "FH", never both)
+        # keyed to the freshest EXISTING solver_runs row for the target
+        # gameweek. Since ticket #284, ALSO reads the rebuild solve's own
+        # results CSV (never the baseline's) and stores the fifteen picked
+        # players to public.chip_rebuild_picks, right after the advisory row
+        # — see scripts/store-squad-advisory.ts's own file header for the
+        # full safety case, including what happens when chip_rebuild_picks
+        # hasn't been migrated onto the live database yet. Writes to
+        # chip_advisories, chip_rebuild_picks and job_runs only. Gated on
+        # BOTH build steps' own squad_found outputs, matching solver-run.
+        # yml's own gating convention.
         if: steps.build-baseline-input.outputs.squad_found == 'true' && steps.build-rebuild-input.outputs.squad_found == 'true'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          REBUILD_VARIANT: ${{ inputs.variant }}
+          REBUILD_VARIANT: ${{ matrix.variant }}
         run: npx tsx scripts/store-squad-advisory.ts
+
+      # Ticket #284 — every artifact name below carries `-${{ matrix.variant }}`
+      # so the two matrix jobs (wc, fh) never collide uploading under the
+      # same name in the same workflow run (actions/upload-artifact@v4
+      # refuses to overwrite an existing artifact name within a run).
 
       - name: Upload projections CSV artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: squad-rebuild-probe-projections-csv
+          name: squad-rebuild-probe-projections-csv-${{ matrix.variant }}
           path: ${{ env.PROJECTIONS_CSV_PATH }}
           if-no-files-found: warn
           retention-days: 14
@@ -215,7 +262,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: squad-rebuild-probe-team-json
+          name: squad-rebuild-probe-team-json-${{ matrix.variant }}
           path: ${{ env.TEAM_JSON_PATH }}
           if-no-files-found: warn
           retention-days: 14
@@ -224,7 +271,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: squad-rebuild-probe-baseline-log
+          name: squad-rebuild-probe-baseline-log-${{ matrix.variant }}
           path: ${{ env.BASELINE_SOLVER_LOG_PATH }}
           if-no-files-found: warn
           retention-days: 14
@@ -233,7 +280,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: squad-rebuild-probe-rebuild-log
+          name: squad-rebuild-probe-rebuild-log-${{ matrix.variant }}
           path: ${{ env.REBUILD_SOLVER_LOG_PATH }}
           if-no-files-found: warn
           retention-days: 14
@@ -242,22 +289,24 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: squad-rebuild-probe-rebuild-config
+          name: squad-rebuild-probe-rebuild-config-${{ matrix.variant }}
           path: ${{ env.REBUILD_SOLVER_CONFIG_PATH }}
           if-no-files-found: warn
           retention-days: 14
 
-      # The REBUILT SQUAD itself — ticket's own scope: "The rebuilt squad is
-      # uploaded as a workflow artefact, never stored." print_squads: true
-      # (unchanged, every config this app builds sets it) makes the rebuild
-      # solve's own results CSV carry the fifteen picked players; this is
-      # the only place they are ever readable, and only for retention-days
-      # below, never in any table.
+      # The REBUILT SQUAD itself, uploaded regardless of whether the store
+      # step above succeeded (`if: always()`) — since ticket #284 it is ALSO
+      # stored to public.chip_rebuild_picks by that step, but this artifact
+      # stays: it is the one place the FULL results CSV (every gameweek in
+      # the horizon, every solution) is readable, not just the fifteen
+      # solution_index-0/first-gameweek rows the database keeps.
+      # print_squads: true (unchanged, every config this app builds sets it)
+      # makes the rebuild solve's own results CSV carry the picked players.
       - name: Upload rebuild results CSV artifact (the rebuilt squad)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: squad-rebuild-probe-results-csv
+          name: squad-rebuild-probe-results-csv-${{ matrix.variant }}
           path: ${{ env.SOLVER_RESULTS_DIR }}/*.csv
           if-no-files-found: warn
           retention-days: 14
