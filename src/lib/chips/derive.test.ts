@@ -12,9 +12,10 @@ import {
   SOLVER_CHIP_DISPLAY_NAMES,
   SQUAD_ADVISORY_DISPLAY_NAMES,
   SQUAD_ADVISORY_HORIZON_NOTE,
+  buildSquadRebuildView,
   deriveChipState,
 } from './derive.ts'
-import type { ChipAdvisoryRow, ChipSourceData, GameweekDeadline, SquadAdvisoryRow } from './types.ts'
+import type { ChipAdvisoryRow, ChipPlayerOption, ChipRebuildPickRow, ChipSourceData, GameweekDeadline, SquadAdvisoryRow } from './types.ts'
 
 /** A full, evenly-spaced season of gameweek deadlines, GW1..GW38, one week
  *  apart, so "current gameweek" and "gameweeks remaining" arithmetic has
@@ -46,8 +47,18 @@ function sourceData(overrides: Partial<ChipSourceData> = {}): ChipSourceData {
     gameweeks,
     chipAdvisories: [],
     squadAdvisories: [],
+    players: [],
+    existingSquadPlayerIds: null,
     ...overrides,
   }
+}
+
+/** A SquadAdvisoryRow with no stored picks (ticket #284) — the pre-#284 shape most of this
+ *  file's existing squad-advisory tests exercise (delta/displayName/rounding only). Every field
+ *  new since #284 gets a fixture-friendly default so those tests read exactly as they did before
+ *  this ticket; the dedicated "See the squad" describe block below overrides `picks` explicitly. */
+function squadAdvisoryRow(overrides: Partial<SquadAdvisoryRow> & Pick<SquadAdvisoryRow, 'chipCode' | 'delta'>): SquadAdvisoryRow {
+  return { id: 1, gameweekId: 7, picks: [], ...overrides }
 }
 
 describe('deriveChipState — CHIP_DISPLAY_NAMES maps every known FPL identifier to a display name', () => {
@@ -467,33 +478,35 @@ describe('deriveChipState — squad-rebuild advisory (ticket #134)', () => {
   })
 
   it('resolves WC to "Wildcard" and rounds the delta to a whole number', () => {
-    const squadAdvisories: SquadAdvisoryRow[] = [{ chipCode: 'WC', delta: 46.8 }]
+    const squadAdvisories: SquadAdvisoryRow[] = [squadAdvisoryRow({ chipCode: 'WC', delta: 46.8 })]
     const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
-    expect(state.squadAdvisories).toEqual([{ chipCode: 'WC', displayName: 'Wildcard', deltaWhole: 47 }])
+    expect(state.squadAdvisories).toEqual([
+      { chipCode: 'WC', displayName: 'Wildcard', deltaWhole: 47, gameweekId: 7, gameweekLabel: 'Gameweek 7', squad: null },
+    ])
   })
 
   it('resolves FH to "Free Hit"', () => {
-    const squadAdvisories: SquadAdvisoryRow[] = [{ chipCode: 'FH', delta: 30 }]
+    const squadAdvisories: SquadAdvisoryRow[] = [squadAdvisoryRow({ chipCode: 'FH', delta: 30 })]
     const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
     expect(state.squadAdvisories[0].displayName).toBe('Free Hit')
   })
 
   it('can carry BOTH a Wildcard and a Free Hit row at once — two separate questions, two separate answers', () => {
     const squadAdvisories: SquadAdvisoryRow[] = [
-      { chipCode: 'WC', delta: 47 },
-      { chipCode: 'FH', delta: 31 },
+      squadAdvisoryRow({ chipCode: 'WC', delta: 47 }),
+      squadAdvisoryRow({ chipCode: 'FH', delta: 31 }),
     ]
     const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
     expect(state.squadAdvisories).toEqual([
-      { chipCode: 'WC', displayName: 'Wildcard', deltaWhole: 47 },
-      { chipCode: 'FH', displayName: 'Free Hit', deltaWhole: 31 },
+      { chipCode: 'WC', displayName: 'Wildcard', deltaWhole: 47, gameweekId: 7, gameweekLabel: 'Gameweek 7', squad: null },
+      { chipCode: 'FH', displayName: 'Free Hit', deltaWhole: 31, gameweekId: 7, gameweekLabel: 'Gameweek 7', squad: null },
     ])
   })
 
   it('rounds a delta like 6.5 up and 6.49 down — Math.round, not truncation', () => {
     const squadAdvisories: SquadAdvisoryRow[] = [
-      { chipCode: 'WC', delta: 6.5 },
-      { chipCode: 'FH', delta: 6.49 },
+      squadAdvisoryRow({ chipCode: 'WC', delta: 6.5 }),
+      squadAdvisoryRow({ chipCode: 'FH', delta: 6.49 }),
     ]
     const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
     expect(state.squadAdvisories[0].deltaWhole).toBe(7)
@@ -501,7 +514,7 @@ describe('deriveChipState — squad-rebuild advisory (ticket #134)', () => {
   })
 
   it('carries the fixed five-gameweek limitation sentence on the derived view whenever there is at least one squad advisory', () => {
-    const squadAdvisories: SquadAdvisoryRow[] = [{ chipCode: 'WC', delta: 47 }]
+    const squadAdvisories: SquadAdvisoryRow[] = [squadAdvisoryRow({ chipCode: 'WC', delta: 47 })]
     const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
     expect(state.squadAdvisoryNote).toBe(SQUAD_ADVISORY_HORIZON_NOTE)
     expect(state.squadAdvisoryNote).toMatch(/five-gameweek/)
@@ -509,7 +522,7 @@ describe('deriveChipState — squad-rebuild advisory (ticket #134)', () => {
 
   it('the squad-advisory note and the chip-timing advisory note are independent — one can be present without the other', () => {
     const state = deriveChipState(
-      sourceData({ chipAdvisories: [], squadAdvisories: [{ chipCode: 'WC', delta: 47 }] }),
+      sourceData({ chipAdvisories: [], squadAdvisories: [squadAdvisoryRow({ chipCode: 'WC', delta: 47 })] }),
       GW19_DEADLINE_MS - 1,
     )
     expect(state.chipAdvisoryNote).toBeNull()
@@ -518,5 +531,185 @@ describe('deriveChipState — squad-rebuild advisory (ticket #134)', () => {
 
   it('SQUAD_ADVISORY_DISPLAY_NAMES maps exactly the two squad-rebuild chip codes', () => {
     expect(SQUAD_ADVISORY_DISPLAY_NAMES).toEqual({ WC: 'Wildcard', FH: 'Free Hit' })
+  })
+
+  // Ticket #284: "the chips derive picks the latest advisory per chip" — api.ts now passes
+  // through EVERY matching chip_advisories WC/FH row (never pre-deduped in the query, see that
+  // file's own comment), so this reduction must happen here and be provable without a database.
+  it('keeps only the LATEST row per chip code — highest id wins, an older probe for the same chip is discarded entirely', () => {
+    const squadAdvisories: SquadAdvisoryRow[] = [
+      squadAdvisoryRow({ id: 5, chipCode: 'WC', delta: 10 }),
+      squadAdvisoryRow({ id: 9, chipCode: 'WC', delta: 47 }), // the newer WC probe — this one should win
+      squadAdvisoryRow({ id: 3, chipCode: 'FH', delta: 20 }),
+    ]
+    const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisories).toHaveLength(2)
+    expect(state.squadAdvisories.find((a) => a.chipCode === 'WC')?.deltaWhole).toBe(47)
+    expect(state.squadAdvisories.find((a) => a.chipCode === 'FH')?.deltaWhole).toBe(20)
+  })
+
+  it('the highest id wins regardless of input order — appearing first does not matter', () => {
+    const squadAdvisories: SquadAdvisoryRow[] = [
+      squadAdvisoryRow({ id: 9, chipCode: 'WC', delta: 47 }),
+      squadAdvisoryRow({ id: 5, chipCode: 'WC', delta: 10 }),
+    ]
+    const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisories).toHaveLength(1)
+    expect(state.squadAdvisories[0].deltaWhole).toBe(47)
+  })
+
+  it('Wildcard and Free Hit are deduped independently — a Wildcard probe from last night and a Free Hit probe from this morning can both be the latest at once', () => {
+    const squadAdvisories: SquadAdvisoryRow[] = [
+      squadAdvisoryRow({ id: 1, chipCode: 'WC', delta: 5 }),
+      squadAdvisoryRow({ id: 2, chipCode: 'WC', delta: 8 }),
+      squadAdvisoryRow({ id: 10, chipCode: 'FH', delta: 12 }),
+      squadAdvisoryRow({ id: 11, chipCode: 'FH', delta: 15 }),
+    ]
+    const state = deriveChipState(sourceData({ squadAdvisories }), GW19_DEADLINE_MS - 1)
+    expect(state.squadAdvisories.map((a) => a.deltaWhole).sort((a, b) => a - b)).toEqual([8, 15])
+  })
+})
+
+// ============================================================================
+// buildSquadRebuildView — the "See the squad" disclosure (ticket #284).
+// ============================================================================
+
+function playerOption(id: number, webName: string, elementType: 1 | 2 | 3 | 4): ChipPlayerOption {
+  return { id, webName, elementType }
+}
+
+/** 15 players spanning all four positions, matching REBUILD_PICKS below one-for-one by id. */
+const REBUILD_PLAYERS: ChipPlayerOption[] = [
+  playerOption(1, 'Keeper A', 1),
+  playerOption(2, 'Defender A', 2),
+  playerOption(3, 'Defender B', 2),
+  playerOption(4, 'Defender C', 2),
+  playerOption(5, 'Midfielder A', 3),
+  playerOption(6, 'Midfielder B', 3),
+  playerOption(7, 'Midfielder C', 3),
+  playerOption(8, 'Midfielder D', 3),
+  playerOption(9, 'Forward A', 4),
+  playerOption(10, 'Forward B', 4),
+  playerOption(11, 'Forward C', 4),
+  playerOption(12, 'Keeper B', 1),
+  playerOption(13, 'Defender D', 2),
+  playerOption(14, 'Defender E', 2),
+  playerOption(15, 'Midfielder E', 3),
+]
+
+function rebuildPick(playerId: number, overrides: Partial<ChipRebuildPickRow> = {}): ChipRebuildPickRow {
+  return {
+    playerId,
+    playerCode: null,
+    position: 'DEF',
+    isStarting: true,
+    benchOrder: null,
+    isCaptain: false,
+    isViceCaptain: false,
+    expectedPoints: 4,
+    ...overrides,
+  }
+}
+
+/** A full, valid 15-player rebuild squad: 11 starting (id 8 captain, id 11 vice), 4 bench (ids 12-15, bench_order 1-4). */
+const REBUILD_PICKS: ChipRebuildPickRow[] = [
+  rebuildPick(1, { position: 'GKP', expectedPoints: 3 }),
+  rebuildPick(2, { position: 'DEF', expectedPoints: 4 }),
+  rebuildPick(3, { position: 'DEF', expectedPoints: 4 }),
+  rebuildPick(4, { position: 'DEF', expectedPoints: 4 }),
+  rebuildPick(5, { position: 'MID', expectedPoints: 5 }),
+  rebuildPick(6, { position: 'MID', expectedPoints: 5 }),
+  rebuildPick(7, { position: 'MID', expectedPoints: 5 }),
+  rebuildPick(8, { position: 'MID', expectedPoints: 5, isCaptain: true }),
+  rebuildPick(9, { position: 'FWD', expectedPoints: 6 }),
+  rebuildPick(10, { position: 'FWD', expectedPoints: 6 }),
+  rebuildPick(11, { position: 'FWD', expectedPoints: 6, isViceCaptain: true }),
+  rebuildPick(12, { position: 'GKP', isStarting: false, benchOrder: 1, expectedPoints: 2 }),
+  rebuildPick(13, { position: 'DEF', isStarting: false, benchOrder: 2, expectedPoints: 2 }),
+  rebuildPick(14, { position: 'DEF', isStarting: false, benchOrder: 3, expectedPoints: 2 }),
+  rebuildPick(15, { position: 'MID', isStarting: false, benchOrder: 4, expectedPoints: 2 }),
+]
+
+describe('buildSquadRebuildView', () => {
+  const playersById = new Map(REBUILD_PLAYERS.map((p) => [p.id, p]))
+
+  it('returns null when there are no stored picks — the caller renders no disclosure rather than an empty one', () => {
+    expect(buildSquadRebuildView([], playersById, null)).toBeNull()
+  })
+
+  it('groups the starting XI by position, in Goalkeepers/Defenders/Midfielders/Forwards order, and marks the captain', () => {
+    const squad = buildSquadRebuildView(REBUILD_PICKS, playersById, null)
+    expect(squad).not.toBeNull()
+    expect(squad!.positionGroups.map((g) => g.label)).toEqual(['Goalkeepers', 'Defenders', 'Midfielders', 'Forwards'])
+    expect(squad!.positionGroups[0].starters).toEqual([{ playerId: 1, name: 'Keeper A', isCaptain: false }])
+    const midfielders = squad!.positionGroups[2].starters
+    expect(midfielders.find((p) => p.playerId === 8)).toEqual({ playerId: 8, name: 'Midfielder D', isCaptain: true })
+    expect(squad!.captainName).toBe('Midfielder D')
+  })
+
+  it('lists the bench separately, ordered by bench_order, never folded into a position group', () => {
+    const squad = buildSquadRebuildView(REBUILD_PICKS, playersById, null)
+    expect(squad!.bench.map((p) => p.playerId)).toEqual([12, 13, 14, 15])
+  })
+
+  it("sums the starting XI's expected points for this one gameweek, captain's contribution doubled", () => {
+    const squad = buildSquadRebuildView(REBUILD_PICKS, playersById, null)
+    // 3+4+4+4+5+5+5+6+6+6 (ten non-captain starters) + 5*2 (captain, id 8, doubled) = 48 + 10 = 58.
+    expect(squad!.gameweekPointsWhole).toBe(58)
+  })
+
+  it('falls back to the raw CSV position string, in its own group, for a starter the current player pool no longer recognises — never silently dropped', () => {
+    const playersMissingOne = new Map(REBUILD_PLAYERS.filter((p) => p.id !== 9).map((p) => [p.id, p]))
+    const squad = buildSquadRebuildView(REBUILD_PICKS, playersMissingOne, null)
+    const fallbackGroup = squad!.positionGroups.find((g) => g.label === 'FWD')
+    expect(fallbackGroup).toBeDefined()
+    expect(fallbackGroup!.starters).toEqual([{ playerId: 9, name: 'Player 9', isCaptain: false }])
+    // The other two forwards are still resolved normally, in the real "Forwards" group.
+    expect(squad!.positionGroups.find((g) => g.label === 'Forwards')!.starters.map((p) => p.playerId).sort()).toEqual([10, 11])
+  })
+
+  describe('In / Out vs your team', () => {
+    it('known: false — no In/Out lists at all — when nothing has been saved for this gameweek', () => {
+      const squad = buildSquadRebuildView(REBUILD_PICKS, playersById, null)
+      expect(squad!.comparison).toEqual({ known: false })
+    })
+
+    it('0 changes when the saved squad is exactly the rebuild squad', () => {
+      const existingIds = new Set(REBUILD_PICKS.map((p) => p.playerId))
+      const squad = buildSquadRebuildView(REBUILD_PICKS, playersById, existingIds)
+      expect(squad!.comparison).toEqual({ known: true, playersIn: [], playersOut: [] })
+    })
+
+    it('15 changes when the saved squad shares no player at all with the rebuild squad', () => {
+      const existingIds = new Set(Array.from({ length: 15 }, (_, i) => i + 101))
+      const squad = buildSquadRebuildView(REBUILD_PICKS, playersById, existingIds)
+      expect(squad!.comparison.known).toBe(true)
+      if (!squad!.comparison.known) throw new Error('unreachable')
+      expect(squad!.comparison.playersIn).toHaveLength(15)
+      expect(squad!.comparison.playersOut).toHaveLength(15)
+      expect(squad!.comparison.playersIn.map((p) => p.playerId).sort((a, b) => a - b)).toEqual(
+        REBUILD_PICKS.map((p) => p.playerId).sort((a, b) => a - b)
+      )
+      expect(squad!.comparison.playersOut.map((p) => p.playerId).sort((a, b) => a - b)).toEqual([...existingIds].sort((a, b) => a - b))
+    })
+
+    it('a partial overlap reports only the genuine ins and outs, never the players unchanged between the two squads', () => {
+      // Existing squad keeps players 1-13 (unchanged), drops 14 and 15, and holds two players
+      // (201, 202) the rebuild doesn't pick at all.
+      const existingIds = new Set([...Array.from({ length: 13 }, (_, i) => i + 1), 201, 202])
+      const squad = buildSquadRebuildView(REBUILD_PICKS, playersById, existingIds)
+      expect(squad!.comparison.known).toBe(true)
+      if (!squad!.comparison.known) throw new Error('unreachable')
+      expect(squad!.comparison.playersIn.map((p) => p.playerId).sort((a, b) => a - b)).toEqual([14, 15])
+      expect(squad!.comparison.playersOut.map((p) => p.playerId).sort((a, b) => a - b)).toEqual([201, 202])
+    })
+
+    it('names an "out" player even when their id is unresolvable in the current player pool, rather than dropping them', () => {
+      const existingIds = new Set([999])
+      const squad = buildSquadRebuildView(REBUILD_PICKS, playersById, existingIds)
+      expect(squad!.comparison.known).toBe(true)
+      if (!squad!.comparison.known) throw new Error('unreachable')
+      expect(squad!.comparison.playersOut).toEqual([{ playerId: 999, name: 'Player 999' }])
+    })
   })
 })

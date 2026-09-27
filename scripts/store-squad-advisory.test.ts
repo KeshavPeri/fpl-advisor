@@ -16,6 +16,18 @@
 // SolverSolution[] array constructed by hand, so nothing here depends on
 // which side of that fix scripts/lib/solver-output.ts happens to be on.
 //
+// TICKET #284 (feature-list item 28, the second half) adds three more pure
+// functions below, tested the same way: mapRebuildResultsCsvRow and
+// buildChipRebuildPickRows against plain, already-parsed results-CSV row
+// objects (the same column shapes scripts/store-solver-output.test.ts's own
+// csvRow fixture uses, verified there against dev/solve.py's source), and
+// resolveChipRebuildPicksInsertOutcome against a bare Postgrest-shaped error
+// object — proving the "the store step still writes the advisory when the
+// picks table is missing" DoD item without a database: that function is
+// only ever reached from main() AFTER the chip_advisories row is already
+// committed, so proving it never throws on a missing-table error is exactly
+// what proves the advisory survives that condition.
+//
 // TICKET #160: the rebuild solve is now chip-free (buildRebuildSolverConfig's
 // chip_limits is all zero for both variants — chip_limits.wc/fh is no longer
 // granted on top of preseason: true, since that let the solve rebuild the
@@ -27,7 +39,15 @@
 
 import { describe, expect, it } from 'vitest'
 import type { SolverSolution } from './lib/solver-output.js'
-import { SquadAdvisoryBuildError, buildSquadAdvisoryRow, countDistinctObjectiveValues } from './store-squad-advisory.js'
+import {
+  ChipRebuildPicksBuildError,
+  SquadAdvisoryBuildError,
+  buildChipRebuildPickRows,
+  buildSquadAdvisoryRow,
+  countDistinctObjectiveValues,
+  mapRebuildResultsCsvRow,
+  resolveChipRebuildPicksInsertOutcome,
+} from './store-squad-advisory.js'
 
 describe('buildSquadAdvisoryRow — one row per run, always solution_index 0', () => {
   it('builds a WC row from the primary (solution_index 0) solution of each solve, delta = rebuild objective - baseline objective', () => {
@@ -243,5 +263,230 @@ describe('countDistinctObjectiveValues', () => {
   it('returns 1 for a single solution', () => {
     const solutions: SolverSolution[] = [{ solutionIndex: 0, chips: [], score: 123.45, playerSold: null, playerBought: null }]
     expect(countDistinctObjectiveValues(solutions)).toBe(1)
+  })
+})
+
+// ============================================================================
+// mapRebuildResultsCsvRow / buildChipRebuildPickRows — ticket #284. Same CSV
+// column shapes scripts/store-solver-output.test.ts's own csvRow fixture
+// uses (the exact columns run/solve.py writes at the pinned commit —
+// verified there by reading dev/solver.py's source and by a real run),
+// extended with `pos` read verbatim into chip_rebuild_picks.position (see
+// that migration's own column comment).
+// ============================================================================
+
+function rebuildCsvRow(overrides: Partial<Record<string, string>> = {}): Record<string, string> {
+  return {
+    id: '303',
+    week: '5',
+    name: 'Kipré',
+    pos: 'DEF',
+    type: '2',
+    team: 'Ipswich Town',
+    buy_price: '4.0',
+    sell_price: '0.0',
+    xP: '5.49',
+    xMin: '60',
+    squad: '1',
+    lineup: '1',
+    bench: '-1',
+    captain: '0',
+    vicecaptain: '0',
+    transfer_in: '1',
+    transfer_out: '0',
+    multiplier: '1',
+    xp_cont: '5.49',
+    chip: '-',
+    iter: '0',
+    ft: '1.0',
+    transfer_count: '1.0',
+    ...overrides,
+  }
+}
+
+describe('mapRebuildResultsCsvRow', () => {
+  it('maps id, pos and xP to player_id, position and expected_points, carrying the chip_advisory_id passed in', () => {
+    const pick = mapRebuildResultsCsvRow(rebuildCsvRow(), 42, 12345)
+    expect(pick.chip_advisory_id).toBe(42)
+    expect(pick.player_id).toBe(303)
+    expect(pick.position).toBe('DEF')
+    expect(pick.expected_points).toBe(5.49)
+  })
+
+  it('carries the player_code passed in by the caller', () => {
+    expect(mapRebuildResultsCsvRow(rebuildCsvRow(), 1, 12345).player_code).toBe(12345)
+    expect(mapRebuildResultsCsvRow(rebuildCsvRow(), 1, null).player_code).toBeNull()
+  })
+
+  it('maps bench=-1 to is_starting true and bench_order null', () => {
+    const pick = mapRebuildResultsCsvRow(rebuildCsvRow({ bench: '-1', lineup: '1' }), 1, null)
+    expect(pick.is_starting).toBe(true)
+    expect(pick.bench_order).toBeNull()
+  })
+
+  it('maps bench=0 to bench_order 1, and bench=3 to bench_order 4 — shifted by one from the solver\'s own 0-3 slot, is_starting false', () => {
+    const first = mapRebuildResultsCsvRow(rebuildCsvRow({ bench: '0', lineup: '0' }), 1, null)
+    expect(first.bench_order).toBe(1)
+    expect(first.is_starting).toBe(false)
+    expect(mapRebuildResultsCsvRow(rebuildCsvRow({ bench: '3', lineup: '0' }), 1, null).bench_order).toBe(4)
+  })
+
+  it('maps captain/vicecaptain flags to booleans independently', () => {
+    expect(mapRebuildResultsCsvRow(rebuildCsvRow({ captain: '1', vicecaptain: '0' }), 1, null).is_captain).toBe(true)
+    expect(mapRebuildResultsCsvRow(rebuildCsvRow({ captain: '0', vicecaptain: '1' }), 1, null).is_vice_captain).toBe(true)
+  })
+})
+
+/**
+ * A full, valid 15-player rebuild squad for one gameweek, solution_index 0 — 11 starting
+ * (player 1 captain, player 2 vice-captain), 4 bench (players 12-15, bench_order 0-3), ids 1-15.
+ * Matches the ticket's own DoD shape exactly: "results-CSV → 15 pick rows (11 starting, 4 bench,
+ * exactly one captain and one vice)".
+ */
+function fullRebuildSquadCsvRows(gameweekId: number): Array<Record<string, string>> {
+  const rows: Array<Record<string, string>> = []
+  for (let id = 1; id <= 11; id++) {
+    rows.push(
+      rebuildCsvRow({
+        id: String(id),
+        week: String(gameweekId),
+        iter: '0',
+        lineup: '1',
+        bench: '-1',
+        captain: id === 1 ? '1' : '0',
+        vicecaptain: id === 2 ? '1' : '0',
+      }),
+    )
+  }
+  for (let id = 12; id <= 15; id++) {
+    rows.push(
+      rebuildCsvRow({
+        id: String(id),
+        week: String(gameweekId),
+        iter: '0',
+        lineup: '0',
+        bench: String(id - 12),
+        captain: '0',
+        vicecaptain: '0',
+      }),
+    )
+  }
+  return rows
+}
+
+describe('buildChipRebuildPickRows', () => {
+  it('the DoD shape: results-CSV -> 15 pick rows, 11 starting, 4 bench, exactly one captain and one vice', () => {
+    const rows = buildChipRebuildPickRows({
+      chipAdvisoryId: 99,
+      targetGameweekId: 5,
+      csvRows: fullRebuildSquadCsvRows(5),
+      codeByPlayerId: new Map(),
+    })
+
+    expect(rows).toHaveLength(15)
+    expect(rows.every((r) => r.chip_advisory_id === 99)).toBe(true)
+    expect(rows.filter((r) => r.is_starting)).toHaveLength(11)
+    expect(rows.filter((r) => !r.is_starting)).toHaveLength(4)
+    expect(rows.filter((r) => r.is_captain)).toHaveLength(1)
+    expect(rows.filter((r) => r.is_vice_captain)).toHaveLength(1)
+  })
+
+  it('filters to solution_index 0 and the target gameweek only — other iterations and other horizon gameweeks in the same CSV are ignored, never mixed in', () => {
+    const targetRows = fullRebuildSquadCsvRows(5)
+    const otherIterRows = fullRebuildSquadCsvRows(5).map((r) => ({ ...r, iter: '1', id: String(Number(r.id) + 100) }))
+    const otherGameweekRows = fullRebuildSquadCsvRows(6).map((r) => ({ ...r, id: String(Number(r.id) + 200) }))
+
+    const rows = buildChipRebuildPickRows({
+      chipAdvisoryId: 1,
+      targetGameweekId: 5,
+      csvRows: [...targetRows, ...otherIterRows, ...otherGameweekRows],
+      codeByPlayerId: new Map(),
+    })
+
+    expect(rows).toHaveLength(15)
+    expect(rows.map((r) => r.player_id).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 15 }, (_, i) => i + 1),
+    )
+  })
+
+  it('resolves player_code from the caller-provided map, null when a player id is not present in it', () => {
+    const rows = buildChipRebuildPickRows({
+      chipAdvisoryId: 1,
+      targetGameweekId: 5,
+      csvRows: fullRebuildSquadCsvRows(5),
+      codeByPlayerId: new Map([[1, 5001]]),
+    })
+    expect(rows.find((r) => r.player_id === 1)?.player_code).toBe(5001)
+    expect(rows.find((r) => r.player_id === 2)?.player_code).toBeNull()
+  })
+
+  it('throws (ChipRebuildPicksBuildError) when there are not exactly 15 rows for solution_index 0 / the target gameweek', () => {
+    const rows = fullRebuildSquadCsvRows(5).slice(0, 14)
+    expect(() =>
+      buildChipRebuildPickRows({ chipAdvisoryId: 1, targetGameweekId: 5, csvRows: rows, codeByPlayerId: new Map() }),
+    ).toThrow(ChipRebuildPicksBuildError)
+  })
+
+  it('throws when the starting/bench split is not 11/4', () => {
+    const rows = fullRebuildSquadCsvRows(5)
+    rows[11] = { ...rows[11], lineup: '1', bench: '-1' } // player 12 (bench) now also flagged starting
+    expect(() =>
+      buildChipRebuildPickRows({ chipAdvisoryId: 1, targetGameweekId: 5, csvRows: rows, codeByPlayerId: new Map() }),
+    ).toThrow(/11 starting and 4 bench/)
+  })
+
+  it('throws when there is no captain at all', () => {
+    const rows = fullRebuildSquadCsvRows(5).map((r) => ({ ...r, captain: '0' }))
+    expect(() =>
+      buildChipRebuildPickRows({ chipAdvisoryId: 1, targetGameweekId: 5, csvRows: rows, codeByPlayerId: new Map() }),
+    ).toThrow(/one captain and one vice-captain/)
+  })
+
+  it('throws when there are two vice-captains', () => {
+    const rows = fullRebuildSquadCsvRows(5)
+    rows[2] = { ...rows[2], vicecaptain: '1' } // player 3, alongside player 2's own vice flag
+    expect(() =>
+      buildChipRebuildPickRows({ chipAdvisoryId: 1, targetGameweekId: 5, csvRows: rows, codeByPlayerId: new Map() }),
+    ).toThrow(/one captain and one vice-captain/)
+  })
+})
+
+// ============================================================================
+// resolveChipRebuildPicksInsertOutcome — ticket #284's own DoD: "the store
+// step still writes the advisory when the picks table is missing." Pure —
+// see its own comment in store-squad-advisory.ts for why proving this
+// function never throws on a missing-table error is exactly what proves
+// that DoD item, with no database involved.
+// ============================================================================
+
+describe('resolveChipRebuildPicksInsertOutcome', () => {
+  it('reports "stored" with the row count when there is no error', () => {
+    expect(resolveChipRebuildPicksInsertOutcome(null, 15)).toEqual({ outcome: 'stored', count: 15 })
+  })
+
+  it('reports "skipped", never throws, when the table does not exist yet (PGRST205 — Supabase\'s schema-cache shape) — the advisory already written before this call stands', () => {
+    const outcome = resolveChipRebuildPicksInsertOutcome(
+      { code: 'PGRST205', message: "Could not find the table 'public.chip_rebuild_picks' in the schema cache" },
+      15,
+    )
+    expect(outcome.outcome).toBe('skipped')
+    if (outcome.outcome === 'skipped') {
+      expect(outcome.reason).toMatch(/chip_rebuild_picks/)
+      expect(outcome.reason).toMatch(/20260926090000_chip_rebuild_picks\.sql/)
+    }
+  })
+
+  it('reports "skipped", never throws, for the bare-Postgres "relation does not exist" shape too (42P01)', () => {
+    const outcome = resolveChipRebuildPicksInsertOutcome(
+      { code: '42P01', message: 'relation "public.chip_rebuild_picks" does not exist' },
+      15,
+    )
+    expect(outcome.outcome).toBe('skipped')
+  })
+
+  it('throws — never silently skips — for any other error, e.g. a genuine constraint or permission failure', () => {
+    expect(() =>
+      resolveChipRebuildPicksInsertOutcome({ code: '23505', message: 'duplicate key value violates unique constraint' }, 15),
+    ).toThrow(/chip_rebuild_picks insert failed/)
   })
 })

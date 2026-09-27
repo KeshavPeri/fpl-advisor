@@ -3,7 +3,17 @@ import AppShell from '../components/AppShell'
 import Surface from '../components/Surface'
 import { fetchChipSourceData } from '../lib/chips/api.ts'
 import { deriveChipState } from '../lib/chips/derive.ts'
-import type { ChipAdvisoryView, ChipExpiryWarning, ChipSetView, DerivedChipState, UsedChipView } from '../lib/chips/types.ts'
+import type {
+  ChipAdvisoryView,
+  ChipExpiryWarning,
+  ChipSetView,
+  DerivedChipState,
+  SquadAdvisoryView,
+  SquadRebuildPlayerRefView,
+  SquadRebuildPlayerView,
+  SquadRebuildSquadView,
+  UsedChipView,
+} from '../lib/chips/types.ts'
 import { toErrorMessage } from '../lib/format'
 import './ChipsScreen.css'
 
@@ -209,16 +219,7 @@ function ChipsContent({ state }: { state: DerivedChipState }) {
           {state.squadAdvisoryNote && <p className="chips-advisory__note">{state.squadAdvisoryNote}</p>}
           <ul className="chips-advisory__list">
             {state.squadAdvisories.map((advisory) => (
-              <li key={advisory.chipCode} className="chips-advisory__row">
-                <span className="chips-advisory__name">{advisory.displayName}</span>
-                <span className="chips-advisory__meta">
-                  <span className="num">
-                    {advisory.deltaWhole > 0 ? '+' : ''}
-                    {advisory.deltaWhole}
-                  </span>{' '}
-                  pts if rebuilt now
-                </span>
-              </li>
+              <SquadAdvisoryRow key={advisory.chipCode} advisory={advisory} />
             ))}
           </ul>
         </Surface>
@@ -315,6 +316,118 @@ function ChipAdvisoryPlan({ plan, showSolutionCount }: { plan: ChipAdvisoryView;
       </p>
     </div>
   )
+}
+
+/**
+ * One squad-rebuild advisory row (ticket #284) — the existing delta line,
+ * unchanged, plus a closed-by-default "See the squad" disclosure underneath
+ * it when a squad is actually stored for this advisory. Native
+ * `<details>`/`<summary>`, the same pattern
+ * src/screens/ReasoningScreen.tsx's own PlayerCard/OtherOptionRow already
+ * establish for this app — free keyboard/VoiceOver disclosure semantics, no
+ * extra React state. `advisory.squad` is null when nothing is stored yet
+ * (an advisory row from before this ticket, or chip_rebuild_picks' own
+ * migration not yet applied — see scripts/store-squad-advisory.ts's own
+ * header) — no disclosure renders in that case, rather than an empty one.
+ */
+function SquadAdvisoryRow({ advisory }: { advisory: SquadAdvisoryView }) {
+  return (
+    <li className="chips-advisory__row chips-advisory__row--squad">
+      <div className="chips-squad-row__header">
+        <span className="chips-advisory__name">{advisory.displayName}</span>
+        <span className="chips-advisory__meta">
+          <span className="num">
+            {advisory.deltaWhole > 0 ? '+' : ''}
+            {advisory.deltaWhole}
+          </span>{' '}
+          pts if rebuilt now
+        </span>
+      </div>
+      {advisory.squad && (
+        <details className="chips-squad-detail">
+          <summary className="chips-squad-detail__summary">See the squad</summary>
+          <SquadRebuildDetail advisory={advisory} squad={advisory.squad} />
+        </details>
+      )}
+    </li>
+  )
+}
+
+/**
+ * The disclosure's full body — ticket #284's own DoD: the starting XI and
+ * bench grouped by position, the captain marked, expected points next GW,
+ * and the In/Out comparison against the saved squad. The Free Hit label
+ * ("for Gameweek N only — your team returns after") only ever renders for
+ * chipCode 'FH' — a Wildcard rebuild has no such limitation, it IS the
+ * squad going forward.
+ */
+function SquadRebuildDetail({ advisory, squad }: { advisory: SquadAdvisoryView; squad: SquadRebuildSquadView }) {
+  return (
+    <div className="chips-squad-detail__body">
+      {advisory.chipCode === 'FH' && (
+        <p className="chips-squad-detail__note">For {advisory.gameweekLabel} only — your team returns after.</p>
+      )}
+
+      {squad.gameweekPointsWhole !== null && (
+        <p className="chips-squad-detail__points">
+          <span className="num">{squad.gameweekPointsWhole}</span> pts next gameweek
+        </p>
+      )}
+
+      {squad.positionGroups.map((group) => (
+        <div key={group.label} className="chips-squad-group">
+          <p className="chips-squad-group__label">{group.label}</p>
+          <SquadRebuildPlayerList players={group.starters} />
+        </div>
+      ))}
+
+      {squad.bench.length > 0 && (
+        <div className="chips-squad-group">
+          <p className="chips-squad-group__label">Bench</p>
+          <SquadRebuildPlayerList players={squad.bench} />
+        </div>
+      )}
+
+      <div className="chips-squad-comparison">
+        <p className="chips-squad-comparison__label">In / Out vs your team</p>
+        <SquadRebuildComparison comparison={squad.comparison} />
+      </div>
+    </div>
+  )
+}
+
+function SquadRebuildPlayerList({ players }: { players: readonly SquadRebuildPlayerView[] }) {
+  return (
+    <ul className="chips-squad-player-list">
+      {players.map((player) => (
+        <li key={player.playerId} className="chips-squad-player">
+          <span className="chips-squad-player__name">{player.name}</span>
+          {player.isCaptain && <span className="chips-squad-player__captain">Captain</span>}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function SquadRebuildComparison({ comparison }: { comparison: SquadRebuildSquadView['comparison'] }) {
+  if (!comparison.known) {
+    return <p className="chips-squad-comparison__empty">No saved squad to compare against yet.</p>
+  }
+  if (comparison.playersIn.length === 0 && comparison.playersOut.length === 0) {
+    return <p className="chips-squad-comparison__empty">No changes from your saved squad.</p>
+  }
+  return (
+    <>
+      {/* formatChipNames (top of file) is a plain "A, B and C" list joiner — reused here for
+          player names rather than duplicated, same "Alisson, Haaland and Salah" construction. */}
+      {comparison.playersIn.length > 0 && <p className="chips-squad-comparison__in">In: {formatChipNames(namesOf(comparison.playersIn))}</p>}
+      {comparison.playersOut.length > 0 && <p className="chips-squad-comparison__out">Out: {formatChipNames(namesOf(comparison.playersOut))}</p>}
+    </>
+  )
+}
+
+function namesOf(players: readonly SquadRebuildPlayerRefView[]): string[] {
+  return players.map((p) => p.name)
 }
 
 interface ChipHistoryBlockProps {

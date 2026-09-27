@@ -213,6 +213,138 @@
   color: var(--text-primary);
 }
 
+/* ---- Squad-rebuild "See the squad" disclosure (ticket #284) — one row now
+   stacks the existing delta line above a closed-by-default detail rather
+   than sitting flat like a chip-timing row. Same chevron treatment
+   ReasoningScreen.css already uses for its own <details>/<summary>
+   disclosures (.reasoning-player__details-summary /
+   .reasoning-other-option__summary) — a small rotating chevron, no default
+   browser marker. ---- */
+
+.chips-advisory__row--squad {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.chips-squad-row__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.chips-squad-detail {
+  margin-top: var(--space-2);
+}
+
+.chips-squad-detail__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  list-style: none;
+}
+
+.chips-squad-detail__summary::-webkit-details-marker {
+  display: none;
+}
+
+.chips-squad-detail__summary::after {
+  content: '';
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 1.5px solid var(--text-tertiary);
+  border-bottom: 1.5px solid var(--text-tertiary);
+  transform: rotate(-45deg);
+  transition: transform var(--dur-press) var(--ease-out);
+}
+
+.chips-squad-detail[open] .chips-squad-detail__summary::after {
+  transform: rotate(45deg);
+}
+
+.chips-squad-detail__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.chips-squad-detail__note {
+  font: var(--text-label);
+  color: var(--text-tertiary);
+}
+
+.chips-squad-detail__points {
+  font: var(--text-body);
+  font-weight: 550;
+  color: var(--text-primary);
+}
+
+.chips-squad-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.chips-squad-group__label {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--text-tertiary);
+}
+
+.chips-squad-player-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.chips-squad-player {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font: var(--text-label-tight);
+  color: var(--text-primary);
+}
+
+.chips-squad-player__captain {
+  font: var(--text-label);
+  color: var(--accent-cyan);
+}
+
+.chips-squad-comparison {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--panel-border);
+}
+
+.chips-squad-comparison__label {
+  font: var(--text-label);
+  font-weight: 550;
+  color: var(--text-tertiary);
+}
+
+.chips-squad-comparison__empty {
+  font: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.chips-squad-comparison__in,
+.chips-squad-comparison__out {
+  font: var(--text-label);
+  color: var(--text-primary);
+}
+
 /* ---- F40/F42 — "what's already gone": both sets' used/lost history in
    one panel, separated by a rule rather than two identical panels. ---- */
 
